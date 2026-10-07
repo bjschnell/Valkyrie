@@ -312,6 +312,7 @@ impl App {
                     cwd: None,
                     name: None,
                     size,
+                    env: overseer_proto::login_env(),
                 };
                 match self.client.spawn(spec).await {
                     Ok(info) => {

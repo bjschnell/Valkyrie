@@ -230,3 +230,72 @@ fn recorded_sessions_meet_the_accuracy_gate() {
     }
     assert!(checked > 0);
 }
+
+/// SSH-resume contract: an auto-started daemon leads its own session (a dropped
+/// connection can't hang it up) and its default socket lives under the state dir,
+/// named for this host, not under `$XDG_RUNTIME_DIR` (deleted at logout, often unset
+/// over SSH).
+#[test]
+fn auto_started_daemon_is_detached_and_found_without_a_runtime_dir() {
+    /// Kills the daemon's whole session even when an assertion fails first.
+    struct Reap(Option<u32>, PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{pid}")])
+                    .status();
+                for _ in 0..100 {
+                    if !Path::new(&format!("/proc/{pid}")).exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let dir = temp("detach");
+    let mut reap = Reap(None, dir.clone());
+    let run = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .env_remove("OVERSEER_SOCKET")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("OVERSEER_SESSION")
+            .env("XDG_STATE_HOME", &dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    run(&["new", "--name", "keep", "--", "sleep", "30"]);
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+    let socket = dir.join(format!("overseer/run/{}.sock", host.trim()));
+    let daemon = std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .find(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
+                let c = String::from_utf8_lossy(&c);
+                c.contains(dir.to_str().unwrap()) && c.contains("daemon")
+            })
+        })
+        .expect("daemon process");
+    reap.0 = Some(daemon);
+    assert!(socket.exists(), "no socket at {}", socket.display());
+    // /proc/<pid>/stat: "pid (comm) state ppid pgrp session ..."
+    let stat = std::fs::read_to_string(format!("/proc/{daemon}/stat")).unwrap();
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        fields[3],
+        daemon.to_string(),
+        "not a session leader: {stat}"
+    );
+    assert!(run(&["ls"]).contains("keep"));
+}

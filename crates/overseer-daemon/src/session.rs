@@ -143,6 +143,12 @@ impl Session {
             None => std::env::current_dir()?,
         };
         cmd.cwd(&cwd);
+        for (key, value) in &spec.env {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            }
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("OVERSEER_SESSION", id.to_string());

@@ -35,6 +35,7 @@ fn sh(script: &str, size: Size) -> SpawnSpec {
         cwd: Some(std::env::temp_dir()),
         name: None,
         size,
+        env: Vec::new(),
     }
 }
 
@@ -78,6 +79,20 @@ async fn attach_starts_with_full_snapshot_of_existing_output() {
     assert_eq!(update.rows.len(), SIZE.rows as usize);
     assert_eq!(update.rows[0].spans[0].text, "before-attach");
     client.kill(id).await.unwrap();
+}
+
+/// Sessions take login-bound variables from the client that spawns them, not from
+/// whichever login started the daemon (DESIGN §8.1); `None` unsets one.
+#[tokio::test]
+async fn spawn_applies_the_clients_login_env() {
+    let (client, _pushes, _dir) = start().await;
+    let mut spec = sh(r#"printf '%s|%s' "$SSH_AUTH_SOCK" "${HOME-unset}""#, SIZE);
+    spec.env = vec![
+        ("SSH_AUTH_SOCK".into(), Some("/tmp/agent.test".into())),
+        ("HOME".into(), None),
+    ];
+    let id = client.spawn(spec).await.unwrap().id;
+    wait_dump(&client, id, |t| t.trim_end() == "/tmp/agent.test|unset").await;
 }
 
 #[tokio::test]

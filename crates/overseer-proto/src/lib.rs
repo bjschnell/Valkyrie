@@ -43,6 +43,30 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
     pub name: Option<String>,
     pub size: Size,
+    /// The spawning client's login environment (`login_env`); `None` unsets a
+    /// variable the daemon inherited from whichever login started it.
+    #[serde(default)]
+    pub env: Vec<(String, Option<String>)>,
+}
+
+/// Variables tied to one login rather than the user: the daemon outlives the login
+/// that started it, so each spawn takes them from the client asking (as tmux's
+/// `update-environment` does). Otherwise a later SSH login's agents would get a dead
+/// `SSH_AUTH_SOCK` (git push fails) or a deleted `XDG_RUNTIME_DIR`.
+pub const LOGIN_ENV: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "SSH_CONNECTION",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
+pub fn login_env() -> Vec<(String, Option<String>)> {
+    LOGIN_ENV
+        .iter()
+        .map(|k| (k.to_string(), std::env::var(k).ok()))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,17 +182,48 @@ pub enum Reply {
     Text { text: String },
 }
 
-/// Default daemon socket: `$XDG_RUNTIME_DIR/overseer/overseer.sock`, falling back to
-/// `/tmp/overseer-<uid>/overseer.sock`.
+/// Default daemon socket: `<state dir>/run/<hostname>.sock`. Not `$XDG_RUNTIME_DIR`:
+/// logind deletes that when the user's last login ends, and SSH logins may not set
+/// it, so a later `ssh host; overseer` would start a second, empty daemon while the
+/// first one keeps the sessions (herdr keeps its socket under `~/.config` too). The
+/// hostname keeps machines sharing an NFS home from evicting each other's daemon.
 pub fn default_socket_path() -> PathBuf {
-    runtime_dir().join("overseer.sock")
+    state_dir().join("run").join(format!("{}.sock", hostname()))
 }
 
-pub fn runtime_dir() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(dir) => PathBuf::from(dir).join("overseer"),
-        // SAFETY: getuid cannot fail.
-        None => PathBuf::from(format!("/tmp/overseer-{}", unsafe { libc::getuid() })),
+/// Where daemons before 2026-10-07 listened, to point upgraders at a stray one.
+pub fn legacy_socket_paths() -> Vec<PathBuf> {
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let mut paths: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|dir| PathBuf::from(dir).join("overseer/overseer.sock"))
+        .into_iter()
+        .collect();
+    paths.push(PathBuf::from(format!("/tmp/overseer-{uid}/overseer.sock")));
+    paths
+}
+
+/// Longest path a unix socket address holds (`sun_path` is 108 bytes with the NUL).
+pub const MAX_SOCKET_PATH: usize = 107;
+
+/// This machine's name, safe as a file name.
+pub fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; gethostname NUL-terminates or
+    // truncates within it.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let name: String = String::from_utf8_lossy(&buf[..if ok { end } else { 0 }])
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
+        .take(64)
+        .collect();
+    match name.as_str() {
+        "" | "." | ".." => "localhost".into(),
+        _ => name,
     }
 }
 
@@ -199,13 +254,46 @@ pub fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
 
 /// `$XDG_STATE_HOME/overseer`, falling back to `~/.local/state/overseer`.
 pub fn state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(dir).join("overseer");
+    // Relative values are invalid per the XDG spec, and would make the socket path
+    // depend on the working directory.
+    let absolute = |var| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    if let Some(dir) = absolute("XDG_STATE_HOME") {
+        return dir.join("overseer");
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local/state/overseer")
+    absolute("HOME")
+        .or_else(passwd_home)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".local/state/overseer")
+}
+
+/// The home directory from the password database, for when `$HOME` is unset.
+fn passwd_home() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut out = std::ptr::null_mut();
+    // SAFETY: all pointers are valid for the call; `out` is null on failure.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut out,
+        )
+    };
+    if rc != 0 || out.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points into `buf`, NUL-terminated by getpwuid_r.
+    let dir = unsafe { CStr::from_ptr(pwd.pw_dir) };
+    let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    dir.is_absolute().then_some(dir)
 }
 
 #[cfg(test)]

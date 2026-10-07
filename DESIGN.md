@@ -168,6 +168,28 @@ Web/PWA: installable, push notifications, queue-first mobile layout, session dri
 **No network listener by default** (decided 2026-10-06). The daemon speaks only its unix socket, as Leader does, so it stays defensible on a managed work laptop. The web listener starts only when it's explicitly enabled in config.
 Auth: token + WebAuthn/passkey; once enabled, assume exposure over Tailscale only; TLS and origin checks required. Never expose PTY control unauthenticated.
 
+### 8.1 Remote resume over SSH (2026-10-07)
+Requirement from the author's herdr use: `ssh box; overseer` must show exactly the sessions left running on that machine, from any client machine. The daemon already owns the PTYs and clients are thin, so detaching or closing a client never touches the sessions. Two details made that fail over SSH; both are fixed, matching herdr's server:
+- **The auto-started daemon calls `setsid`.** It leads its own session (parent init), so the terminal or SSH connection that started it can hang up without reaching it. Before this it was only in its own process group, inside the launching login session.
+- **The default socket is `~/.local/state/overseer/run/<hostname>.sock`** (`$XDG_STATE_HOME`), not `$XDG_RUNTIME_DIR`. logind deletes `/run/user/<uid>` when the user's last login ends (without linger), and SSH logins may not set the variable. Either way, the next `overseer` would start a second, empty daemon while the first kept the sessions. herdr keeps its socket under `~/.config/herdr` for the same reason.
+  - The hostname is in the name because a unix socket only works on the host that bound it. Machines sharing an NFS home would otherwise each see the other's socket as stale, delete it, and orphan the other's daemon.
+  - Relative `XDG_STATE_HOME`/`HOME` values are ignored; the fallback is the passwd entry's home.
+  - Socket paths are limited to 107 bytes. A longer one fails up front with a message pointing at `--socket`/`OVERSEER_SOCKET`.
+  - Starting a daemon while one from an older build still answers on the old path prints a note with the command to stop it.
+- **Sessions take login-bound variables from the client that spawns them** (`SSH_AUTH_SOCK`, `SSH_CONNECTION`, `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`), unsetting any the client lacks, as tmux's `update-environment` does. Otherwise an agent started from a later SSH login would inherit the first login's dead agent socket and `git push` would fail. Sessions already running keep the environment they started with.
+- `overseer new` from a terminal without a real size (0×0 over `ssh host overseer new …`) spawns at 120×40; the first attach resizes it.
+- Verified by simulation: login 1 auto-starts the daemon and a shell session, then the whole login session is killed. Login 2 has a different size and no `XDG_RUNTIME_DIR`. It attaches with the TUI, sees the old output, and types into the same shell; a session it spawns gets login 2's `SSH_AUTH_SOCK`. Tests check that the daemon leads its own session and uses the per-host state-dir socket, and that a spawn applies the client's login environment.
+- Accepted (LOW, from review):
+  - Only the socket's own directory is checked for ownership and mode, not its parents. If `XDG_STATE_HOME` pointed into a world-writable directory, another user could race a rename.
+  - Two simultaneous first starts can leave one idle, unreachable daemon (pre-existing).
+  - `new` from a terminal smaller than 20×4 spawns at 120×40 until attached.
+
+Follow-ups (herdr has them, we don't yet):
+- **Sessions survive a daemon upgrade.** Restarting the daemon still kills its sessions. herdr's `update --handoff` passes the live PTYs to the new server. For us that means passing the PTY master fds to the new daemon over the socket (SCM_RIGHTS), along with each session's screen and tracker state.
+- **Start on boot.** A systemd user unit plus `loginctl enable-linger` would bring the daemon up before any login. Today the first `overseer` command starts it.
+- **`overseer --remote <host>`.** Runs the local TUI against a remote daemon by forwarding its socket over SSH. Today's equivalent is `ssh -t host overseer attach`.
+- **Restore after reboot.** herdr's `session.json` restores layout and cwds, not processes. The equivalent here is respawning sessions by command and cwd, with `--resume` for agents.
+
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
 - Web: Rust-compiled WASM vs TypeScript (Svelte/Solid) is an open choice. Lean TS for PWA speed of iteration unless a shared protocol crate to WASM gives real wins.
@@ -254,7 +276,7 @@ Findings that feed M1:
 Hardening from the M0 code review (all applied):
 - PTY writes run on a per-session writer thread, so neither tokio workers nor the reader thread ever block on a full tty.
 - A dedicated waiter thread reaps the child, so `Exited` doesn't depend on PTY EOF. `kill` signals the whole process group: SIGHUP, then SIGKILL after 2 s.
-- The socket dir is `/tmp/overseer-<getuid>` as a fallback, and both daemon and client verify it is owned by us, mode 0700 and not a symlink.
+- Both daemon and client verify the socket dir is owned by us, mode 0700 and not a symlink. (The dir itself moved on 2026-10-07; see §8.1.)
 - Each connection's output queue is bounded at 256 frames. A slow client drops its diffs and resyncs from a snapshot. The resync re-sends `Exited` too, and reattach waits for the old stream to stop.
 - Spans re-anchor after wide or combined graphemes, so width disagreements (e.g. `⚠️`) can't shift a row. Accept errors no longer kill the daemon, and `daemon.log` is 0600.
 

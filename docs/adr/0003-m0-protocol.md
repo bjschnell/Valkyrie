@@ -4,7 +4,7 @@ Status: accepted (M0); HTTP/WS transport added in M3 carrying the same messages
 Date: 2026-10-06
 
 ## Decision
-- Transport: unix socket at `$XDG_RUNTIME_DIR/overseer/overseer.sock` (mode 0600 dir).
+- Transport: unix socket at `$XDG_RUNTIME_DIR/overseer/overseer.sock` (mode 0600 dir). *Superseded 2026-10-07: now `~/.local/state/overseer/run/<hostname>.sock`, so it survives logout and is found over SSH (DESIGN §8.1).*
 - Framing: 4-byte big-endian length + JSON body (serde, tagged enums). Max frame 16 MiB.
 - Messages live in `overseer-proto`; it is the only crate clients and daemon share.
 - Screen updates are **row-granular**: `Screen { full: bool, rows: [(index, cells)], cursor, modes, size }`. A newly attached or lagging client gets `full: true`; otherwise only damaged rows are sent. Cells are run-length grouped by style (`Span { text, style }`) to keep JSON small.

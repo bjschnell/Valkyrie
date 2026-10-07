@@ -64,6 +64,10 @@ mod tests {
                     cwd: Some("/tmp".into()),
                     name: None,
                     size: Size { cols: 80, rows: 24 },
+                    env: vec![
+                        ("SSH_AUTH_SOCK".into(), Some("/tmp/a".into())),
+                        ("DISPLAY".into(), None),
+                    ],
                 },
             },
             ClientMsg::Input {

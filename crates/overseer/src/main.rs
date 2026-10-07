@@ -148,10 +148,15 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 require_tty()?;
             }
             let (client, pushes) = connect(&socket).await?;
-            let size = overseer_tui::session_size().unwrap_or(Size {
-                cols: 120,
-                rows: 40,
-            });
+            // A terminal without a real size (`ssh host overseer new …`, scripts)
+            // reports 0×0; the first attach resizes the session anyway.
+            let size = overseer_tui::session_size()
+                .ok()
+                .filter(|s| s.cols >= 20 && s.rows >= 4)
+                .unwrap_or(Size {
+                    cols: 120,
+                    rows: 40,
+                });
             let cwd = Some(match cwd {
                 Some(dir) => std::fs::canonicalize(dir)?,
                 None => std::env::current_dir()?,
@@ -162,6 +167,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     cwd,
                     name,
                     size,
+                    env: overseer_proto::login_env(),
                 })
                 .await?;
             if attach {
@@ -265,6 +271,26 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
     if let Ok(conn) = Client::connect(socket).await {
         return Ok(conn);
     }
+    let len = socket.as_os_str().len();
+    if len > overseer_proto::MAX_SOCKET_PATH {
+        bail!(
+            "socket path {} is {len} bytes, over the {} a unix socket allows; \
+             pick a shorter one with --socket or OVERSEER_SOCKET",
+            socket.display(),
+            overseer_proto::MAX_SOCKET_PATH
+        );
+    }
+    for old in overseer_proto::legacy_socket_paths() {
+        if old != socket && Client::connect(&old).await.is_ok() {
+            eprintln!(
+                "note: an older overseer daemon is still running on {} with its own \
+                 sessions; this starts a new one. Stop the old one when done with them: \
+                 pkill -f 'overseer --socket {} daemon'",
+                old.display(),
+                old.display()
+            );
+        }
+    }
     let log_dir = overseer_proto::state_dir();
     std::fs::create_dir_all(&log_dir)?;
     // The log records full command lines, so keep it private like the transcripts.
@@ -273,16 +299,26 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
         .append(true)
         .mode(0o600)
         .open(log_dir.join("daemon.log"))?;
-    std::process::Command::new(std::env::current_exe()?)
+    let mut daemon = std::process::Command::new(std::env::current_exe()?);
+    daemon
         .arg("--socket")
         .arg(socket)
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()
-        .context("start daemon")?;
+        .stderr(log);
+    // Its own session, like herdr's server: closing the terminal or SSH connection
+    // that started it must not take the sessions down with it.
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        daemon.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    daemon.spawn().context("start daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         if let Ok(conn) = Client::connect(socket).await {
