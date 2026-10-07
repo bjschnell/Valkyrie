@@ -1,0 +1,10 @@
+[package]
+name = "valkyrie-term"
+description = "Per-session VT screen model (alacritty_terminal) producing protocol screen updates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+valkyrie-proto.workspace = true
+alacritty_terminal.workspace = true

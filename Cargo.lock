@@ -989,79 +989,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "overseer"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "libc",
- "overseer-agents",
- "overseer-daemon",
- "overseer-proto",
- "overseer-term",
- "overseer-tui",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "overseer-agents"
-version = "0.0.1"
-dependencies = [
- "overseer-proto",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "overseer-daemon"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "libc",
- "overseer-agents",
- "overseer-proto",
- "overseer-term",
- "portable-pty",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "overseer-proto"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "libc",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "overseer-term"
-version = "0.0.1"
-dependencies = [
- "alacritty_terminal",
- "overseer-proto",
-]
-
-[[package]]
-name = "overseer-tui"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "overseer-proto",
- "ratatui",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "palette"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2033,6 +1960,79 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "valkyrie"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "valkyrie-agents",
+ "valkyrie-daemon",
+ "valkyrie-proto",
+ "valkyrie-term",
+ "valkyrie-tui",
+]
+
+[[package]]
+name = "valkyrie-agents"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "valkyrie-proto",
+]
+
+[[package]]
+name = "valkyrie-daemon"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "valkyrie-agents",
+ "valkyrie-proto",
+ "valkyrie-term",
+]
+
+[[package]]
+name = "valkyrie-proto"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "valkyrie-term"
+version = "0.0.1"
+dependencies = [
+ "alacritty_terminal",
+ "valkyrie-proto",
+]
+
+[[package]]
+name = "valkyrie-tui"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ratatui",
+ "serde_json",
+ "tokio",
+ "valkyrie-proto",
 ]
 
 [[package]]

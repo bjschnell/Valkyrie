@@ -7,7 +7,7 @@ Date: 2026-10-06
 The daemon keeps a parsed screen model per session (DESIGN §4.1). Candidates: `alacritty_terminal` 0.26 (Apache-2.0), `vte` 0.15 + own grid, `vt100` 0.16 (MIT), `termwiz` 0.23.
 
 ## Decision
-Use `alacritty_terminal`, wrapped behind our own `overseer-term` crate so no alacritty type leaks into the protocol or clients.
+Use `alacritty_terminal`, wrapped behind our own `valkyrie-term` crate so no alacritty type leaks into the protocol or clients.
 
 Reasons, from reading the 0.26 source:
 - `Term::damage()` / `reset_damage()` give per-line damage bounds → row diffs for the wire come almost free.

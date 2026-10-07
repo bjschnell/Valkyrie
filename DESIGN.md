@@ -1,6 +1,6 @@
-# Overseer — Design Draft v0.1
+# Valkyrie — Design Draft v0.1
 
-Working title (placeholder). Status: **draft for evaluation by Claude Code + Opus**. Nothing here is validated by code yet. Items marked **[VERIFY]** are claims from a quick survey (Oct 2026) that must be checked against primary sources before they drive decisions.
+Name: **Valkyrie** (renamed from Overseer on 2026-10-07); the command is `valk`. Status: **draft for evaluation by Claude Code + Opus**. Nothing here is validated by code yet. Items marked **[VERIFY]** are claims from a quick survey (Oct 2026) that must be checked against primary sources before they drive decisions.
 
 ## 1. One-liner
 
@@ -127,7 +127,7 @@ Decision {
 }
 ```
 - Lifecycle borrowed from agentmem; we add transcript-span provenance and path-scoped applicability.
-- Canonical on disk as markdown files in-repo (`.overseer/decisions/*.md`) for diffability and git history; SQLite is an index/cache. Decide whether decisions live in the repo or in the daemon's data dir (repo-local = portable + reviewable; data dir = no repo pollution). [DECISION NEEDED]
+- Canonical on disk as markdown files in-repo (`.valkyrie/decisions/*.md`) for diffability and git history; SQLite is an index/cache. Decide whether decisions live in the repo or in the daemon's data dir (repo-local = portable + reviewable; data dir = no repo pollution). [DECISION NEEDED]
 
 ### 6.3 Capture
 1. Cheap-model extraction run at session end / on commit / on "decision-shaped" events, producing `proposed` decisions only.
@@ -144,7 +144,7 @@ Decision {
 ### 6.5 Serving to agents
 - **MCP server** (stdio + HTTP) exposed to every managed session: `search_decisions`, `get_project_state`, `get_decision`, `propose_decision`, `link_session`, `list_open_questions`.
 - **Pinned block**: small, generated, token-budgeted section injected into CLAUDE.md / AGENTS.md (or via `--append-system-prompt`/equivalent) containing only standing constraints. Budget enforced (e.g. ≤ 1.5k tokens) with ranking by scope + recency + validation.
-- **Handoff on demand**: `overseer handoff <session>` generates a compact structured resume (goal, decisions, open threads, files) instead of pasting giant MDs; also queryable via MCP.
+- **Handoff on demand**: `valk handoff <session>` generates a compact structured resume (goal, decisions, open threads, files) instead of pasting giant MDs; also queryable via MCP.
 - **Cross-session recall**: "what did we decide about X / where did we fix Y" resolves to a decision with a link to the originating transcript span.
 
 ### 6.6 Risks
@@ -169,15 +169,15 @@ Web/PWA: installable, push notifications, queue-first mobile layout, session dri
 Auth: token + WebAuthn/passkey; once enabled, assume exposure over Tailscale only; TLS and origin checks required. Never expose PTY control unauthenticated.
 
 ### 8.1 Remote resume over SSH (2026-10-07)
-Requirement from the author's herdr use: `ssh box; overseer` must show exactly the sessions left running on that machine, from any client machine. The daemon already owns the PTYs and clients are thin, so detaching or closing a client never touches the sessions. Two details made that fail over SSH; both are fixed, matching herdr's server:
+Requirement from the author's herdr use: `ssh box; valk` must show exactly the sessions left running on that machine, from any client machine. The daemon already owns the PTYs and clients are thin, so detaching or closing a client never touches the sessions. Two details made that fail over SSH; both are fixed, matching herdr's server:
 - **The auto-started daemon calls `setsid`.** It leads its own session (parent init), so the terminal or SSH connection that started it can hang up without reaching it. Before this it was only in its own process group, inside the launching login session.
-- **The default socket is `~/.local/state/overseer/run/<hostname>.sock`** (`$XDG_STATE_HOME`), not `$XDG_RUNTIME_DIR`. logind deletes `/run/user/<uid>` when the user's last login ends (without linger), and SSH logins may not set the variable. Either way, the next `overseer` would start a second, empty daemon while the first kept the sessions. herdr keeps its socket under `~/.config/herdr` for the same reason.
+- **The default socket is `~/.local/state/valkyrie/run/<hostname>.sock`** (`$XDG_STATE_HOME`), not `$XDG_RUNTIME_DIR`. logind deletes `/run/user/<uid>` when the user's last login ends (without linger), and SSH logins may not set the variable. Either way, the next `valk` would start a second, empty daemon while the first kept the sessions. herdr keeps its socket under `~/.config/herdr` for the same reason.
   - The hostname is in the name because a unix socket only works on the host that bound it. Machines sharing an NFS home would otherwise each see the other's socket as stale, delete it, and orphan the other's daemon.
   - Relative `XDG_STATE_HOME`/`HOME` values are ignored; the fallback is the passwd entry's home.
-  - Socket paths are limited to 107 bytes. A longer one fails up front with a message pointing at `--socket`/`OVERSEER_SOCKET`.
+  - Socket paths are limited to 107 bytes. A longer one fails up front with a message pointing at `--socket`/`VALK_SOCKET`.
   - Starting a daemon while one from an older build still answers on the old path prints a note with the command to stop it.
 - **Sessions take login-bound variables from the client that spawns them** (`SSH_AUTH_SOCK`, `SSH_CONNECTION`, `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`), unsetting any the client lacks, as tmux's `update-environment` does. Otherwise an agent started from a later SSH login would inherit the first login's dead agent socket and `git push` would fail. Sessions already running keep the environment they started with.
-- `overseer new` from a terminal without a real size (0×0 over `ssh host overseer new …`) spawns at 120×40; the first attach resizes it.
+- `valk new` from a terminal without a real size (0×0 over `ssh host valk new …`) spawns at 120×40; the first attach resizes it.
 - Verified by simulation: login 1 auto-starts the daemon and a shell session, then the whole login session is killed. Login 2 has a different size and no `XDG_RUNTIME_DIR`. It attaches with the TUI, sees the old output, and types into the same shell; a session it spawns gets login 2's `SSH_AUTH_SOCK`. Tests check that the daemon leads its own session and uses the per-host state-dir socket, and that a spawn applies the client's login environment.
 - Accepted (LOW, from review):
   - Only the socket's own directory is checked for ownership and mode, not its parents. If `XDG_STATE_HOME` pointed into a world-writable directory, another user could race a rename.
@@ -185,9 +185,9 @@ Requirement from the author's herdr use: `ssh box; overseer` must show exactly t
   - `new` from a terminal smaller than 20×4 spawns at 120×40 until attached.
 
 Follow-ups (herdr has them, we don't yet):
-- ~~**Sessions survive a daemon upgrade.**~~ Done 2026-10-07: `overseer upgrade` ([ADR-0006](docs/adr/0006-upgrade-handoff.md)) re-execs the daemon in place, so agents stay its children. PTYs and the listener are inherited and screens are rebuilt from the transcripts. The TUI reconnects by itself. Verified live by upgrading mid-turn under Claude running `sleep 15`: the handoff took 105 ms end to end, the session stayed `working`, and PostToolUse and Stop reached the new image.
-- **Start on boot.** A systemd user unit plus `loginctl enable-linger` would bring the daemon up before any login. Today the first `overseer` command starts it.
-- **`overseer --remote <host>`.** Runs the local TUI against a remote daemon by forwarding its socket over SSH. Today's equivalent is `ssh -t host overseer attach`.
+- ~~**Sessions survive a daemon upgrade.**~~ Done 2026-10-07: `valk upgrade` ([ADR-0006](docs/adr/0006-upgrade-handoff.md)) re-execs the daemon in place, so agents stay its children. PTYs and the listener are inherited and screens are rebuilt from the transcripts. The TUI reconnects by itself. Verified live by upgrading mid-turn under Claude running `sleep 15`: the handoff took 105 ms end to end, the session stayed `working`, and PostToolUse and Stop reached the new image.
+- **Start on boot.** A systemd user unit plus `loginctl enable-linger` would bring the daemon up before any login. Today the first `valk` command starts it.
+- **`valk --remote <host>`.** Runs the local TUI against a remote daemon by forwarding its socket over SSH. Today's equivalent is `ssh -t host valk attach`.
 - **Restore after reboot.** herdr's `session.json` restores layout and cwds, not processes. The equivalent here is respawning sessions by command and cwd, with `--resume` for agents.
 
 ## 9. Tech choices (proposed, challengeable)
@@ -234,17 +234,17 @@ Session data flow:
 pty reader thread ─bytes─► Term (alacritty) ─damage─► Screen diff ─broadcast─► clients
         ▲                     │ PtyWrite (query replies)
         └──── pty writer ◄────┴──────────── Input frames from clients
-raw bytes also appended to $XDG_STATE_HOME/overseer/sessions/<unix-ts>-<id>.raw (0600) (fixtures for M1 heuristics)
+raw bytes also appended to $XDG_STATE_HOME/valkyrie/sessions/<unix-ts>-<id>.raw (0600) (fixtures for M1 heuristics)
 ```
 
 CLI surface (one binary):
-- `overseer daemon` — run the daemon in the foreground.
-- `overseer new [--cwd DIR] [--name N] -- CMD...` — spawn a session (auto-starts daemon if absent).
-- `overseer ls` · `overseer kill ID` · `overseer dump ID` (plain-text screen; used for headless verification).
-- `overseer send ID TEXT` — inject input (`\r \n \t \e \xHH` escapes); headless driving and future supervisor plumbing.
-- `overseer attach [ID]` / `overseer` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches.
-- `overseer bench latency [-n N]` — keystroke→screen-update round trip through the daemon against `cat`; prints p50/p99/max.
-- `overseer bench parse FILE` — VT parse throughput over a recorded `.raw` transcript.
+- `valk daemon` — run the daemon in the foreground.
+- `valk new [--cwd DIR] [--name N] -- CMD...` — spawn a session (auto-starts daemon if absent).
+- `valk ls` · `valk kill ID` · `valk dump ID` (plain-text screen; used for headless verification).
+- `valk send ID TEXT` — inject input (`\r \n \t \e \xHH` escapes); headless driving and future supervisor plumbing.
+- `valk attach [ID]` / `valk` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches.
+- `valk bench latency [-n N]` — keystroke→screen-update round trip through the daemon against `cat`; prints p50/p99/max.
+- `valk bench parse FILE` — VT parse throughput over a recorded `.raw` transcript.
 
 Acceptance (= ADR-0002 exit criteria):
 1. `claude` and `codex` render correctly and are drivable via attach.
@@ -288,7 +288,7 @@ Decisions: [ADR-0005 state signals](docs/adr/0005-state-signals.md): hooks first
 
 ### 14.1 Pipeline
 ```
-hook (overseer hook <agent>) ─┐
+hook (valk hook <agent>) ─┐
 PTY output / bell / title ────┼─► adapter.normalize ─► AgentEvent ─► state machine ─► QueueItem
 process exit / timers ────────┘        (per agent)        (bus)        (per session)    (ranked)
 ```
@@ -306,7 +306,7 @@ trait Adapter: Send + Sync {
 }
 ```
 - `claude`: `prepare` adds `--settings` with hooks for the events above. `scan` detects the folder-trust prompt and the permission dialog (as a fallback).
-- `codex`: hooks come from `~/.codex/hooks.json` (`overseer setup codex`). `scan` covers the trust prompt, the approval dialog, and the auto-reviewer spinner. The session shows "heuristics only" until the first hook event arrives. Codex fires `SessionStart` lazily, just before the first `UserPromptSubmit`, and fires `Interrupt` on Esc-deny and Esc-interrupt, so it has no hook gaps.
+- `codex`: hooks come from `~/.codex/hooks.json` (`valk setup codex`). `scan` covers the trust prompt, the approval dialog, and the auto-reviewer spinner. The session shows "heuristics only" until the first hook event arrives. Codex fires `SessionStart` lazily, just before the first `UserPromptSubmit`, and fires `Interrupt` on Esc-deny and Esc-interrupt, so it has no hook gaps.
 - **Codex auto-review** (`approvals_reviewer = "auto_review"`): `PermissionRequest` fires *before* the reviewer decides, and its payload is identical to a human-bound request. While the screen shows "Reviewing approval request" the session is `working` (summary `auto-review: Permission: …`). If the reviewer hands the request on, the approval dialog appears on screen and the session returns to `needs_input` with the original summary.
 - `generic`: no hooks. Bell → `InputAsked`, plus quiet-output detection.
 - Heuristics run once output has been quiet for ~150 ms, never per chunk, so their cost stays off the latency path. While output keeps coming (an animated spinner never goes quiet) the daemon also takes a **glance** every 500 ms, logged as `scan` with `"quiet": false`. Glances only drive the auto-review checks: a mid-frame screen can look idle (Claude draws its prompt box under the spinner), so idle detection and screen-only heuristics wait for quiet scans.
@@ -332,30 +332,30 @@ States from §5.1: `working · needs_input · blocked · review_ready · idle ·
 
 User input sent to a `needs_input` session doesn't change its state; the agent's next event does. Changed from the earlier draft: `review_ready` no longer requires a changed working tree, because Leader's "done-unseen" (any finished turn) is what the author uses daily, and an answer-only turn still needs reading. The diff stat is used only in the summary.
 
-Because overseer owns the screen, the `interrupted?` check reads the session's own `VtScreen` through `Adapter::scan`. Herdr needed a separate `agent explain` call for the same check.
+Because Valkyrie owns the screen, the `interrupted?` check reads the session's own `VtScreen` through `Adapter::scan`. Herdr needed a separate `agent explain` call for the same check.
 
 ### 14.4 Queue
 `QueueItem { session, state, reason, summary, since, seq, project }`.
-- **Ranking** (ported from Leader, extended with overseer's extra states): `needs_input` > `blocked` > `review_ready` > `interrupted?`/`stale`; oldest first within a state, then by session id. `working` and `idle` sessions are not queue items; they appear in the session list below the queue. `interrupted?` rows are always shown (Leader §14: never hide them with idle rows).
-- **Seen model:** `review_ready` stays in the queue until the user attaches to that session or marks it seen (`s` for one item, `S` for all). Marking seen is keyed by the transition's `seq`, so a newer turn brings the item back. Herdr had this built in. Overseer implements it, which is easy because the daemon sees every attach.
+- **Ranking** (ported from Leader, extended with Valkyrie's extra states): `needs_input` > `blocked` > `review_ready` > `interrupted?`/`stale`; oldest first within a state, then by session id. `working` and `idle` sessions are not queue items; they appear in the session list below the queue. `interrupted?` rows are always shown (Leader §14: never hide them with idle rows).
+- **Seen model:** `review_ready` stays in the queue until the user attaches to that session or marks it seen (`s` for one item, `S` for all). Marking seen is keyed by the transition's `seq`, so a newer turn brings the item back. Herdr had this built in. Valkyrie implements it, which is easy because the daemon sees every attach.
 - **Summaries (M1, no LLM):** taken from the hook text first (permission + command, question, conclusion line). When a session has no hooks, a screen fallback on its `VtScreen` uses the last question-like line plus the pending command, or the last assistant block with chrome stripped. Port Leader's `summarize.py` rules: rejoin wrapped lines, strip chrome, apply the conclusion regex. Its `tests/fixtures/tail_*.txt` are real Claude captures and become test cases here.
 - **Later (not M1):** an LLM summary on transition into review_ready, as in Leader M5. That means a locked-down `claude -p --tools "" --no-session-persistence --disable-slash-commands --strict-mcp-config --model haiku`, fed the last turn only after redaction, rate-limited, with the heuristic line as fallback. **Batching** has no precedent in Leader and stays new design for M3.
 - TUI keys follow Leader's overlay: `j`/`k`, `Enter` attach, `Tab` top item, `s`/`S` seen, plus a footer with counts (`2 needs input · 1 done · 3 working`). Idle sessions are always listed under the queue, so there's no `a` toggle. Attaching marks a `review_ready` turn seen: it leaves the queue but keeps its state.
 
 ### 14.5 Protocol and clients
-- `ClientMsg::Hook { session, agent, payload }` comes from `overseer hook`, and `WatchQueue` subscribes a client to `ServerMsg::Queue { items }` pushes.
+- `ClientMsg::Hook { session, agent, payload }` comes from `valk hook`, and `WatchQueue` subscribes a client to `ServerMsg::Queue { items }` pushes.
 - TUI home: the queue on top, all sessions below; `Enter` attaches to the selected item and `Tab` jumps to the top item. The attached view's status bar shows the session state.
 
 ### 14.6 Fixtures and tests
 - Every session writes `<ns>-<id>.events.jsonl` (mode 0600) next to its `.raw`. It records everything the tracker consumed, each tagged with the transcript byte offset: start (agent, size), output marks (≤4/s), hooks (slimmed payloads), bells, screen scans, attach/detach, seen, resize, exit, and every resulting state.
-- `overseer replay <events.jsonl> [--labels <labels.jsonl>]` re-feeds the transcript up to each offset and re-runs normalize + scan + tracker with the **current** code. It prints the timeline, drift from the recorded states, and time-weighted accuracy against hand labels (`{"at": <s>, "state": …}` lines; a replayed `interrupted` counts as a correct `idle`). `overseer render <raw>` prints a transcript's screen for labeling.
-- Gate: `crates/overseer/tests/fixtures/*.events.jsonl` with labels must replay at ≥95%. Unit tests cover normalize per agent, the state table, ranking and seen, and `scan` against recorded screens (Claude trust/permission/idle/done, Codex trust/approval/reviewing/busy/idle).
+- `valk replay <events.jsonl> [--labels <labels.jsonl>]` re-feeds the transcript up to each offset and re-runs normalize + scan + tracker with the **current** code. It prints the timeline, drift from the recorded states, and time-weighted accuracy against hand labels (`{"at": <s>, "state": …}` lines; a replayed `interrupted` counts as a correct `idle`). `valk render <raw>` prints a transcript's screen for labeling.
+- Gate: `crates/valkyrie/tests/fixtures/*.events.jsonl` with labels must replay at ≥95%. Unit tests cover normalize per agent, the state table, ranking and seen, and `scan` against recorded screens (Claude trust/permission/idle/done, Codex trust/approval/reviewing/busy/idle).
 
 #### M1 results (2026-10-06, Claude Code 2.1.292, haiku, isolated daemon)
 | Check | Result |
 |---|---|
-| Hooks via `--settings` in an already-trusted folder | fire with no prompt; `OVERSEER_SESSION`/`OVERSEER_SOCKET` reach the hook |
-| `overseer hook` round trip (real binary, n=30) | median **0.68 ms** (budget 50 ms; Leader's Python hook 15 ms) |
+| Hooks via `--settings` in an already-trusted folder | fire with no prompt; `VALK_SESSION`/`VALK_SOCKET` reach the hook |
+| `valk hook` round trip (real binary, n=30) | median **0.68 ms** (budget 50 ms; Leader's Python hook 15 ms) |
 | Prompt → reply | working → done, summary `ok · uncommitted: 12 files +1114 -94` |
 | Bash permission | needs_input `Permission: Bash touch …` 70 ms after PreToolUse |
 | Esc-deny (no hook) | `interrupted?` |

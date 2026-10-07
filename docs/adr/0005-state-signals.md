@@ -10,12 +10,12 @@ The attention queue (DESIGN §5) is only as good as state detection. Verified ag
 - Hooks don't fire before the agent is past its folder-trust prompt, and both agents open on one in an untrusted folder.
 
 ## Decision
-1. **One hook entry point for every agent:** `overseer hook <agent>`, a command hook. It reads the event JSON on stdin and forwards it with `$OVERSEER_SESSION` to the daemon socket, then exits 0 at once (observe-only, see 4). Without `$OVERSEER_SESSION` it exits 0 and does nothing, so it's harmless outside overseer. Using a command hook rather than an HTTP one keeps us on the unix socket with no TCP listener.
+1. **One hook entry point for every agent:** `valk hook <agent>`, a command hook. It reads the event JSON on stdin and forwards it with `$VALK_SESSION` to the daemon socket, then exits 0 at once (observe-only, see 4). Without `$VALK_SESSION` it exits 0 and does nothing, so it's harmless outside Valkyrie. Using a command hook rather than an HTTP one keeps us on the unix socket with no TCP listener.
 2. **Claude:** the adapter adds `--settings '{"hooks":{…}}'` at spawn. Nothing in the user's config changes.
-3. **Codex:** `overseer setup codex` adds one fixed entry to `~/.codex/hooks.json` and the user trusts it once with `/hooks`. The command string never changes, so its hash and therefore the trust stay valid. No bypass flag.
+3. **Codex:** `valk setup codex` adds one fixed entry to `~/.codex/hooks.json` and the user trusts it once with `/hooks`. The command string never changes, so its hash and therefore the trust stay valid. No bypass flag. *Exception: the rename to Valkyrie (2026-10-07) changed the binary to `valk`. `valk setup codex` replaces the old `overseer` entries, which must be trusted again once. Codex sessions still running under the old daemon stop reporting hooks until restarted under `valk`.*
 4. **Observe-only in M1.** Hooks never return a decision. Approve/deny from the queue (a `PermissionRequest` hook waiting on the daemon, with a timeout falling back to the native dialog) comes with M3, alongside phone/web.
 5. **Screen heuristics stay**, as the fallback for pre-hook states (folder-trust prompts), agents without hooks, and the stale detector. They're tested against recorded `.raw` transcripts.
-6. **Bell and title** (already emitted by `overseer-term`) are generic weak signals for any program.
+6. **Bell and title** (already emitted by `valkyrie-term`) are generic weak signals for any program.
 7. **Hook contract** (from Leader's live work, `~/repos/leader/docs/findings.md` §8, §11):
    - The hook **prints nothing**: plain stdout becomes model context on `UserPromptSubmit`/`SessionStart`.
    - It **always exits 0**: exit 2 blocks `PreToolUse`/`UserPromptSubmit`/`Stop`.

@@ -1,0 +1,25 @@
+[package]
+name = "valkyrie-daemon"
+description = "Valkyrie daemon: PTY host, session manager, socket server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+valkyrie-proto.workspace = true
+valkyrie-term.workspace = true
+valkyrie-agents.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+portable-pty.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+valkyrie-agents.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+libc.workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "valkyrie"
+description = "Attention-first manager for coding-agent CLIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "valk"
+path = "src/main.rs"
+
+[dependencies]
+valkyrie-proto.workspace = true
+valkyrie-term.workspace = true
+valkyrie-daemon.workspace = true
+valkyrie-tui.workspace = true
+valkyrie-agents.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+libc.workspace = true

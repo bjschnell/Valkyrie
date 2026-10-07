@@ -9,11 +9,11 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
-overseer-proto = { path = "crates/overseer-proto" }
-overseer-term = { path = "crates/overseer-term" }
-overseer-daemon = { path = "crates/overseer-daemon" }
-overseer-tui = { path = "crates/overseer-tui" }
-overseer-agents = { path = "crates/overseer-agents" }
+valkyrie-proto = { path = "crates/valkyrie-proto" }
+valkyrie-term = { path = "crates/valkyrie-term" }
+valkyrie-daemon = { path = "crates/valkyrie-daemon" }
+valkyrie-tui = { path = "crates/valkyrie-tui" }
+valkyrie-agents = { path = "crates/valkyrie-agents" }
 alacritty_terminal = "0.26"
 portable-pty = "0.9"
 ratatui = "0.30"
