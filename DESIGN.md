@@ -107,6 +107,16 @@ score = blocking-others weight (other agents/tasks depend on it) + age + explici
 ### 5.4 Notifications
 Web push for PWA; TUI bell/OS notification. Rate-limited and deduped: queue is the source of truth, notifications only mirror new top-of-queue items. Goal: pings disappear when the supervisor (phase 2) handles things.
 
+**TUI pings (done 2026-10-07, cloned from herdr's sounds):**
+- **What fires a ping.** Each queue push is diffed against the previous one by `(session, seq)`. A new transition into `needs_input` or `blocked` plays the `request` sound, and a new transition into `review_ready` plays `done`. The first queue after a connect, or after reconnecting to a restarted daemon, only primes. An upgrade keeps ids and seqs, so pings that happened during it still fire. `interrupted?`/`stale` never ping, because they are guesses.
+- **What stays quiet.** No ping for the attached session, or for anything already `seen`, which includes anything another client is attached to. A transition must hold for 1.5 s before it pings. Codex reports a permission request before its auto-reviewer takes it, and that must not ring. A new seq in the same state, which is only a summary update, doesn't ping again. A request still sounds right after a `done`.
+- **Sound.** At most one sound per second, with a toast in the bar for 6 s.
+  - The sounds are generated two-note chimes, written once to `<state dir>/sounds/{request,done}.wav`. Replace the files to use your own sounds.
+  - They play through `pw-play`, then `paplay`, then `aplay`. A player still running after 5 s is killed; herdr's hung for 15 s on a dead audio server.
+- **Over SSH** (`SSH_CONNECTION`/`SSH_TTY` set), the TUI rings the outer terminal's bell instead, so the ping reaches the machine you sit at.
+- **Mute.** `m` toggles sounds and the choice is remembered; `VALK_SOUND=on|off` overrides it.
+- **Limits.** Pings come from the client, so none sound without a TUI open, and each open TUI pings. Desktop notifications (herdr's `ui.toast` terminal/system delivery) are a follow-up.
+
 ### 5.5 herdr logic reuse
 Audited 2026-10-06: the author's plugin is **Leader** (`~/repos/leader`, Python stdlib, herdr 0.8.2, Claude Code 2.1.284–285). Its live findings (`docs/findings.md` there) are adopted as M1 inputs; see §14.3–14.4 for what was ported. Semantics are ported, not code. Leader has no batching, so §5.3 batching remains new design.
 

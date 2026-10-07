@@ -4,9 +4,11 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod ping;
 mod theme;
 
 use anyhow::Result;
+use ping::{Kind, Ping, Pinger};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
@@ -19,7 +21,7 @@ use ratatui::widgets::{
 };
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use theme::{Theme, state_icon};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -74,6 +76,11 @@ struct App {
     theme: &'static Theme,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
+    pinger: Pinger,
+    /// Ping sounds on (`m` toggles).
+    sound: bool,
+    /// The last ping, shown in the bar for `TOAST_FOR`.
+    toast: Option<(Ping, Instant)>,
 }
 
 struct Attached {
@@ -102,6 +109,9 @@ impl App {
             quit: false,
             theme: Theme::load(),
             preview: None,
+            pinger: Pinger::default(),
+            sound: ping::load_enabled(),
+            toast: None,
         }
     }
 
@@ -160,6 +170,9 @@ impl App {
                     self.update_preview().await;
                 }
                 _ = anim.tick(), if self.animating() => {}
+                _ = sleep_until(self.pinger.next_due()), if self.pinger.next_due().is_some() => {
+                    self.fire_pings();
+                }
             }
         }
         Ok(())
@@ -189,6 +202,9 @@ impl App {
             // Session ids start over in a restarted daemon: re-attaching by id could
             // land in an unrelated program.
             let same = self.boot == Some(info.boot);
+            if !same {
+                self.pinger.reset();
+            }
             self.boot = Some(info.boot);
             self.status = if same {
                 "reconnected to the daemon".into()
@@ -375,6 +391,14 @@ impl App {
                 self.clamp_selection();
                 self.update_preview().await;
             }
+            HomeKey::Sound => {
+                self.sound = !self.sound;
+                ping::save_enabled(self.sound);
+                self.status = format!("sound: {}", if self.sound { "on" } else { "off" });
+                if std::env::var_os("VALK_SOUND").is_some() {
+                    self.status += " (VALK_SOUND decides at the next start)";
+                }
+            }
             HomeKey::Theme => {
                 self.theme = self.theme.next();
                 self.theme.save();
@@ -446,6 +470,8 @@ impl App {
     /// Returns whether the queue changed.
     fn on_push(&mut self, msg: ServerMsg) -> Result<bool> {
         if let ServerMsg::Queue { items } = msg {
+            let viewing = self.view.as_ref().map(|v| v.id);
+            self.pinger.on_queue(&items, viewing, Instant::now());
             let anchor = self.anchor();
             self.queue = items;
             self.restore(anchor);
@@ -496,9 +522,12 @@ impl App {
                     {
                         frame.set_cursor_position(Position::new(body.x + x, body.y + y));
                     }
+                    let mut line = attached_bar(view, self.theme);
+                    if let Some(toast) = self.toast() {
+                        line.spans.extend(toast_spans(toast, self.theme));
+                    }
                     frame.render_widget(
-                        Paragraph::new(attached_bar(view, self.theme))
-                            .style(style::Style::new().bg(self.theme.panel)),
+                        Paragraph::new(line).style(style::Style::new().bg(self.theme.panel)),
                         bar,
                     );
                 }
@@ -507,6 +536,51 @@ impl App {
         })?;
         Ok(())
     }
+}
+
+/// How long a ping's toast stays in the bar.
+const TOAST_FOR: Duration = Duration::from_secs(6);
+
+impl App {
+    fn fire_pings(&mut self) {
+        let viewing = self.view.as_ref().map(|v| v.id);
+        let Some(ping) = self.pinger.due(viewing, Instant::now()) else {
+            return;
+        };
+        if ping.sound && self.sound {
+            ping::play(ping.kind);
+        }
+        // A fresh request stays up over a later finish.
+        if self.toast().is_some_and(|t| t.kind == Kind::Request) && ping.kind == Kind::Done {
+            return;
+        }
+        self.toast = Some((ping, Instant::now()));
+    }
+
+    fn toast(&self) -> Option<&Ping> {
+        self.toast
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < TOAST_FOR)
+            .map(|(ping, _)| ping)
+    }
+}
+
+async fn sleep_until(at: Option<Instant>) {
+    if let Some(at) = at {
+        tokio::time::sleep_until(at.into()).await;
+    }
+}
+
+/// ` ● api needs input ` in the ping's color.
+fn toast_spans(ping: &Ping, t: &Theme) -> Vec<ratatui::text::Span<'static>> {
+    let (icon, color) = match ping.kind {
+        Kind::Request => ("●", t.needs),
+        Kind::Done => ("✓", t.done),
+    };
+    vec![
+        format!(" {icon} {} ", ping.text).fg(t.bg).bg(color).bold(),
+        " ".into(),
+    ]
 }
 
 /// How often the working spinner advances.
@@ -591,8 +665,12 @@ impl App {
             self.draw_preview(frame, area);
         }
 
+        let mut footer = footer_line(&self.status, self.sound, t);
+        if let Some(toast) = self.toast() {
+            footer.spans.splice(0..0, toast_spans(toast, t));
+        }
         frame.render_widget(
-            Paragraph::new(footer_line(&self.status, t)).style(style::Style::new().bg(t.panel)),
+            Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
     }
@@ -751,7 +829,7 @@ fn header_line(queue: &[QueueItem], sessions: &[SessionInfo], t: &Theme) -> Line
 }
 
 /// The status message, then key hints as chips.
-fn footer_line(status: &str, t: &Theme) -> Line<'static> {
+fn footer_line(status: &str, sound: bool, t: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
@@ -764,6 +842,7 @@ fn footer_line(status: &str, t: &Theme) -> Line<'static> {
         ("n", "new"),
         ("x", "kill"),
         ("t", "theme"),
+        ("m", if sound { "sound" } else { "muted" }),
         ("q", "quit"),
     ] {
         spans.push(" ".into());
@@ -1006,6 +1085,8 @@ enum HomeKey {
     Refresh,
     /// Cycle the color theme.
     Theme,
+    /// Ping sounds on/off.
+    Sound,
     Quit,
 }
 
@@ -1034,6 +1115,7 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
             b'x' => keys.push(HomeKey::Kill),
             b'r' => keys.push(HomeKey::Refresh),
             b't' => keys.push(HomeKey::Theme),
+            b'm' => keys.push(HomeKey::Sound),
             b'q' | 0x03 => keys.push(HomeKey::Quit),
             _ => {}
         }
