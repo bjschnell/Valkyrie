@@ -4,7 +4,7 @@ use crate::codec::{read_frame, write_frame};
 use crate::{ClientMsg, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec};
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
@@ -22,6 +22,16 @@ pub struct Client {
 
 /// Server-pushed messages (`Screen`, `Exited`, `Queue`). Closes when the connection drops.
 pub type Pushes = mpsc::UnboundedReceiver<ServerMsg>;
+
+/// What `Hello` tells about the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonInfo {
+    pub protocol: u32,
+    /// Upgrade handoffs so far (ADR-0006).
+    pub generation: u32,
+    /// Same across handoffs, different after a restart.
+    pub boot: u64,
+}
 
 impl Client {
     pub async fn connect(path: &Path) -> Result<(Client, Pushes)> {
@@ -103,9 +113,31 @@ impl Client {
 
     /// The daemon's protocol version.
     pub async fn hello(&self) -> Result<u32> {
+        self.hello_info().await.map(|info| info.protocol)
+    }
+
+    pub async fn hello_info(&self) -> Result<DaemonInfo> {
         match self.request(|req| ClientMsg::Hello { req }).await? {
-            Reply::Hello { protocol } => Ok(protocol),
+            Reply::Hello {
+                protocol,
+                generation,
+                boot,
+            } => Ok(DaemonInfo {
+                protocol,
+                generation,
+                boot,
+            }),
             other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Asks the daemon to re-exec as `exe`. `Ok` means the daemon accepted and closed
+    /// the connection to hand off; confirm with a fresh connection's generation.
+    pub async fn upgrade(&self, exe: PathBuf) -> Result<()> {
+        match self.request(|req| ClientMsg::Upgrade { req, exe }).await {
+            Ok(other) => bail!("unexpected reply: {other:?}"),
+            Err(_) if self.closed.load(Ordering::SeqCst) => Ok(()),
+            Err(e) => Err(e),
         }
     }
 

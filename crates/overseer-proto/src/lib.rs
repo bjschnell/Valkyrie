@@ -16,7 +16,7 @@ pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -145,6 +145,13 @@ pub enum ClientMsg {
         session: SessionId,
         seq: u64,
     },
+    /// Re-exec the daemon as `exe`, keeping every session (ADR-0006). Only a refusal
+    /// is answered; on success the connection simply closes and the next `Hello`
+    /// reports a higher `generation`.
+    Upgrade {
+        req: ReqId,
+        exe: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,10 +183,25 @@ pub enum ServerMsg {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Reply {
     Done,
-    Hello { protocol: u32 },
-    Session { info: SessionInfo },
-    Sessions { sessions: Vec<SessionInfo> },
-    Text { text: String },
+    Hello {
+        protocol: u32,
+        /// How many upgrade handoffs this daemon's sessions have been through.
+        #[serde(default)]
+        generation: u32,
+        /// Identifies this daemon across handoffs: a restarted daemon (whose session
+        /// ids start over) has a different one.
+        #[serde(default)]
+        boot: u64,
+    },
+    Session {
+        info: SessionInfo,
+    },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
+    Text {
+        text: String,
+    },
 }
 
 /// Default daemon socket: `<state dir>/run/<hostname>.sock`. Not `$XDG_RUNTIME_DIR`:

@@ -185,7 +185,7 @@ Requirement from the author's herdr use: `ssh box; overseer` must show exactly t
   - `new` from a terminal smaller than 20×4 spawns at 120×40 until attached.
 
 Follow-ups (herdr has them, we don't yet):
-- **Sessions survive a daemon upgrade.** Restarting the daemon still kills its sessions. herdr's `update --handoff` passes the live PTYs to the new server. For us that means passing the PTY master fds to the new daemon over the socket (SCM_RIGHTS), along with each session's screen and tracker state.
+- ~~**Sessions survive a daemon upgrade.**~~ Done 2026-10-07: `overseer upgrade` ([ADR-0006](docs/adr/0006-upgrade-handoff.md)) re-execs the daemon in place, so agents stay its children. PTYs and the listener are inherited and screens are rebuilt from the transcripts. The TUI reconnects by itself. Verified live by upgrading mid-turn under Claude running `sleep 15`: the handoff took 105 ms end to end, the session stayed `working`, and PostToolUse and Stop reached the new image.
 - **Start on boot.** A systemd user unit plus `loginctl enable-linger` would bring the daemon up before any login. Today the first `overseer` command starts it.
 - **`overseer --remote <host>`.** Runs the local TUI against a remote daemon by forwarding its socket over SSH. Today's equivalent is `ssh -t host overseer attach`.
 - **Restore after reboot.** herdr's `session.json` restores layout and cwds, not processes. The equivalent here is respawning sessions by command and cwd, with `--resume` for agents.

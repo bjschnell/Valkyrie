@@ -1,9 +1,11 @@
 //! One PTY-hosted program plus its screen model and agent state (DESIGN §13–14).
 //!
 //! Three threads per session, none of which ever runs on a tokio worker:
-//! - reader: PTY output → transcript + screen → broadcast diff (ends at PTY EOF)
+//! - reader: PTY output → transcript + screen → broadcast diff (ends at PTY EOF, or
+//!   between two reads when an upgrade handoff stops it; ADR-0006)
 //! - writer: drains the input queue into the PTY; a program that stops reading stdin
-//!   blocks only this thread
+//!   blocks only this thread. A handoff stops it between writes and the unwritten
+//!   rest of the queue crosses the exec
 //! - waiter: reaps the child and publishes `Exited`, independent of PTY EOF (a
 //!   background job can hold the tty open long after the agent exits)
 //!
@@ -14,16 +16,21 @@
 
 use anyhow::{Context, Result};
 use overseer_agents::{Adapter, AgentEvent, Screen, Tracker};
+use overseer_proto::AgentStatus;
 use overseer_proto::{AgentState, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec};
 use overseer_term::{Signal, VtScreen};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, broadcast};
 
@@ -51,6 +58,120 @@ pub struct Host {
     pub socket: PathBuf,
     /// Poked whenever any session's agent status changes.
     pub changed: Arc<Notify>,
+    /// Set to stop every reader for an upgrade handoff; replaced if it fails.
+    pub stop: Mutex<Arc<StopPipe>>,
+}
+
+/// Readers poll this alongside their PTY and return, before reading another byte,
+/// once it is set: unread output stays in the kernel for the next daemon image.
+pub struct StopPipe {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl StopPipe {
+    pub fn new() -> std::io::Result<Self> {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` has room for the two descriptors pipe2 writes.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: pipe2 just returned these, and nothing else owns them.
+        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        Ok(Self { read, write })
+    }
+
+    /// Level-triggered and never drained, so every poller sees it, now and later.
+    pub fn set(&self) {
+        // SAFETY: writes one byte from a valid buffer to our own pipe.
+        unsafe { libc::write(self.write.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+    }
+}
+
+/// The PTY master, held as a plain fd so it can survive an exec (ADR-0006).
+struct Pty(OwnedFd);
+
+impl Pty {
+    fn resize(&self, size: Size) -> std::io::Result<()> {
+        let ws = libc::winsize {
+            ws_row: size.rows,
+            ws_col: size.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCSWINSZ reads a winsize from a valid pointer.
+        if unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCSWINSZ, &ws) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// An independent handle for a reader or writer thread.
+    fn file(&self) -> std::io::Result<File> {
+        Ok(File::from(self.0.try_clone()?))
+    }
+}
+
+/// Input waiting for the PTY. The writer takes from the front; when a handoff stops
+/// it mid-buffer, the unwritten rest goes back to the front, and the whole queue
+/// crosses the exec in `SavedSession::input`.
+#[derive(Default)]
+struct InputQueue {
+    state: Mutex<InputState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct InputState {
+    bufs: VecDeque<Vec<u8>>,
+    /// Stop taking input (handoff); cleared if the handoff fails.
+    halt: bool,
+    /// The session is gone; the writer ends once the queue is empty.
+    closed: bool,
+}
+
+impl InputQueue {
+    fn push(&self, data: Vec<u8>) {
+        let mut state = self.state.lock().unwrap();
+        if !state.closed {
+            state.bufs.push_back(data);
+            self.ready.notify_one();
+        }
+    }
+
+    fn set(&self, f: impl FnOnce(&mut InputState)) {
+        f(&mut self.state.lock().unwrap());
+        self.ready.notify_all();
+    }
+}
+
+/// What reaps the program: the handle from spawning it, or (after a handoff, where
+/// only the pid crossed the exec) `waitpid` on that pid.
+enum Reap {
+    Child(Box<dyn Child + Send + Sync>),
+    Pid(u32),
+}
+
+/// One session as it crosses an upgrade handoff (ADR-0006).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SavedSession {
+    pub id: SessionId,
+    name: String,
+    command: Vec<String>,
+    cwd: PathBuf,
+    pub pid: Option<u32>,
+    created_unix: u64,
+    /// The PTY master, inherited across the exec.
+    pub fd: RawFd,
+    transcript: PathBuf,
+    events: PathBuf,
+    offset: u64,
+    size: Size,
+    status: AgentStatus,
+    exited: Option<Option<i32>>,
+    /// Input the old image had not written to the PTY yet.
+    #[serde(default)]
+    pub input: Vec<u8>,
 }
 
 pub struct Session {
@@ -63,10 +184,26 @@ pub struct Session {
     pub clients: AtomicU32,
     adapter: &'static dyn Adapter,
     state: Mutex<State>,
-    input: mpsc::Sender<Vec<u8>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    input: Arc<InputQueue>,
+    pty: Pty,
+    transcript: PathBuf,
+    events: PathBuf,
+    reader: Mutex<Option<JoinHandle<()>>>,
+    writer: Mutex<Option<JoinHandle<()>>>,
     feed: broadcast::Sender<Arc<ServerMsg>>,
     changed: Arc<Notify>,
+}
+
+/// The fixed facts about a session, whether spawned or adopted.
+struct Meta {
+    id: SessionId,
+    name: String,
+    command: Vec<String>,
+    cwd: PathBuf,
+    pid: Option<u32>,
+    created_unix: u64,
+    transcript: PathBuf,
+    events: PathBuf,
 }
 
 /// Everything shared threads mutate. Diffs and `Exited` are broadcast while this lock
@@ -130,6 +267,8 @@ impl Session {
         };
         let transcript = private("raw")?;
         let log = private("events.jsonl")?;
+        let transcript_path = stem.with_extension("raw");
+        let events_path = stem.with_extension("events.jsonl");
 
         let pair = native_pty_system()
             .openpty(pty_size(size))
@@ -159,9 +298,10 @@ impl Session {
             .spawn_command(cmd)
             .with_context(|| format!("spawn {program}"))?;
         drop(pair.slave);
-        let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
-        let (input, input_rx) = mpsc::channel();
+        let fd = pair.master.as_raw_fd().context("pty master has no fd")?;
+        // SAFETY: the master is open until `pair.master` drops, after this dup.
+        let pty = Pty(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?);
+        drop(pair.master);
 
         let now_ms = now.as_millis() as u64;
         let mut state = State {
@@ -181,49 +321,277 @@ impl Session {
             json!({"agent": adapter.name(), "command": spec.command, "size": size}),
         );
 
+        let pid = child.process_id();
+        let session = Session::new(
+            Meta {
+                id,
+                name: spec.name.unwrap_or_else(|| default_name(&spec.command)),
+                command: spec.command,
+                cwd,
+                pid,
+                created_unix: now.as_secs(),
+                transcript: transcript_path,
+                events: events_path,
+            },
+            adapter,
+            state,
+            pty,
+            host,
+        );
+        session.start_threads(Some(Reap::Child(child)), transcript, host)?;
+        Ok(session)
+    }
+
+    /// Takes over a session saved by the previous daemon image (ADR-0006): the PTY
+    /// fd came across the exec, the screen is rebuilt from the transcript, and the
+    /// program is still our child, so `waitpid` keeps working.
+    pub fn adopt(saved: SavedSession, host: &Host, generation: u32) -> Result<Arc<Session>> {
+        // SAFETY: the previous image passed this fd to us and nothing else owns it.
+        let fd = unsafe { OwnedFd::from_raw_fd(saved.fd) };
+        // It crossed the exec without CLOEXEC; children we spawn must not inherit it.
+        // SAFETY: plain fcntl on an fd we own.
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        let adapter = overseer_agents::adapter_for(&saved.command);
+        // Best effort from here on: losing the screen or a log beats losing the agent.
+        let screen = rebuild_screen(&saved.transcript, &saved.events, saved.offset, saved.size)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    session = saved.id,
+                    "screen not rebuilt, starting blank: {e:#}"
+                );
+                VtScreen::new(saved.size)
+            });
+        let now = now_ms();
+        let log = append_private(&saved.events)?;
+        let transcript = append_private(&saved.transcript)?;
+        let mut state = State {
+            screen,
+            exited: saved.exited,
+            tracker: Tracker::resume(
+                saved.status,
+                adapter.hook_gaps(),
+                saved.exited.is_some(),
+                now,
+            ),
+            log,
+            offset: saved.offset,
+            last_output_ms: now,
+            last_mark_ms: 0,
+            last_scan_ms: 0,
+            scan_due: false,
+        };
+        state.log(now, "resume", json!({"generation": generation}));
+        let reap = match (saved.exited, saved.pid) {
+            (None, Some(pid)) => Some(Reap::Pid(pid)),
+            _ => None,
+        };
+        let session = Session::new(
+            Meta {
+                id: saved.id,
+                name: saved.name,
+                command: saved.command,
+                cwd: saved.cwd,
+                pid: saved.pid,
+                created_unix: saved.created_unix,
+                transcript: saved.transcript,
+                events: saved.events,
+            },
+            adapter,
+            state,
+            Pty(fd),
+            host,
+        );
+        if !saved.input.is_empty() {
+            session.input.push(saved.input);
+        }
+        session.start_threads(reap, transcript, host)?;
+        Ok(session)
+    }
+
+    fn new(
+        meta: Meta,
+        adapter: &'static dyn Adapter,
+        state: State,
+        pty: Pty,
+        host: &Host,
+    ) -> Arc<Session> {
         let (feed, _) = broadcast::channel(FEED_CAPACITY);
-        let session = Arc::new(Session {
-            id,
-            name: spec.name.unwrap_or_else(|| default_name(&spec.command)),
-            command: spec.command,
-            cwd,
-            pid: child.process_id(),
-            created_unix: now.as_secs(),
+        Arc::new(Session {
+            id: meta.id,
+            name: meta.name,
+            command: meta.command,
+            cwd: meta.cwd,
+            pid: meta.pid,
+            created_unix: meta.created_unix,
             clients: AtomicU32::new(0),
             adapter,
             state: Mutex::new(state),
-            input,
-            master: Mutex::new(pair.master),
+            input: Arc::default(),
+            pty,
+            transcript: meta.transcript,
+            events: meta.events,
+            reader: Mutex::new(None),
+            writer: Mutex::new(None),
             feed,
             changed: host.changed.clone(),
-        });
+        })
+    }
 
-        // The writer holds no Arc<Session>: it ends when the session (the last input
-        // sender) is dropped, which happens after the reader sees EOF.
-        std::thread::Builder::new()
+    fn start_threads(
+        self: &Arc<Self>,
+        reap: Option<Reap>,
+        transcript: File,
+        host: &Host,
+    ) -> Result<()> {
+        if let Some(reap) = reap {
+            let waiter = self.clone();
+            std::thread::Builder::new()
+                .name(format!("pty-x-{}", self.id))
+                .spawn(move || waiter.wait_exit(reap))?;
+        }
+        self.start_io(transcript, host.stop.lock().unwrap().clone())
+    }
+
+    fn start_io(self: &Arc<Self>, transcript: File, stop: Arc<StopPipe>) -> Result<()> {
+        // Non-blocking (the reader and writer share one open file description), so
+        // a stopped writer is never stuck inside write(); both poll first.
+        // SAFETY: plain fcntl on our own fd.
+        unsafe {
+            let fd = self.pty.0.as_raw_fd();
+            libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+        // The writer holds no Arc<Session>: it ends once the session is dropped
+        // (`closed`), which happens after the reader sees EOF.
+        let (writer, queue, id, writer_stop) =
+            (self.pty.file()?, self.input.clone(), self.id, stop.clone());
+        let handle = std::thread::Builder::new()
             .name(format!("pty-w-{id}"))
-            .spawn(move || write_loop(id, writer, input_rx))?;
-        let waiter = session.clone();
-        std::thread::Builder::new()
-            .name(format!("pty-x-{id}"))
-            .spawn(move || waiter.wait_exit(child))?;
-        let reader_session = session.clone();
-        std::thread::Builder::new()
+            .spawn(move || write_loop(id, writer, queue, writer_stop))?;
+        *self.writer.lock().unwrap() = Some(handle);
+        let reader = self.pty.file()?;
+        let session = self.clone();
+        let handle = std::thread::Builder::new()
             .name(format!("pty-r-{id}"))
-            .spawn(move || reader_session.pump(reader, transcript))?;
-        Ok(session)
+            .spawn(move || session.pump(reader, transcript, stop))?;
+        *self.reader.lock().unwrap() = Some(handle);
+        Ok(())
+    }
+
+    /// Waits until the reader and writer have returned, after `StopPipe::set`. Unread
+    /// output stays in the kernel; unwritten input stays in the queue.
+    pub fn stop_io(&self) {
+        self.input.set(|state| state.halt = true);
+        for thread in [&self.reader, &self.writer] {
+            if let Some(handle) = thread.lock().unwrap().take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Restarts the reader and writer after a handoff that failed to exec.
+    pub fn resume_io(self: &Arc<Self>, stop: Arc<StopPipe>) -> Result<()> {
+        self.input.set(|state| state.halt = false);
+        let transcript = append_private(&self.transcript)?;
+        self.start_io(transcript, stop)
+    }
+
+    pub fn exited(&self) -> bool {
+        self.state.lock().unwrap().exited.is_some()
+    }
+
+    /// SIGKILL now, for a killed session that must not outlive a handoff unreaped.
+    pub fn force_kill(&self) {
+        if let Some(pid) = self.pid {
+            self.signal_group(pid, libc::SIGKILL);
+        }
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Everything the next daemon image needs; call with the reader stopped.
+    pub fn save(&self) -> SavedSession {
+        let state = self.state.lock().unwrap();
+        SavedSession {
+            id: self.id,
+            name: self.name.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            pid: self.pid,
+            created_unix: self.created_unix,
+            fd: self.pty.0.as_raw_fd(),
+            transcript: self.transcript.clone(),
+            events: self.events.clone(),
+            offset: state.offset,
+            size: state.screen.size(),
+            status: state.tracker.status().clone(),
+            exited: state.exited,
+            input: self
+                .input
+                .state
+                .lock()
+                .unwrap()
+                .bufs
+                .iter()
+                .flatten()
+                .copied()
+                .collect(),
+        }
+    }
+
+    pub fn pty_fd(&self) -> RawFd {
+        self.pty.0.as_raw_fd()
     }
 
     fn watching(&self) -> bool {
         self.clients.load(Ordering::Relaxed) > 0
     }
 
-    fn pump(self: Arc<Self>, mut reader: Box<dyn Read + Send>, mut transcript: File) {
+    fn pump(self: Arc<Self>, mut reader: File, mut transcript: File, stop: Arc<StopPipe>) {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
+            let mut fds = [
+                libc::pollfd {
+                    fd: reader.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: stop.read.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: `fds` is a valid array of two pollfds.
+            if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            // Checked first: whatever is readable now belongs to the next image.
+            if fds[1].revents != 0 {
+                tracing::debug!(session = self.id, "reader stopped for handoff");
+                return;
+            }
+            // POLLHUP/POLLERR show up as EOF or EIO from read.
             let n = match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
                 Ok(n) => n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
             };
             let bytes = &buf[..n];
             if let Err(e) = transcript.write_all(bytes) {
@@ -268,8 +636,11 @@ impl Session {
         tracing::debug!(session = self.id, "pty closed");
     }
 
-    fn wait_exit(self: Arc<Self>, mut child: Box<dyn Child + Send + Sync>) {
-        let code = child.wait().ok().map(|s| s.exit_code() as i32);
+    fn wait_exit(self: Arc<Self>, reap: Reap) {
+        let code = match reap {
+            Reap::Child(mut child) => child.wait().ok().map(|s| s.exit_code() as i32),
+            Reap::Pid(pid) => wait_pid(pid),
+        };
         tracing::info!(session = self.id, ?code, "exited");
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
@@ -408,7 +779,7 @@ impl Session {
 
     /// Never blocks: input is queued for the writer thread.
     pub fn write_input(&self, data: Vec<u8>) {
-        let _ = self.input.send(data);
+        self.input.push(data);
     }
 
     pub fn resize(&self, size: Size) {
@@ -419,7 +790,7 @@ impl Session {
         }
         state.screen.resize(size);
         state.log(now_ms(), "resize", json!({"size": size}));
-        if let Err(e) = self.master.lock().unwrap().resize(pty_size(size)) {
+        if let Err(e) = self.pty.resize(size) {
             tracing::warn!(session = self.id, "pty resize failed: {e}");
         }
         if let Some(update) = state.screen.take_diff() {
@@ -473,6 +844,12 @@ impl Session {
             exited: state.exited,
             status: state.tracker.status().clone(),
         }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.input.set(|state| state.closed = true);
     }
 }
 
@@ -534,13 +911,149 @@ fn parse_shortstat(text: &str) -> Option<String> {
     )
 }
 
-fn write_loop(id: SessionId, mut writer: Box<dyn Write + Send>, input: mpsc::Receiver<Vec<u8>>) {
-    for data in input {
-        if let Err(e) = writer.write_all(&data).and_then(|_| writer.flush()) {
-            tracing::debug!(session = id, "pty write failed, dropping input: {e}");
-            return;
+fn write_loop(id: SessionId, mut writer: File, queue: Arc<InputQueue>, stop: Arc<StopPipe>) {
+    let mut failed = false;
+    loop {
+        let mut buf = {
+            let mut state = queue.state.lock().unwrap();
+            loop {
+                if state.halt {
+                    return;
+                }
+                if let Some(buf) = state.bufs.pop_front() {
+                    break buf;
+                }
+                if state.closed {
+                    return;
+                }
+                state = queue.ready.wait(state).unwrap();
+            }
+        };
+        // After a failure keep draining, so the queue doesn't grow forever.
+        let mut written = 0;
+        while !failed && written < buf.len() {
+            let mut fds = [
+                libc::pollfd {
+                    fd: writer.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: stop.read.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY: `fds` is a valid array of two pollfds.
+            let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+            if rc < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            if fds[1].revents != 0 {
+                // Handoff: the unwritten rest goes back to the front of the queue.
+                buf.drain(..written);
+                queue.state.lock().unwrap().bufs.push_front(buf);
+                return;
+            }
+            match writer.write(&buf[written..]) {
+                Ok(n) => written += n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => {
+                    tracing::debug!(session = id, "pty write failed, dropping input: {e}");
+                    failed = true;
+                }
+            }
         }
     }
+}
+
+/// Opens a transcript or event log to append, recreating it (0600) if it was deleted.
+fn append_private(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Reaps a program that could not be adopted, so it doesn't stay a zombie.
+pub fn reap_orphan(pid: u32) {
+    std::thread::spawn(move || {
+        let code = wait_pid(pid);
+        tracing::info!(pid, ?code, "reaped orphan");
+    });
+}
+
+/// Reaps `pid` with the exit code portable-pty would report (1 when killed by a
+/// signal). `None` if it is not our child any more (reaped just before the exec).
+fn wait_pid(pid: u32) -> Option<i32> {
+    let mut status = 0;
+    loop {
+        // SAFETY: waits on our own child with a valid status pointer.
+        let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+        if rc == pid as libc::pid_t {
+            break;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
+    if libc::WIFEXITED(status) {
+        Some(libc::WEXITSTATUS(status))
+    } else {
+        Some(1)
+    }
+}
+
+/// The screen as it stood at `upto` bytes into the transcript: replays the bytes with
+/// the resizes from the event log at the offsets they happened. Replies to terminal
+/// queries are discarded; the program got the real ones long ago.
+fn rebuild_screen(transcript: &Path, events: &Path, upto: u64, size: Size) -> Result<VtScreen> {
+    let mut start = None;
+    let mut resizes = Vec::new();
+    for line in BufReader::new(File::open(events)?).lines() {
+        let Ok(line) = serde_json::from_str::<Value>(&line?) else {
+            continue;
+        };
+        let at: Option<Size> = serde_json::from_value(line["size"].clone()).ok();
+        match (line["k"].as_str(), at) {
+            (Some("start"), Some(at)) => start = Some(at),
+            (Some("resize"), Some(at)) => resizes.push((line["off"].as_u64().unwrap_or(0), at)),
+            _ => {}
+        }
+    }
+    let mut screen = VtScreen::new(start.unwrap_or(size));
+    let mut raw = BufReader::new(File::open(transcript)?).take(upto);
+    let mut resizes = resizes.into_iter().peekable();
+    let mut pos = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        while let Some(&(off, at)) = resizes.peek()
+            && off <= pos
+        {
+            screen.resize(at);
+            resizes.next();
+        }
+        let room = resizes
+            .peek()
+            .map_or(buf.len() as u64, |&(off, _)| off - pos)
+            .min(buf.len() as u64) as usize;
+        let n = raw.read(&mut buf[..room])?;
+        if n == 0 {
+            break;
+        }
+        screen.feed(&buf[..n]);
+        pos += n as u64;
+    }
+    if screen.size() != size {
+        screen.resize(size);
+    }
+    let _ = screen.take_diff();
+    Ok(screen)
 }
 
 fn pty_size(size: Size) -> PtySize {
@@ -588,6 +1101,38 @@ mod tests {
             vec![(500, false), (1_000, false), (1_250, true)],
             "{scans:?}"
         );
+    }
+
+    #[test]
+    fn rebuilt_screen_matches_the_live_one_across_resizes() {
+        use overseer_proto::Size;
+        let dir = std::env::temp_dir().join(format!("overseer-rebuild-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (raw, events) = (dir.join("t.raw"), dir.join("t.events.jsonl"));
+        let start = Size { cols: 20, rows: 5 };
+        let wide = Size { cols: 40, rows: 8 };
+        let first = b"\x1b[2J\x1b[Hline one is long enough to wrap\r\nsecond\x1b[6n";
+        // Row 8 only exists after the resize: replaying it at the old size would
+        // clamp it to row 5 (reflow alone would hide a missed resize).
+        let second = b"\r\nafter resize \x1b[1mbold\x1b[0m\x1b[8;1Hbottom";
+        let mut live = overseer_term::VtScreen::new(start);
+        live.feed(first);
+        live.resize(wide);
+        live.feed(second);
+        std::fs::write(&raw, [&first[..], &second[..], b"not yet"].concat()).unwrap();
+        let log = [
+            serde_json::json!({"k": "start", "off": 0, "size": start}),
+            serde_json::json!({"k": "out", "off": 10}),
+            serde_json::json!({"k": "resize", "off": first.len(), "size": wide}),
+        ];
+        let log: String = log.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&events, log + "garbage\n").unwrap();
+
+        let upto = (first.len() + second.len()) as u64;
+        let rebuilt = super::rebuild_screen(&raw, &events, upto, wide).unwrap();
+        assert_eq!(rebuilt.text(), live.text());
+        assert_eq!(rebuilt.snapshot(), live.snapshot());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

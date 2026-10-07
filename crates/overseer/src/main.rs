@@ -25,7 +25,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the daemon in the foreground.
-    Daemon,
+    Daemon {
+        /// Take over from a previous daemon image (set by an upgrade handoff).
+        #[arg(long, hide = true)]
+        resume_fd: Option<i32>,
+        /// Check that a handoff on stdin parses, print the format and exit.
+        #[arg(long, hide = true)]
+        handoff_check: bool,
+    },
+    /// Switch the running daemon to this binary, keeping every session (ADR-0006).
+    Upgrade {
+        /// The overseer binary to switch to (default: this one).
+        #[arg(long)]
+        exe: Option<PathBuf>,
+    },
     /// Spawn a session: `overseer new -- claude`.
     New {
         #[arg(long)]
@@ -115,7 +128,17 @@ fn main() -> Result<()> {
 
 async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
     match cmd {
-        Some(Cmd::Daemon) => {
+        Some(Cmd::Daemon {
+            handoff_check: true,
+            ..
+        }) => {
+            let mut json = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut json)?;
+            overseer_daemon::check_handoff(&json)?;
+            println!("{}", overseer_daemon::HANDOFF_VERSION);
+            Ok(())
+        }
+        Some(Cmd::Daemon { resume_fd, .. }) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
@@ -125,17 +148,22 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
             let exe = std::env::current_exe()?;
-            overseer_daemon::run(&socket, &overseer_proto::state_dir(), &exe).await
+            let state = overseer_proto::state_dir();
+            match resume_fd {
+                Some(fd) => overseer_daemon::resume(fd, &state, &exe).await,
+                None => overseer_daemon::run(&socket, &state, &exe).await,
+            }
         }
+        Some(Cmd::Upgrade { exe }) => upgrade(&socket, exe).await,
         None => {
             require_tty()?;
             let (client, pushes) = connect(&socket).await?;
-            overseer_tui::run(client, pushes, None).await
+            overseer_tui::run(client, pushes, None, socket).await
         }
         Some(Cmd::Attach { session }) => {
             require_tty()?;
             let (client, pushes) = connect(&socket).await?;
-            overseer_tui::run(client, pushes, session).await
+            overseer_tui::run(client, pushes, session, socket).await
         }
         Some(Cmd::New {
             cwd,
@@ -171,7 +199,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 })
                 .await?;
             if attach {
-                overseer_tui::run(client, pushes, Some(info.id)).await
+                overseer_tui::run(client, pushes, Some(info.id), socket).await
             } else {
                 println!("{}", info.id);
                 Ok(())
@@ -250,6 +278,59 @@ fn require_tty() -> Result<()> {
 }
 
 /// Connect, starting a background daemon first if none is listening.
+/// Hands the running daemon over to `exe` and waits until the new image answers.
+/// Deliberately skips the protocol check: the old daemon may speak an older one, and
+/// `Hello` and `Upgrade` keep their shape across versions for exactly this.
+async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
+    let exe = std::fs::canonicalize(match exe {
+        Some(exe) => exe,
+        None => std::env::current_exe()?,
+    })?;
+    let (client, _pushes) = Client::connect(socket).await.with_context(|| {
+        format!(
+            "no daemon on {}; nothing to upgrade (the next overseer command starts one)",
+            socket.display()
+        )
+    })?;
+    const PREDATES: &str =
+        "the running daemon predates upgrades; restart it once instead (this ends its sessions)";
+    let before = client.hello_info().await.context(PREDATES)?;
+    anyhow::ensure!(before.protocol >= 3, PREDATES);
+    let sessions = client.list().await?.len();
+    client.upgrade(exe.clone()).await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok((client, _)) = Client::connect(socket).await
+            && let Ok(now) = client.hello_info().await
+        {
+            anyhow::ensure!(
+                now.boot == before.boot,
+                "a different daemon answered: the old one went away instead of handing off; see {}",
+                overseer_proto::state_dir().join("daemon.log").display()
+            );
+            anyhow::ensure!(
+                now.generation > before.generation,
+                "the daemon is still the old one (generation {}); see {}",
+                now.generation,
+                overseer_proto::state_dir().join("daemon.log").display()
+            );
+            let (protocol, after) = (now.protocol, now.generation);
+            let kept = client.list().await?.len();
+            println!(
+                "daemon now runs {} (protocol {protocol}, generation {after}); {kept}/{sessions} sessions kept",
+                exe.display()
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "the daemon did not come back; see {}",
+            overseer_proto::state_dir().join("daemon.log").display()
+        );
+    }
+}
+
 async fn connect(socket: &Path) -> Result<(Client, Pushes)> {
     let conn = start_or_connect(socket).await?;
     match conn.0.hello().await {

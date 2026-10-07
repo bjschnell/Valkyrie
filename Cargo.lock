@@ -1025,6 +1025,7 @@ dependencies = [
  "overseer-proto",
  "overseer-term",
  "portable-pty",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

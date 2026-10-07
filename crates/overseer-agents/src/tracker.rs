@@ -55,6 +55,15 @@ impl Tracker {
         }
     }
 
+    /// Continues from a status carried across a daemon upgrade (ADR-0006). Timers and
+    /// screen verdicts start fresh; `ended` if the program had already exited.
+    pub fn resume(status: AgentStatus, hook_gaps: bool, ended: bool, now: u64) -> Self {
+        let mut tracker = Self::new(&status.agent, hook_gaps, now);
+        tracker.status = status;
+        tracker.ended = ended;
+        tracker
+    }
+
     pub fn status(&self) -> &AgentStatus {
         &self.status
     }

@@ -18,6 +18,7 @@ use ratatui::style::{self, Modifier, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -25,7 +26,16 @@ use tokio::sync::mpsc;
 /// Ctrl-] — detach from the attached session.
 pub const DETACH_KEY: u8 = 0x1d;
 
-pub async fn run(client: Client, pushes: Pushes, attach_to: Option<SessionId>) -> Result<()> {
+/// How long the TUI keeps trying to reach the daemon after the connection drops. An
+/// upgrade handoff (ADR-0006) takes milliseconds; a daemon restart is not coming back.
+const RECONNECT_FOR: Duration = Duration::from_secs(10);
+
+pub async fn run(
+    client: Client,
+    pushes: Pushes,
+    attach_to: Option<SessionId>,
+    socket: PathBuf,
+) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     // ratatui's own hook (installed by init) restores raw mode and the screen; chain
     // ours in front so mirrored input modes don't outlive a panic either.
@@ -34,7 +44,9 @@ pub async fn run(client: Client, pushes: Pushes, attach_to: Option<SessionId>) -
         let _ = reset_terminal_modes();
         ratatui_hook(info);
     }));
-    let result = App::new(client).run(&mut terminal, pushes, attach_to).await;
+    let result = App::new(client, socket)
+        .run(&mut terminal, pushes, attach_to)
+        .await;
     let _ = reset_terminal_modes();
     ratatui::restore();
     result
@@ -42,6 +54,9 @@ pub async fn run(client: Client, pushes: Pushes, attach_to: Option<SessionId>) -
 
 struct App {
     client: Client,
+    socket: PathBuf,
+    /// The daemon's identity (`Hello::boot`): an upgrade keeps it, a restart doesn't.
+    boot: Option<u64>,
     /// The ranked attention queue, as last pushed by the daemon.
     queue: Vec<QueueItem>,
     sessions: Vec<SessionInfo>,
@@ -65,9 +80,11 @@ struct Attached {
 }
 
 impl App {
-    fn new(client: Client) -> Self {
+    fn new(client: Client, socket: PathBuf) -> Self {
         Self {
             client,
+            socket,
+            boot: None,
             queue: Vec::new(),
             sessions: Vec::new(),
             selected: 0,
@@ -86,6 +103,7 @@ impl App {
         let mut stdin = stdin_bytes();
         let mut winch = signal(SignalKind::window_change())?;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
+        self.boot = self.client.hello_info().await.ok().map(|info| info.boot);
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
         }
@@ -103,8 +121,8 @@ impl App {
                 },
                 msg = pushes.recv() => {
                     let Some(msg) = msg else {
-                        self.status = "daemon connection lost".into();
-                        break;
+                        pushes = self.reconnect(terminal).await?;
+                        continue;
                     };
                     let mut queue_changed = self.on_push(msg)?;
                     // Coalesce bursts into one redraw.
@@ -127,6 +145,50 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// The daemon connection dropped, usually for an upgrade handoff: reconnect and
+    /// put the same view back.
+    async fn reconnect(&mut self, terminal: &mut DefaultTerminal) -> Result<Pushes> {
+        self.status = "daemon connection lost; reconnecting…".into();
+        self.draw(terminal)?;
+        let deadline = std::time::Instant::now() + RECONNECT_FOR;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let Ok((client, pushes)) = Client::connect(&self.socket).await else {
+                continue;
+            };
+            let info = match client.hello_info().await {
+                Ok(info) if info.protocol == overseer_proto::PROTOCOL => info,
+                Ok(info) => anyhow::bail!(
+                    "the daemon now speaks protocol {}, this overseer {}; run the new overseer",
+                    info.protocol,
+                    overseer_proto::PROTOCOL
+                ),
+                Err(_) => continue,
+            };
+            self.client = client;
+            // Session ids start over in a restarted daemon: re-attaching by id could
+            // land in an unrelated program.
+            let same = self.boot == Some(info.boot);
+            self.boot = Some(info.boot);
+            self.status = if same {
+                "reconnected to the daemon".into()
+            } else {
+                self.view = None;
+                let _ = reset_terminal_modes();
+                "the daemon restarted; sessions from before are gone".into()
+            };
+            if let Err(e) = self.client.watch_queue().await {
+                self.status = format!("queue unavailable: {e:#}");
+            }
+            self.refresh().await;
+            if let Some(id) = self.view.as_ref().map(|v| v.id) {
+                self.attach(id).await;
+            }
+            return Ok(pushes);
+        }
+        anyhow::bail!("lost the daemon connection")
     }
 
     async fn refresh(&mut self) {
@@ -829,7 +891,7 @@ mod tests {
         overseer_proto::ensure_private_dir(&dir).unwrap();
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
-        let mut app = App::new(client);
+        let mut app = App::new(client, PathBuf::new());
         app.sessions = vec![info(1), info(2), info(3)];
         app.selected = 2; // session 3
         app.on_push(ServerMsg::Queue {
