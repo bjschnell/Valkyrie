@@ -1,0 +1,19 @@
+[package]
+name = "overseer-daemon"
+description = "Overseer daemon: PTY host, session manager, socket server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+overseer-proto.workspace = true
+overseer-term.workspace = true
+portable-pty.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+libc.workspace = true

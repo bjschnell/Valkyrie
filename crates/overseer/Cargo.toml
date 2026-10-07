@@ -1,0 +1,17 @@
+[package]
+name = "overseer"
+description = "Attention-first manager for coding-agent CLIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+overseer-proto.workspace = true
+overseer-term.workspace = true
+overseer-daemon.workspace = true
+overseer-tui.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true

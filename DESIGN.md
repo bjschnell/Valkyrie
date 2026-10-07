@@ -1,0 +1,257 @@
+# Overseer — Design Draft v0.1
+
+Working title (placeholder). Status: **draft for evaluation by Claude Code + Opus**. Nothing here is validated by code yet. Items marked **[VERIFY]** are claims from a quick survey (Oct 2026) that must be checked against primary sources before they drive decisions.
+
+## 1. One-liner
+
+A Rust daemon + TUI + PWA that sits *above* coding-agent CLIs (Claude Code, Codex, others) as a manager of managers. Its two core ideas: an **attention queue** that tells you which agent needs you next and why, and a **project context layer** that carries decisions across sessions and agents so you stop pasting handoff docs.
+
+Standalone, open source, MIT/Apache-2.0 candidate. Success criterion: the author prefers it over herdr for daily use.
+
+## 2. Goals / non-goals
+
+Goals
+- Attention-first UX: the primary screen is a ranked inbox, not a grid of sessions.
+- Persistent, reviewable, supersedable project decisions with provenance, injected into every agent automatically.
+- Zed-class responsiveness: input latency and render speed are product features, not nice-to-haves.
+- TUI and web are equal clients of one daemon API.
+- Support Claude Code and Codex first, others through a pluggable adapter trait.
+- Phase 2: a supervisor agent that drives other agents and only escalates real blockers.
+
+Non-goals
+- Not an agent harness. We never implement the model loop, tools, or prompts for coding.
+- Not an IDE or editor.
+- Not a hosted service. Local-first; remote access is via the user's own network (Tailscale etc.).
+- Not a general memory platform; scope is project/dev context.
+
+## 3. Competitive landscape (short) [VERIFY all]
+
+- **Agent of Empires (AoE)**: Rust, MIT, TUI + web + CLI + HTTP API, tmux-backed sessions, worktrees, container sandboxing, status detection, phone-friendly structured view. Closest overlap on the multiplexer + remote half.
+- **herdr**: Rust multiplexer/"runtime for agents"; has agent-automation primitives (agents creating/inspecting other panes). Closest overlap for phase 2. Depth unknown.
+- **Happy, Omnara (original repo unmaintained), Claude Squad, Conductor, Vibe Kanban, cwt, showrunner**: session/worktree managers or mobile remotes.
+- **agentmem, engram, agent-logbook, others**: memory MCPs. agentmem already has lifecycle states (hypothesis→active→validated→deprecated/superseded), conflict + staleness detection, FTS5, markdown canonical files.
+
+Differentiators we lean on:
+1. Attention queue as the *primary* surface.
+2. Native, manager-controlled decision memory with provenance (session, commit, files, transcript offset).
+3. Fleet-wide injection through the manager (one source of truth for standing rules).
+4. Manager-of-managers supervisor with the queue as its escalation channel.
+5. Owned PTY + terminal-state layer (no tmux dependency) for latency and reliable state detection/phone rendering.
+
+## 4. Architecture
+
+```
+            ┌───────────── clients ─────────────┐
+            │  TUI (ratatui)   Web/PWA   CLI    │
+            └───────────────┬───────────────────┘
+                 HTTP + WebSocket (one API)
+            ┌───────────────▼───────────────────┐
+            │              daemon               │
+            │  session mgr · PTY host · VT state│
+            │  adapters (claude, codex, acp…)   │
+            │  event bus · attention queue      │
+            │  context store · MCP server       │
+            │  supervisor (phase 2)             │
+            └───────────────┬───────────────────┘
+                   SQLite (WAL) + transcript files
+```
+
+Principles
+- **Daemon is the only stateful component.** Clients are thin; the TUI must use the same public API as the web client (no private back channel). Local TUI may use a unix socket with the same protocol for latency.
+- **Survives client disconnect.** Sessions live in the daemon, not in a client or tmux.
+- **Event-sourced.** Every session emits typed events (state change, prompt shown, tool call, file touched, commit, error). Queue, summaries, and decision extraction are consumers of the event stream.
+
+### 4.1 PTY + terminal state
+- `portable-pty` for spawning; `alacritty_terminal` or `vte` (+ own grid) to keep a parsed screen model per session in the daemon. [VERIFY which gives best embed story and scrollback control]
+- Web client receives **diffed screen updates** (cell/row diffs), not raw byte streams, with a raw-stream mode for full-fidelity xterm.js view. Phone gets a reflowed/structured view when an adapter provides structure.
+- Latency budget (proposal): keystroke→echo p99 < 16 ms local TUI; < network RTT + 10 ms remote. Measure from day one with a built-in benchmark harness.
+
+### 4.2 Agent adapters
+Trait roughly:
+```
+trait AgentAdapter {
+    fn spawn(&self, spec: SessionSpec) -> Session;
+    fn detect_state(&self, ev: &RawEvents, screen: &Screen) -> AgentState; // fallback
+    fn structured(&self) -> Option<StructuredChannel>; // ACP / SDK / hooks
+    fn inject_context(&self, ctx: &ContextBundle) -> InjectPlan;
+}
+```
+Tiers of state detection, best first:
+1. **Structured**: ACP adapters exist for Claude (Zed's Agent SDK adapter) and Codex (codex-acp / Codex App Server) [VERIFY current status]. Claude Code hooks (Stop, Notification, PreToolUse etc.) and Codex notify/hooks where available.
+2. **Hooks/side channels** (hook scripts posting to the daemon socket).
+3. **Screen heuristics** over the VT grid (last resort; per-adapter regexes with version pinning and tests against recorded fixtures).
+
+Open question: ACP gives clean structure but may bypass the native TUI the user is used to. Decide whether a session is "PTY-native with hook-based state" (default) or "ACP-structured" (opt-in, better phone UX).
+
+### 4.3 Worktrees / isolation
+Optional per-session git worktree; sandbox/container support is **deferred** (AoE has it; not our wedge).
+
+## 5. Attention queue (core differentiator)
+
+### 5.1 States
+`working` · `needs_input` (question/permission/choice) · `blocked` (error, stuck, loop) · `review_ready` (done, diff awaiting human) · `idle` · `stale` (no progress for N min while "working").
+
+### 5.2 Item model
+```
+QueueItem { session, reason: enum, summary: 1–2 lines, ask: Option<Question>,
+            urgency, cost_to_defer, age, project, suggested_action }
+```
+- Summary generated **on state transitions only** (cheap model, bounded input: last N events + diff stat), cached, regenerated if the item is still open and new events arrive.
+- Quick actions inline: approve / deny / pick option / send canned reply / "defer 30 min" / "open session".
+
+### 5.3 Ranking (v0 heuristic, tunable)
+score = blocking-others weight (other agents/tasks depend on it) + age + explicit priority + cost of idling (agent doing nothing while waiting) − batchability (similar low-risk approvals can be grouped).
+- **Batching**: group repeated permission prompts across sessions ("12 agents want to run `cargo test`") into one tap.
+- Learned ranking is explicitly out of scope until we have data.
+
+### 5.4 Notifications
+Web push for PWA; TUI bell/OS notification. Rate-limited and deduped: queue is the source of truth, notifications only mirror new top-of-queue items. Goal: pings disappear when the supervisor (phase 2) handles things.
+
+### 5.5 herdr logic reuse
+Unknown. **Action:** audit the author's herdr plugin queue logic (location not yet identified on the Hermes host; only a third-party `hermes-herdr-auto-reconcile` plugin was found, which is a different thing). Port semantics, not code, unless license/coupling allows.
+
+## 6. Project context layer (core differentiator)
+
+### 6.1 Problem
+Repeatedly telling agents "check session X, we decided Y", and pasting large handoff markdowns.
+
+### 6.2 Data model
+```
+Decision {
+  id, project, title, body (short), kind: decision|constraint|pattern|gotcha|fix,
+  status: proposed|active|validated|superseded|deprecated|expired,
+  supersedes: Option<id>, superseded_by: Option<id>,
+  provenance: { session_id, transcript_span, commit, files[], agent, timestamp },
+  confidence, scope: global|project|path-glob, ttl/review_by, last_confirmed_at,
+  tags, embedding (optional)
+}
+```
+- Lifecycle borrowed from agentmem; we add transcript-span provenance and path-scoped applicability.
+- Canonical on disk as markdown files in-repo (`.overseer/decisions/*.md`) for diffability and git history; SQLite is an index/cache. Decide whether decisions live in the repo or in the daemon's data dir (repo-local = portable + reviewable; data dir = no repo pollution). [DECISION NEEDED]
+
+### 6.3 Capture
+1. Cheap-model extraction run at session end / on commit / on "decision-shaped" events, producing `proposed` decisions only.
+2. **Human confirm is mandatory** to become `active`: one-tap accept / edit / reject in the queue (they appear as queue items). No unreviewed auto-memory.
+3. Agents can also propose via MCP tool `propose_decision`.
+
+### 6.4 Staleness handling
+- **Supersede**: new decision linked to the old; old drops from recall but stays in history.
+- **Conflict detection**: on proposal, retrieve nearest active decisions (FTS + optional embeddings) and flag contradictions for review.
+- **Expiry/review_by**: decisions about volatile things (versions, endpoints, flags) get short TTLs and resurface for re-confirmation.
+- **Code-anchored invalidation**: if files in a decision's scope changed substantially since `last_confirmed_at`, mark `needs_review`.
+- **Health score** per project (stale count, conflicts, unreviewed proposals).
+
+### 6.5 Serving to agents
+- **MCP server** (stdio + HTTP) exposed to every managed session: `search_decisions`, `get_project_state`, `get_decision`, `propose_decision`, `link_session`, `list_open_questions`.
+- **Pinned block**: small, generated, token-budgeted section injected into CLAUDE.md / AGENTS.md (or via `--append-system-prompt`/equivalent) containing only standing constraints. Budget enforced (e.g. ≤ 1.5k tokens) with ranking by scope + recency + validation.
+- **Handoff on demand**: `overseer handoff <session>` generates a compact structured resume (goal, decisions, open threads, files) instead of pasting giant MDs; also queryable via MCP.
+- **Cross-session recall**: "what did we decide about X / where did we fix Y" resolves to a decision with a link to the originating transcript span.
+
+### 6.6 Risks
+- Injection bloat eating context → hard token budgets, retrieval over pre-injection.
+- Garbage accumulation → mandatory review, health score, TTLs.
+- Adapter divergence in how each agent loads instructions → per-adapter `inject_context` with tests.
+- Privacy: transcripts and decisions may contain secrets → local-only storage, redaction pass before any external summarizer call, configurable model/provider (local models supported).
+
+## 7. Supervisor agent (phase 2, "meta flow")
+- A supervisor session that uses the daemon's API/MCP to: read the queue, answer routine prompts per policy, dispatch tasks, spawn/stop sessions, and escalate to the human queue only on defined conditions.
+- **Policy file** defines what it may auto-approve (e.g. read-only commands, test runs, in-worktree edits) and hard stops (destructive ops, secrets, prod, spend).
+- Full audit log of every autonomous action; one-tap undo/stop-all.
+- Depends on 4.2 structured channel quality and 5 state accuracy. Do not start until phase 1 queue accuracy is measured.
+- Check herdr's agent-automation primitives for prior art. [VERIFY]
+
+## 8. Clients
+
+TUI (ratatui): queue is the home screen; split into queue | session view | context pane. Keyboard-first; jump to top queue item in one key.
+
+Web/PWA: installable, push notifications, queue-first mobile layout, session drive (send input, approve, interrupt), start session in a chosen repo, decision review cards. Rendering via diffed screen stream; xterm.js (or custom canvas/WebGL renderer) for terminal view. Reference UX: the author's existing "kawaii"/Alice PWA.
+Auth: token + WebAuthn/passkey; assume exposure over Tailscale only by default; TLS and origin checks required. Never expose PTY control unauthenticated.
+
+## 9. Tech choices (proposed, challengeable)
+- Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
+- Web: Rust-compiled WASM vs TypeScript (Svelte/Solid) is an open choice. Lean TS for PWA speed of iteration unless a shared protocol crate to WASM gives real wins.
+- Protocol: versioned, schema-first (JSON now; evaluate MessagePack/CBOR for the screen stream). Generate TS types from Rust.
+- Single static binary: daemon + TUI + CLI as subcommands; web assets embedded.
+
+## 10. Milestones
+
+M0 — Spike (1–2 wks): PTY host + VT state, spawn claude/codex, attach from a minimal TUI, latency harness. Decide tmux-less viability and VT crate.
+M1 — Daemon + queue: event bus, adapter trait with Claude + Codex (hooks first, ACP evaluated), state detection with recorded-fixture tests, queue + TUI home screen.
+M2 — Context layer: decision store, lifecycle, extraction → review flow, MCP server, pinned-block injection, handoff command.
+M3 — Web/PWA: API parity, push, queue-first mobile UI, session drive.
+M4 — Hardening + OSS release: docs, benchmarks vs AoE/herdr, adapter fixtures, security review.
+M5 — Supervisor agent + policy engine.
+
+## 11. Evaluation tasks for Claude Code + Opus (first pass)
+1. Teardown AoE and herdr source: state-detection approach, session persistence, API surface, what they do poorly. Produce a gap table.
+2. Audit the author's herdr queue plugin for reusable semantics (need path from author).
+3. Verify ACP/Claude hooks/Codex hooks capabilities and limits; recommend state-detection tier strategy per agent.
+4. Benchmark candidate VT crates for embedding, memory, and diffing; propose screen-diff wire format.
+5. Stress-test the decision schema and staleness model against agentmem/engram; decide repo-local vs data-dir storage.
+6. Threat model: remote PTY control, injected context as prompt-injection vector, transcript secrets.
+7. Propose the project name, crate layout, and an ADR list for the open decisions below.
+
+## 12. Open decisions
+- ~~VT crate~~ → alacritty_terminal ([ADR-0001](docs/adr/0001-vt-engine.md)).
+- ~~tmux vs owned PTY~~ → owned PTY, pending M0 exit criteria ([ADR-0002](docs/adr/0002-no-tmux.md)).
+- Repo-local vs daemon-local decision storage.
+- PTY-native-with-hooks vs ACP-structured as default session mode.
+- Web client: TS vs Rust/WASM.
+- License (MIT vs Apache-2.0 vs dual).
+- Summarizer/extractor model strategy: local-only default vs bring-your-own API key.
+- Name.
+
+## 13. M0 spec (complete 2026-10-06)
+
+Decisions: [ADR-0001 VT engine](docs/adr/0001-vt-engine.md) · [ADR-0002 no tmux](docs/adr/0002-no-tmux.md) · [ADR-0003 protocol](docs/adr/0003-m0-protocol.md) · [ADR-0004 crate layout](docs/adr/0004-crate-layout.md)
+
+Session data flow:
+```
+pty reader thread ─bytes─► Term (alacritty) ─damage─► Screen diff ─broadcast─► clients
+        ▲                     │ PtyWrite (query replies)
+        └──── pty writer ◄────┴──────────── Input frames from clients
+raw bytes also appended to $XDG_STATE_HOME/overseer/sessions/<unix-ts>-<id>.raw (0600) (fixtures for M1 heuristics)
+```
+
+CLI surface (one binary):
+- `overseer daemon` — run the daemon in the foreground.
+- `overseer new [--cwd DIR] [--name N] -- CMD...` — spawn a session (auto-starts daemon if absent).
+- `overseer ls` · `overseer kill ID` · `overseer dump ID` (plain-text screen; used for headless verification).
+- `overseer send ID TEXT` — inject input (`\r \n \t \e \xHH` escapes); headless driving and future supervisor plumbing.
+- `overseer attach [ID]` / `overseer` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches.
+- `overseer bench latency [-n N]` — keystroke→screen-update round trip through the daemon against `cat`; prints p50/p99/max.
+- `overseer bench parse FILE` — VT parse throughput over a recorded `.raw` transcript.
+
+Acceptance (= ADR-0002 exit criteria):
+1. `claude` and `codex` render correctly and are drivable via attach.
+2. Detach → reattach restores the exact screen; session keeps running with zero clients.
+3. Resize propagates (client size → PTY + Term).
+4. `bench latency` p99 < 16 ms on the author's machine; numbers recorded here.
+5. Unit tests: frame codec round-trip, screen diff correctness (damage rows == changed rows), span grouping.
+
+Out of scope for M0: adapters/state detection, queue, HTTP/WS, auth, mouse passthrough, kitty keyboard, scrollback browsing.
+
+### M0 results (2026-10-06, author's machine, release build)
+
+| Criterion | Result |
+|---|---|
+| 1. claude / codex render + drivable | ✅ Both render their trust prompts with correct box-drawing and selection markers through the daemon. Arrow keys sent via `send` and via the nested TUI moved the selection. Prompts were not accepted (that would change real config). |
+| 2. Detach → reattach | ✅ Exercised by running the TUI as a session inside the daemon: `Ctrl-]` shows the home list, and Enter on another session restores its full screen. |
+| 3. Resize propagates | ✅ Integration test: attach at 50×12 → program's `stty size` reports `12 50`. |
+| 4. Keystroke → screen update | ✅ **p50 22 µs, p99 29 µs, max 206 µs** (n=2000, raw-mode `cat`, after review fixes). That is 500× under the 16 ms budget; the client's own terminal render is not included. |
+| 5. Unit/integration tests | ✅ 29 tests: codec, private socket dir, term diffs/spans/wide and combined chars/query replies, TUI apply/render, 9 daemon end-to-end tests on real PTYs. Three of the daemon tests are regression tests for review findings: a stalled input writer, exit while a background job holds the tty, and process-group kill. |
+| VT parse + diff throughput | ~210–250 MiB/s on recorded agent transcripts (repeated 20×). |
+
+Manual check (author, 2026-10-06): `new -a -- claude` in a real terminal runs Claude Code inside the TUI, and exiting Claude returns to the session list. Works. The UI needs polish, deferred: a queue-first home screen arrives with M1 anyway.
+
+Findings that feed M1:
+- Both agents' first screen is a **trust prompt**, a ready-made `needs_input` fixture (transcripts are saved per session).
+- Agents query the terminal at startup: from the transcripts, Codex sends OSC 11 (background color), DSR 6n and DA1/DA2, and Claude Code sends DA1. alacritty answers these, and the daemon reports a fixed dark palette for color queries. Passing through the real client palette is a later refinement.
+- Known gaps: no scrollback browsing, mouse, or kitty keyboard; the last client to resize wins; queued input is unbounded per session (a huge paste into a program that isn't reading stays in daemon memory); background jobs that ignore SIGHUP and outlive the agent are not SIGKILLed (only signalled while the leader is unreaped, to avoid hitting a recycled pgid).
+
+Hardening from the M0 code review (all applied):
+- PTY writes run on a per-session writer thread, so neither tokio workers nor the reader thread ever block on a full tty.
+- A dedicated waiter thread reaps the child, so `Exited` doesn't depend on PTY EOF. `kill` signals the whole process group: SIGHUP, then SIGKILL after 2 s.
+- The socket dir is `/tmp/overseer-<getuid>` as a fallback, and both daemon and client verify it is owned by us, mode 0700 and not a symlink.
+- Each connection's output queue is bounded at 256 frames. A slow client drops its diffs and resyncs from a snapshot. The resync re-sends `Exited` too, and reattach waits for the old stream to stop.
+- Spans re-anchor after wide or combined graphemes, so width disagreements (e.g. `⚠️`) can't shift a row. Accept errors no longer kill the daemon, and `daemon.log` is 0600.
