@@ -10,3 +10,6 @@ overseer-proto.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -4,6 +4,7 @@
 //! `req` id that the matching `Ok`/`Err` reply echoes; server pushes (`Screen`,
 //! `Exited`) carry none.
 
+pub mod agent;
 pub mod client;
 pub mod codec;
 pub mod screen;
@@ -11,7 +12,11 @@ pub mod screen;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
+
+/// Bumped on incompatible protocol changes; clients check it with `Hello`.
+pub const PROTOCOL: u32 = 2;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -52,11 +57,17 @@ pub struct SessionInfo {
     pub clients: u32,
     /// `None` while running; `Some(code)` once the child exited (`code` may be unknown).
     pub exited: Option<Option<i32>>,
+    #[serde(default)]
+    pub status: AgentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
+    /// Version check. A daemon older than protocol 2 doesn't know it and hangs up.
+    Hello {
+        req: ReqId,
+    },
     Spawn {
         req: ReqId,
         spec: SpawnSpec,
@@ -90,6 +101,26 @@ pub enum ClientMsg {
         session: SessionId,
         size: Size,
     },
+    /// An agent hook event, forwarded by `overseer hook <agent>` (ADR-0005). No reply:
+    /// the hook never waits on the daemon.
+    Hook {
+        session: SessionId,
+        agent: String,
+        /// When the hook process sent it (µs since the epoch); orders racing hooks.
+        sent_us: u64,
+        payload: serde_json::Value,
+    },
+    /// Subscribe this connection to `Queue` pushes, starting with the current queue.
+    WatchQueue {
+        req: ReqId,
+    },
+    /// Mark a session's current state seen (DESIGN §14.4). Ignored if the session has
+    /// moved past `seq` since the client looked.
+    MarkSeen {
+        req: ReqId,
+        session: SessionId,
+        seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,12 +142,17 @@ pub enum ServerMsg {
         session: SessionId,
         code: Option<i32>,
     },
+    /// The whole ranked queue, pushed whenever it changes.
+    Queue {
+        items: Vec<QueueItem>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Reply {
     Done,
+    Hello { protocol: u32 },
     Session { info: SessionInfo },
     Sessions { sessions: Vec<SessionInfo> },
     Text { text: String },

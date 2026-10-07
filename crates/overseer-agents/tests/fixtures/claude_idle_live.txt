@@ -1,0 +1,23 @@
+
+ ▐▛███▛█   Claude Code v2.1.292
+▝▜██████▀  Haiku 4.5 · Claude Pro
+ ▝▝   ▝▝   ~/repos/overseer
+
+⚠ Your login expires in 2 days · run /login to renew
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Try "edit <filepath> to..."
+────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · r…
+  branch:main | !12 ?5
+  [OMC#4.15.10L] | Model: Haiku 4.5
+  5h:[##------]24%(1h23m) wk:[#-------]16%(4d9h) | session:0m | ctx:[--------…
+  ⏸ manual mode on

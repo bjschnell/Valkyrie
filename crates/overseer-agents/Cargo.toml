@@ -1,0 +1,11 @@
+[package]
+name = "overseer-agents"
+description = "Agent adapters, state tracking and queue ranking (pure logic, no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+overseer-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true

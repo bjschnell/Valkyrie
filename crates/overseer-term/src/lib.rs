@@ -170,8 +170,20 @@ impl VtScreen {
     }
 
     /// Visible screen as plain text, trailing blanks trimmed.
+    /// The visible screen as plain text, one line per row.
     pub fn text(&self) -> String {
+        self.text_with(false)
+    }
+
+    /// Like [`text`](Self::text), but rows the terminal soft-wrapped are joined back
+    /// into one line, so heuristics see what the program printed.
+    pub fn unwrapped_text(&self) -> String {
+        self.text_with(true)
+    }
+
+    fn text_with(&self, unwrap: bool) -> String {
         let mut out = String::new();
+        let last_col = Column(self.size.cols as usize - 1);
         for y in 0..self.size.rows {
             let line = &self.term.grid()[Line(y as i32)];
             let mut s = String::new();
@@ -181,8 +193,12 @@ impl VtScreen {
                     push_cell_text(&mut s, cell);
                 }
             }
-            out.push_str(s.trim_end());
-            out.push('\n');
+            if unwrap && line[last_col].flags.contains(Flags::WRAPLINE) {
+                out.push_str(&s);
+            } else {
+                out.push_str(s.trim_end());
+                out.push('\n');
+            }
         }
         let trimmed = out.trim_end_matches('\n').len();
         out.truncate(trimmed);
@@ -502,5 +518,13 @@ mod tests {
         let mut s = screen();
         s.feed(b"hi\r\n\r\nthere");
         assert_eq!(s.text(), "hi\n\nthere\n");
+    }
+
+    #[test]
+    fn unwrapped_text_joins_soft_wrapped_rows_only() {
+        let mut screen = VtScreen::new(Size { cols: 5, rows: 4 });
+        screen.feed(b"abcdefg\r\nxy");
+        assert_eq!(screen.text(), "abcde\nfg\nxy\n");
+        assert_eq!(screen.unwrapped_text(), "abcdefg\nxy\n");
     }
 }

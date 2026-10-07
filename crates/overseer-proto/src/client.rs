@@ -20,7 +20,7 @@ pub struct Client {
     next: Arc<AtomicU64>,
 }
 
-/// Server-pushed messages (`Screen`, `Exited`). Closes when the connection drops.
+/// Server-pushed messages (`Screen`, `Exited`, `Queue`). Closes when the connection drops.
 pub type Pushes = mpsc::UnboundedReceiver<ServerMsg>;
 
 impl Client {
@@ -101,6 +101,14 @@ impl Client {
         }
     }
 
+    /// The daemon's protocol version.
+    pub async fn hello(&self) -> Result<u32> {
+        match self.request(|req| ClientMsg::Hello { req }).await? {
+            Reply::Hello { protocol } => Ok(protocol),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn spawn(&self, spec: SpawnSpec) -> Result<SessionInfo> {
         match self.request(|req| ClientMsg::Spawn { req, spec }).await? {
             Reply::Session { info } => Ok(info),
@@ -138,6 +146,37 @@ impl Client {
             Reply::Text { text } => Ok(text),
             other => bail!("unexpected reply: {other:?}"),
         }
+    }
+
+    /// Start receiving `Queue` pushes (the current queue first).
+    pub async fn watch_queue(&self) -> Result<()> {
+        self.request(|req| ClientMsg::WatchQueue { req })
+            .await
+            .map(drop)
+    }
+
+    pub async fn mark_seen(&self, session: SessionId, seq: u64) -> Result<()> {
+        self.request(|req| ClientMsg::MarkSeen { req, session, seq })
+            .await
+            .map(drop)
+    }
+
+    /// Fire-and-forget, like `overseer hook`.
+    pub fn hook(
+        &self,
+        session: SessionId,
+        agent: &str,
+        sent_us: u64,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.out
+            .send(ClientMsg::Hook {
+                session,
+                agent: agent.to_owned(),
+                sent_us,
+                payload,
+            })
+            .map_err(|_| anyhow!("daemon connection closed"))
     }
 
     /// Fire-and-forget; input has no reply so keystrokes never wait on a round trip.

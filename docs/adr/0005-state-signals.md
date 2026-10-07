@@ -27,5 +27,5 @@ The attention queue (DESIGN §5) is only as good as state detection. Verified ag
 ## Consequences
 - Codex needs a one-time setup plus trust. Until then Codex sessions run on heuristics only, and the UI should say so.
 - Hook payloads differ slightly between agents (Codex adds `turn_id` and `last_assistant_message` on `Stop`), so each adapter normalizes them into `AgentEvent`.
-- Two transitions fire no hook in Claude Code: denying a permission with Esc, and interrupting a turn with Esc. Leader verified this live. Only the screen can catch them (DESIGN §14.3 `interrupted?`).
+- Two transitions fire no hook in Claude Code: denying a permission with Esc, and interrupting a turn with Esc. Leader verified this live. Only the screen can catch them (DESIGN §14.3 `interrupted?`). Re-verified live in M1: an Esc-deny shows as `interrupted?` about 2 s after the dialog closes.
 - If the daemon is down, the hook fails fast; that never blocks the agent, because it is observe-only.

@@ -1,4 +1,6 @@
 mod bench;
+mod hook;
+mod tools;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -46,17 +48,73 @@ enum Cmd {
     Dump { session: SessionId },
     /// Send input to a session. Understands \r \n \t \e and \xHH escapes.
     Send { session: SessionId, text: String },
+    /// Forward an agent hook event (stdin JSON) to the daemon. Agents run this; it
+    /// prints nothing, always exits 0, and does nothing outside an overseer session.
+    #[command(hide = true)]
+    Hook { agent: String },
+    /// Install agent integrations.
+    #[command(subcommand)]
+    Setup(SetupCmd),
+    /// Print the screen a recorded transcript (`.raw`) leaves behind.
+    Render {
+        file: PathBuf,
+        #[arg(long, default_value_t = 120)]
+        cols: u16,
+        #[arg(long, default_value_t = 40)]
+        rows: u16,
+        /// Stop after this many bytes.
+        #[arg(long)]
+        upto: Option<usize>,
+    },
+    /// Re-run a recorded session (`<stem>.events.jsonl`) through the current state
+    /// detection: timeline, drift from the recording, and accuracy against labels.
+    Replay {
+        events: PathBuf,
+        /// JSON lines `{"at": <seconds>, "state": "<state>"}`, each holding until the next.
+        #[arg(long)]
+        labels: Option<PathBuf>,
+    },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Add overseer's hooks to ~/.codex/hooks.json (then trust them once with /hooks).
+    Codex {
+        /// Print the resulting hooks.json instead of writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove overseer's hooks instead.
+        #[arg(long)]
+        remove: bool,
+        /// The overseer binary the hooks run (default: this one).
+        #[arg(long)]
+        exe: Option<PathBuf>,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // A hook must never print or exit nonzero (exit 2 blocks the agent), even
+        // when its arguments or environment don't parse.
+        Err(_) if std::env::args().any(|a| a == "hook") => return Ok(()),
+        Err(e) => e.exit(),
+    };
     let socket = cli
         .socket
         .unwrap_or_else(overseer_proto::default_socket_path);
-    match cli.cmd {
+    // Hooks run on every agent event: skip the async runtime and never fail.
+    if let Some(Cmd::Hook { agent }) = &cli.cmd {
+        hook::run(agent, &socket);
+        return Ok(());
+    }
+    tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
+}
+
+async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
+    match cmd {
         Some(Cmd::Daemon) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -66,7 +124,8 @@ async fn main() -> Result<()> {
                 .with_writer(std::io::stderr)
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
-            overseer_daemon::run(&socket, &overseer_proto::state_dir()).await
+            let exe = std::env::current_exe()?;
+            overseer_daemon::run(&socket, &overseer_proto::state_dir(), &exe).await
         }
         None => {
             require_tty()?;
@@ -116,18 +175,22 @@ async fn main() -> Result<()> {
             let (client, _) = connect(&socket).await?;
             for s in client.list().await? {
                 let state = match s.exited {
-                    None => "running".into(),
+                    None => s.status.state.label().to_string(),
                     Some(Some(code)) => format!("exited {code}"),
                     Some(None) => "exited".into(),
                 };
                 println!(
-                    "{:>3}  {:<14} {:<10} {}  {}",
+                    "{:>3}  {:<14} {:<7} {:<13} {}  {}",
                     s.id,
                     s.name,
+                    s.status.agent,
                     state,
                     s.command.join(" "),
                     s.cwd.display()
                 );
+                if let Some(summary) = &s.status.summary {
+                    println!("     {summary}");
+                }
             }
             Ok(())
         }
@@ -141,6 +204,31 @@ async fn main() -> Result<()> {
             client.input(session, unescape(&text)?)?;
             // Input is fire-and-forget; a round trip guarantees it was flushed before exit.
             client.list().await.map(drop)
+        }
+        Some(Cmd::Hook { .. }) => unreachable!("handled before the runtime starts"),
+        Some(Cmd::Setup(SetupCmd::Codex {
+            dry_run,
+            remove,
+            exe,
+        })) => {
+            let exe = match exe {
+                Some(exe) => std::path::absolute(exe)?,
+                None => std::env::current_exe()?,
+            };
+            hook::setup_codex(&exe, &hook::codex_hooks_path(), remove, dry_run)
+        }
+        Some(Cmd::Render {
+            file,
+            cols,
+            rows,
+            upto,
+        }) => {
+            print!("{}", tools::render(&file, Size { cols, rows }, upto)?);
+            Ok(())
+        }
+        Some(Cmd::Replay { events, labels }) => {
+            print!("{}", tools::replay_report(&events, labels.as_deref())?);
+            Ok(())
         }
         Some(Cmd::Bench(cmd)) => bench::run(cmd, &socket).await,
     }
@@ -157,6 +245,23 @@ fn require_tty() -> Result<()> {
 
 /// Connect, starting a background daemon first if none is listening.
 async fn connect(socket: &Path) -> Result<(Client, Pushes)> {
+    let conn = start_or_connect(socket).await?;
+    match conn.0.hello().await {
+        Ok(p) if p == overseer_proto::PROTOCOL => Ok(conn),
+        Ok(p) => bail!(
+            "the running daemon speaks protocol {p}, this overseer {}; restart the daemon",
+            overseer_proto::PROTOCOL
+        ),
+        // Daemons before protocol 2 hang up on `Hello`.
+        Err(_) => bail!(
+            "the running daemon on {} is older than this overseer. Stop it to upgrade \
+             (this ends its sessions): pkill -f 'overseer.*daemon'",
+            socket.display()
+        ),
+    }
+}
+
+async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
     if let Ok(conn) = Client::connect(socket).await {
         return Ok(conn);
     }

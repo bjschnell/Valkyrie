@@ -258,7 +258,7 @@ Hardening from the M0 code review (all applied):
 - Each connection's output queue is bounded at 256 frames. A slow client drops its diffs and resyncs from a snapshot. The resync re-sends `Exited` too, and reattach waits for the old stream to stop.
 - Spans re-anchor after wide or combined graphemes, so width disagreements (e.g. `⚠️`) can't shift a row. Accept errors no longer kill the daemon, and `daemon.log` is 0600.
 
-## 14. M1 spec (draft)
+## 14. M1 spec (implemented 2026-10-06; Codex live check pending)
 
 Goal: the home screen becomes a ranked attention queue fed by accurate agent state. The M1 exit criterion is **state accuracy measured against recorded fixtures** (DESIGN §7 makes this the gate for the supervisor).
 
@@ -297,13 +297,13 @@ States from §5.1: `working · needs_input · blocked · review_ready · idle ·
 | ToolStarted, ToolFinished (ok or failed) | working | `PostToolUse*` is the only signal that a permission was **approved**; nothing fires on approval itself |
 | PermissionAsked | needs_input | primary signal: fires ~50–90 ms after the dialog appears; summary `Permission: <tool> <command/path>` |
 | ToolStarted(`AskUserQuestion`), InputAsked (elicitation, `agent_needs_input`) | needs_input | summary = the question text |
-| Notification `permission_prompt` | needs_input | arrives ~6 s **after** PermissionAsked with a vaguer message; **keep** the earlier summary |
+| Notification `permission_prompt` | needs_input, **only from working** | arrives ~6 s **after** PermissionAsked with a vaguer message, sometimes after the dialog was already answered or denied (seen live). It counts only as a fallback for a missed PermissionAsked |
 | Notification `idle_prompt` | ignored | must not revive a settled session |
 | TurnFailed | blocked | summary `Turn failed: <error>` |
 | TurnEnded | review_ready | "done, unseen". Attaching (or `s`) makes it idle. Summary = most conclusion-like line of `last_assistant_message`, plus `git diff --stat` when the tree changed |
 | SessionStart (`startup`/`resume`/`clear`) | idle | `compact` is ignored (it can fire mid-turn) |
 | Subagent events (`agent_id` set) | only tool/permission/notification events count | a subagent's permission dialog blocks the same terminal; its Stop/SessionStart must not settle the parent (herdr's own integration ignores `SubagentStop` too) |
-| Screen shows the idle prompt ≥10 s while state is working, or needs_input from a permission | idle, flagged `interrupted?` | covers the two gaps where **no hook fires**: Esc-deny of a permission, and Esc-interrupt mid-turn. Codex has an `Interrupt` hook; Claude doesn't |
+| Screen shows the idle prompt ≥10 s within the current working state, or within a needs_input from a permission (2 s if the permission dialog itself was seen on screen and then gave way to the prompt) | `interrupted` (shown `interrupted?`) | covers the two gaps where **no hook fires**: Esc-deny of a permission, and Esc-interrupt mid-turn. Codex has an `Interrupt` hook; Claude doesn't |
 | no output or events for N min (default 5) while working | stale | |
 | Exited | exited (nonzero code → blocked) | |
 
@@ -317,15 +317,61 @@ Because overseer owns the screen, the `interrupted?` check reads the session's o
 - **Seen model:** `review_ready` stays in the queue until the user attaches to that session or marks it seen (`s` for one item, `S` for all). Marking seen is keyed by the transition's `seq`, so a newer turn brings the item back. Herdr had this built in. Overseer implements it, which is easy because the daemon sees every attach.
 - **Summaries (M1, no LLM):** taken from the hook text first (permission + command, question, conclusion line). When a session has no hooks, a screen fallback on its `VtScreen` uses the last question-like line plus the pending command, or the last assistant block with chrome stripped. Port Leader's `summarize.py` rules: rejoin wrapped lines, strip chrome, apply the conclusion regex. Its `tests/fixtures/tail_*.txt` are real Claude captures and become test cases here.
 - **Later (not M1):** an LLM summary on transition into review_ready, as in Leader M5. That means a locked-down `claude -p --tools "" --no-session-persistence --disable-slash-commands --strict-mcp-config --model haiku`, fed the last turn only after redaction, rate-limited, with the heuristic line as fallback. **Batching** has no precedent in Leader and stays new design for M3.
-- TUI keys follow Leader's overlay: `j`/`k`, `Enter` attach, `s`/`S` seen, `a` toggle idle, plus a footer with counts (`2 needs input · 1 done · 3 working`).
+- TUI keys follow Leader's overlay: `j`/`k`, `Enter` attach, `Tab` top item, `s`/`S` seen, plus a footer with counts (`2 needs input · 1 done · 3 working`). Idle sessions are always listed under the queue, so there's no `a` toggle. Attaching marks a `review_ready` turn seen: it leaves the queue but keeps its state.
 
 ### 14.5 Protocol and clients
 - `ClientMsg::Hook { session, agent, payload }` comes from `overseer hook`, and `WatchQueue` subscribes a client to `ServerMsg::Queue { items }` pushes.
 - TUI home: the queue on top, all sessions below; `Enter` attaches to the selected item and `Tab` jumps to the top item. The attached view's status bar shows the session state.
 
 ### 14.6 Fixtures and tests
-- Record real Claude/Codex sessions (`.raw` + `.events.jsonl`), hand-label state per timestamp, replay through adapter + state machine, and report accuracy. This is the measurable M1 gate.
-- Unit tests: `normalize` per agent against real payloads; the state machine table above; `scan` against the trust-prompt transcripts captured in M0.
+- Every session writes `<ns>-<id>.events.jsonl` (mode 0600) next to its `.raw`. It records everything the tracker consumed, each tagged with the transcript byte offset: start (agent, size), output marks (≤4/s), hooks (slimmed payloads), bells, screen scans, attach/detach, seen, resize, exit, and every resulting state.
+- `overseer replay <events.jsonl> [--labels <labels.jsonl>]` re-feeds the transcript up to each offset and re-runs normalize + scan + tracker with the **current** code. It prints the timeline, drift from the recorded states, and time-weighted accuracy against hand labels (`{"at": <s>, "state": …}` lines; a replayed `interrupted` counts as a correct `idle`). `overseer render <raw>` prints a transcript's screen for labeling.
+- Gate: `crates/overseer/tests/fixtures/*.events.jsonl` with labels must replay at ≥95%. Unit tests cover normalize per agent, the state table, ranking and seen, and `scan` against recorded screens (Claude trust/permission/idle/done, Codex trust).
+
+#### M1 results (2026-10-06, Claude Code 2.1.292, haiku, isolated daemon)
+| Check | Result |
+|---|---|
+| Hooks via `--settings` in an already-trusted folder | fire with no prompt; `OVERSEER_SESSION`/`OVERSEER_SOCKET` reach the hook |
+| `overseer hook` round trip (real binary, n=30) | median **0.68 ms** (budget 50 ms; Leader's Python hook 15 ms) |
+| Prompt → reply | working → done, summary `ok · uncommitted: 12 files +1114 -94` |
+| Bash permission | needs_input `Permission: Bash touch …` 70 ms after PreToolUse |
+| Esc-deny (no hook) | `interrupted?` |
+| Approve | PostToolUse → working → done |
+| Labeled live recording (`claude-permission-deny-approve`) | **98.1%**; the remaining 2 s is the deliberate deny grace |
+| Tests | 84 across the workspace; clippy clean; independent review (19 findings) applied |
+
+Bugs the live run found, all fixed and covered by tests:
+- Claude's prompt is `❯` + U+00A0, not a plain space.
+- A screen idle from *before* a new prompt immediately re-flagged `interrupted?`.
+- The late `permission_prompt` notification re-blocked an already settled session.
+- Narrow terminals hard-wrap phrases mid-word. Scans now use `VtScreen::unwrapped_text`, which joins soft-wrapped rows.
+
+From the independent review, fixed with regression tests:
+- **Abrupt disconnects.** A client dying with unread frames leaked its attach count (ECONNRESET skipped cleanup), so every later transition counted as already seen.
+- **False `interrupted?` on long turns.** Every Claude turn over ~10 s was flagged, because the spinner never leaves the quiet gap a rescan needs. An idle verdict now only stands while no output has arrived since it was taken.
+- **Hook could break its contract.** A hook whose arguments didn't parse printed to stderr and exited 2. Hooks now always exit 0, and the registered commands end in `2>/dev/null || true`.
+- **Timer transitions.** Ones that fired while attached were never marked seen.
+- **Bells.** A seen bell never settled, and later bells were swallowed.
+- **TUI cursor.** It jumped to another session when the queue changed size.
+- **Old daemons.** A new client couldn't talk to a pre-M1 daemon. There's now a `Hello`/`PROTOCOL` check with a clear "restart the daemon" message.
+- **Nested agents.** A `codex exec` run by Claude drove Claude's session. Hooks now apply only from the session's own agent; plain shell sessions take any.
+- **`setup codex` file handling:**
+  - `--remove` wrote `null` when there was no file.
+  - A symlinked file was replaced.
+  - A backup could be overwritten.
+  - The file mode was lost.
+
+Accepted for now (LOW):
+- `events.jsonl` has no rotation.
+- Unbounded `git diff` threads.
+- A user-supplied `--settings` may shadow ours.
+- The hook `connect` has no timeout (bounded by the agent's 5 s hook timeout).
+- Session ids restart with the daemon, so an orphan process could post to a reused id.
+- No screen-fallback summaries for unhooked sessions.
+
+Still pending:
+- **Codex live check.** Run `overseer setup codex`, `/hooks` trust, and one turn. This needs the author, because it changes `~/.codex/hooks.json` and needs an interactive trust.
+- More labeled recordings: AskUserQuestion, subagents, long tool runs, stale.
 
 ### 14.7 Out of scope for M1
 Approve/deny from the queue (M3), LLM summaries, batching, push notifications, SQLite (arrives with the M2 context store).

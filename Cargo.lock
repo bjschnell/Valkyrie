@@ -994,13 +994,24 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "overseer-agents",
  "overseer-daemon",
  "overseer-proto",
  "overseer-term",
  "overseer-tui",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "overseer-agents"
+version = "0.0.1"
+dependencies = [
+ "overseer-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1009,9 +1020,11 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "libc",
+ "overseer-agents",
  "overseer-proto",
  "overseer-term",
  "portable-pty",
+ "serde_json",
  "tokio",
  "tracing",
 ]

@@ -17,7 +17,9 @@ async fn start() -> (Client, Pushes, PathBuf) {
     let socket = dir.join("run/o.sock");
     let state = dir.join("state");
     let serve_socket = socket.clone();
-    tokio::spawn(async move { overseer_daemon::run(&serve_socket, &state).await });
+    tokio::spawn(async move {
+        overseer_daemon::run(&serve_socket, &state, std::path::Path::new("overseer")).await
+    });
     for _ in 0..100 {
         if let Ok((client, pushes)) = Client::connect(&socket).await {
             return (client, pushes, dir);
@@ -166,6 +168,7 @@ async fn kill_removes_session_and_unknown_ids_error() {
     assert!(client.attach(999, SIZE).await.is_err());
     let transcripts: Vec<_> = std::fs::read_dir(dir.join("state/sessions"))
         .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension() == Some("raw".as_ref()))
         .collect();
     assert_eq!(transcripts.len(), 1);
     let name = transcripts[0].as_ref().unwrap().file_name();
@@ -252,4 +255,313 @@ async fn kill_takes_down_the_whole_process_group() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("background job {bg} survived kill");
+}
+
+// ---- M1: agent state and the attention queue (DESIGN §14) ----
+
+use overseer_proto::{AgentState, AskKind, QueueItem};
+use serde_json::json;
+
+/// Waits for a `Queue` push satisfying `pred`, skipping other pushes.
+async fn wait_queue(pushes: &mut Pushes, pred: impl Fn(&[QueueItem]) -> bool) -> Vec<QueueItem> {
+    let mut last = Vec::new();
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(3), pushes.recv()).await {
+            Ok(Some(ServerMsg::Queue { items })) => {
+                if pred(&items) {
+                    return items;
+                }
+                last = items;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("connection closed"),
+            Err(_) => break,
+        }
+    }
+    panic!("queue never matched; last: {last:?}");
+}
+
+fn hook_at(client: &Client, id: u32, t: u64, payload: serde_json::Value) {
+    client.hook(id, "claude", t, payload).unwrap();
+}
+
+#[tokio::test]
+async fn hooks_drive_state_and_the_queue() {
+    let (client, mut pushes, _dir) = start().await;
+    let id = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+    client.watch_queue().await.unwrap();
+    wait_queue(&mut pushes, |q| q.is_empty()).await;
+
+    hook_at(
+        &client,
+        id,
+        1,
+        json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    hook_at(
+        &client,
+        id,
+        2,
+        json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash",
+               "tool_input": {"command": "cargo test"}}),
+    );
+    let q = wait_queue(&mut pushes, |q| !q.is_empty()).await;
+    assert_eq!(q[0].session, id);
+    assert_eq!(q[0].status.state, AgentState::NeedsInput);
+    assert_eq!(q[0].status.ask, Some(AskKind::Permission));
+    assert_eq!(
+        q[0].status.summary.as_deref(),
+        Some("Permission: Bash cargo test")
+    );
+    assert!(q[0].status.hooked);
+
+    // Approval shows up only as the tool finishing.
+    hook_at(
+        &client,
+        id,
+        3,
+        json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}),
+    );
+    wait_queue(&mut pushes, |q| q.is_empty()).await;
+    assert_eq!(
+        client.list().await.unwrap()[0].status.state,
+        AgentState::Working
+    );
+
+    hook_at(
+        &client,
+        id,
+        4,
+        json!({"hook_event_name": "Stop", "last_assistant_message": "Ran it.\nAll tests pass."}),
+    );
+    let q = wait_queue(&mut pushes, |q| !q.is_empty()).await;
+    assert_eq!(q[0].status.state, AgentState::ReviewReady);
+    assert!(
+        q[0].status
+            .summary
+            .as_deref()
+            .unwrap()
+            .starts_with("All tests pass."),
+        "{:?}",
+        q[0].status.summary
+    );
+    client.mark_seen(id, q[0].status.seq).await.unwrap();
+    wait_queue(&mut pushes, |q| q.is_empty()).await;
+    client.kill(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn attaching_marks_a_finished_turn_seen_but_not_an_open_question() {
+    let (client, _pushes, dir) = start().await;
+    let id = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+    // A second connection watches, so attach pushes don't interleave with the queue.
+    let (watch, mut queue) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
+    watch.watch_queue().await.unwrap();
+
+    hook_at(&client, id, 1, json!({"hook_event_name": "Stop"}));
+    wait_queue(&mut queue, |q| q.len() == 1).await;
+    client.attach(id, SIZE).await.unwrap();
+    wait_queue(&mut queue, |q| q.is_empty()).await;
+    client.detach().await.unwrap();
+
+    hook_at(
+        &client,
+        id,
+        2,
+        json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
+               "tool_input": {"questions": [{"question": "Which DB?"}]}}),
+    );
+    wait_queue(&mut queue, |q| q.len() == 1).await;
+    client.attach(id, SIZE).await.unwrap();
+    // Still waiting for an answer: it stays queued while attached.
+    let s = &client.list().await.unwrap()[0].status;
+    assert_eq!(s.state, AgentState::NeedsInput);
+    assert!(s.seen);
+    assert!(overseer_agents::queued(s));
+    client.kill(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn bell_and_failed_exit_queue_plain_programs() {
+    let (client, mut pushes, _dir) = start().await;
+    client.watch_queue().await.unwrap();
+    let bell = client
+        .spawn(sh("printf '\\a'; sleep 30", SIZE))
+        .await
+        .unwrap()
+        .id;
+    let q = wait_queue(&mut pushes, |q| q.len() == 1).await;
+    assert_eq!(q[0].session, bell);
+    assert_eq!(q[0].status.ask, Some(AskKind::Bell));
+    assert_eq!(q[0].status.agent, "generic");
+
+    let failed = client.spawn(sh("exit 3", SIZE)).await.unwrap().id;
+    let q = wait_queue(&mut pushes, |q| q.len() == 2).await;
+    let item = q.iter().find(|i| i.session == failed).unwrap();
+    assert_eq!(item.status.state, AgentState::Blocked);
+    assert_eq!(item.status.summary.as_deref(), Some("exited with code 3"));
+    // Needs input ranks above blocked.
+    assert_eq!(q[0].session, bell);
+    client.kill(bell).await.unwrap();
+}
+
+#[tokio::test]
+async fn claude_sessions_get_hook_settings_and_screen_heuristics() {
+    let (client, mut pushes, dir) = start().await;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("claude");
+    // Echoes what overseer passed it, then shows a folder-trust prompt.
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$1\" \"$OVERSEER_SESSION\" \"$OVERSEER_SOCKET\"\n\
+         printf 'Quick safety check: Is this a project you created or one you trust?\\n'\nsleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    client.watch_queue().await.unwrap();
+    let mut spec = sh("", SIZE);
+    spec.command = vec![fake.to_string_lossy().into_owned()];
+    let id = client.spawn(spec).await.unwrap().id;
+
+    let q = wait_queue(&mut pushes, |q| q.len() == 1).await;
+    assert_eq!(q[0].status.agent, "claude");
+    assert_eq!(q[0].status.ask, Some(AskKind::Screen));
+    assert!(!q[0].status.hooked);
+    let text = client.dump(id).await.unwrap().replace('\n', "");
+    let socket = std::path::absolute(dir.join("run/o.sock")).unwrap();
+    assert!(
+        text.starts_with(&format!("--settings|{id}|{}", socket.display())),
+        "{text}"
+    );
+    // The displayed command is what the user typed, not the hook-augmented one.
+    assert_eq!(client.list().await.unwrap()[0].command.len(), 1);
+    client.kill(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn every_session_writes_a_replayable_event_log() {
+    let (client, _pushes, dir) = start().await;
+    let id = client
+        .spawn(sh("printf hi; sleep 30", SIZE))
+        .await
+        .unwrap()
+        .id;
+    wait_dump(&client, id, |t| t.contains("hi")).await;
+    hook_at(
+        &client,
+        id,
+        1,
+        json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    for _ in 0..200 {
+        if client.list().await.unwrap()[0].status.state == AgentState::Working {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client.kill(id).await.unwrap();
+    let log = std::fs::read_dir(dir.join("state/sessions"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".events.jsonl"))
+        .unwrap();
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kinds: Vec<&str> = lines.iter().map(|l| l["k"].as_str().unwrap()).collect();
+    assert_eq!(kinds[0], "start");
+    assert!(kinds.contains(&"out"), "{kinds:?}");
+    let hook = lines.iter().find(|l| l["k"] == "hook").unwrap();
+    assert_eq!(hook["payload"]["hook_event_name"], "UserPromptSubmit");
+    assert_eq!(hook["off"], 2, "points just past `hi` in the transcript");
+    let state = lines.iter().find(|l| l["k"] == "state").unwrap();
+    assert_eq!(state["status"]["state"], "working");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+// ---- Review regressions ----
+
+#[tokio::test]
+async fn a_client_dying_with_unread_frames_still_detaches() {
+    let (client, _pushes, dir) = start().await;
+    let id = client
+        .spawn(sh("while :; do echo tick; sleep 0.01; done", SIZE))
+        .await
+        .unwrap()
+        .id;
+    let mut raw = tokio::net::UnixStream::connect(dir.join("run/o.sock"))
+        .await
+        .unwrap();
+    overseer_proto::codec::write_frame(
+        &mut raw,
+        &overseer_proto::ClientMsg::Attach {
+            req: 1,
+            session: id,
+            size: SIZE,
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(client.list().await.unwrap()[0].clients, 1);
+    // Closing with unread data in the receive buffer sends RST: the daemon sees
+    // ECONNRESET, not EOF.
+    drop(raw);
+    for _ in 0..200 {
+        if client.list().await.unwrap()[0].clients == 0 {
+            client.kill(id).await.unwrap();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("attach count leaked");
+}
+
+#[tokio::test]
+async fn hooks_from_a_different_agent_are_ignored_unless_the_session_is_plain() {
+    let (client, _pushes, dir) = start().await;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("claude");
+    std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut spec = sh("", SIZE);
+    spec.command = vec![fake.to_string_lossy().into_owned()];
+    let claude = client.spawn(spec).await.unwrap().id;
+    let shell = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+
+    // A `codex exec` run by Claude inherits OVERSEER_SESSION.
+    let prompt = json!({"hook_event_name": "UserPromptSubmit"});
+    client.hook(claude, "codex", 1, prompt.clone()).unwrap();
+    client.hook(shell, "codex", 1, prompt.clone()).unwrap();
+    client.hook(shell, "nonsense", 2, json!({"hook_event_name": "Stop"})).unwrap();
+    let state = |id| {
+        let client = client.clone();
+        async move {
+            let list = client.list().await.unwrap();
+            list.into_iter().find(|s| s.id == id).unwrap().status
+        }
+    };
+    for _ in 0..200 {
+        if state(shell).await.state == AgentState::Working {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s = state(shell).await;
+    assert_eq!(s.state, AgentState::Working, "unknown agent must not apply");
+    assert!(s.hooked);
+    let c = state(claude).await;
+    assert_eq!(c.state, AgentState::Idle);
+    assert!(!c.hooked);
+    assert_eq!(client.hello().await.unwrap(), overseer_proto::PROTOCOL);
+    client.kill(claude).await.unwrap();
+    client.kill(shell).await.unwrap();
 }

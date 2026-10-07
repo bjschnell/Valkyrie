@@ -5,26 +5,50 @@ mod session;
 
 use anyhow::{Context, Result};
 use overseer_proto::codec::{read_frame, write_frame};
-use overseer_proto::{ClientMsg, Reply, ReqId, ServerMsg, SessionId};
-use session::Session;
+use overseer_proto::{ClientMsg, QueueItem, Reply, ReqId, ServerMsg, SessionId};
+use session::{Host, Session};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
-#[derive(Default)]
+type Queue = Arc<Vec<QueueItem>>;
+
 struct Registry {
     sessions: Mutex<BTreeMap<SessionId, Arc<Session>>>,
     next_id: AtomicU32,
-    transcript_dir: PathBuf,
+    host: Host,
+    /// The current ranked queue; recomputed when `host.changed` is poked.
+    queue: watch::Sender<Queue>,
 }
 
 impl Registry {
+    fn all(&self) -> Vec<Arc<Session>> {
+        self.sessions.lock().unwrap().values().cloned().collect()
+    }
+
+    fn compute_queue(&self) -> Vec<QueueItem> {
+        let mut items: Vec<QueueItem> = self
+            .all()
+            .iter()
+            .map(|s| s.info())
+            .filter(|info| overseer_agents::queued(&info.status))
+            .map(|info| QueueItem {
+                session: info.id,
+                name: info.name,
+                cwd: info.cwd,
+                status: info.status,
+            })
+            .collect();
+        overseer_agents::sort_queue(&mut items);
+        items
+    }
+
     fn get(&self, id: SessionId) -> Result<Arc<Session>> {
         self.sessions
             .lock()
@@ -41,8 +65,13 @@ const OUT_CAPACITY: usize = 256;
 
 type Out = mpsc::Sender<Arc<ServerMsg>>;
 
-/// Serve forever. Transcripts go to `<state_dir>/sessions/<ns>-<id>.raw`.
-pub async fn run(socket: &Path, state_dir: &Path) -> Result<()> {
+/// How often sessions run screen heuristics and state timers.
+const TICK: Duration = Duration::from_millis(250);
+
+/// Serve forever. Transcripts go to `<state_dir>/sessions/<ns>-<id>.raw`, event logs
+/// next to them. Agent hooks registered by adapters run `hook_exe`.
+pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path) -> Result<()> {
+    let socket = &std::path::absolute(socket)?;
     let dir = socket.parent().context("socket path has no parent")?;
     overseer_proto::ensure_private_dir(dir)?;
     if socket.exists() {
@@ -56,10 +85,18 @@ pub async fn run(socket: &Path, state_dir: &Path) -> Result<()> {
     tracing::info!("listening on {}", socket.display());
 
     let registry = Arc::new(Registry {
+        sessions: Mutex::default(),
         next_id: AtomicU32::new(1),
-        transcript_dir: state_dir.join("sessions"),
-        ..Default::default()
+        host: Host {
+            transcript_dir: state_dir.join("sessions"),
+            hook_exe: hook_exe.to_path_buf(),
+            socket: socket.clone(),
+            changed: Arc::new(Notify::new()),
+        },
+        queue: watch::Sender::new(Arc::default()),
     });
+    tokio::spawn(publish_queue(registry.clone()));
+    tokio::spawn(tick(registry.clone()));
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -79,6 +116,32 @@ pub async fn run(socket: &Path, state_dir: &Path) -> Result<()> {
     }
 }
 
+async fn publish_queue(registry: Arc<Registry>) {
+    loop {
+        registry.host.changed.notified().await;
+        let items = registry.compute_queue();
+        registry.queue.send_if_modified(|queue| {
+            let changed = **queue != items;
+            if changed {
+                *queue = Arc::new(items);
+            }
+            changed
+        });
+    }
+}
+
+async fn tick(registry: Arc<Registry>) {
+    let mut interval = tokio::time::interval(TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let now = session::now_ms();
+        for session in registry.all() {
+            session.tick(now);
+        }
+    }
+}
+
 struct Attachment {
     session: Arc<Session>,
     task: JoinHandle<()>,
@@ -90,7 +153,7 @@ impl Attachment {
     async fn end(self) {
         self.task.abort();
         let _ = self.task.await;
-        self.session.clients.fetch_sub(1, Ordering::Relaxed);
+        self.session.detach();
     }
 }
 
@@ -106,8 +169,22 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
     });
 
     let mut attachment: Option<Attachment> = None;
-    while let Some(msg) = read_frame::<_, ClientMsg>(&mut rd).await? {
+    let mut queue_watch: Option<JoinHandle<()>> = None;
+    // Cleanup below must run however the connection ends: a client that dies with
+    // unread frames shows up as a read error (ECONNRESET), not EOF.
+    let ended = loop {
+        let msg = match read_frame::<_, ClientMsg>(&mut rd).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(e),
+        };
         let (req, result) = match msg {
+            ClientMsg::Hello { req } => (
+                req,
+                Ok(Reply::Hello {
+                    protocol: overseer_proto::PROTOCOL,
+                }),
+            ),
             ClientMsg::Input { session, data } => {
                 if let Ok(s) = registry.get(session) {
                     s.write_input(data);
@@ -120,6 +197,33 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 }
                 continue;
             }
+            ClientMsg::Hook {
+                session,
+                agent,
+                sent_us,
+                payload,
+            } => {
+                match registry.get(session) {
+                    Ok(s) => s.hook(&agent, sent_us, payload),
+                    Err(_) => tracing::debug!(session, "hook for unknown session"),
+                }
+                continue;
+            }
+            ClientMsg::WatchQueue { req } => {
+                reply(&out, req, Ok(Reply::Done)).await;
+                if queue_watch.is_none() {
+                    let rx = registry.queue.subscribe();
+                    queue_watch = Some(tokio::spawn(forward_queue(rx, out.clone())));
+                }
+                continue;
+            }
+            ClientMsg::MarkSeen { req, session, seq } => (
+                req,
+                registry.get(session).map(|s| {
+                    s.mark_seen(seq);
+                    Reply::Done
+                }),
+            ),
             ClientMsg::Spawn { req, spec } => (req, spawn(&registry, spec)),
             ClientMsg::List { req } => {
                 let sessions = registry
@@ -136,6 +240,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 let result = match removed {
                     Some(s) => {
                         s.kill();
+                        registry.host.changed.notify_one();
                         Ok(Reply::Done)
                     }
                     None => Err(anyhow::anyhow!("no session {session}")),
@@ -160,7 +265,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                         a.end().await;
                     }
                     s.resize(size);
-                    s.clients.fetch_add(1, Ordering::Relaxed);
+                    s.attach();
                     reply(&out, req, Ok(Reply::Done)).await;
                     let task = tokio::spawn(forward(s.clone(), out.clone()));
                     attachment = Some(Attachment { session: s, task });
@@ -170,12 +275,15 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
             },
         };
         reply(&out, req, result).await;
-    }
+    };
     if let Some(a) = attachment {
         a.end().await;
     }
+    if let Some(task) = queue_watch {
+        task.abort();
+    }
     writer.abort();
-    Ok(())
+    ended
 }
 
 async fn reply(out: &Out, req: ReqId, result: Result<Reply>) {
@@ -191,11 +299,30 @@ async fn reply(out: &Out, req: ReqId, result: Result<Reply>) {
 
 fn spawn(registry: &Registry, spec: overseer_proto::SpawnSpec) -> Result<Reply> {
     let id = registry.next_id.fetch_add(1, Ordering::Relaxed);
-    let session = Session::spawn(id, spec, &registry.transcript_dir)?;
+    let session = Session::spawn(id, spec, &registry.host)?;
     let info = session.info();
     registry.sessions.lock().unwrap().insert(id, session);
+    registry.host.changed.notify_one();
     tracing::info!(session = id, command = ?info.command, "spawned");
     Ok(Reply::Session { info })
+}
+
+/// Pushes the queue to one connection: the current one, then every change. Only the
+/// latest queue matters, so a slow client simply skips intermediate ones.
+async fn forward_queue(mut rx: watch::Receiver<Queue>, out: Out) {
+    loop {
+        let items = (**rx.borrow_and_update()).clone();
+        if out
+            .send(Arc::new(ServerMsg::Queue { items }))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Streams one session to one connection: a snapshot (plus `Exited` if already

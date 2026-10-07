@@ -13,6 +13,7 @@ overseer-proto = { path = "crates/overseer-proto" }
 overseer-term = { path = "crates/overseer-term" }
 overseer-daemon = { path = "crates/overseer-daemon" }
 overseer-tui = { path = "crates/overseer-tui" }
+overseer-agents = { path = "crates/overseer-agents" }
 alacritty_terminal = "0.26"
 portable-pty = "0.9"
 ratatui = "0.30"
