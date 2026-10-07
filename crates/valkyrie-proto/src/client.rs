@@ -180,6 +180,29 @@ impl Client {
         }
     }
 
+    /// A screenful of scrollback: `(from_top, history, rows)` (see `Reply::Scrollback`).
+    pub async fn scrollback(
+        &self,
+        session: SessionId,
+        anchor: crate::ScrollAnchor,
+    ) -> Result<(u32, u32, Vec<crate::Row>)> {
+        match self
+            .request(|req| ClientMsg::Scrollback {
+                req,
+                session,
+                anchor,
+            })
+            .await?
+        {
+            Reply::Scrollback {
+                from_top,
+                history,
+                rows,
+            } => Ok((from_top, history, rows)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Start receiving `Queue` pushes (the current queue first).
     pub async fn watch_queue(&self) -> Result<()> {
         self.request(|req| ClientMsg::WatchQueue { req })

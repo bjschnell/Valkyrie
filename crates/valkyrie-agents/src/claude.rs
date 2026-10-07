@@ -34,6 +34,9 @@ const SUBAGENT_EVENTS: &[&str] = &[
 ];
 
 impl Adapter for Claude {
+    fn restore(&self, command: &[String], conversation: Option<&str>) -> Option<Vec<String>> {
+        crate::restore::claude(command, conversation)
+    }
     fn name(&self) -> &'static str {
         "claude"
     }

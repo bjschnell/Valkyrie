@@ -4,10 +4,12 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod mouse;
 mod ping;
 mod theme;
 
 use anyhow::Result;
+use mouse::{Input, Mouse, MouseKind, Selection};
 use ping::{Kind, Ping, Pinger};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -27,8 +29,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{
-    AgentState, AgentStatus, Color, CursorShape, Modes, QueueItem, Row, ScreenUpdate, ServerMsg,
-    SessionId, SessionInfo, Size, SpawnSpec, Style,
+    AgentState, AgentStatus, Color, CursorShape, Modes, QueueItem, Row, ScreenUpdate, ScrollAnchor,
+    ServerMsg, SessionId, SessionInfo, Size, SpawnSpec, Style,
 };
 
 /// Ctrl-] — detach from the attached session.
@@ -81,6 +83,8 @@ struct App {
     sound: bool,
     /// The last ping, shown in the bar for `TOAST_FOR`.
     toast: Option<(Ping, Instant)>,
+    /// The start of a mouse report the last read cut off.
+    partial: Vec<u8>,
 }
 
 struct Attached {
@@ -93,6 +97,67 @@ struct Attached {
     title: Option<String>,
     exited: Option<Option<i32>>,
     status: Option<AgentStatus>,
+    /// Screen width, for copying wrapped rows.
+    cols: u16,
+    /// Scrolled back into history; `None` shows the live screen.
+    scroll: Option<Scrolled>,
+    /// Text dragged over with the mouse; stays highlighted until the next key or click.
+    selection: Option<Selection>,
+    selecting: bool,
+    /// A short message for the bar (`copied 42 chars`), and when it was set.
+    notice: Option<(String, Instant)>,
+}
+
+/// A page of scrollback (`Reply::Scrollback`).
+struct Scrolled {
+    from_top: u32,
+    history: u32,
+    rows: Vec<Row>,
+}
+
+/// What most terminals send for Shift-PageUp.
+const SHIFT_PAGE_UP: &[u8] = b"\x1b[5;2~";
+/// Lines per wheel notch.
+const WHEEL_LINES: i64 = 3;
+/// How long a notice stays in the attached bar.
+const NOTICE_FOR: Duration = Duration::from_secs(3);
+
+impl Attached {
+    fn new(id: SessionId, name: String, status: Option<AgentStatus>) -> Self {
+        Self {
+            id,
+            name,
+            rows: Vec::new(),
+            cursor: None,
+            shape: CursorShape::Block,
+            modes: Modes::default(),
+            title: None,
+            exited: None,
+            status,
+            cols: 0,
+            scroll: None,
+            selection: None,
+            selecting: false,
+            notice: None,
+        }
+    }
+
+    /// What is on screen: the scrollback page, or the live screen.
+    fn shown(&self) -> &[Row] {
+        match &self.scroll {
+            Some(page) => &page.rows,
+            None => &self.rows,
+        }
+    }
+
+    fn notice(&mut self, text: String) {
+        self.notice = Some((text, Instant::now()));
+    }
+
+    /// The program gets the mouse when it asked for it; otherwise Valkyrie uses it.
+    fn ours(&self) -> bool {
+        !self.modes.wants_mouse()
+    }
 }
 
 impl App {
@@ -112,6 +177,7 @@ impl App {
             pinger: Pinger::default(),
             sound: ping::load_enabled(),
             toast: None,
+            partial: Vec::new(),
         }
     }
 
@@ -211,7 +277,7 @@ impl App {
             } else {
                 self.view = None;
                 let _ = reset_terminal_modes();
-                "the daemon restarted; sessions from before are gone".into()
+                "the daemon restarted; restorable sessions came back with new ids".into()
             };
             if let Err(e) = self.client.watch_queue().await {
                 self.status = format!("queue unavailable: {e:#}");
@@ -284,19 +350,13 @@ impl App {
             }
         };
         // Set the view before the request so the snapshot pushed right after the reply lands in it.
-        self.view = Some(Attached {
-            id,
-            name,
-            rows: Vec::new(),
-            cursor: None,
-            shape: CursorShape::Block,
-            modes: Modes::default(),
-            title: None,
-            exited: None,
-            status,
-        });
+        self.view = Some(Attached::new(id, name, status));
+        // The snapshot only rewrites modes that differ from the defaults; the mouse
+        // capture has to start now.
+        let _ = write_mouse(Modes::default(), true);
         if let Err(e) = self.client.attach(id, size).await {
             self.view = None;
+            let _ = reset_terminal_modes();
             self.status = format!("attach {id} failed: {e:#}");
         }
     }
@@ -308,31 +368,231 @@ impl App {
         self.refresh().await;
     }
 
-    async fn on_input(&mut self, bytes: Vec<u8>) {
+    async fn on_input(&mut self, mut bytes: Vec<u8>) {
+        if !self.partial.is_empty() {
+            let mut joined = std::mem::take(&mut self.partial);
+            joined.extend(bytes);
+            bytes = joined;
+        }
         if let Some(view) = &self.view {
-            if view.exited.is_some() {
-                return self.detach().await;
-            }
-            let id = view.id;
-            match bytes.iter().position(|&b| b == DETACH_KEY) {
-                Some(i) => {
-                    if i > 0 {
-                        let _ = self.client.input(id, bytes[..i].to_vec());
-                    }
-                    self.detach().await;
-                    // Keys typed right after ^] in the same read belong to the home screen.
-                    for key in home_keys(&bytes[i + 1..]) {
-                        Box::pin(self.on_home_key(key)).await;
-                    }
+            // A program that asked for the mouse gets the reports untouched.
+            let inputs = if view.ours() {
+                // A report cut off by the end of this read finishes in the next one.
+                if let Some(cut) = mouse::unfinished(&bytes) {
+                    self.partial = bytes.split_off(cut);
                 }
-                None => {
-                    let _ = self.client.input(id, bytes);
+                mouse::split(&bytes)
+            } else {
+                vec![Input::Bytes(bytes)]
+            };
+            for input in inputs {
+                match (&self.view, input) {
+                    // Detached mid-read: the rest belongs to the home screen.
+                    (None, Input::Bytes(rest)) => {
+                        for key in home_keys(&rest) {
+                            Box::pin(self.on_home_key(key)).await;
+                        }
+                    }
+                    (None, Input::Mouse(_)) => {}
+                    (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
+                    // A finished program: any key returns home, unless you are
+                    // reading its scrollback.
+                    (Some(view), Input::Bytes(_))
+                        if view.exited.is_some() && view.scroll.is_none() =>
+                    {
+                        self.detach().await;
+                    }
+                    (Some(_), Input::Bytes(bytes)) => self.on_keys(bytes).await,
                 }
             }
             return;
         }
         for key in home_keys(&bytes) {
             self.on_home_key(key).await;
+        }
+    }
+
+    /// Keys while attached: scrollback keys when scrolled back, else the program's.
+    async fn on_keys(&mut self, bytes: Vec<u8>) {
+        let Some(view) = &mut self.view else { return };
+        view.selection = None;
+        let page = view.rows.len().max(2) as i64 - 1;
+        let mut rest: &[u8] = &bytes;
+        if view.scroll.is_none() && !view.modes.alt_screen && rest.starts_with(SHIFT_PAGE_UP) {
+            // Shift-PageUp scrolls back, as in most terminals. A full-screen program
+            // has no scrollback and gets the key.
+            rest = &rest[SHIFT_PAGE_UP.len()..];
+            self.scroll_by(-page).await;
+        }
+        if self.view.as_ref().is_some_and(|v| v.scroll.is_some()) {
+            rest = self.scroll_keys(rest, page).await;
+        }
+        if rest.is_empty() {
+            return;
+        }
+        let Some(view) = &self.view else { return };
+        let id = view.id;
+        match rest.iter().position(|&b| b == DETACH_KEY) {
+            Some(i) => {
+                if i > 0 {
+                    let _ = self.client.input(id, rest[..i].to_vec());
+                }
+                self.detach().await;
+                // Keys typed right after ^] in the same read belong to the home screen.
+                for key in home_keys(&rest[i + 1..]) {
+                    Box::pin(self.on_home_key(key)).await;
+                }
+            }
+            None => {
+                let _ = self.client.input(id, rest.to_vec());
+            }
+        }
+    }
+
+    /// Takes the scrollback keys from the front of `keys` and returns the rest, which
+    /// goes to the program: the first other key ends scroll mode. Scroll keys after
+    /// the page reached the live screen are dropped, not typed (a held `j`).
+    async fn scroll_keys<'a>(&mut self, mut keys: &'a [u8], page: i64) -> &'a [u8] {
+        let mut live = false;
+        while !keys.is_empty() {
+            let key = next_key(keys);
+            // A lone Esc is a key; Esc with more after it is Alt plus that key.
+            let whole = key.len() == keys.len();
+            let action = match key {
+                b"\x1b[A" | b"\x1bOA" | b"k" => Some(Some(-1)),
+                b"\x1b[B" | b"\x1bOB" | b"j" => Some(Some(1)),
+                b"\x1b[5~" | b"\x1b[5;2~" | b"b" | b"\x02" | b"\x15" => Some(Some(-page)),
+                b"\x1b[6~" | b"\x1b[6;2~" | b" " | b"\x06" | b"\x04" => Some(Some(page)),
+                b"g" | b"\x1b[H" | b"\x1b[1~" | b"\x1bOH" => Some(Some(i64::MIN / 2)),
+                b"q" | b"G" | b"\x1b[F" | b"\x1b[4~" | b"\x1bOF" => Some(None),
+                b"\x1b" if whole => Some(None),
+                _ => None,
+            };
+            let Some(delta) = action else { break };
+            keys = &keys[key.len()..];
+            if live {
+                continue;
+            }
+            match delta {
+                Some(delta) => self.scroll_by(delta).await,
+                None => {
+                    if let Some(view) = &mut self.view {
+                        view.scroll = None;
+                    }
+                }
+            }
+            live = self.view.as_ref().is_none_or(|v| v.scroll.is_none());
+        }
+        if let Some(view) = &mut self.view
+            && !keys.is_empty()
+        {
+            view.scroll = None;
+        }
+        keys
+    }
+
+    async fn on_mouse(&mut self, m: Mouse) {
+        let Some(view) = &mut self.view else { return };
+        let bottom = view.rows.len().saturating_sub(1) as u16;
+        let at = (m.x, m.y.min(bottom));
+        match m.kind {
+            MouseKind::WheelUp | MouseKind::WheelDown if view.modes.alt_screen => {
+                // Full-screen programs have no scrollback; like other terminals, the
+                // wheel becomes arrow keys (mode 1007).
+                if view.modes.alt_scroll {
+                    let key: &[u8] = match (m.kind == MouseKind::WheelUp, view.modes.app_cursor) {
+                        (true, true) => b"\x1bOA",
+                        (true, false) => b"\x1b[A",
+                        (false, true) => b"\x1bOB",
+                        (false, false) => b"\x1b[B",
+                    };
+                    let _ = self.client.input(view.id, key.repeat(WHEEL_LINES as usize));
+                }
+            }
+            MouseKind::WheelUp => self.scroll_by(-WHEEL_LINES).await,
+            MouseKind::WheelDown => self.scroll_by(WHEEL_LINES).await,
+            MouseKind::Press => {
+                view.selection = Some(Selection {
+                    anchor: at,
+                    head: at,
+                });
+                view.selecting = true;
+            }
+            MouseKind::Drag => {
+                if view.selecting
+                    && let Some(sel) = &mut view.selection
+                {
+                    sel.head = at;
+                }
+            }
+            MouseKind::Release => {
+                if !std::mem::replace(&mut view.selecting, false) {
+                    return;
+                }
+                let Some(sel) = view.selection.filter(|s| !s.is_empty()) else {
+                    view.selection = None;
+                    return;
+                };
+                let text = sel.text(view.shown(), view.cols);
+                if text.is_empty() {
+                    return;
+                }
+                let n = text.chars().count();
+                match mouse::copy_to_clipboard(&text) {
+                    Ok(()) => view.notice(format!("copied {n} chars")),
+                    Err(e) => view.notice(format!("copy failed: {e}")),
+                }
+            }
+            MouseKind::Other => {}
+        }
+    }
+
+    /// Scrolls `delta` lines (negative is up, into history). Scrolling down past the
+    /// live screen returns to it.
+    async fn scroll_by(&mut self, delta: i64) {
+        let Some(view) = &mut self.view else { return };
+        let anchor = match &view.scroll {
+            None if delta >= 0 => return,
+            None => ScrollAnchor::Up((-delta).min(u32::MAX as i64) as u32),
+            Some(page) => {
+                let top = page.from_top as i64 + delta;
+                if top >= page.history as i64 {
+                    view.scroll = None;
+                    view.selection = None;
+                    return;
+                }
+                ScrollAnchor::FromTop(top.max(0) as u32)
+            }
+        };
+        // The text under a selection moves.
+        view.selection = None;
+        let id = view.id;
+        self.fetch_scroll(id, anchor).await;
+    }
+
+    async fn fetch_scroll(&mut self, id: SessionId, anchor: ScrollAnchor) {
+        let result = self.client.scrollback(id, anchor).await;
+        let Some(view) = self.view.as_mut().filter(|v| v.id == id) else {
+            return;
+        };
+        match result {
+            Ok((from_top, history, _)) if from_top >= history => {
+                if view.scroll.is_none() {
+                    view.notice("no scrollback".into());
+                }
+                view.scroll = None;
+            }
+            Ok((from_top, history, rows)) => {
+                if view.scroll.is_none() {
+                    view.selection = None;
+                }
+                view.scroll = Some(Scrolled {
+                    from_top,
+                    history,
+                    rows,
+                });
+            }
+            Err(e) => view.notice(format!("scrollback failed: {e:#}")),
         }
     }
 
@@ -487,8 +747,29 @@ impl App {
                 if before != (view.modes, view.shape) {
                     write_modes(view.modes, Some(view.shape))?;
                 }
+                // Rewriting the mouse modes mid-drag can lose the drag, so only on change.
+                if mouse::modes(before.0) != mouse::modes(view.modes) {
+                    write_mouse(view.modes, true)?;
+                }
             }
-            ServerMsg::Exited { session, code } if session == view.id => view.exited = Some(code),
+            ServerMsg::Clipboard { session, text } if session == view.id => {
+                let n = text.chars().count();
+                match mouse::copy_to_clipboard(&text) {
+                    Ok(()) => view.notice(format!("{} copied {n} chars", view.name)),
+                    Err(e) => view.notice(format!("copy failed: {e}")),
+                }
+            }
+            ServerMsg::Exited { session, code } if session == view.id => {
+                view.exited = Some(code);
+                // A program that died with the mouse on: take it back, so a wheel or
+                // a motion report scrolls its last screen instead of leaving it.
+                if view.modes.wants_mouse() {
+                    view.modes.mouse_click = false;
+                    view.modes.mouse_drag = false;
+                    view.modes.mouse_motion = false;
+                    write_mouse(view.modes, true)?;
+                }
+            }
             _ => {}
         }
         Ok(false)
@@ -515,8 +796,11 @@ impl App {
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
             match &self.view {
                 Some(view) => {
-                    render_screen(view, body, frame.buffer_mut());
-                    if let Some((x, y)) = view.cursor
+                    render_rows(view.shown(), body, frame.buffer_mut());
+                    if let Some(sel) = &view.selection {
+                        highlight(sel, body, frame.buffer_mut());
+                    }
+                    if let Some((x, y)) = view.cursor.filter(|_| view.scroll.is_none())
                         && x < body.width
                         && y < body.height
                     {
@@ -878,8 +1162,22 @@ fn attached_bar(view: &Attached, t: &Theme) -> Line<'static> {
         }
         (None, None) => {}
     }
-    if let Some(title) = &view.title {
+    if let Some(page) = &view.scroll {
+        let up = page.history - page.from_top;
+        spans.push(
+            format!(" ↑ {up}/{} lines back ", page.history)
+                .fg(t.bg)
+                .bg(t.accent2)
+                .bold(),
+        );
+        spans.push(" q live ".fg(t.muted));
+    } else if let Some(title) = &view.title {
         spans.push(format!(" {title} ").fg(t.muted));
+    }
+    if let Some((notice, at)) = &view.notice
+        && at.elapsed() < NOTICE_FOR
+    {
+        spans.push(format!(" {notice} ").fg(t.done).bold());
     }
     spans.push(" ".into());
     spans.push(" ^] ".fg(t.bg).bg(t.accent).bold());
@@ -945,11 +1243,13 @@ fn age(since_ms: u64, now_ms: u64) -> String {
 impl Attached {
     fn apply(&mut self, update: ScreenUpdate) {
         let height = update.size.rows as usize;
+        self.cols = update.size.cols;
         if update.full || self.rows.len() != height {
             self.rows = (0..height as u16)
                 .map(|y| Row {
                     y,
                     spans: Vec::new(),
+                    wrapped: false,
                 })
                 .collect();
         }
@@ -969,8 +1269,8 @@ impl Attached {
     }
 }
 
-fn render_screen(view: &Attached, area: Rect, buf: &mut ratatui::buffer::Buffer) {
-    for row in &view.rows {
+fn render_rows(rows: &[Row], area: Rect, buf: &mut ratatui::buffer::Buffer) {
+    for row in rows {
         if row.y >= area.height {
             continue;
         }
@@ -986,6 +1286,18 @@ fn render_screen(view: &Attached, area: Rect, buf: &mut ratatui::buffer::Buffer)
                 max,
                 to_style(span.style),
             );
+        }
+    }
+}
+
+/// Shows a mouse selection as reversed cells.
+fn highlight(sel: &Selection, area: Rect, buf: &mut ratatui::buffer::Buffer) {
+    for y in 0..area.height {
+        for x in 0..area.width {
+            if sel.contains(x, y) {
+                let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.modifier.toggle(Modifier::REVERSED);
+            }
         }
     }
 }
@@ -1025,6 +1337,7 @@ pub fn session_size() -> Result<Size> {
     })
 }
 
+/// Mirrors the program's input modes.
 fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     let flag = |on: bool| if on { 'h' } else { 'l' };
     let mut out = std::io::stdout();
@@ -1048,11 +1361,52 @@ fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     Ok(())
 }
 
+/// The mouse: the program's if it asked for it, else Valkyrie's (scrollback,
+/// selection) while `attached`; on the home screen, nobody's.
+fn write_mouse(m: Modes, attached: bool) -> Result<()> {
+    let mut out = std::io::stdout();
+    write!(out, "{}", mouse::CAPTURE_OFF)?;
+    if attached && m.wants_mouse() {
+        for (on, mode) in [
+            (m.mouse_click, 1000),
+            (m.mouse_drag, 1002),
+            (m.mouse_motion, 1003),
+            (m.mouse_sgr, 1006),
+            (m.mouse_utf8, 1005),
+        ] {
+            if on {
+                write!(out, "\x1b[?{mode}h")?;
+            }
+        }
+    } else if attached {
+        write!(out, "{}", mouse::CAPTURE_ON)?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
 /// Back to what a plain shell expects: no mirrored input modes, the user's cursor shape.
 fn reset_terminal_modes() -> Result<()> {
     write_modes(Modes::default(), None)?;
+    write_mouse(Modes::default(), false)?;
     execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape)?;
     Ok(())
+}
+
+/// The first key in `bytes`: a CSI or SS3 sequence, a lone Esc, or one byte.
+fn next_key(bytes: &[u8]) -> &[u8] {
+    match bytes {
+        [0x1b, b'[', rest @ ..] => {
+            let end = rest
+                .iter()
+                .position(|b| (0x40..=0x7e).contains(b))
+                .map_or(bytes.len(), |i| i + 3);
+            &bytes[..end]
+        }
+        [0x1b, b'O', _, ..] => &bytes[..3],
+        [] => bytes,
+        _ => &bytes[..1],
+    }
 }
 
 /// Blocking stdin reader on its own thread; raw mode means each read is what the
@@ -1095,13 +1449,16 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
     let mut i = 0;
     while i < bytes.len() {
         let rest = &bytes[i..];
-        if rest.len() >= 3 && (rest.starts_with(b"\x1b[") || rest.starts_with(b"\x1bO")) {
-            match rest[2] {
-                b'A' => keys.push(HomeKey::Up),
-                b'B' => keys.push(HomeKey::Down),
+        if rest.len() >= 2 && (rest.starts_with(b"\x1b[") || rest.starts_with(b"\x1bO")) {
+            // Whole sequences, so a stray mouse report (`ESC[<0;5;3m`) is not read as
+            // keys; an X10 report (`ESC[M` + 3 raw bytes) has no final byte at all.
+            let key = next_key(rest);
+            match key {
+                b"\x1b[A" | b"\x1bOA" => keys.push(HomeKey::Up),
+                b"\x1b[B" | b"\x1bOB" => keys.push(HomeKey::Down),
                 _ => {}
             }
-            i += 3;
+            i += if key == b"\x1b[M" { 6 } else { key.len() };
             continue;
         }
         match rest[0] {
@@ -1145,6 +1502,10 @@ mod tests {
                 HomeKey::Quit
             ]
         );
+        // Mouse reports arriving after a detach are not keys (`m` would toggle sound,
+        // an X10 report's raw bytes could be `q` or `x`).
+        assert_eq!(home_keys(b"\x1b[<0;5;3m\x1b[Mqxj"), []);
+        assert_eq!(home_keys(b"\x1b[<0;5;3mj"), [HomeKey::Down]);
     }
 
     fn update(full: bool, rows: Vec<Row>) -> ScreenUpdate {
@@ -1174,6 +1535,7 @@ mod tests {
                 text: text.into(),
                 style: Style::default(),
             }],
+            wrapped: false,
         }
     }
 
@@ -1357,17 +1719,7 @@ mod tests {
 
     #[test]
     fn applies_full_then_partial_updates() {
-        let mut view = Attached {
-            id: 1,
-            name: "x".into(),
-            rows: Vec::new(),
-            cursor: None,
-            shape: CursorShape::Block,
-            modes: Modes::default(),
-            title: None,
-            exited: None,
-            status: None,
-        };
+        let mut view = Attached::new(1, "x".into(), None);
         view.apply(update(true, vec![row(0, "a"), row(1, "b"), row(2, "c")]));
         view.apply(update(false, vec![row(1, "B"), row(9, "ignored")]));
         let texts: Vec<&str> = view.rows.iter().map(|r| r.spans[0].text.as_str()).collect();
@@ -1379,17 +1731,7 @@ mod tests {
 
     #[test]
     fn renders_spans_into_buffer() {
-        let mut view = Attached {
-            id: 1,
-            name: "x".into(),
-            rows: Vec::new(),
-            cursor: None,
-            shape: CursorShape::Block,
-            modes: Modes::default(),
-            title: None,
-            exited: None,
-            status: None,
-        };
+        let mut view = Attached::new(1, "x".into(), None);
         view.apply(update(
             true,
             vec![Row {
@@ -1402,11 +1744,12 @@ mod tests {
                         ..Style::default()
                     },
                 }],
+                wrapped: false,
             }],
         ));
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        render_screen(&view, area, &mut buf);
+        render_rows(&view.rows, area, &mut buf);
         assert_eq!(buf[(2, 1)].symbol(), "日");
         assert_eq!(buf[(4, 1)].symbol(), "x");
         assert!(buf[(4, 1)].modifier.contains(Modifier::BOLD));

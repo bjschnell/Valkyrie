@@ -1,7 +1,10 @@
 //! The daemon: the only stateful component (DESIGN §4). Hosts sessions and serves the
 //! protocol over a unix socket.
 
+mod restore;
 mod session;
+
+pub use restore::path as restore_path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -89,6 +92,12 @@ struct Registry {
     /// reaped session still drops (and frees its PTY and threads) as before.
     dying: Mutex<Vec<std::sync::Weak<Session>>>,
     upgrades: mpsc::Sender<UpgradeRequest>,
+    /// Kept in step with the sessions, to bring them back after a restart.
+    restore_file: PathBuf,
+    /// Restore-list entries that failed to come back; kept for the next restart.
+    unrestored: Mutex<Vec<session::RestoreEntry>>,
+    /// Write the restore list now (a session was killed).
+    restore_now: Notify,
 }
 
 impl Registry {
@@ -152,6 +161,11 @@ pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path) -> Result<()>
         .unwrap_or_default()
         .as_nanos() as u64;
     let (registry, upgrades) = new_registry(socket.clone(), state_dir, hook_exe, 1, 0, boot)?;
+    // A fresh start; an upgrade (`resume`) has the sessions themselves.
+    let restored = restore::restore(&registry, &registry.restore_file);
+    if restored > 0 {
+        tracing::info!("restored {restored} sessions");
+    }
     serve_forever(listener, registry, upgrades).await
 }
 
@@ -219,6 +233,7 @@ fn new_registry(
     boot: u64,
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
+    let socket_for_restore = socket.clone();
     let registry = Arc::new(Registry {
         sessions: Mutex::default(),
         next_id: AtomicU32::new(next_id),
@@ -236,6 +251,9 @@ fn new_registry(
         gate: std::sync::RwLock::new(()),
         dying: Mutex::default(),
         upgrades,
+        restore_file: restore::path(state_dir, &socket_for_restore),
+        unrestored: Mutex::default(),
+        restore_now: Notify::new(),
     });
     Ok((registry, rx))
 }
@@ -247,6 +265,10 @@ async fn serve_forever(
 ) -> Result<()> {
     tokio::spawn(publish_queue(registry.clone()));
     tokio::spawn(tick(registry.clone()));
+    tokio::spawn(restore::keep(
+        registry.clone(),
+        registry.restore_file.clone(),
+    ));
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -613,6 +635,8 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     Some(s) => {
                         s.kill();
                         registry.host.changed.notify_one();
+                        // A kill just before a reboot must not come back.
+                        registry.restore_now.notify_one();
                         Ok(Reply::Done)
                     }
                     None => Err(anyhow::anyhow!("no session {session}")),
@@ -625,6 +649,11 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     .get(session)
                     .map(|s| Reply::Text { text: s.text() }),
             ),
+            ClientMsg::Scrollback {
+                req,
+                session,
+                anchor,
+            } => (req, registry.get(session).map(|s| s.scrollback(anchor))),
             ClientMsg::Detach { req } => {
                 if let Some(a) = attachment.take() {
                     a.end().await;
@@ -670,6 +699,16 @@ async fn reply(out: &Out, req: ReqId, result: Result<Reply>) {
 }
 
 fn spawn(registry: &Registry, spec: valkyrie_proto::SpawnSpec) -> Result<Reply> {
+    spawn_with(registry, spec, None)
+}
+
+/// `spawn`, starting the session off with the agent conversation it resumes (set
+/// before it is listed, so its own first hook is never overwritten).
+fn spawn_with(
+    registry: &Registry,
+    spec: valkyrie_proto::SpawnSpec,
+    conversation: Option<String>,
+) -> Result<Reply> {
     let _gate = registry.gate.read().unwrap();
     anyhow::ensure!(
         !registry.frozen.load(Ordering::SeqCst),
@@ -677,6 +716,9 @@ fn spawn(registry: &Registry, spec: valkyrie_proto::SpawnSpec) -> Result<Reply> 
     );
     let id = registry.next_id.fetch_add(1, Ordering::Relaxed);
     let session = Session::spawn(id, spec, &registry.host)?;
+    if conversation.is_some() {
+        session.set_conversation(conversation);
+    }
     let info = session.info();
     registry.sessions.lock().unwrap().insert(id, session);
     registry.host.changed.notify_one();

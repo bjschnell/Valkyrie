@@ -198,7 +198,52 @@ Follow-ups (herdr has them, we don't yet):
 - ~~**Sessions survive a daemon upgrade.**~~ Done 2026-10-07: `valk upgrade` ([ADR-0006](docs/adr/0006-upgrade-handoff.md)) re-execs the daemon in place, so agents stay its children. PTYs and the listener are inherited and screens are rebuilt from the transcripts. The TUI reconnects by itself. Verified live by upgrading mid-turn under Claude running `sleep 15`: the handoff took 105 ms end to end, the session stayed `working`, and PostToolUse and Stop reached the new image.
 - **Start on boot.** A systemd user unit plus `loginctl enable-linger` would bring the daemon up before any login. Today the first `valk` command starts it.
 - **`valk --remote <host>`.** Runs the local TUI against a remote daemon by forwarding its socket over SSH. Today's equivalent is `ssh -t host valk attach`.
-- **Restore after reboot.** herdr's `session.json` restores layout and cwds, not processes. The equivalent here is respawning sessions by command and cwd, with `--resume` for agents.
+- ~~**Restore after reboot.**~~ Done 2026-10-07, see §8.3.
+
+### 8.2 Scrollback, mouse and clipboard (2026-10-07)
+These are table stakes when switching from herdr, which has all three.
+- **Scrollback.** The daemon's screen keeps 10,000 lines of history.
+  - `ClientMsg::Scrollback { anchor }` returns one screenful: `Up(n)` lines above the screen, or `FromTop(n)`, which stays put while output arrives.
+  - The TUI scrolls back with the wheel or Shift-PageUp. In scroll mode:
+    - `j/k`, the arrows, PgUp/PgDn, `b`/space and `g`/Home move.
+    - `q`, Esc, `G` and End return to the live screen.
+    - Any other key returns to the live screen and goes to the program. A held `j` that reaches the live screen is dropped, not typed.
+    - The bar shows `↑ n/total lines back`.
+  - The page holds still while output arrives, as tmux's copy mode does. It is not refetched until you scroll, so the part that overlaps the live screen can be stale.
+  - Limit: once a session has 10,000 lines of history, each new line drops the oldest. A `FromTop` anchor then shifts by the lines added since the last scroll. Fixing that needs an absolute line counter in the daemon.
+  - Full-screen (alternate-screen) programs have no history, so like other terminals the wheel sends them arrow keys (mode 1007), and Shift-PageUp goes to them.
+- **Mouse.** Modes now carries the program's mouse modes (1000/1002/1003, SGR, UTF-8).
+  - A program that asked for the mouse gets the outer terminal mirrored and the raw reports forwarded.
+  - Otherwise, while attached, the TUI enables 1002+1006 for itself: wheel scrolling, and drag to select (shown reversed). Release copies the selection.
+  - Mouse modes are rewritten only when they change, so a drag survives other mode changes.
+  - A report cut off at the end of a read is held for the next one.
+  - The home screen skips whole escape sequences, so stray reports never act as keys.
+  - **Agents are full-screen mouse programs.** The recorded Claude Code (full-screen renderer) and Codex sessions both switch to the alternate screen (1049) and enable 1000/1002/1003/1006. Before protocol 4, Valkyrie never mirrored mouse modes, so the wheel did nothing inside them. Now they get the mouse and scroll and select themselves. Claude copies its selection with OSC 52, which arrives as below. Valkyrie's own scroll mode serves shells and other inline programs.
+  - Rows carry `wrapped`, so a copy joins soft-wrapped lines.
+  - Shift-drag still gives the terminal's own selection in most terminals.
+- **Clipboard.** The TUI copies through OSC 52 on its own terminal, wrapped for tmux, so copies reach the machine you sit at, over SSH too. Inside tmux this needs `allow-passthrough on`. A program's OSC 52 copy, such as Claude's `/copy`, is pushed to attached clients as `ServerMsg::Clipboard` and copied the same way. OSC 52 reads (paste requests) are never answered. Replaying a transcript during an upgrade never re-copies. A program's copy is capped at 1 MiB, so it always fits a frame.
+- **Protocol 4.**
+
+### 8.3 Restore after a restart (2026-10-07)
+herdr resumes its agent panes into their own conversations after its server restarts (`resume_agents_on_restore`). Valkyrie does the same for a daemon that died, whether from a reboot, a crash or `kill`. An upgrade keeps the sessions themselves (ADR-0006).
+- **The list.** The daemon keeps `<state dir>/restore-<host>.json` (mode 0600) in step with its sessions: name, command, cwd, and the agent's conversation id. It is checked every second and written only when it changes.
+  - A daemon on a non-default socket gets its own `restore-<host>-<hash>.json`, so it never restores another daemon's live sessions.
+  - The conversation id is the `session_id` of the agent's `SessionStart` hook, so it follows `/clear`. It is taken only when the agent isn't mid-turn, since Codex hooks are global and a `codex exec` the agent runs reports its own id. It crosses upgrades in the handoff.
+  - Entries that fail to come back stay on the list for the next restart, for example `claude` not on PATH yet or a missing cwd. A list that doesn't parse is set aside as `.json.bad`.
+  - Spawning into a missing directory is now an error; portable-pty used to start the program elsewhere.
+  - Per-spawn environment is not saved: restored sessions get the daemon's.
+  - A session you kill leaves the list at once. A program that exits on its own leaves after 3 s. A reboot ends every program at once, and the daemon may reap some before it dies itself; the delay keeps those on the list.
+- **Restore.** A freshly started daemon (`run`, not `resume`) spawns every entry its adapter can restore, at 120×40 in its old cwd and under its old name. `VALK_RESTORE=off` skips it.
+  - **Claude:** `claude --resume <id> [options]`. Flags are kept and the start-up prompt is dropped. `-c`, `-r`, `--session-id`, `--fork-session`, `-w` and `--init` are replaced or dropped, and a `-p` run is not restored.
+    - The id comes first: a value-taking flag the table doesn't know keeps no value, and at the end it would swallow `--resume` and send the id as a prompt. Here it fails loudly instead.
+  - **Codex:** `codex resume <id> [options]`. `codex exec` and other subcommands are not restored, and `-i` images are dropped.
+  - **Interactive shells** (`bash`, `fish -l`…, with only known interactive flags) start again. `bash -lc …` and `fish --command=…` are commands, not shells.
+  - **Anything else** is not restored, because running an arbitrary command again could do harm. Neither is an agent that never reported a conversation (herdr likewise needs a session ref).
+- **Verified.** A daemon test restores a fake `claude --model x hello` as `--model x --resume conv-1` plus a shell, and checks that a killed session, an exited program and `sleep` stay gone. With the real binary, `kill -9` of the daemon followed by `valk ls` brought back the shell in its old cwd.
+- **Follow-ups.**
+  - Start on boot (systemd user unit) so restore happens without a login.
+  - Restored sessions have no scrollback from before.
+  - Restore is still unverified against a live Claude or Codex conversation.
 
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.

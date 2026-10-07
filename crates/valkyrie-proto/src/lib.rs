@@ -16,7 +16,7 @@ pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -117,6 +117,13 @@ pub enum ClientMsg {
         req: ReqId,
         session: SessionId,
     },
+    /// One screenful of a session's scrollback (history above the screen, then the
+    /// screen), for scrolling back while attached.
+    Scrollback {
+        req: ReqId,
+        session: SessionId,
+        anchor: ScrollAnchor,
+    },
     Input {
         session: SessionId,
         data: Vec<u8>,
@@ -177,6 +184,12 @@ pub enum ServerMsg {
     Queue {
         items: Vec<QueueItem>,
     },
+    /// The attached session's program copied `text` (OSC 52); the client puts it on
+    /// its own clipboard.
+    Clipboard {
+        session: SessionId,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,6 +215,24 @@ pub enum Reply {
     Text {
         text: String,
     },
+    Scrollback {
+        /// The first row's line, counting from the oldest line in history.
+        from_top: u32,
+        /// Lines of history above the screen; `from_top == history` is the live screen.
+        history: u32,
+        /// One screenful, `y` from 0.
+        rows: Vec<Row>,
+    },
+}
+
+/// Where a `Scrollback` page starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollAnchor {
+    /// This many lines above the live screen.
+    Up(u32),
+    /// At this line from the oldest one in history; stays put while output arrives.
+    FromTop(u32),
 }
 
 /// Default daemon socket: `<state dir>/run/<hostname>.sock`. Not `$XDG_RUNTIME_DIR`:

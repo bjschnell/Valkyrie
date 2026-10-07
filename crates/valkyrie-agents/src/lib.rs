@@ -3,6 +3,7 @@
 
 mod claude;
 pub mod codex;
+mod restore;
 pub mod summary;
 mod tracker;
 
@@ -76,6 +77,15 @@ pub trait Adapter: Send + Sync {
     /// Whether some transitions fire no hook, so the screen must check for them.
     fn hook_gaps(&self) -> bool {
         false
+    }
+    /// The command that brings this session back after the daemon restarted, given
+    /// the agent's conversation id (from its hooks). `None`: not restored.
+    fn restore(&self, command: &[String], _conversation: Option<&str>) -> Option<Vec<String>> {
+        restore::shell(command)
+    }
+    /// The agent's own conversation id in a hook payload.
+    fn conversation(&self, payload: &Value) -> Option<String> {
+        payload["session_id"].as_str().map(str::to_owned)
     }
 }
 

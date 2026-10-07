@@ -22,6 +22,9 @@ pub struct ScreenUpdate {
 pub struct Row {
     pub y: u16,
     pub spans: Vec<Span>,
+    /// The line continues on the next row (soft wrap), so copied text joins them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wrapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,10 +98,26 @@ pub enum CursorShape {
 /// Terminal modes a client must mirror on its own terminal so that the raw input
 /// bytes it forwards are encoded the way the program expects.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Modes {
     pub app_cursor: bool,
     pub app_keypad: bool,
     pub bracketed_paste: bool,
     pub focus_events: bool,
     pub alt_screen: bool,
+    /// Mouse reporting the program asked for (1000/1002/1003) and its encoding
+    /// (1006 SGR, 1005 UTF-8). With none, the client may use the mouse itself.
+    pub mouse_click: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub mouse_sgr: bool,
+    pub mouse_utf8: bool,
+    /// 1007: the wheel scrolls by sending arrow keys in the alternate screen.
+    pub alt_scroll: bool,
+}
+
+impl Modes {
+    pub fn wants_mouse(&self) -> bool {
+        self.mouse_click || self.mouse_drag || self.mouse_motion
+    }
 }

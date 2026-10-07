@@ -21,6 +21,9 @@ pub const EVENTS: &[&str] = &[
 const HOOK_TIMEOUT: u64 = 5;
 
 impl Adapter for Codex {
+    fn restore(&self, command: &[String], conversation: Option<&str>) -> Option<Vec<String>> {
+        crate::restore::codex(command, conversation)
+    }
     fn name(&self) -> &'static str {
         "codex"
     }

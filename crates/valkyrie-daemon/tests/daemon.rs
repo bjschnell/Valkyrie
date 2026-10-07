@@ -14,7 +14,14 @@ async fn start() -> (Client, Pushes, PathBuf) {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    let socket = dir.join("run/o.sock");
+    start_in(&dir, "run/o.sock").await;
+    let (client, pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
+    (client, pushes, dir)
+}
+
+/// A daemon with its state in `dir/state`, listening on `dir/<socket>`.
+async fn start_in(dir: &std::path::Path, socket: &str) -> (Client, Pushes) {
+    let socket = dir.join(socket);
     let state = dir.join("state");
     let serve_socket = socket.clone();
     tokio::spawn(async move {
@@ -22,7 +29,7 @@ async fn start() -> (Client, Pushes, PathBuf) {
     });
     for _ in 0..100 {
         if let Ok((client, pushes)) = Client::connect(&socket).await {
-            return (client, pushes, dir);
+            return (client, pushes);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -78,6 +85,44 @@ async fn attach_starts_with_full_snapshot_of_existing_output() {
     assert!(update.full);
     assert_eq!(update.rows.len(), SIZE.rows as usize);
     assert_eq!(update.rows[0].spans[0].text, "before-attach");
+    client.kill(id).await.unwrap();
+}
+
+/// Scrolling back reads history the screen lost, and a program's copy (OSC 52)
+/// reaches the attached client.
+#[tokio::test]
+async fn scrollback_and_program_copies_reach_the_client() {
+    let (client, mut pushes, _dir) = start().await;
+    let id = client
+        .spawn(sh(
+            "seq 1 30; read go; printf '\\033]52;c;aGk=\\007'; sleep 5",
+            SIZE,
+        ))
+        .await
+        .unwrap()
+        .id;
+    wait_dump(&client, id, |t| t.contains("30")).await;
+    let text = |rows: &[valkyrie_proto::Row]| -> Vec<String> {
+        rows.iter()
+            .map(|r| r.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    };
+    let (from_top, history, rows) = client
+        .scrollback(id, valkyrie_proto::ScrollAnchor::Up(99))
+        .await
+        .unwrap();
+    assert_eq!(from_top, 0);
+    assert!(history >= 20, "history {history}");
+    assert_eq!(text(&rows)[..3], ["1", "2", "3"]);
+
+    client.attach(id, SIZE).await.unwrap();
+    client.input(id, b"\r".to_vec()).unwrap();
+    loop {
+        if let ServerMsg::Clipboard { session, text } = next_push(&mut pushes).await {
+            assert_eq!((session, text.as_str()), (id, "hi"));
+            break;
+        }
+    }
     client.kill(id).await.unwrap();
 }
 
@@ -581,4 +626,131 @@ async fn hooks_from_a_different_agent_are_ignored_unless_the_session_is_plain() 
     assert_eq!(client.hello().await.unwrap(), valkyrie_proto::PROTOCOL);
     client.kill(claude).await.unwrap();
     client.kill(shell).await.unwrap();
+}
+
+/// DESIGN §8.3: a fresh daemon brings back what the last one hosted. The agent
+/// resumes the conversation its hooks named, the shell starts over, and neither a
+/// killed session, a program that ended, nor an arbitrary command comes back.
+#[tokio::test]
+async fn a_fresh_daemon_restores_agents_and_shells() {
+    let (client, _pushes, dir) = start().await;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexec sleep 100\n").unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let spawn = |command: &[&str], name: &str| SpawnSpec {
+        command: command.iter().map(|s| s.to_string()).collect(),
+        cwd: Some(dir.clone()),
+        name: Some(name.into()),
+        size: SIZE,
+        env: Vec::new(),
+    };
+    let agent = client
+        .spawn(spawn(
+            &[claude.to_str().unwrap(), "--model", "x", "hello"],
+            "agent",
+        ))
+        .await
+        .unwrap()
+        .id;
+    client.spawn(spawn(&["sh"], "shell")).await.unwrap();
+    client
+        .spawn(spawn(&["sleep", "100"], "sleeper"))
+        .await
+        .unwrap();
+    let gone = client.spawn(spawn(&["sh"], "gone")).await.unwrap().id;
+    client.spawn(spawn(&["true"], "quick")).await.unwrap();
+    client
+        .hook(
+            agent,
+            "claude",
+            1,
+            serde_json::json!({"hook_event_name": "SessionStart", "source": "startup",
+                               "session_id": "conv-1"}),
+        )
+        .unwrap();
+    client.kill(gone).await.unwrap();
+
+    let list = valkyrie_daemon::restore_path(&dir.join("state"), &dir.join("run/o.sock"));
+    let names = |text: &str| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // `quick` ends at once but stays listed for the exit grace, then goes.
+    let mut text = String::new();
+    for _ in 0..80 {
+        text = std::fs::read_to_string(&list).unwrap_or_default();
+        if text.contains("conv-1")
+            && !text.is_empty()
+            && names(&text) == ["agent", "shell", "sleeper"]
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(names(&text), ["agent", "shell", "sleeper"], "{text}");
+    assert!(text.contains("conv-1"), "{text}");
+
+    // The next daemon (the first one stands in for a dead one). Lists are per socket,
+    // so another socket starts with nothing to restore until given this one's list.
+    let next_list = valkyrie_daemon::restore_path(&dir.join("state"), &dir.join("run/next.sock"));
+    assert_ne!(next_list, list);
+    // Plus one that cannot come back now (its cwd is gone): it stays listed.
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
+    saved["sessions"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(
+        {"name": "lost", "command": ["sh"], "cwd": dir.join("gone").to_str().unwrap()}));
+    std::fs::write(&next_list, saved.to_string()).unwrap();
+    let (next, _p) = start_in(&dir, "run/next.sock").await;
+    let sessions = next.list().await.unwrap();
+    let got: Vec<(&str, Vec<&str>)> = sessions
+        .iter()
+        .map(|s| {
+            (
+                s.name.as_str(),
+                s.command.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "agent",
+                vec![
+                    claude.to_str().unwrap(),
+                    "--resume",
+                    "conv-1",
+                    "--model",
+                    "x"
+                ]
+            ),
+            ("shell", vec!["sh"]),
+        ]
+    );
+    assert!(sessions.iter().all(|s| s.cwd == dir));
+    let mut kept = String::new();
+    for _ in 0..30 {
+        kept = std::fs::read_to_string(&next_list).unwrap_or_default();
+        if !kept.is_empty() && names(&kept).len() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(names(&kept), ["lost", "agent", "shell"], "{kept}");
+    for s in sessions {
+        next.kill(s.id).await.unwrap();
+    }
+    for s in client.list().await.unwrap() {
+        let _ = client.kill(s.id).await;
+    }
 }

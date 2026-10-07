@@ -367,7 +367,8 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
         );
     }
     for old in valkyrie_proto::legacy_socket_paths() {
-        if old != socket && Client::connect(&old).await.is_ok() {
+        // Checked first: connecting creates the socket's directory.
+        if old != socket && old.exists() && Client::connect(&old).await.is_ok() {
             eprintln!(
                 "note: an older daemon is still running on {} with its own \
                  sessions; this starts a new one. Stop the old one when done with them: \

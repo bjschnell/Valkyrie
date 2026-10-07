@@ -2029,9 +2029,11 @@ name = "valkyrie-tui"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64",
  "ratatui",
  "serde_json",
  "tokio",
+ "unicode-width",
  "valkyrie-proto",
 ]
 

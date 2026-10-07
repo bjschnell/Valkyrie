@@ -10,6 +10,8 @@ valkyrie-proto.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
+unicode-width = "0.2"
 
 [dev-dependencies]
 serde_json.workspace = true

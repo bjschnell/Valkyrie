@@ -31,7 +31,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, broadcast};
 use valkyrie_agents::{Adapter, AgentEvent, Screen, Tracker};
 use valkyrie_proto::AgentStatus;
-use valkyrie_proto::{AgentState, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec};
+use valkyrie_proto::{
+    AgentState, Reply, ScrollAnchor, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec,
+};
 use valkyrie_term::{Signal, VtScreen};
 
 /// Server pushes for one session. Lagging receivers resync from a fresh snapshot.
@@ -172,6 +174,18 @@ pub struct SavedSession {
     /// Input the old image had not written to the PTY yet.
     #[serde(default)]
     pub input: Vec<u8>,
+    #[serde(default)]
+    conversation: Option<String>,
+}
+
+/// What brings a session back after the daemon restarts (DESIGN §8.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoreEntry {
+    pub name: String,
+    pub command: Vec<String>,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub conversation: Option<String>,
 }
 
 pub struct Session {
@@ -220,6 +234,10 @@ struct State {
     last_mark_ms: u64,
     last_scan_ms: u64,
     scan_due: bool,
+    /// The agent's own conversation id, from its hooks, to resume it after a restart.
+    conversation: Option<String>,
+    /// When the program exited (ms), if it did while this image ran.
+    exited_ms: Option<u64>,
 }
 
 impl State {
@@ -250,6 +268,12 @@ impl Session {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         let adapter = valkyrie_agents::adapter_for(&spec.command);
+        let cwd = match spec.cwd {
+            Some(dir) => dir,
+            None => std::env::current_dir()?,
+        };
+        // portable-pty would quietly start the program somewhere else.
+        anyhow::ensure!(cwd.is_dir(), "no such directory: {}", cwd.display());
 
         // Opened before spawning so a failure here cannot orphan the child. Ids restart
         // with the daemon, so the nanosecond timestamp keeps transcripts distinct.
@@ -277,10 +301,6 @@ impl Session {
         adapter.prepare(&mut argv, &host.hook_exe);
         let mut cmd = CommandBuilder::new(&program);
         cmd.args(&argv[1..]);
-        let cwd = match spec.cwd {
-            Some(dir) => dir,
-            None => std::env::current_dir()?,
-        };
         cmd.cwd(&cwd);
         for (key, value) in &spec.env {
             match value {
@@ -314,6 +334,8 @@ impl Session {
             last_mark_ms: 0,
             last_scan_ms: 0,
             scan_due: false,
+            conversation: None,
+            exited_ms: None,
         };
         state.log(
             now_ms,
@@ -379,6 +401,9 @@ impl Session {
             last_mark_ms: 0,
             last_scan_ms: 0,
             scan_due: false,
+            conversation: saved.conversation,
+            // Exited under the old image: long enough ago to drop from the restore list.
+            exited_ms: saved.exited.map(|_| 0),
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -531,6 +556,7 @@ impl Session {
             size: state.screen.size(),
             status: state.tracker.status().clone(),
             exited: state.exited,
+            conversation: state.conversation.clone(),
             input: self
                 .input
                 .state
@@ -623,6 +649,13 @@ impl Session {
                         changed |= state.tracker.apply(&AgentEvent::Bell, now, self.watching());
                     }
                     Signal::Title(_) => {}
+                    Signal::Clipboard(text) => {
+                        state.log(now, "copy", json!({"chars": text.chars().count()}));
+                        let _ = self.feed.send(Arc::new(ServerMsg::Clipboard {
+                            session: self.id,
+                            text,
+                        }));
+                    }
                 }
             }
             if changed {
@@ -645,6 +678,7 @@ impl Session {
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
         state.exited = Some(code);
+        state.exited_ms = Some(now);
         let _ = self.feed.send(Arc::new(ServerMsg::Exited {
             session: self.id,
             code,
@@ -674,6 +708,15 @@ impl Session {
             json!({"agent": agent, "sent_us": sent_us, "payload": payload, "events": events,
                    "ignored": !ours}),
         );
+        // Only a session start names the conversation, and not mid-turn: Codex hooks
+        // are global, so a `codex exec` the agent runs reports its own one-shot id.
+        if ours
+            && events.contains(&AgentEvent::SessionStarted)
+            && state.tracker.status().state != AgentState::Working
+            && let Some(id) = adapter.conversation(&payload)
+        {
+            state.conversation = Some(id);
+        }
         if ours && state.tracker.hook(&events, sent_us, now, self.watching()) {
             self.after_change(&mut state, now);
         }
@@ -828,6 +871,40 @@ impl Session {
 
     pub fn text(&self) -> String {
         self.state.lock().unwrap().screen.text()
+    }
+
+    /// Starts the restore list off with the conversation a restored agent resumes, so
+    /// it is kept even if the daemon stops before the agent's first hook.
+    pub fn set_conversation(&self, id: Option<String>) {
+        self.state.lock().unwrap().conversation = id;
+    }
+
+    /// This session's line in the restore list (DESIGN §8.3): while it runs, and for
+    /// `grace_ms` after it exits. A reboot ends every program at once, and the daemon
+    /// may reap some before it dies itself; an exit seen that late must not drop them.
+    pub fn restore_entry(&self, now: u64, grace_ms: u64) -> Option<RestoreEntry> {
+        let state = self.state.lock().unwrap();
+        if state
+            .exited_ms
+            .is_some_and(|at| now.saturating_sub(at) >= grace_ms)
+        {
+            return None;
+        }
+        Some(RestoreEntry {
+            name: self.name.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            conversation: state.conversation.clone(),
+        })
+    }
+
+    pub fn scrollback(&self, anchor: ScrollAnchor) -> Reply {
+        let (from_top, history, rows) = self.state.lock().unwrap().screen.scrollback(anchor);
+        Reply::Scrollback {
+            from_top,
+            history,
+            rows,
+        }
     }
 
     pub fn info(&self) -> SessionInfo {

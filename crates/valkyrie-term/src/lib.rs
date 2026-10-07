@@ -10,9 +10,13 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{self, NamedColor, Processor, Rgb};
 use std::sync::{Arc, Mutex};
-use valkyrie_proto::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Size, Span, Style};
+use valkyrie_proto::{
+    Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, ScrollAnchor, Size, Span, Style,
+};
 
 pub const SCROLLBACK: usize = 10_000;
+/// The largest copy (OSC 52) a program may put on the user's clipboard.
+pub const MAX_COPY: usize = 1 << 20;
 
 /// Side effects of feeding bytes that the session host must act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +25,8 @@ pub enum Signal {
     Reply(Vec<u8>),
     Bell,
     Title(Option<String>),
+    /// The program copied this text (OSC 52). Pasting (OSC 52 load) is never allowed.
+    Clipboard(String),
 }
 
 #[derive(Clone, Default)]
@@ -108,7 +114,11 @@ impl VtScreen {
                     self.title = None;
                     signals.push(Signal::Title(None))
                 }
-                // Clipboard access, blink, and wakeups are client/renderer concerns; M0 drops them.
+                // A larger copy would not fit a protocol frame.
+                Event::ClipboardStore(_, text) if text.len() <= MAX_COPY => {
+                    signals.push(Signal::Clipboard(text))
+                }
+                // Blink and wakeups are renderer concerns.
                 _ => {}
             }
         }
@@ -239,11 +249,36 @@ impl VtScreen {
             bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
             focus_events: m.contains(TermMode::FOCUS_IN_OUT),
             alt_screen: m.contains(TermMode::ALT_SCREEN),
+            mouse_click: m.contains(TermMode::MOUSE_REPORT_CLICK),
+            mouse_drag: m.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: m.contains(TermMode::MOUSE_MOTION),
+            mouse_sgr: m.contains(TermMode::SGR_MOUSE),
+            mouse_utf8: m.contains(TermMode::UTF8_MOUSE),
+            alt_scroll: m.contains(TermMode::ALTERNATE_SCROLL),
         }
     }
 
+    /// A screenful starting `anchor`: lines from history, then the screen. Returns the
+    /// start (counted from the oldest history line), the history length, and the rows.
+    pub fn scrollback(&self, anchor: ScrollAnchor) -> (u32, u32, Vec<Row>) {
+        let history = self.term.grid().history_size() as u32;
+        let from_top = match anchor {
+            ScrollAnchor::Up(n) => history.saturating_sub(n),
+            ScrollAnchor::FromTop(n) => n.min(history),
+        };
+        let rows = (0..self.size.rows)
+            .map(|y| self.row_at(from_top as i32 - history as i32 + y as i32, y))
+            .collect();
+        (from_top, history, rows)
+    }
+
     fn row(&self, y: u16) -> Row {
-        let line = &self.term.grid()[Line(y as i32)];
+        self.row_at(y as i32, y)
+    }
+
+    /// Grid line `line` (negative is history) as row `y`.
+    fn row_at(&self, line: i32, y: u16) -> Row {
+        let line = &self.term.grid()[Line(line)];
         let mut spans: Vec<Span> = Vec::new();
         // Clients may measure wide or combined graphemes differently than alacritty did
         // (e.g. "⚠\u{FE0F}" is one cell here, two in ratatui), so every span after one
@@ -285,7 +320,10 @@ impl VtScreen {
             }
             spans.pop();
         }
-        Row { y, spans }
+        let wrapped = line[Column(self.size.cols as usize - 1)]
+            .flags
+            .contains(Flags::WRAPLINE);
+        Row { y, spans, wrapped }
     }
 }
 
@@ -511,6 +549,56 @@ mod tests {
         let snap = s.snapshot();
         assert_eq!(snap.size, Size { cols: 40, rows: 10 });
         assert_eq!(snap.rows.len(), 10);
+    }
+
+    #[test]
+    fn scrollback_pages_through_history_then_the_screen() {
+        let mut s = VtScreen::new(Size { cols: 10, rows: 3 });
+        for i in 0..10 {
+            s.feed(format!("line{i}\r\n").as_bytes());
+        }
+        // Screen: line8, line9, blank. History: line0..line7.
+        let text = |rows: &[Row]| rows.iter().map(row_text).collect::<Vec<_>>();
+        let (from_top, history, rows) = s.scrollback(ScrollAnchor::Up(2));
+        assert_eq!((from_top, history), (6, 8));
+        assert_eq!(text(&rows), ["line6", "line7", "line8"]);
+        assert_eq!(rows.iter().map(|r| r.y).collect::<Vec<_>>(), [0, 1, 2]);
+        let (from_top, _, rows) = s.scrollback(ScrollAnchor::Up(99));
+        assert_eq!(from_top, 0);
+        assert_eq!(text(&rows)[0], "line0");
+        // Anchored from the top, more output does not move the page.
+        s.feed(b"line10\r\n");
+        let (from_top, history, rows) = s.scrollback(ScrollAnchor::FromTop(6));
+        assert_eq!((from_top, history), (6, 9));
+        assert_eq!(text(&rows), ["line6", "line7", "line8"]);
+        // Past the end clamps to the live screen.
+        let (from_top, _, rows) = s.scrollback(ScrollAnchor::FromTop(50));
+        assert_eq!(from_top, 9);
+        assert_eq!(rows, s.snapshot().rows);
+    }
+
+    #[test]
+    fn copies_and_mouse_modes_reach_the_host() {
+        let mut s = screen();
+        // OSC 52 store of "hi"; a load request is ignored.
+        let signals = s.feed(b"\x1b]52;c;aGk=\x07\x1b]52;c;?\x07");
+        assert_eq!(signals, vec![Signal::Clipboard("hi".into())]);
+        s.feed(b"\x1b[?1002h\x1b[?1006h");
+        let m = s.snapshot().modes;
+        assert!(m.mouse_drag && m.mouse_sgr && m.wants_mouse());
+        s.feed(b"\x1b[?1002l");
+        assert!(!s.snapshot().modes.wants_mouse());
+    }
+
+    #[test]
+    fn rows_record_soft_wraps() {
+        let mut s = VtScreen::new(Size { cols: 5, rows: 3 });
+        s.feed(b"abcdefg\r\nxy");
+        let rows = s.snapshot().rows;
+        assert_eq!(
+            rows.iter().map(|r| r.wrapped).collect::<Vec<_>>(),
+            [true, false, false]
+        );
     }
 
     #[test]
