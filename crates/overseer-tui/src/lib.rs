@@ -4,6 +4,8 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod theme;
+
 use anyhow::Result;
 use overseer_proto::client::{Client, Pushes};
 use overseer_proto::{
@@ -16,10 +18,14 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{self, Modifier, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, BorderType, Cell, HighlightSpacing, Padding, Paragraph, Row as TableRow, Table,
+    TableState, Wrap,
+};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use theme::{Theme, state_icon};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
@@ -65,6 +71,9 @@ struct App {
     view: Option<Attached>,
     status: String,
     quit: bool,
+    theme: &'static Theme,
+    /// The selected session's screen text, for the preview pane.
+    preview: Option<(SessionId, String)>,
 }
 
 struct Attached {
@@ -91,6 +100,8 @@ impl App {
             view: None,
             status: String::new(),
             quit: false,
+            theme: Theme::load(),
+            preview: None,
         }
     }
 
@@ -103,6 +114,9 @@ impl App {
         let mut stdin = stdin_bytes();
         let mut winch = signal(SignalKind::window_change())?;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
+        // Only redraws, for the working spinner; runs while one is on screen.
+        let mut anim = tokio::time::interval(SPIN_EVERY);
+        anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.boot = self.client.hello_info().await.ok().map(|info| info.boot);
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
@@ -141,7 +155,11 @@ impl App {
                     }
                     terminal.autoresize()?;
                 }
-                _ = tick.tick() => self.refresh().await,
+                _ = tick.tick() => {
+                    self.refresh().await;
+                    self.update_preview().await;
+                }
+                _ = anim.tick(), if self.animating() => {}
             }
         }
         Ok(())
@@ -189,6 +207,27 @@ impl App {
             return Ok(pushes);
         }
         anyhow::bail!("lost the daemon connection")
+    }
+
+    /// Something on the home screen is spinning.
+    fn animating(&self) -> bool {
+        self.view.is_none()
+            && self
+                .sessions
+                .iter()
+                .any(|s| s.exited.is_none() && s.status.state == AgentState::Working)
+    }
+
+    /// Fetches the selected session's screen for the preview pane.
+    async fn update_preview(&mut self) {
+        if self.view.is_some() {
+            return;
+        }
+        let (Some(id), _) = self.selection() else {
+            self.preview = None;
+            return;
+        };
+        self.preview = self.client.dump(id).await.ok().map(|text| (id, text));
     }
 
     async fn refresh(&mut self) {
@@ -327,10 +366,19 @@ impl App {
         let (selected, item) = self.selection();
         let item = item.map(|i| (i.session, i.status.seq));
         match key {
-            HomeKey::Up => self.selected = self.selected.saturating_sub(1),
+            HomeKey::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                self.update_preview().await;
+            }
             HomeKey::Down => {
                 self.selected += 1;
                 self.clamp_selection();
+                self.update_preview().await;
+            }
+            HomeKey::Theme => {
+                self.theme = self.theme.next();
+                self.theme.save();
+                self.status = format!("theme: {}", self.theme.name);
             }
             HomeKey::Top => {
                 if let Some(top) = self.queue.first() {
@@ -448,22 +496,11 @@ impl App {
                     {
                         frame.set_cursor_position(Position::new(body.x + x, body.y + y));
                     }
-                    let state = match (view.exited, &view.status) {
-                        (Some(Some(code)), _) => format!(" [exited {code}] any key returns"),
-                        (Some(None), _) => " [exited] any key returns".into(),
-                        (None, Some(s)) => format!(" [{}]", s.state.label()),
-                        (None, None) => String::new(),
-                    };
-                    let title = view
-                        .title
-                        .as_deref()
-                        .map(|t| format!(" · {t}"))
-                        .unwrap_or_default();
-                    let text = format!(
-                        " overseer · {} {}{title}{state}  ·  ^] detach ",
-                        view.id, view.name
+                    frame.render_widget(
+                        Paragraph::new(attached_bar(view, self.theme))
+                            .style(style::Style::new().bg(self.theme.panel)),
+                        bar,
                     );
-                    frame.render_widget(Paragraph::new(text).reversed(), bar);
                 }
                 None => self.draw_home(frame, body, bar),
             }
@@ -472,59 +509,320 @@ impl App {
     }
 }
 
+/// How often the working spinner advances.
+const SPIN_EVERY: Duration = Duration::from_millis(100);
+/// Wide enough for the lists plus a preview of the selected session.
+const PREVIEW_MIN_WIDTH: u16 = 130;
+
 impl App {
     fn draw_home(&self, frame: &mut ratatui::Frame, body: Rect, bar: Rect) {
+        let t = self.theme;
         let now = now_ms();
-        let queue_height = (self.queue.len().max(1) as u16 + 2)
-            .min(body.height / 2)
-            .max(3);
-        let [queue_area, sessions_area] =
-            Layout::vertical([Constraint::Length(queue_height), Constraint::Fill(1)]).areas(body);
-
-        let in_queue = self.selected < self.queue.len();
-        let queue_items: Vec<ListItem> = if self.queue.is_empty() {
-            vec![ListItem::new(Line::from(" nothing needs you").dim())]
-        } else {
-            self.queue.iter().map(|q| queue_line(q, now)).collect()
-        };
-        let mut state = ListState::default()
-            .with_selected((in_queue && !self.queue.is_empty()).then_some(self.selected));
-        frame.render_stateful_widget(
-            List::new(queue_items)
-                .block(ratatui::widgets::Block::bordered().title(" overseer · needs you "))
-                .highlight_style(Modifier::REVERSED),
-            queue_area,
-            &mut state,
+        let spin = (now / SPIN_EVERY.as_millis() as u64) as usize;
+        frame.render_widget(
+            Block::new().style(style::Style::new().bg(t.bg)),
+            frame.area(),
         );
 
-        let session_items: Vec<ListItem> =
-            self.sessions.iter().map(|s| session_line(s, now)).collect();
-        let mut state = ListState::default()
+        let [header, main] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+        frame.render_widget(
+            Paragraph::new(header_line(&self.queue, &self.sessions, t)),
+            header,
+        );
+
+        let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
+            let [lists, preview] =
+                Layout::horizontal([Constraint::Percentage(62), Constraint::Fill(1)]).areas(main);
+            (lists, Some(preview))
+        } else {
+            (main, None)
+        };
+        let queue_height = (self.queue.len().max(2) as u16 + 2)
+            .min(lists.height / 2)
+            .max(4);
+        let [queue_area, sessions_area] =
+            Layout::vertical([Constraint::Length(queue_height), Constraint::Fill(1)]).areas(lists);
+
+        let in_queue = self.selected < self.queue.len();
+        let queue_title = Line::from(vec![
+            " ● ".fg(t.needs).bold(),
+            "needs you ".fg(t.fg).bold(),
+            format!("{} ", self.queue.len()).fg(t.muted),
+        ]);
+        let queue_block = panel(queue_title, t, in_queue || self.sessions.is_empty());
+        if self.queue.is_empty() {
+            let inner = queue_block.inner(queue_area);
+            frame.render_widget(queue_block, queue_area);
+            let calm = Line::from(vec![
+                "✓ ".fg(t.done).bold(),
+                "all clear".fg(t.fg).bold(),
+                "  ·  nothing needs you".fg(t.muted),
+            ])
+            .centered();
+            let [_, mid, _] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .areas(inner);
+            frame.render_widget(Paragraph::new(calm), mid);
+        } else {
+            let rows = self.queue.iter().map(|q| queue_row(q, now, spin, t));
+            let mut state = TableState::default().with_selected(in_queue.then_some(self.selected));
+            frame.render_stateful_widget(table(rows, t).block(queue_block), queue_area, &mut state);
+        }
+
+        let sessions_title = Line::from(vec![
+            " ◆ ".fg(t.accent).bold(),
+            "sessions ".fg(t.fg).bold(),
+            format!("{} ", self.sessions.len()).fg(t.muted),
+        ]);
+        let rows = self.sessions.iter().map(|s| session_row(s, now, spin, t));
+        let mut state = TableState::default()
             .with_selected((!in_queue).then(|| self.selected - self.queue.len()));
         frame.render_stateful_widget(
-            List::new(session_items)
-                .block(ratatui::widgets::Block::bordered().title(" sessions "))
-                .highlight_style(Modifier::REVERSED),
+            table(rows, t).block(panel(sessions_title, t, !in_queue)),
             sessions_area,
             &mut state,
         );
 
-        let help = "enter attach · tab top · s/S seen · n new · x kill · q quit";
-        let mut parts = vec![counts(&self.queue, &self.sessions)];
-        if !self.status.is_empty() {
-            parts.push(self.status.clone());
+        if let Some(area) = preview {
+            self.draw_preview(frame, area);
         }
-        parts.push(help.into());
+
         frame.render_widget(
-            Paragraph::new(format!(" {} ", parts.join(" · "))).reversed(),
+            Paragraph::new(footer_line(&self.status, t)).style(style::Style::new().bg(t.panel)),
             bar,
         );
     }
+
+    /// The selected session: its full summary, then the bottom of its screen.
+    fn draw_preview(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let t = self.theme;
+        let (selected, _) = self.selection();
+        let session = selected.and_then(|id| self.sessions.iter().find(|s| s.id == id));
+        let Some(session) = session else {
+            frame.render_widget(panel(Line::from(" preview ".fg(t.muted)), t, false), area);
+            return;
+        };
+        let title = Line::from(vec![
+            " ▸ ".fg(t.accent).bold(),
+            session.name.clone().fg(t.fg).bold(),
+            format!(" #{} ", session.id).fg(t.muted),
+        ]);
+        let block = panel(title, t, false);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let status = &session.status;
+        let color = t.state(status.state);
+        let mut head = vec![Line::from(vec![
+            format!("{} {}", state_icon(status.state, 0), status.state.label())
+                .fg(color)
+                .bold(),
+            format!("  {}  ·  {}", status.agent, short_path(&session.cwd)).fg(t.muted),
+        ])];
+        if let Some(summary) = &status.summary {
+            head.push(Line::from(summary.clone().fg(t.fg)));
+        }
+        head.push(Line::from("─".repeat(inner.width as usize).fg(t.border)));
+        let head_height = head.len() as u16 + u16::from(status.summary.is_some()); // room to wrap
+        let [top, screen] =
+            Layout::vertical([Constraint::Length(head_height), Constraint::Fill(1)]).areas(inner);
+        frame.render_widget(Paragraph::new(head).wrap(Wrap { trim: true }), top);
+
+        let text = match &self.preview {
+            Some((id, text)) if *id == session.id => text.as_str(),
+            _ => "",
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let end = lines
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |i| i + 1);
+        let start = end.saturating_sub(screen.height as usize);
+        let body: Vec<Line> = lines[start..end]
+            .iter()
+            .map(|l| Line::from(l.to_string().fg(t.muted)))
+            .collect();
+        frame.render_widget(Paragraph::new(body), screen);
+    }
 }
 
-/// `2 needs input · 1 done · 3 working`
-fn counts(queue: &[QueueItem], sessions: &[SessionInfo]) -> String {
-    let mut parts = Vec::new();
+/// A rounded panel; the focused one gets the accent border.
+fn panel(title: Line<'static>, t: &Theme, focused: bool) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style::Style::new().fg(if focused { t.accent } else { t.border }))
+        .style(style::Style::new().bg(t.panel).fg(t.fg))
+        .title(title)
+        .padding(Padding::horizontal(1))
+}
+
+fn table<'a>(rows: impl IntoIterator<Item = TableRow<'a>>, t: &Theme) -> Table<'a> {
+    Table::new(
+        rows,
+        [
+            Constraint::Length(15),
+            Constraint::Length(16),
+            Constraint::Length(5),
+            Constraint::Fill(3),
+            Constraint::Fill(1),
+        ],
+    )
+    .column_spacing(1)
+    .row_highlight_style(style::Style::new().bg(t.selection))
+    .highlight_symbol(Line::from("▌".fg(t.accent)))
+    .highlight_spacing(HighlightSpacing::Always)
+}
+
+fn badge(state: AgentState, label: String, spin: usize, t: &Theme) -> Cell<'static> {
+    let color = t.state(state);
+    Cell::from(Line::from(vec![
+        format!("{} ", state_icon(state, spin)).fg(color),
+        label.fg(color).bold(),
+    ]))
+}
+
+fn name_cell(id: SessionId, name: &str, t: &Theme) -> Cell<'static> {
+    Cell::from(Line::from(vec![
+        name.to_string().fg(t.fg).bold(),
+        format!(" #{id}").fg(t.muted),
+    ]))
+}
+
+fn queue_row(q: &QueueItem, now: u64, spin: usize, t: &Theme) -> TableRow<'static> {
+    let s = &q.status;
+    TableRow::new([
+        badge(s.state, s.state.label().into(), spin, t),
+        name_cell(q.session, &q.name, t),
+        Cell::from(age(s.since_ms, now).fg(t.muted)),
+        Cell::from(s.summary.clone().unwrap_or_default().fg(t.fg)),
+        Cell::from(short_path(&q.cwd).fg(t.muted)),
+    ])
+}
+
+fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'static> {
+    let (state, label) = match s.exited {
+        None => (s.status.state, s.status.state.label().to_string()),
+        Some(Some(code)) => (AgentState::Exited, format!("exited {code}")),
+        Some(None) => (AgentState::Exited, "exited".into()),
+    };
+    let detail = match &s.status.summary {
+        Some(summary) => summary.clone().fg(t.fg),
+        None => s
+            .title
+            .clone()
+            .unwrap_or_else(|| s.command.join(" "))
+            .fg(t.muted),
+    };
+    let mut detail = vec![detail];
+    if s.status.agent != "generic" && !s.status.hooked {
+        detail.push("  no hooks yet".fg(t.interrupted).italic());
+    }
+    if s.clients > 0 {
+        detail.insert(0, "◉ ".fg(t.accent2));
+    }
+    TableRow::new([
+        badge(state, label, spin, t),
+        name_cell(s.id, &s.name, t),
+        Cell::from(age(s.status.since_ms, now).fg(t.muted)),
+        Cell::from(Line::from(detail)),
+        Cell::from(short_path(&s.cwd).fg(t.muted)),
+    ])
+}
+
+/// ` ◆ OVERSEER  agent control` on the left, colored counts on the right.
+fn header_line(queue: &[QueueItem], sessions: &[SessionInfo], t: &Theme) -> Line<'static> {
+    let mut spans = vec![
+        " ◆ OVERSEER ".fg(t.bg).bg(t.accent).bold(),
+        " agent control ".fg(t.muted),
+    ];
+    for (state, n) in counts(queue, sessions) {
+        let color = t.state(state);
+        spans.push(" ".into());
+        spans.push(format!(" {n} {} ", state.label()).fg(t.bg).bg(color).bold());
+    }
+    if spans.len() == 2 {
+        spans.push(" ✓ all quiet ".fg(t.done));
+    }
+    Line::from(spans)
+}
+
+/// The status message, then key hints as chips.
+fn footer_line(status: &str, t: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    if !status.is_empty() {
+        spans.push(format!(" {status} ").fg(t.accent2).bold());
+        spans.push("│".fg(t.border));
+    }
+    for (key, what) in [
+        ("↩", "attach"),
+        ("⇥", "top"),
+        ("s/S", "seen"),
+        ("n", "new"),
+        ("x", "kill"),
+        ("t", "theme"),
+        ("q", "quit"),
+    ] {
+        spans.push(" ".into());
+        spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
+        spans.push(format!(" {what}").fg(t.muted));
+    }
+    Line::from(spans).style(style::Style::new().bg(t.panel))
+}
+
+/// The bar under an attached session.
+fn attached_bar(view: &Attached, t: &Theme) -> Line<'static> {
+    let mut spans = vec![
+        " ◆ OVERSEER ".fg(t.bg).bg(t.accent).bold(),
+        format!(" {} ", view.name).fg(t.fg).bold(),
+        format!("#{} ", view.id).fg(t.muted),
+    ];
+    match (view.exited, &view.status) {
+        (Some(code), _) => {
+            let code = code.map(|c| format!(" {c}")).unwrap_or_default();
+            spans.push(
+                format!(" × exited{code} · any key returns ")
+                    .fg(t.blocked)
+                    .bold(),
+            );
+        }
+        (None, Some(s)) => {
+            let color = t.state(s.state);
+            spans.push(
+                format!(" {} {} ", state_icon(s.state, 0), s.state.label())
+                    .fg(color)
+                    .bold(),
+            );
+        }
+        (None, None) => {}
+    }
+    if let Some(title) = &view.title {
+        spans.push(format!(" {title} ").fg(t.muted));
+    }
+    spans.push(" ".into());
+    spans.push(" ^] ".fg(t.bg).bg(t.accent).bold());
+    spans.push(" detach ".fg(t.muted));
+    Line::from(spans).style(style::Style::new().bg(t.panel))
+}
+
+/// `~/repos/x` for paths under `$HOME`.
+fn short_path(path: &std::path::Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if path.starts_with(&home) && home.as_os_str().len() > 1 => {
+            format!("~/{}", path.strip_prefix(&home).unwrap().display())
+                .trim_end_matches('/')
+                .to_string()
+        }
+        _ => path.display().to_string(),
+    }
+}
+
+/// How many sessions are in each state worth a glance, most urgent first.
+fn counts(queue: &[QueueItem], sessions: &[SessionInfo]) -> Vec<(AgentState, usize)> {
+    let mut out = Vec::new();
     for state in [
         AgentState::NeedsInput,
         AgentState::Blocked,
@@ -534,7 +832,7 @@ fn counts(queue: &[QueueItem], sessions: &[SessionInfo]) -> String {
     ] {
         let n = queue.iter().filter(|q| q.status.state == state).count();
         if n > 0 {
-            parts.push(format!("{n} {}", state.label()));
+            out.push((state, n));
         }
     }
     let working = sessions
@@ -542,13 +840,9 @@ fn counts(queue: &[QueueItem], sessions: &[SessionInfo]) -> String {
         .filter(|s| s.exited.is_none() && s.status.state == AgentState::Working)
         .count();
     if working > 0 {
-        parts.push(format!("{working} working"));
+        out.push((AgentState::Working, working));
     }
-    if parts.is_empty() {
-        "all quiet".into()
-    } else {
-        parts.join(" · ")
-    }
+    out
 }
 
 fn now_ms() -> u64 {
@@ -567,36 +861,6 @@ fn age(since_ms: u64, now_ms: u64) -> String {
         3600..86400 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86400),
     }
-}
-
-fn state_color(state: AgentState) -> style::Color {
-    match state {
-        AgentState::NeedsInput => style::Color::Yellow,
-        AgentState::Blocked => style::Color::Red,
-        AgentState::ReviewReady => style::Color::Green,
-        AgentState::Interrupted | AgentState::Stale => style::Color::Magenta,
-        AgentState::Working => style::Color::Cyan,
-        AgentState::Idle | AgentState::Exited => style::Color::DarkGray,
-    }
-}
-
-fn queue_line(q: &QueueItem, now: u64) -> ListItem<'static> {
-    let s = &q.status;
-    let summary = s.summary.clone().unwrap_or_default();
-    ListItem::new(Line::from(vec![
-        format!(" {:<12} ", s.state.label())
-            .fg(state_color(s.state))
-            .bold(),
-        format!(
-            "{:>3} {:<12} {:>4}  ",
-            q.session,
-            q.name,
-            age(s.since_ms, now)
-        )
-        .into(),
-        summary.into(),
-        format!("  ({})", q.cwd.display()).dim(),
-    ]))
 }
 
 impl Attached {
@@ -673,36 +937,6 @@ fn to_color(c: Color) -> style::Color {
     }
 }
 
-fn session_line(s: &SessionInfo, now: u64) -> ListItem<'static> {
-    let state = match s.exited {
-        None => s.status.state.label().to_string(),
-        Some(Some(code)) => format!("exited {code}"),
-        Some(None) => "exited".to_string(),
-    };
-    let color = match s.exited {
-        None => state_color(s.status.state),
-        Some(_) => style::Color::DarkGray,
-    };
-    let hooks = if s.status.agent == "generic" || s.status.hooked {
-        ""
-    } else {
-        " (no hooks yet)"
-    };
-    let detail = s.title.clone().unwrap_or_else(|| s.command.join(" "));
-    ListItem::new(Line::from(vec![
-        format!(" {:<12} ", state).fg(color),
-        format!(
-            "{:>3} {:<12} {:>4}  {}c  {detail}{hooks}  ",
-            s.id,
-            s.name,
-            age(s.status.since_ms, now),
-            s.clients
-        )
-        .into(),
-        format!("({})", s.cwd.display()).dim(),
-    ]))
-}
-
 /// The session gets the whole terminal minus the status bar.
 pub fn session_size() -> Result<Size> {
     let (cols, rows) = ratatui::crossterm::terminal::size()?;
@@ -770,6 +1004,8 @@ enum HomeKey {
     NewShell,
     Kill,
     Refresh,
+    /// Cycle the color theme.
+    Theme,
     Quit,
 }
 
@@ -797,6 +1033,7 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
             b'n' => keys.push(HomeKey::NewShell),
             b'x' => keys.push(HomeKey::Kill),
             b'r' => keys.push(HomeKey::Refresh),
+            b't' => keys.push(HomeKey::Theme),
             b'q' | 0x03 => keys.push(HomeKey::Quit),
             _ => {}
         }
@@ -906,6 +1143,133 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.selection(), (Some(1), app.queue.get(1)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The home screen with a realistic mix of sessions, in each theme. With
+    /// `OVERSEER_SNAPSHOT_DIR` set, also writes each render's cells (symbol, fg, bg,
+    /// bold) as JSON there, for eyeballing a theme as an image.
+    #[tokio::test]
+    async fn home_screen_renders_queue_sessions_and_preview() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("overseer-tui-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        overseer_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        let now = now_ms();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let session = |id, name: &str, state, summary: Option<&str>, ago: u64, cwd: &str| {
+            let mut s = info(id);
+            s.name = name.into();
+            s.command = vec![name.into()];
+            s.cwd = format!("{home}/repos/{cwd}").into();
+            s.status = AgentStatus {
+                agent: "claude".into(),
+                state,
+                summary: summary.map(Into::into),
+                since_ms: now - ago * 1000,
+                hooked: true,
+                ..AgentStatus::default()
+            };
+            s
+        };
+        app.sessions = vec![
+            session(
+                1,
+                "api-auth",
+                AgentState::NeedsInput,
+                Some("Permission: Bash cargo test -p auth"),
+                42,
+                "api",
+            ),
+            session(2, "web-ui", AgentState::Working, None, 380, "web"),
+            session(
+                3,
+                "migrations",
+                AgentState::ReviewReady,
+                Some("Done: backfill script added · uncommitted: 3 files +120 -8"),
+                900,
+                "api",
+            ),
+            session(
+                4,
+                "infra",
+                AgentState::Blocked,
+                Some("exited with code 101"),
+                3600,
+                "infra",
+            ),
+            session(5, "docs", AgentState::Idle, None, 7200, "docs"),
+        ];
+        app.sessions[1].clients = 1;
+        app.queue = [0, 3, 2]
+            .iter()
+            .map(|&i| {
+                let s = &app.sessions[i];
+                QueueItem {
+                    session: s.id,
+                    name: s.name.clone(),
+                    cwd: s.cwd.clone(),
+                    status: s.status.clone(),
+                }
+            })
+            .collect();
+        app.preview = Some((
+            1,
+            "● Running the auth tests\n  ⎿  $ cargo test -p auth\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No".into(),
+        ));
+        for theme in theme::THEMES {
+            app.theme = theme;
+            let mut terminal = Terminal::new(TestBackend::new(160, 22)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+            for want in [
+                "OVERSEER",
+                "1 needs input",
+                "cargo test -p auth",
+                "backfill",
+                "web-ui",
+                "Do you want to proceed?",
+                "theme",
+            ] {
+                assert!(text.contains(want), "{} theme lacks {want:?}", theme.name);
+            }
+            if let Some(out) = std::env::var_os("OVERSEER_SNAPSHOT_DIR") {
+                let color = |c: style::Color| match c {
+                    style::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                    _ => String::new(),
+                };
+                let rows: Vec<Vec<serde_json::Value>> = (0..buffer.area.height)
+                    .map(|y| {
+                        (0..buffer.area.width)
+                            .map(|x| {
+                                let c = &buffer[(x, y)];
+                                serde_json::json!([
+                                    c.symbol(),
+                                    color(c.fg),
+                                    color(c.bg),
+                                    c.modifier.contains(Modifier::BOLD)
+                                ])
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let path = PathBuf::from(out).join(format!("{}.json", theme.name));
+                std::fs::write(path, serde_json::to_string(&rows).unwrap()).unwrap();
+            }
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
