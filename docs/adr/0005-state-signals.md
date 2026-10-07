@@ -16,8 +16,16 @@ The attention queue (DESIGN §5) is only as good as state detection. Verified ag
 4. **Observe-only in M1.** Hooks never return a decision. Approve/deny from the queue (a `PermissionRequest` hook waiting on the daemon, with a timeout falling back to the native dialog) comes with M3, alongside phone/web.
 5. **Screen heuristics stay**, as the fallback for pre-hook states (folder-trust prompts), agents without hooks, and the stale detector. They're tested against recorded `.raw` transcripts.
 6. **Bell and title** (already emitted by `overseer-term`) are generic weak signals for any program.
+7. **Hook contract** (from Leader's live work, `~/repos/leader/docs/findings.md` §8, §11):
+   - The hook **prints nothing**: plain stdout becomes model context on `UserPromptSubmit`/`SessionStart`.
+   - It **always exits 0**: exit 2 blocks `PreToolUse`/`UserPromptSubmit`/`Stop`.
+   - Each registration sets a small explicit `timeout`.
+   - Budget: under 50 ms per call (Leader's Python hook measured a median of 15 ms).
+   - The hook waits for the daemon's ack for at most ~25 ms.
+   - Every event carries a send timestamp, so the daemon can drop events that arrive out of order.
 
 ## Consequences
 - Codex needs a one-time setup plus trust. Until then Codex sessions run on heuristics only, and the UI should say so.
 - Hook payloads differ slightly between agents (Codex adds `turn_id` and `last_assistant_message` on `Stop`), so each adapter normalizes them into `AgentEvent`.
+- Two transitions fire no hook in Claude Code: denying a permission with Esc, and interrupting a turn with Esc. Leader verified this live. Only the screen can catch them (DESIGN §14.3 `interrupted?`).
 - If the daemon is down, the hook fails fast; that never blocks the agent, because it is observe-only.

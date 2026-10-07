@@ -108,7 +108,7 @@ score = blocking-others weight (other agents/tasks depend on it) + age + explici
 Web push for PWA; TUI bell/OS notification. Rate-limited and deduped: queue is the source of truth, notifications only mirror new top-of-queue items. Goal: pings disappear when the supervisor (phase 2) handles things.
 
 ### 5.5 herdr logic reuse
-Unknown. **Action:** audit the author's herdr plugin queue logic (location not yet identified on the Hermes host; only a third-party `hermes-herdr-auto-reconcile` plugin was found, which is a different thing). Port semantics, not code, unless license/coupling allows.
+Audited 2026-10-06: the author's plugin is **Leader** (`~/repos/leader`, Python stdlib, herdr 0.8.2, Claude Code 2.1.284–285). Its live findings (`docs/findings.md` there) are adopted as M1 inputs; see §14.3–14.4 for what was ported. Semantics are ported, not code. Leader has no batching, so §5.3 batching remains new design.
 
 ## 6. Project context layer (core differentiator)
 
@@ -165,7 +165,8 @@ Decision {
 TUI (ratatui): queue is the home screen; split into queue | session view | context pane. Keyboard-first; jump to top queue item in one key.
 
 Web/PWA: installable, push notifications, queue-first mobile layout, session drive (send input, approve, interrupt), start session in a chosen repo, decision review cards. Rendering via diffed screen stream; xterm.js (or custom canvas/WebGL renderer) for terminal view. Reference UX: the author's existing "kawaii"/Alice PWA.
-Auth: token + WebAuthn/passkey; assume exposure over Tailscale only by default; TLS and origin checks required. Never expose PTY control unauthenticated.
+**No network listener by default** (decided 2026-10-06). The daemon speaks only its unix socket, as Leader does, so it stays defensible on a managed work laptop. The web listener starts only when it's explicitly enabled in config.
+Auth: token + WebAuthn/passkey; once enabled, assume exposure over Tailscale only; TLS and origin checks required. Never expose PTY control unauthenticated.
 
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
@@ -184,7 +185,7 @@ M5 — Supervisor agent + policy engine.
 
 ## 11. Evaluation tasks for Claude Code + Opus (first pass)
 1. Teardown AoE and herdr source: state-detection approach, session persistence, API surface, what they do poorly. Produce a gap table.
-2. Audit the author's herdr queue plugin for reusable semantics (need path from author).
+2. ~~Audit the author's herdr queue plugin for reusable semantics~~ → done, see §5.5 and §14.3–14.4.
 3. Verify ACP/Claude hooks/Codex hooks capabilities and limits; recommend state-detection tier strategy per agent.
 4. Benchmark candidate VT crates for embedding, memory, and diffing; propose screen-diff wire format.
 5. Stress-test the decision schema and staleness model against agentmem/engram; decide repo-local vs data-dir storage.
@@ -196,6 +197,7 @@ M5 — Supervisor agent + policy engine.
 - ~~tmux vs owned PTY~~ → owned PTY; M0 exit criteria met ([ADR-0002](docs/adr/0002-no-tmux.md)).
 - ~~PTY-native-with-hooks vs ACP-structured~~ → PTY-native with hooks for M1 ([ADR-0005](docs/adr/0005-state-signals.md)); ACP stays an opt-in idea for the phone UX.
 - Repo-local vs daemon-local decision storage.
+- ~~Web listener default~~ → off; opt-in via config (§8).
 - Web client: TS vs Rust/WASM.
 - License (MIT vs Apache-2.0 vs dual).
 - Summarizer/extractor model strategy: local-only default vs bring-your-own API key.
@@ -287,24 +289,35 @@ trait Adapter: Send + Sync {
 - Heuristics run only after output has been quiet for ~150 ms, never per chunk, so their cost stays off the latency path.
 
 ### 14.3 State machine (per session)
-States from §5.1: `working · needs_input · blocked · review_ready · idle · stale · exited`.
+States from §5.1: `working · needs_input · blocked · review_ready · idle · stale · exited`. Each transition gets a monotonic `seq`. Hooks carry the time they were sent, and an event older than the session's last applied one is dropped, so hooks that arrive out of order can't roll the state back (Leader §2).
 
-| Event | → state |
-|---|---|
-| PromptSubmitted, ToolStarted, ToolFinished | working |
-| PermissionAsked, InputAsked, ScreenPrompt | needs_input |
-| TurnFailed | blocked |
-| TurnEnded (working tree changed since prompt) | review_ready |
-| TurnEnded (no changes), Idle, Interrupted | idle |
-| no events/output for N min (default 5) while working | stale |
-| Exited | exited (nonzero code → blocked) |
+| Event | → state | notes (Leader findings §8, §11, §14) |
+|---|---|---|
+| PromptSubmitted | working | clears summary and seen flag |
+| ToolStarted, ToolFinished (ok or failed) | working | `PostToolUse*` is the only signal that a permission was **approved**; nothing fires on approval itself |
+| PermissionAsked | needs_input | primary signal: fires ~50–90 ms after the dialog appears; summary `Permission: <tool> <command/path>` |
+| ToolStarted(`AskUserQuestion`), InputAsked (elicitation, `agent_needs_input`) | needs_input | summary = the question text |
+| Notification `permission_prompt` | needs_input | arrives ~6 s **after** PermissionAsked with a vaguer message; **keep** the earlier summary |
+| Notification `idle_prompt` | ignored | must not revive a settled session |
+| TurnFailed | blocked | summary `Turn failed: <error>` |
+| TurnEnded | review_ready | "done, unseen". Attaching (or `s`) makes it idle. Summary = most conclusion-like line of `last_assistant_message`, plus `git diff --stat` when the tree changed |
+| SessionStart (`startup`/`resume`/`clear`) | idle | `compact` is ignored (it can fire mid-turn) |
+| Subagent events (`agent_id` set) | only tool/permission/notification events count | a subagent's permission dialog blocks the same terminal; its Stop/SessionStart must not settle the parent (herdr's own integration ignores `SubagentStop` too) |
+| Screen shows the idle prompt ≥10 s while state is working, or needs_input from a permission | idle, flagged `interrupted?` | covers the two gaps where **no hook fires**: Esc-deny of a permission, and Esc-interrupt mid-turn. Codex has an `Interrupt` hook; Claude doesn't |
+| no output or events for N min (default 5) while working | stale | |
+| Exited | exited (nonzero code → blocked) | |
 
-User input forwarded to a `needs_input` session doesn't change its state by itself; the agent's next event does. "Working tree changed" means `git status --porcelain` differs from its state at `PromptSubmitted`, run off-thread.
+User input sent to a `needs_input` session doesn't change its state; the agent's next event does. Changed from the earlier draft: `review_ready` no longer requires a changed working tree, because Leader's "done-unseen" (any finished turn) is what the author uses daily, and an answer-only turn still needs reading. The diff stat is used only in the summary.
 
-### 14.4 Queue (ranking pending herdr audit)
-`QueueItem { session, state, reason, summary, since, project }`. In M1 the summary comes from the hook payload (the tool and its command, the notification message, or the last assistant message truncated), with no LLM. LLM summaries come later, on state transitions only, per §5.2.
-- **Pending:** ranking weights and batching semantics, to be set after auditing the author's herdr queue plugin (§5.5, evaluation task 2).
-- Provisional ordering until then: needs_input > blocked > review_ready > stale > idle; older first within a state; working and exited aren't queued.
+Because overseer owns the screen, the `interrupted?` check reads the session's own `VtScreen` through `Adapter::scan`. Herdr needed a separate `agent explain` call for the same check.
+
+### 14.4 Queue
+`QueueItem { session, state, reason, summary, since, seq, project }`.
+- **Ranking** (ported from Leader, extended with overseer's extra states): `needs_input` > `blocked` > `review_ready` > `interrupted?`/`stale`; oldest first within a state, then by session id. `working` and `idle` sessions are not queue items; they appear in the session list below the queue. `interrupted?` rows are always shown (Leader §14: never hide them with idle rows).
+- **Seen model:** `review_ready` stays in the queue until the user attaches to that session or marks it seen (`s` for one item, `S` for all). Marking seen is keyed by the transition's `seq`, so a newer turn brings the item back. Herdr had this built in. Overseer implements it, which is easy because the daemon sees every attach.
+- **Summaries (M1, no LLM):** taken from the hook text first (permission + command, question, conclusion line). When a session has no hooks, a screen fallback on its `VtScreen` uses the last question-like line plus the pending command, or the last assistant block with chrome stripped. Port Leader's `summarize.py` rules: rejoin wrapped lines, strip chrome, apply the conclusion regex. Its `tests/fixtures/tail_*.txt` are real Claude captures and become test cases here.
+- **Later (not M1):** an LLM summary on transition into review_ready, as in Leader M5. That means a locked-down `claude -p --tools "" --no-session-persistence --disable-slash-commands --strict-mcp-config --model haiku`, fed the last turn only after redaction, rate-limited, with the heuristic line as fallback. **Batching** has no precedent in Leader and stays new design for M3.
+- TUI keys follow Leader's overlay: `j`/`k`, `Enter` attach, `s`/`S` seen, `a` toggle idle, plus a footer with counts (`2 needs input · 1 done · 3 working`).
 
 ### 14.5 Protocol and clients
 - `ClientMsg::Hook { session, agent, payload }` comes from `overseer hook`, and `WatchQueue` subscribes a client to `ServerMsg::Queue { items }` pushes.
