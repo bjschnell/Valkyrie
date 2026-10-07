@@ -66,8 +66,8 @@ fn normalize(p: &Value) -> Option<AgentEvent> {
     })
 }
 
-/// Only the trust prompt is verified against a recording; the rest is best effort
-/// until Codex sessions are recorded (DESIGN §14.6).
+/// Verified against Codex 0.159 recordings: trust prompt, approval dialog, the
+/// auto-reviewer spinner, busy, and the composer.
 fn scan(screen: &str) -> Option<Screen> {
     let lines: Vec<&str> = screen.lines().map(str::trim).collect();
     let flat = crate::flatten(screen);
@@ -84,6 +84,9 @@ fn scan(screen: &str) -> Option<Screen> {
         return Some(Screen::Prompt {
             summary: crate::summary::truncate(q),
         });
+    }
+    if has("Reviewing approval request") {
+        return Some(Screen::Reviewing);
     }
     if lines
         .iter()
@@ -195,6 +198,30 @@ mod tests {
             scan("• Working (3s • esc to interrupt)"),
             Some(Screen::Busy)
         );
+    }
+
+    #[test]
+    fn scans_recorded_codex_screens() {
+        let fixture = |name: &str| {
+            std::fs::read_to_string(format!(
+                "{}/tests/fixtures/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            scan(&fixture("codex_approval.txt")),
+            Some(Screen::Prompt {
+                summary: "Would you like to run the following command?".into()
+            })
+        );
+        // The auto-reviewer's spinner also says "esc to interrupt".
+        assert_eq!(
+            scan(&fixture("codex_reviewing.txt")),
+            Some(Screen::Reviewing)
+        );
+        assert_eq!(scan(&fixture("codex_busy.txt")), Some(Screen::Busy));
+        assert_eq!(scan(&fixture("codex_idle.txt")), Some(Screen::Idle));
     }
 
     #[test]

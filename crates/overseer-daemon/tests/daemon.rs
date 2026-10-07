@@ -541,7 +541,9 @@ async fn hooks_from_a_different_agent_are_ignored_unless_the_session_is_plain() 
     let prompt = json!({"hook_event_name": "UserPromptSubmit"});
     client.hook(claude, "codex", 1, prompt.clone()).unwrap();
     client.hook(shell, "codex", 1, prompt.clone()).unwrap();
-    client.hook(shell, "nonsense", 2, json!({"hook_event_name": "Stop"})).unwrap();
+    client
+        .hook(shell, "nonsense", 2, json!({"hook_event_name": "Stop"}))
+        .unwrap();
     let state = |id| {
         let client = client.clone();
         async move {

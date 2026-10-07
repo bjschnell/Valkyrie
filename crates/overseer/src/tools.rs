@@ -99,7 +99,11 @@ pub fn replay(events: &Path) -> Result<Replay> {
             }
             "scan" => {
                 let verdict = adapter.scan(&screen.unwrapped_text());
-                tracker.screen(verdict, t, watch);
+                if line["quiet"] == false {
+                    tracker.glance(verdict, t, watch);
+                } else {
+                    tracker.screen(verdict, t, watch);
+                }
             }
             "attach" => {
                 watching = line["clients"].as_u64().unwrap_or(1) > 0;

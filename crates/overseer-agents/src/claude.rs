@@ -133,6 +133,30 @@ fn normalize(p: &Value) -> Option<AgentEvent> {
     })
 }
 
+/// The spinner (`✽ Drizzling… (8s · ↓ 140 tokens)`; 2.1.292 dropped "esc to
+/// interrupt" from it) or a running tool's background hint. The prompt box stays
+/// drawn under both, so without this a busy screen reads as idle.
+/// Anchored to Claude's own chrome, not any text on screen: a glyph, one word ending
+/// in `…`, then `(<n>s`; or the hint line on its own.
+fn is_busy_line(line: &str) -> bool {
+    if line.to_lowercase().contains("esc to interrupt") || line == "(ctrl+b to run in background)" {
+        return true;
+    }
+    let mut chars = line.chars();
+    let glyph = chars
+        .next()
+        .is_some_and(|c| !c.is_alphanumeric() && !c.is_whitespace() && !"⎿│❯>-(".contains(c));
+    let Some((word, rest)) = chars.as_str().trim_start().split_once("… (") else {
+        return false;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    glyph
+        && !word.is_empty()
+        && word.chars().all(char::is_alphabetic)
+        && digits > 0
+        && (rest[digits..].starts_with("s ·") || rest[digits..].starts_with("s)"))
+}
+
 fn scan(screen: &str) -> Option<Screen> {
     let lines: Vec<&str> = screen.lines().map(str::trim).collect();
     let flat = crate::flatten(screen);
@@ -160,10 +184,7 @@ fn scan(screen: &str) -> Option<Screen> {
             summary: crate::summary::truncate(&summary),
         });
     }
-    if lines
-        .iter()
-        .any(|l| l.to_lowercase().contains("esc to interrupt"))
-    {
+    if lines.iter().any(|l| is_busy_line(l)) {
         return Some(Screen::Busy);
     }
     let prompt_box = lines.iter().any(|l| match l.strip_prefix('❯') {
@@ -341,6 +362,16 @@ mod tests {
         );
         assert_eq!(scan(&fixture("claude_done_list.txt")), Some(Screen::Idle));
         assert_eq!(scan(&fixture("claude_idle_live.txt")), Some(Screen::Idle));
+        assert_eq!(scan(&fixture("claude_busy_live.txt")), Some(Screen::Busy));
+        assert!(is_busy_line("✶ Thinking… (12s · ↑ 1.2k tokens)"));
+        assert!(!is_busy_line("✻ Sautéed for 5s · done 1:21 p.m."));
+        assert!(!is_busy_line("I wrote… (see above) the file"));
+        assert!(!is_busy_line("⎿  Compiling… (3s)"));
+        assert!(!is_busy_line("Waiting… (5s timeout)"));
+        assert!(!is_busy_line("• synced… (4s ago)"));
+        assert!(!is_busy_line("Press ctrl+b to run in background, it said."));
+        assert!(is_busy_line("(ctrl+b to run in background)"));
+        assert!(is_busy_line("✢ Pondering… (3s)"));
         assert_eq!(
             scan(&fixture("claude_done_wrapped.txt")),
             Some(Screen::Idle)

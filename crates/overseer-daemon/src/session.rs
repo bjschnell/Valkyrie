@@ -35,6 +35,10 @@ const FEED_CAPACITY: usize = 1024;
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Screen heuristics run once output has been quiet this long, never per chunk.
 const SCAN_QUIET_MS: u64 = 150;
+/// ...and glance at least this often while output keeps coming: an animated spinner
+/// never goes quiet, and Codex's auto-reviewer only shows under one. Glances only
+/// drive `Tracker::glance`.
+const SCAN_EVERY_MS: u64 = 500;
 /// At most one output offset mark per this interval in the event log.
 const MARK_EVERY_MS: u64 = 250;
 
@@ -77,6 +81,7 @@ struct State {
     offset: u64,
     last_output_ms: u64,
     last_mark_ms: u64,
+    last_scan_ms: u64,
     scan_due: bool,
 }
 
@@ -161,6 +166,7 @@ impl Session {
             offset: 0,
             last_output_ms: now_ms,
             last_mark_ms: 0,
+            last_scan_ms: 0,
             scan_due: false,
         };
         state.log(
@@ -296,16 +302,31 @@ impl Session {
         }
     }
 
-    /// Periodic: screen heuristics once output is quiet, then the tracker's timers.
+    /// Periodic: screen heuristics once output is quiet (glances in between), then
+    /// the tracker's timers.
     pub fn tick(self: &Arc<Self>, now: u64) {
         let mut state = self.state.lock().unwrap();
         let mut changed = false;
-        if state.scan_due && now.saturating_sub(state.last_output_ms) >= SCAN_QUIET_MS {
-            state.scan_due = false;
+        if let Some(quiet) = scan_kind(
+            state.scan_due,
+            now,
+            state.last_output_ms,
+            state.last_scan_ms,
+        ) {
+            // Only a quiet scan settles it: the screen a burst ends on must get one.
+            state.scan_due = !quiet;
+            state.last_scan_ms = now;
             if self.adapter.name() != "generic" {
                 let verdict = self.adapter.scan(&state.screen.unwrapped_text());
-                state.log(now, "scan", json!({"screen": screen_label(&verdict)}));
-                changed |= state.tracker.screen(verdict, now, self.watching());
+                let watching = self.watching();
+                if quiet {
+                    state.log(now, "scan", json!({"screen": screen_label(&verdict)}));
+                    changed |= state.tracker.screen(verdict, now, watching);
+                } else {
+                    let label = screen_label(&verdict);
+                    state.log(now, "scan", json!({"screen": label, "quiet": false}));
+                    changed |= state.tracker.glance(verdict, now, watching);
+                }
             }
         }
         changed |= state.tracker.tick(now, self.watching());
@@ -449,10 +470,20 @@ impl Session {
     }
 }
 
+/// Whether to scan on this tick: `Some(true)` quiet scan, `Some(false)` glance.
+fn scan_kind(due: bool, now: u64, last_output_ms: u64, last_scan_ms: u64) -> Option<bool> {
+    if !due {
+        return None;
+    }
+    let quiet = now.saturating_sub(last_output_ms) >= SCAN_QUIET_MS;
+    (quiet || now.saturating_sub(last_scan_ms) >= SCAN_EVERY_MS).then_some(quiet)
+}
+
 fn screen_label(verdict: &Option<Screen>) -> Value {
     match verdict {
         None => Value::Null,
         Some(Screen::Busy) => "busy".into(),
+        Some(Screen::Reviewing) => "reviewing".into(),
         Some(Screen::Idle) => "idle".into(),
         Some(Screen::Prompt { summary }) => json!({"prompt": summary}),
     }
@@ -525,6 +556,34 @@ fn default_name(command: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_burst_ending_on_a_glance_still_gets_a_quiet_scan() {
+        // Output every 100 ms until 950 ms, then silence; ticks every 250 ms. The
+        // glance at 1_000 lands 50 ms after the last chunk.
+        let (mut due, mut last_output, mut last_scan) = (false, 0, 0);
+        let mut scans = Vec::new();
+        for now in (0..3_000u64).step_by(50) {
+            if now <= 950 && now % 100 == 50 {
+                due = true;
+                last_output = now;
+            }
+            if now % 250 == 0
+                && let Some(quiet) = super::scan_kind(due, now, last_output, last_scan)
+            {
+                due = !quiet;
+                last_scan = now;
+                scans.push((now, quiet));
+            }
+        }
+        // The tick at 1_250 is 300 ms after the last output (quiet); the glances
+        // came before it, every 500 ms while output kept coming.
+        assert_eq!(
+            scans,
+            vec![(500, false), (1_000, false), (1_250, true)],
+            "{scans:?}"
+        );
+    }
+
     #[test]
     fn shortstat() {
         let p = super::parse_shortstat;

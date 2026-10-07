@@ -30,6 +30,9 @@ pub struct Tracker {
     screen_idle_since: Option<u64>,
     /// The permission dialog has been on screen during the current `NeedsInput`.
     dialog_seen: bool,
+    /// A permission request an automatic reviewer took over: its summary, so the
+    /// request can go back to the human if the reviewer hands it on with a dialog.
+    reviewing: Option<String>,
     /// Whether the agent can miss transitions that only the screen shows.
     hook_gaps: bool,
     ended: bool,
@@ -46,6 +49,7 @@ impl Tracker {
             screen: None,
             screen_idle_since: None,
             dialog_seen: false,
+            reviewing: None,
             hook_gaps,
             ended: false,
         }
@@ -80,6 +84,11 @@ impl Tracker {
             return false;
         }
         self.last_activity_ms = now;
+        // A hand-over to the human comes after the tool's PreToolUse; anything else
+        // settles the reviewed request.
+        if !matches!(event, E::ToolStarted) {
+            self.reviewing = None;
+        }
         let state = self.status.state;
         match event {
             E::SessionStarted | E::SessionEnded | E::Interrupted => {
@@ -189,7 +198,7 @@ impl Tracker {
             return false;
         }
         if self.status.hooked {
-            return self.check_interrupted(now, watching);
+            return self.review(verdict, now, watching) | self.check_interrupted(now, watching);
         }
         // Heuristics only: before the first hook (trust prompts), or no hooks at all.
         let state = self.status.state;
@@ -202,11 +211,57 @@ impl Tracker {
                 now,
                 watching,
             ),
-            Some(Screen::Busy) => self.set(S::Working, None, None, now, watching),
+            Some(Screen::Busy | Screen::Reviewing) => {
+                self.set(S::Working, None, None, now, watching)
+            }
             Some(Screen::Idle) if state == S::Working => {
                 self.set(S::ReviewReady, None, None, now, watching)
             }
             Some(Screen::Idle) | None if screen_ask => self.set(S::Idle, None, None, now, watching),
+            _ => false,
+        }
+    }
+
+    /// A screen verdict taken while output is still coming. Only the auto-reviewer
+    /// checks use it: a busy screen can look idle mid-frame (Claude draws its prompt
+    /// box under the spinner), so idle detection and heuristics wait for quiet.
+    pub fn glance(&mut self, verdict: Option<Screen>, now: u64, watching: bool) -> bool {
+        !self.ended && self.status.hooked && self.review(verdict, now, watching)
+    }
+
+    /// Codex fires `PermissionRequest` before its automatic reviewer decides, so the
+    /// request only needs the human once the reviewer hands it over with a dialog.
+    fn review(&mut self, verdict: Option<Screen>, now: u64, watching: bool) -> bool {
+        use AgentState as S;
+        let s = &self.status;
+        match verdict {
+            Some(Screen::Reviewing)
+                if s.state == S::NeedsInput && s.ask == Some(AskKind::Permission) =>
+            {
+                let summary = s.summary.clone();
+                let changed = self.set(
+                    S::Working,
+                    None,
+                    summary.as_ref().map(|s| format!("auto-review: {s}")),
+                    now,
+                    watching,
+                );
+                self.reviewing = summary;
+                changed
+            }
+            Some(Screen::Prompt { .. }) if s.state == S::Working && self.reviewing.is_some() => {
+                let summary = self.reviewing.take();
+                let changed = self.set(
+                    S::NeedsInput,
+                    Some(AskKind::Permission),
+                    summary,
+                    now,
+                    watching,
+                );
+                // Static from here on, so it won't be rescanned.
+                self.dialog_seen = true;
+                changed
+            }
             _ => false,
         }
     }
@@ -230,12 +285,13 @@ impl Tracker {
             AgentState::NeedsInput => self.status.ask == Some(AskKind::Permission),
             _ => false,
         };
-        // Idle within the current busy state: an idle screen left over from before
-        // (e.g. the prompt was just submitted) doesn't count.
+        // Idle and silent within the current busy state: an idle screen left over
+        // from before (e.g. the prompt was just submitted) doesn't count, and neither
+        // does one that is still being redrawn (a busy screen can scan as idle).
         let idle_for = self
             .screen_idle_since
             .filter(|_| self.last_scan_ms >= self.last_output_ms)
-            .map(|t| now.saturating_sub(t.max(self.status.since_ms)));
+            .map(|t| now.saturating_sub(t.max(self.status.since_ms).max(self.last_output_ms)));
         let grace = if self.dialog_seen {
             DENY_AFTER_MS
         } else {
@@ -307,6 +363,9 @@ impl Tracker {
         s.seq += 1;
         s.seen = watching;
         self.dialog_seen = false;
+        if state != AgentState::Working {
+            self.reviewing = None;
+        }
         true
     }
 }
@@ -548,6 +607,74 @@ mod tests {
         hook(&mut t, E::PromptSubmitted, 0);
         t.screen(Some(Screen::Idle), 0, false);
         assert!(!t.tick(INTERRUPT_AFTER_MS * 2, false));
+        assert_eq!(t.status().state, S::Working);
+    }
+
+    #[test]
+    fn an_auto_reviewed_permission_only_needs_the_human_once_handed_over() {
+        let mut t = Tracker::new("codex", false, 0);
+        hook(&mut t, E::PromptSubmitted, 0);
+        let ask = E::PermissionAsked {
+            summary: "Permission: Bash touch a".into(),
+        };
+        hook(&mut t, ask.clone(), 1);
+        assert_eq!(t.status().state, S::NeedsInput);
+        assert!(t.screen(Some(Screen::Reviewing), 2, false));
+        assert_eq!(t.status().state, S::Working);
+        assert_eq!(
+            t.status().summary.as_deref(),
+            Some("auto-review: Permission: Bash touch a")
+        );
+        // Reviewer approves: the tool runs and finishes.
+        hook(&mut t, E::ToolFinished, 3);
+        let dialog = || {
+            Some(Screen::Prompt {
+                summary: "Would you like to run…?".into(),
+            })
+        };
+        assert!(!t.screen(dialog(), 4, false));
+        assert_eq!(t.status().state, S::Working);
+        // Reviewer hands the next one to the human.
+        hook(&mut t, ask, 5);
+        t.screen(Some(Screen::Reviewing), 6, false);
+        assert!(t.screen(dialog(), 7, false));
+        assert_eq!(t.status().state, S::NeedsInput);
+        assert_eq!(t.status().ask, Some(AskKind::Permission));
+        assert_eq!(
+            t.status().summary.as_deref(),
+            Some("Permission: Bash touch a")
+        );
+    }
+
+    #[test]
+    fn idle_looking_glances_under_a_spinner_never_interrupt() {
+        // Claude draws its prompt box under the spinner, so a mid-output frame scans
+        // as idle. Long turns and approved long-running tools must stay busy.
+        let mut t = tracker();
+        hook(&mut t, E::PromptSubmitted, 0);
+        let ask = E::PermissionAsked {
+            summary: "Permission: Bash sleep 30".into(),
+        };
+        hook(&mut t, ask, 1_000);
+        let dialog = Some(Screen::Prompt {
+            summary: "Do you want to proceed?".into(),
+        });
+        t.screen(dialog, 1_200, false);
+        let mut now = 1_500;
+        while now < 40_000 {
+            t.output(now);
+            t.glance(Some(Screen::Idle), now + 10, false);
+            t.tick(now + 20, false);
+            now += 500;
+        }
+        assert_eq!(t.status().state, S::NeedsInput);
+        hook(&mut t, E::ToolFinished, 40_000);
+        while now < 80_000 {
+            t.output(now);
+            t.glance(Some(Screen::Idle), now + 10, false);
+            t.tick(now + 20, false);
+            now += 500;
+        }
         assert_eq!(t.status().state, S::Working);
     }
 

@@ -258,7 +258,7 @@ Hardening from the M0 code review (all applied):
 - Each connection's output queue is bounded at 256 frames. A slow client drops its diffs and resyncs from a snapshot. The resync re-sends `Exited` too, and reattach waits for the old stream to stop.
 - Spans re-anchor after wide or combined graphemes, so width disagreements (e.g. `⚠️`) can't shift a row. Accept errors no longer kill the daemon, and `daemon.log` is 0600.
 
-## 14. M1 spec (implemented 2026-10-06; Codex live check pending)
+## 14. M1 spec (implemented 2026-10-06; Codex verified live 2026-10-07)
 
 Goal: the home screen becomes a ranked attention queue fed by accurate agent state. The M1 exit criterion is **state accuracy measured against recorded fixtures** (DESIGN §7 makes this the gate for the supervisor).
 
@@ -284,9 +284,10 @@ trait Adapter: Send + Sync {
 }
 ```
 - `claude`: `prepare` adds `--settings` with hooks for the events above. `scan` detects the folder-trust prompt and the permission dialog (as a fallback).
-- `codex`: hooks come from `~/.codex/hooks.json` (`overseer setup codex`). `scan` covers the trust prompt and approval list. The session shows "heuristics only" until the first hook event arrives.
+- `codex`: hooks come from `~/.codex/hooks.json` (`overseer setup codex`). `scan` covers the trust prompt, the approval dialog, and the auto-reviewer spinner. The session shows "heuristics only" until the first hook event arrives. Codex fires `SessionStart` lazily, just before the first `UserPromptSubmit`, and fires `Interrupt` on Esc-deny and Esc-interrupt, so it has no hook gaps.
+- **Codex auto-review** (`approvals_reviewer = "auto_review"`): `PermissionRequest` fires *before* the reviewer decides, and its payload is identical to a human-bound request. While the screen shows "Reviewing approval request" the session is `working` (summary `auto-review: Permission: …`). If the reviewer hands the request on, the approval dialog appears on screen and the session returns to `needs_input` with the original summary.
 - `generic`: no hooks. Bell → `InputAsked`, plus quiet-output detection.
-- Heuristics run only after output has been quiet for ~150 ms, never per chunk, so their cost stays off the latency path.
+- Heuristics run once output has been quiet for ~150 ms, never per chunk, so their cost stays off the latency path. While output keeps coming (an animated spinner never goes quiet) the daemon also takes a **glance** every 500 ms, logged as `scan` with `"quiet": false`. Glances only drive the auto-review checks: a mid-frame screen can look idle (Claude draws its prompt box under the spinner), so idle detection and screen-only heuristics wait for quiet scans.
 
 ### 14.3 State machine (per session)
 States from §5.1: `working · needs_input · blocked · review_ready · idle · stale · exited`. Each transition gets a monotonic `seq`. Hooks carry the time they were sent, and an event older than the session's last applied one is dropped, so hooks that arrive out of order can't roll the state back (Leader §2).
@@ -326,7 +327,7 @@ Because overseer owns the screen, the `interrupted?` check reads the session's o
 ### 14.6 Fixtures and tests
 - Every session writes `<ns>-<id>.events.jsonl` (mode 0600) next to its `.raw`. It records everything the tracker consumed, each tagged with the transcript byte offset: start (agent, size), output marks (≤4/s), hooks (slimmed payloads), bells, screen scans, attach/detach, seen, resize, exit, and every resulting state.
 - `overseer replay <events.jsonl> [--labels <labels.jsonl>]` re-feeds the transcript up to each offset and re-runs normalize + scan + tracker with the **current** code. It prints the timeline, drift from the recorded states, and time-weighted accuracy against hand labels (`{"at": <s>, "state": …}` lines; a replayed `interrupted` counts as a correct `idle`). `overseer render <raw>` prints a transcript's screen for labeling.
-- Gate: `crates/overseer/tests/fixtures/*.events.jsonl` with labels must replay at ≥95%. Unit tests cover normalize per agent, the state table, ranking and seen, and `scan` against recorded screens (Claude trust/permission/idle/done, Codex trust).
+- Gate: `crates/overseer/tests/fixtures/*.events.jsonl` with labels must replay at ≥95%. Unit tests cover normalize per agent, the state table, ranking and seen, and `scan` against recorded screens (Claude trust/permission/idle/done, Codex trust/approval/reviewing/busy/idle).
 
 #### M1 results (2026-10-06, Claude Code 2.1.292, haiku, isolated daemon)
 | Check | Result |
@@ -339,6 +340,20 @@ Because overseer owns the screen, the `interrupted?` check reads the session's o
 | Approve | PostToolUse → working → done |
 | Labeled live recording (`claude-permission-deny-approve`) | **98.1%**; the remaining 2 s is the deliberate deny grace |
 | Tests | 84 across the workspace; clippy clean; independent review (19 findings) applied |
+
+#### Codex live check (2026-10-07, Codex 0.159.2, `-s read-only -a on-request`, isolated daemon)
+| Check | Result |
+|---|---|
+| Hooks from `~/.codex/hooks.json` after `/hooks` trust | all 8 fire; the hook command is the release binary path |
+| Bash permission, reviewer = user | needs_input `Permission: Bash touch …`; approve → PostToolUse → working → done |
+| Esc-deny | `Interrupt` hook 5 ms after the key → idle (no grace needed) |
+| Bash permission, reviewer = auto_review | before the fix: a false needs_input for the whole review (1.7 s). After: needs_input until the next glance (≤500 ms; 0.26–0.34 s recorded), then working (`auto-review: …`) |
+| Labeled recordings `codex-auto-review`, `codex-approve-deny` | **97.2%**, **98.3%** (the remainder is the pre-glance flash and hook lag) |
+
+The same session found two Claude issues, both fixed and recorded (`claude-long-tool`: an auto-allowed `sleep 15`, **100%**):
+- Claude 2.1.292's spinner (`✽ Drizzling… (8s · ↓ 140 tokens)`) no longer says "esc to interrupt", so a busy screen scanned as idle. `scan` now reads the spinner and the "to run in background" hint as busy.
+- Any 150 ms lull during a long tool then counted as a fresh idle screen, and a turn over 10 s went `interrupted?`. Now `interrupted?` needs the screen idle **and silent** (no output at all) for the whole grace; an idle Claude redraws about once every 14 s.
+- The replay gate re-runs the recorded scan times, so it can't catch a change in scan *scheduling*; recordings made before 2026-10-07 have no glances. Scheduling changes need a fresh live recording.
 
 Bugs the live run found, all fixed and covered by tests:
 - Claude's prompt is `❯` + U+00A0, not a plain space.
@@ -368,10 +383,11 @@ Accepted for now (LOW):
 - The hook `connect` has no timeout (bounded by the agent's 5 s hook timeout).
 - Session ids restart with the daemon, so an orphan process could post to a reused id.
 - No screen-fallback summaries for unhooked sessions.
+- `interrupted?` needs the idle screen fully silent for the grace, so an idle screen that redraws on a timer faster than that (a ticking custom statusline) never gets flagged. Claude's own idle screen is silent today.
+- A permission handed to the Codex auto-reviewer stays tracked across the next `PreToolUse`; if the reviewer denies and an unrelated tool then shows a "Would you like to …?" line before its `PostToolUse`, it is reported as the old request.
 
 Still pending:
-- **Codex live check.** Run `overseer setup codex`, `/hooks` trust, and one turn. This needs the author, because it changes `~/.codex/hooks.json` and needs an interactive trust.
-- More labeled recordings: AskUserQuestion, subagents, long tool runs, stale.
+- More labeled recordings: AskUserQuestion, subagents, long tool runs, stale, and a Codex auto-reviewer that hands a request to the human.
 
 ### 14.7 Out of scope for M1
 Approve/deny from the queue (M3), LLM summaries, batching, push notifications, SQLite (arrives with the M2 context store).

@@ -56,6 +56,10 @@ pub enum Screen {
         summary: String,
     },
     Busy,
+    /// An automatic reviewer is deciding a permission request (Codex
+    /// `approvals_reviewer = "auto_review"`); no human is needed unless it hands the
+    /// request over with a dialog.
+    Reviewing,
     /// The agent's input prompt, ready for the next message.
     Idle,
 }
