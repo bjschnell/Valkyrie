@@ -193,9 +193,9 @@ M5 — Supervisor agent + policy engine.
 
 ## 12. Open decisions
 - ~~VT crate~~ → alacritty_terminal ([ADR-0001](docs/adr/0001-vt-engine.md)).
-- ~~tmux vs owned PTY~~ → owned PTY, pending M0 exit criteria ([ADR-0002](docs/adr/0002-no-tmux.md)).
+- ~~tmux vs owned PTY~~ → owned PTY; M0 exit criteria met ([ADR-0002](docs/adr/0002-no-tmux.md)).
+- ~~PTY-native-with-hooks vs ACP-structured~~ → PTY-native with hooks for M1 ([ADR-0005](docs/adr/0005-state-signals.md)); ACP stays an opt-in idea for the phone UX.
 - Repo-local vs daemon-local decision storage.
-- PTY-native-with-hooks vs ACP-structured as default session mode.
 - Web client: TS vs Rust/WASM.
 - License (MIT vs Apache-2.0 vs dual).
 - Summarizer/extractor model strategy: local-only default vs bring-your-own API key.
@@ -255,3 +255,64 @@ Hardening from the M0 code review (all applied):
 - The socket dir is `/tmp/overseer-<getuid>` as a fallback, and both daemon and client verify it is owned by us, mode 0700 and not a symlink.
 - Each connection's output queue is bounded at 256 frames. A slow client drops its diffs and resyncs from a snapshot. The resync re-sends `Exited` too, and reattach waits for the old stream to stop.
 - Spans re-anchor after wide or combined graphemes, so width disagreements (e.g. `⚠️`) can't shift a row. Accept errors no longer kill the daemon, and `daemon.log` is 0600.
+
+## 14. M1 spec (draft)
+
+Goal: the home screen becomes a ranked attention queue fed by accurate agent state. The M1 exit criterion is **state accuracy measured against recorded fixtures** (DESIGN §7 makes this the gate for the supervisor).
+
+Decisions: [ADR-0005 state signals](docs/adr/0005-state-signals.md): hooks first, heuristics as fallback, observe-only.
+
+### 14.1 Pipeline
+```
+hook (overseer hook <agent>) ─┐
+PTY output / bell / title ────┼─► adapter.normalize ─► AgentEvent ─► state machine ─► QueueItem
+process exit / timers ────────┘        (per agent)        (bus)        (per session)    (ranked)
+```
+- `AgentEvent` (normalized): `PromptSubmitted`, `ToolStarted{name, summary}`, `ToolFinished{name, ok}`, `PermissionAsked{tool, summary}`, `InputAsked{message}`, `TurnEnded{last_message}`, `TurnFailed{error}`, `Interrupted`, `Idle`, `ScreenPrompt{kind, text}` (heuristic), `Bell`, `Title`, `Exited{code}`.
+- Each event is appended to `sessions/<ns>-<id>.events.jsonl` next to the `.raw` transcript, so every real session becomes a replayable fixture.
+
+### 14.2 Adapters
+```rust
+trait Adapter: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn matches(&self, command: &[String]) -> bool;            // claude, codex, generic
+    fn prepare(&self, cmd: &mut Vec<String>, env: &mut Env);  // e.g. claude --settings
+    fn normalize(&self, hook: &serde_json::Value) -> Vec<AgentEvent>;
+    fn scan(&self, screen: &ScreenText) -> Option<AgentEvent>; // heuristics, run on quiet output
+}
+```
+- `claude`: `prepare` adds `--settings` with hooks for the events above. `scan` detects the folder-trust prompt and the permission dialog (as a fallback).
+- `codex`: hooks come from `~/.codex/hooks.json` (`overseer setup codex`). `scan` covers the trust prompt and approval list. The session shows "heuristics only" until the first hook event arrives.
+- `generic`: no hooks. Bell → `InputAsked`, plus quiet-output detection.
+- Heuristics run only after output has been quiet for ~150 ms, never per chunk, so their cost stays off the latency path.
+
+### 14.3 State machine (per session)
+States from §5.1: `working · needs_input · blocked · review_ready · idle · stale · exited`.
+
+| Event | → state |
+|---|---|
+| PromptSubmitted, ToolStarted, ToolFinished | working |
+| PermissionAsked, InputAsked, ScreenPrompt | needs_input |
+| TurnFailed | blocked |
+| TurnEnded (working tree changed since prompt) | review_ready |
+| TurnEnded (no changes), Idle, Interrupted | idle |
+| no events/output for N min (default 5) while working | stale |
+| Exited | exited (nonzero code → blocked) |
+
+User input forwarded to a `needs_input` session doesn't change its state by itself; the agent's next event does. "Working tree changed" means `git status --porcelain` differs from its state at `PromptSubmitted`, run off-thread.
+
+### 14.4 Queue (ranking pending herdr audit)
+`QueueItem { session, state, reason, summary, since, project }`. In M1 the summary comes from the hook payload (the tool and its command, the notification message, or the last assistant message truncated), with no LLM. LLM summaries come later, on state transitions only, per §5.2.
+- **Pending:** ranking weights and batching semantics, to be set after auditing the author's herdr queue plugin (§5.5, evaluation task 2).
+- Provisional ordering until then: needs_input > blocked > review_ready > stale > idle; older first within a state; working and exited aren't queued.
+
+### 14.5 Protocol and clients
+- `ClientMsg::Hook { session, agent, payload }` comes from `overseer hook`, and `WatchQueue` subscribes a client to `ServerMsg::Queue { items }` pushes.
+- TUI home: the queue on top, all sessions below; `Enter` attaches to the selected item and `Tab` jumps to the top item. The attached view's status bar shows the session state.
+
+### 14.6 Fixtures and tests
+- Record real Claude/Codex sessions (`.raw` + `.events.jsonl`), hand-label state per timestamp, replay through adapter + state machine, and report accuracy. This is the measurable M1 gate.
+- Unit tests: `normalize` per agent against real payloads; the state machine table above; `scan` against the trust-prompt transcripts captured in M0.
+
+### 14.7 Out of scope for M1
+Approve/deny from the queue (M3), LLM summaries, batching, push notifications, SQLite (arrives with the M2 context store).
