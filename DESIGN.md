@@ -394,6 +394,33 @@ With this, the phone does the whole loop: start an agent, answer it, see what it
   - **Keys.** `j j j` then `r` opened the third session's review.
 - **Not yet:** staging or committing from the review itself (it asks the agent instead), per-hunk comments, dictation on a real phone (Safari's recognizer in a Home Screen app is the one to check), and starting an agent with options (model, permission mode).
 
+### 8.9 Split panes (2026-10-08)
+herdr splits a tab into panes; Valkyrie had one session per tab. Now a tab can hold several, side by side or stacked.
+
+- **A pane is a session.** Splitting spawns a new session, so the queue, the web app, restore and the event log see each pane as one, with nothing new to learn. The phone lists panes as separate sessions.
+- **The daemon keeps the layout** (protocol 9), as it keeps the tab order, so every client draws the same splits and they survive closing the TUI.
+  - `layout::Pane` is a binary tree: leaves are sessions, splits have an axis (`columns` or `rows`) and `a`'s share in thousandths. A tab with one pane has no tree.
+  - `ClientMsg::Split { session, side, spec }` spawns `spec` beside `session`, half its room. The new session is ranked right after it, so a tab's panes stay together in the order.
+  - `ClientMsg::Ratio { a, b, ratio }` moves the divider of the split where `a` and `b` part. Naming two sessions, not a path, stays right while other panes come and go.
+  - `Reply::Sessions` carries `layouts` (`serde(default)`). Panes whose session left the lists are pruned when the layouts are read, and a split left with one side becomes that side.
+  - `Move` now places a whole tab: `to` counts tabs, and any of its panes names it.
+  - `ClientMsg::AttachPanes` makes one connection watch exactly these sessions, each at its size. Panes it already watched carry on without a new snapshot, so a split or a closed pane doesn't redraw the others.
+  - Stored layouts lose a pane only when the daemon drops its session (a kill, or the sweep after the exit grace), not when it leaves the lists. A reboot ends the shells before the daemon, and a pane must keep its place in its split for the restore list, just as it keeps its entry. Clients get the layouts with unlisted panes taken out.
+  - The upgrade handoff carries the layouts. The restore list keeps them too, with each pane numbered by its entry, so a reboot brings the splits back; a pane that isn't restored (a `sleep`) drops out of its split.
+- **TUI.**
+  - `view` is the focused pane: it gets the keyboard, the bar, scrollback keys and the mirrored input modes. The other panes are drawn in their areas with a one-cell `│`/`─` divider, lit in the accent color along the focused pane.
+  - **Right-click in a session** opens the pane menu at the pointer: Split right, down, left, up, Close pane. It is Valkyrie's even over Claude or Codex, which own the mouse, because otherwise a split could never start over an agent. With Ctrl or Alt held, a right click goes to a program that wants the mouse instead (vim's or htop's own menus); Shift is left alone, since most terminals keep it for their own selection. Splits start `$SHELL` in the focused pane's directory and take the keyboard.
+  - **Keys** after `Ctrl-\`: `s`/`v` split below/right (vim's way round), `S`/`V` above/left, `o`/`O` next/previous pane, `p` the pane menu.
+  - **Mouse.** A click focuses the pane under it. Dragging a divider resizes, live here and kept in the daemon on release. The wheel scrolls the pane under the pointer, focused or not, as in tmux.
+  - **The mouse is always Valkyrie's first while attached** (1002 + 1006, and 1003 while any pane asked for motion). It used to mirror a mouse program's own modes and pass raw reports through. Now each report goes to the pane it is over, moved into that pane's cells, filtered by what the program asked for (clicks, drags, motion) and encoded as it asked (SGR, UTF-8 or X10; an X10 cell past 223 can't be sent and is dropped). A pane that took a press keeps its drag and release, wherever the pointer goes. A press while a drag is still on means the release was lost outside the window: that drag ends (a divider keeps where it got to) and the press starts afresh.
+  - A tab shows its focused pane, or else the pane that needs you first. A split tab says `⊞N` before the program. Closing a tab closes every pane, asking once if any runs an agent. Closing a pane, or a shell exiting in one, gives its room to its sibling, and the pane now where it was gets the keyboard. A failed program's pane stays until closed; a key there moves to the next pane instead of going home.
+  - Focus events (1004) go to a program as its pane gains or loses the keyboard. Kitty images are placed at their pane's offset.
+- **Verified.** Unit tests cover the tree (splitting, pruning, ratios, tiny areas, the divider landing where the pointer let go) and the mouse encodings. Daemon tests split, move tabs, attach three panes at their sizes, prune on kill, and restore a split after a restart. A TUI test draws a split tab and routes clicks, drags, the pane menu and a divider drag. Live, the built `valk` in a pty against a throwaway daemon: right-click → Split right made a pane that took the keys; a click moved focus; a program in the right pane that turned on SGR mouse got `ESC[<0;4;5M` for a click at its own cell (3,4); `^\ s` split below and `exit` there handed its room and the keyboard to the pane above; dragging the divider to column 30 made the left pane 30 columns wide.
+- **Limits.**
+  - Two clients on different terminal sizes resize the same panes; the last wins, as for one pane.
+  - No zoom (one pane full-screen for a while) and no keyboard resize yet. Focus moves in layout order, not by direction.
+  - A tab's name and rename are its focused pane's.
+
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
 - Web: Rust-compiled WASM vs TypeScript (Svelte/Solid) is an open choice. Lean TS for PWA speed of iteration unless a shared protocol crate to WASM gives real wins.

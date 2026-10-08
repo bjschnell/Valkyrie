@@ -1,7 +1,7 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 8;
+export const PROTOCOL = 9;
 
 export type SessionId = number;
 export type Size = { cols: number; rows: number };

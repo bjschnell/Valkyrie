@@ -205,10 +205,42 @@ impl Client {
     }
 
     pub async fn list(&self) -> Result<Vec<SessionInfo>> {
+        self.list_tabs().await.map(|(sessions, _)| sessions)
+    }
+
+    /// The sessions, and the split layouts of tabs with more than one pane.
+    pub async fn list_tabs(&self) -> Result<(Vec<SessionInfo>, Vec<crate::Pane>)> {
         match self.request(|req| ClientMsg::List { req }).await? {
-            Reply::Sessions { sessions } => Ok(sessions),
+            Reply::Sessions { sessions, layouts } => Ok((sessions, layouts)),
             other => bail!("unexpected reply: {other:?}"),
         }
+    }
+
+    /// Starts `spec` as a new pane beside `session` (`ClientMsg::Split`).
+    pub async fn split(
+        &self,
+        session: SessionId,
+        side: crate::Side,
+        spec: SpawnSpec,
+    ) -> Result<SessionInfo> {
+        match self
+            .request(|req| ClientMsg::Split {
+                req,
+                session,
+                side,
+                spec,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(info),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn ratio(&self, a: SessionId, b: SessionId, ratio: u16) -> Result<()> {
+        self.request(|req| ClientMsg::Ratio { req, a, b, ratio })
+            .await
+            .map(drop)
     }
 
     pub async fn kill(&self, session: SessionId) -> Result<()> {
@@ -220,6 +252,13 @@ impl Client {
     pub async fn attach(&self, session: SessionId, size: Size) -> Result<()> {
         let size = Some(size);
         self.request(|req| ClientMsg::Attach { req, session, size })
+            .await
+            .map(drop)
+    }
+
+    /// Watches exactly these panes (`ClientMsg::AttachPanes`).
+    pub async fn attach_panes(&self, panes: Vec<(SessionId, Size)>) -> Result<()> {
+        self.request(|req| ClientMsg::AttachPanes { req, panes })
             .await
             .map(drop)
     }

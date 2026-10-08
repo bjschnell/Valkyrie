@@ -83,9 +83,9 @@ impl Pinger {
     }
 
     /// Takes a new queue: notes its new transitions, and drops waiting ones that no
-    /// longer hold. `viewing` is the attached session, which never pings: you're
+    /// longer hold. `viewing` is the attached tab's panes, which never ping: you're
     /// looking at it.
-    pub fn on_queue(&mut self, items: &[QueueItem], viewing: Option<SessionId>, now: Instant) {
+    pub fn on_queue(&mut self, items: &[QueueItem], viewing: &[SessionId], now: Instant) {
         let primed = std::mem::replace(&mut self.primed, true);
         // Still waiting while the session stays in the state it pinged for; a summary
         // update on the way bumps seq but changes nothing.
@@ -114,7 +114,7 @@ impl Pinger {
         }
         // A pending transition someone has looked at since is old news.
         self.pending
-            .retain(|p| Some(p.item.session) != viewing && !Self::seen(items, p));
+            .retain(|p| !viewing.contains(&p.item.session) && !Self::seen(items, p));
         self.known = items
             .iter()
             .map(|i| (i.session, (i.status.seq, i.status.state)))
@@ -134,14 +134,14 @@ impl Pinger {
 
     /// The ping for the transitions that held through `SETTLE`: one, a request before
     /// a finish, the queue's order breaking ties.
-    pub fn due(&mut self, viewing: Option<SessionId>, now: Instant) -> Option<Ping> {
+    pub fn due(&mut self, viewing: &[SessionId], now: Instant) -> Option<Ping> {
         let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
             .into_iter()
             .partition(|p| now >= p.at + SETTLE);
         self.pending = waiting;
         let best = ready
             .into_iter()
-            .filter(|p| Some(p.item.session) != viewing)
+            .filter(|p| !viewing.contains(&p.item.session))
             .reduce(|a, b| {
                 if b.kind == Kind::Request && a.kind == Kind::Done {
                     b
@@ -312,8 +312,8 @@ mod tests {
         viewing: Option<SessionId>,
         now: Instant,
     ) -> Option<Ping> {
-        p.on_queue(items, viewing, now);
-        p.due(viewing, now + SETTLE)
+        p.on_queue(items, viewing.as_slice(), now);
+        p.due(viewing.as_slice(), now + SETTLE)
     }
 
     #[test]
@@ -369,33 +369,29 @@ mod tests {
     fn a_transition_that_does_not_hold_never_pings() {
         let mut p = Pinger::default();
         let t0 = Instant::now();
-        p.on_queue(&[], None, t0);
+        p.on_queue(&[], &[], t0);
         // Codex: PermissionRequest queues it, the auto-reviewer takes it at once.
-        p.on_queue(&[item(1, AgentState::NeedsInput, 2)], None, t0);
+        p.on_queue(&[item(1, AgentState::NeedsInput, 2)], &[], t0);
         assert_eq!(p.next_due(), Some(t0 + SETTLE));
-        assert_eq!(p.due(None, t0 + SETTLE / 2), None);
-        p.on_queue(&[], None, t0 + SETTLE / 2);
-        assert_eq!(p.due(None, t0 + SETTLE * 2), None);
+        assert_eq!(p.due(&[], t0 + SETTLE / 2), None);
+        p.on_queue(&[], &[], t0 + SETTLE / 2);
+        assert_eq!(p.due(&[], t0 + SETTLE * 2), None);
         assert_eq!(p.next_due(), None);
         // A summary update while settling keeps the ping.
-        p.on_queue(&[item(2, AgentState::ReviewReady, 1)], None, t0);
-        p.on_queue(
-            &[item(2, AgentState::ReviewReady, 2)],
-            None,
-            t0 + SETTLE / 2,
-        );
-        assert_eq!(p.due(None, t0 + SETTLE).unwrap().session, 2);
+        p.on_queue(&[item(2, AgentState::ReviewReady, 1)], &[], t0);
+        p.on_queue(&[item(2, AgentState::ReviewReady, 2)], &[], t0 + SETTLE / 2);
+        assert_eq!(p.due(&[], t0 + SETTLE).unwrap().session, 2);
         // Then the reviewer hands it to the human: that one holds.
-        p.on_queue(&[item(1, AgentState::NeedsInput, 4)], None, t0 + SETTLE * 2);
-        assert_eq!(p.due(None, t0 + SETTLE * 2), None);
-        assert_eq!(p.due(None, t0 + SETTLE * 3).unwrap().session, 1);
+        p.on_queue(&[item(1, AgentState::NeedsInput, 4)], &[], t0 + SETTLE * 2);
+        assert_eq!(p.due(&[], t0 + SETTLE * 2), None);
+        assert_eq!(p.due(&[], t0 + SETTLE * 3).unwrap().session, 1);
     }
 
     #[test]
     fn the_viewed_and_seen_stay_quiet_and_requests_win() {
         let mut p = Pinger::default();
         let t0 = Instant::now();
-        p.on_queue(&[], None, t0);
+        p.on_queue(&[], &[], t0);
         assert_eq!(
             settle(&mut p, &[item(1, AgentState::NeedsInput, 1)], Some(1), t0),
             None
@@ -404,7 +400,7 @@ mod tests {
         seen.status.seen = true;
         assert_eq!(settle(&mut p, &[seen], None, t0), None);
         // Looked at while settling (attached elsewhere: the daemon marks it seen).
-        p.on_queue(&[item(7, AgentState::NeedsInput, 1)], None, t0);
+        p.on_queue(&[item(7, AgentState::NeedsInput, 1)], &[], t0);
         let mut looked = item(7, AgentState::NeedsInput, 1);
         looked.status.seen = true;
         assert_eq!(settle(&mut p, &[looked], None, t0), None);

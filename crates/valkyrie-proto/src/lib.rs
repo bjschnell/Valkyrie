@@ -7,16 +7,18 @@
 pub mod agent;
 pub mod client;
 pub mod codec;
+pub mod layout;
 pub mod screen;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
+pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 9;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -119,8 +121,31 @@ pub enum ClientMsg {
         session: SessionId,
         size: Option<Size>,
     },
+    /// Subscribe this connection to every pane of a tab (DESIGN §8.9), each taking
+    /// its size: the connection then watches exactly these. Panes it already watched
+    /// carry on without a new snapshot.
+    AttachPanes {
+        req: ReqId,
+        panes: Vec<(SessionId, Size)>,
+    },
     Detach {
         req: ReqId,
+    },
+    /// Start `spec` as a new pane on `side` of `session`, in the same tab. Replies
+    /// `Session`.
+    Split {
+        req: ReqId,
+        session: SessionId,
+        side: Side,
+        spec: SpawnSpec,
+    },
+    /// Move the divider between the panes of `a` and `b` (the split where they part):
+    /// `a`'s side gets `ratio` thousandths of the room.
+    Ratio {
+        req: ReqId,
+        a: SessionId,
+        b: SessionId,
+        ratio: u16,
     },
     /// Plain-text dump of the visible screen.
     Dump {
@@ -169,7 +194,8 @@ pub enum ClientMsg {
         session: SessionId,
         seq: u64,
     },
-    /// Move a session to place `to` in the list (the tab order every client shows).
+    /// Move a session's tab to place `to` among the tabs (the order every client
+    /// shows). Its panes move with it.
     Move {
         req: ReqId,
         session: SessionId,
@@ -249,6 +275,9 @@ pub enum Reply {
     },
     Sessions {
         sessions: Vec<SessionInfo>,
+        /// The tabs with more than one pane; every other session is a tab of its own.
+        #[serde(default)]
+        layouts: Vec<Pane>,
     },
     Text {
         text: String,

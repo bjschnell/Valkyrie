@@ -893,3 +893,133 @@ async fn a_client_that_stops_reading_holds_a_bounded_backlog_and_resyncs() {
     }
     client.kill(id).await.unwrap();
 }
+
+#[tokio::test]
+async fn splits_keep_a_tabs_panes_together() {
+    use valkyrie_proto::Side;
+    let (client, mut pushes, _dir) = start().await;
+    let a = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+    let b = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+    let c = client
+        .split(a, Side::Right, sh("sleep 30", SIZE))
+        .await
+        .unwrap()
+        .id;
+    let d = client
+        .split(c, Side::Down, sh("sleep 30", SIZE))
+        .await
+        .unwrap()
+        .id;
+    assert!(
+        client
+            .split(999, Side::Up, sh("sleep 30", SIZE))
+            .await
+            .is_err()
+    );
+    let tabs = || async {
+        let (list, layouts) = client.list_tabs().await.unwrap();
+        let order: Vec<u32> = list.iter().map(|s| s.id).collect();
+        let panes: Vec<Vec<u32>> = layouts.iter().map(|p| p.sessions()).collect();
+        (order, panes)
+    };
+    // A split pane follows the one it split, so the tab's panes stay together.
+    assert_eq!(tabs().await, (vec![a, c, d, b], vec![vec![a, c, d]]));
+
+    client.ratio(a, d, 300).await.unwrap();
+    assert!(client.ratio(a, b, 300).await.is_err(), "not split");
+    // Moves are by tab: any pane moves the whole tab.
+    client.move_session(b, 0).await.unwrap();
+    assert_eq!(tabs().await.0, [b, a, c, d]);
+    client.move_session(d, 0).await.unwrap();
+    assert_eq!(tabs().await.0, [a, c, d, b]);
+    client.move_session(b, 1).await.unwrap();
+    assert_eq!(
+        tabs().await.0,
+        [a, c, d, b],
+        "one tab, so b is already second"
+    );
+
+    // One connection watches every pane, each at its size.
+    let small = Size { cols: 20, rows: 5 };
+    client
+        .attach_panes(vec![(a, SIZE), (c, small), (d, small)])
+        .await
+        .unwrap();
+    let mut seen = std::collections::HashMap::new();
+    while seen.len() < 3 {
+        if let ServerMsg::Screen { session, update } = next_push(&mut pushes).await {
+            seen.entry(session).or_insert(update.size);
+        }
+    }
+    assert_eq!((seen[&a], seen[&c], seen[&d]), (SIZE, small, small));
+
+    // A pane that goes leaves the layout; the last one left is a plain tab.
+    client.kill(c).await.unwrap();
+    assert_eq!(tabs().await, (vec![a, d, b], vec![vec![a, d]]));
+    client.kill(d).await.unwrap();
+    assert_eq!(tabs().await, (vec![a, b], vec![]));
+    for id in [a, b] {
+        client.kill(id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn splits_come_back_after_a_restart() {
+    use valkyrie_proto::Side;
+    let (client, _pushes, dir) = start().await;
+    let shell = |name: &str| SpawnSpec {
+        command: vec!["sh".into()],
+        cwd: Some(dir.clone()),
+        name: Some(name.into()),
+        size: SIZE,
+        env: Vec::new(),
+    };
+    let a = client.spawn(shell("left")).await.unwrap().id;
+    client.spawn(shell("alone")).await.unwrap();
+    let right = client
+        .split(a, Side::Right, shell("right"))
+        .await
+        .unwrap()
+        .id;
+    let list = valkyrie_daemon::restore_path(&dir.join("state"), &dir.join("run/o.sock"));
+    let mut text = String::new();
+    for _ in 0..50 {
+        text = std::fs::read_to_string(&list).unwrap_or_default();
+        if text.contains("layouts") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(text.contains("layouts"), "{text}");
+    // A reboot ends the shells before the daemon: one that exits leaves the lists
+    // at once, but keeps its place in its split on the restore list.
+    client.input(right, b"exit\n".to_vec()).unwrap();
+    for _ in 0..50 {
+        if client.list().await.unwrap().iter().all(|s| s.id != right) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (listed, layouts) = client.list_tabs().await.unwrap();
+    assert!(listed.iter().all(|s| s.id != right) && layouts.is_empty());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let text = std::fs::read_to_string(&list).unwrap();
+    assert!(text.contains("layouts") && text.contains("right"), "{text}");
+
+    let next_list = valkyrie_daemon::restore_path(&dir.join("state"), &dir.join("run/next.sock"));
+    std::fs::write(&next_list, &text).unwrap();
+    let (next, _p) = start_in(&dir, "run/next.sock").await;
+    let (sessions, layouts) = next.list_tabs().await.unwrap();
+    let name = |id: u32| sessions.iter().find(|s| s.id == id).unwrap().name.clone();
+    let names: Vec<String> = sessions.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(names, ["left", "right", "alone"]);
+    assert_eq!(layouts.len(), 1);
+    let panes: Vec<String> = layouts[0].sessions().into_iter().map(name).collect();
+    assert_eq!(panes, ["left", "right"]);
+    for s in sessions {
+        next.kill(s.id).await.unwrap();
+    }
+    for s in client.list().await.unwrap() {
+        let _ = client.kill(s.id).await;
+    }
+}

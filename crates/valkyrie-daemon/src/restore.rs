@@ -10,12 +10,13 @@ use crate::session::RestoreEntry;
 use crate::{Registry, spawn_with};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use valkyrie_proto::{Reply, Size, SpawnSpec};
+use valkyrie_proto::{Pane, Reply, SessionId, Size, SpawnSpec};
 
 /// A program that exits stays on the list this long, so the deaths of a reboot, which
 /// the daemon may reap before it dies itself, do not empty it.
@@ -31,6 +32,9 @@ const SIZE: Size = Size {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct List {
     sessions: Vec<RestoreEntry>,
+    /// Tabs split into panes, each pane numbered by its place in `sessions`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layouts: Vec<Pane>,
 }
 
 /// Per host, so machines sharing an NFS home keep their own lists, and per socket, so
@@ -52,12 +56,11 @@ pub fn path(state_dir: &Path, socket: &Path) -> PathBuf {
     state_dir.join(format!("restore-{host}-{hash:016x}.json"))
 }
 
-fn read(path: &Path) -> Result<Vec<RestoreEntry>> {
+fn read(path: &Path) -> Result<List> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(serde_json::from_slice::<List>(&bytes)
-            .with_context(|| format!("parse {}", path.display()))?
-            .sessions),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            .with_context(|| format!("parse {}", path.display()))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(List::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
@@ -87,13 +90,43 @@ fn render(registry: &Registry) -> Option<String> {
     // Entries that failed to come back stay for the next restart to try again (a
     // `claude` missing from PATH, a cwd on a mount not up yet).
     let mut sessions: Vec<RestoreEntry> = registry.unrestored.lock().unwrap().clone();
-    sessions.extend(
-        registry
-            .all()
-            .iter()
-            .filter_map(|s| s.restore_entry(now, EXIT_GRACE_MS)),
-    );
-    serde_json::to_string_pretty(&List { sessions }).ok()
+    let mut place = HashMap::new();
+    for s in registry.all() {
+        if let Some(entry) = s.restore_entry(now, EXIT_GRACE_MS) {
+            place.insert(s.id, sessions.len() as SessionId);
+            sessions.push(entry);
+        }
+    }
+    // The stored layouts, not the listed ones: a pane whose shell a reboot just
+    // ended is still on this list, so it keeps its place in its split.
+    let layouts = registry
+        .layouts
+        .lock()
+        .unwrap()
+        .clone()
+        .into_iter()
+        .filter_map(|p| renumber(p, &place))
+        .collect();
+    serde_json::to_string_pretty(&List { sessions, layouts }).ok()
+}
+
+/// `pane` with each session swapped for its number in `to`; those without one are
+/// left out, and a tab left with one pane is no longer split.
+fn renumber(pane: Pane, to: &HashMap<SessionId, SessionId>) -> Option<Pane> {
+    let pane = pane.retain(&|id| to.contains_key(&id))?;
+    matches!(pane, Pane::Split { .. }).then(|| renumber_all(pane, to))
+}
+
+fn renumber_all(pane: Pane, to: &HashMap<SessionId, SessionId>) -> Pane {
+    match pane {
+        Pane::Leaf { session } => Pane::leaf(to[&session]),
+        Pane::Split { axis, ratio, a, b } => Pane::Split {
+            axis,
+            ratio,
+            a: Box::new(renumber_all(*a, to)),
+            b: Box::new(renumber_all(*b, to)),
+        },
+    }
 }
 
 /// Keeps the list in step with the sessions for as long as the daemon runs: checked
@@ -122,8 +155,8 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
     if std::env::var("VALK_RESTORE").is_ok_and(|v| v == "off") {
         return 0;
     }
-    let entries = match read(path) {
-        Ok(entries) => entries,
+    let list = match read(path) {
+        Ok(list) => list,
         Err(e) => {
             // Set aside rather than overwritten by the next write.
             let bad = path.with_extension("json.bad");
@@ -133,7 +166,9 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
         }
     };
     let mut restored = 0;
-    for entry in entries {
+    // Each entry's place in the list, to the session it came back as.
+    let mut ids = HashMap::new();
+    for (place, entry) in list.sessions.into_iter().enumerate() {
         let adapter = valkyrie_agents::adapter_for(&entry.command);
         let Some(command) = adapter.restore(&entry.command, entry.conversation.as_deref()) else {
             tracing::info!(name = entry.name, command = ?entry.command, "not restored");
@@ -150,6 +185,7 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
         match spawn_with(registry, spec, entry.conversation.clone()) {
             Ok(Reply::Session { info }) => {
                 tracing::info!(session = info.id, ?command, "restored");
+                ids.insert(place as SessionId, info.id);
                 restored += 1;
             }
             Ok(_) => {}
@@ -159,5 +195,12 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
             }
         }
     }
+    // Splits whose panes came back; one pane left is a plain tab.
+    let layouts: Vec<Pane> = list
+        .layouts
+        .into_iter()
+        .filter_map(|p| renumber(p, &ids))
+        .collect();
+    *registry.layouts.lock().unwrap() = layouts;
     restored
 }

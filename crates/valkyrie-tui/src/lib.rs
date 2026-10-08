@@ -5,6 +5,7 @@
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
 mod mouse;
+mod panes;
 mod ping;
 mod quiet;
 mod settings;
@@ -34,8 +35,8 @@ use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{
-    AgentState, AgentStatus, Color, CursorShape, Modes, QueueItem, Row, ScreenUpdate, ScrollAnchor,
-    ServerMsg, SessionId, SessionInfo, Size, SpawnSpec, Style,
+    AgentState, AgentStatus, Color, CursorShape, Modes, Pane, QueueItem, Row, ScreenUpdate,
+    ScrollAnchor, ServerMsg, SessionId, SessionInfo, Side, Size, SpawnSpec, Style,
 };
 
 /// Ctrl-] — detach from the attached session.
@@ -111,6 +112,20 @@ struct App {
     menu: Option<Menu>,
     /// The tab being dragged to a new place.
     tab_drag: Option<SessionId>,
+    /// The attached tab's other panes, when it is split; `view` is the focused one.
+    others: Vec<Attached>,
+    /// The attached tab's split layout (`None`: one pane).
+    layout: Option<Pane>,
+    /// Every split tab's layout, from the last session list.
+    layouts: Vec<Pane>,
+    /// The divider being dragged, and the ratio it was last dragged to.
+    divider_drag: Option<(valkyrie_proto::layout::Divider, u16)>,
+    /// The pane a button went down in: its drag and release go there too.
+    mouse_owner: Option<SessionId>,
+    /// The mouse capture written to the terminal: whether plain motion is on.
+    captured: Option<bool>,
+    /// Tests draw at this size (terminal minus the bar) instead of the terminal's.
+    fixed_size: Option<Size>,
 }
 
 struct Attached {
@@ -132,6 +147,8 @@ struct Attached {
     selecting: bool,
     /// A short message for the bar (`copied 42 chars`), and when it was set.
     notice: Option<(String, Instant)>,
+    /// The size last asked of the daemon for this pane.
+    size: Size,
 }
 
 /// A page of scrollback (`Reply::Scrollback`).
@@ -167,6 +184,7 @@ impl Attached {
             selection: None,
             selecting: false,
             notice: None,
+            size: Size { cols: 0, rows: 0 },
         }
     }
 
@@ -180,11 +198,6 @@ impl Attached {
 
     fn notice(&mut self, text: String) {
         self.notice = Some((text, Instant::now()));
-    }
-
-    /// The program gets the mouse when it asked for it; otherwise Valkyrie uses it.
-    fn ours(&self) -> bool {
-        !self.modes.wants_mouse()
     }
 }
 
@@ -211,6 +224,13 @@ impl App {
             renaming: None,
             menu: None,
             tab_drag: None,
+            others: Vec::new(),
+            layout: None,
+            layouts: Vec::new(),
+            divider_drag: None,
+            mouse_owner: None,
+            captured: None,
+            fixed_size: None,
         }
     }
 
@@ -248,13 +268,21 @@ impl App {
                         pushes = self.reconnect(terminal).await?;
                         continue;
                     };
-                    let running = self.view.as_ref().filter(|v| v.exited.is_none()).map(|v| v.id);
+                    let running: Vec<SessionId> = self
+                        .view
+                        .iter()
+                        .chain(&self.others)
+                        .filter(|v| v.exited.is_none())
+                        .map(|v| v.id)
+                        .collect();
                     let mut queue_changed = self.on_push(msg)?;
                     // Coalesce bursts into one redraw.
                     while let Ok(msg) = pushes.try_recv() {
                         queue_changed |= self.on_push(msg)?;
                     }
-                    let ended = running.filter(|_| self.view.as_ref().is_some_and(|v| v.exited.is_some()));
+                    let ended = running.into_iter().find(|&id| {
+                        self.view.iter().chain(&self.others).any(|v| v.id == id && v.exited.is_some())
+                    });
                     if let Some(id) = ended {
                         self.on_ended(id).await;
                     } else if queue_changed {
@@ -267,7 +295,12 @@ impl App {
                 _ = winch.recv() => {
                     // A font size change resizes the window too. First, so the PTY
                     // resize below carries the new pixel size in one SIGWINCH.
-                    self.report_cell(self.view.as_ref().map(|v| v.id));
+                    for id in self.pane_ids() {
+                        self.report_cell(Some(id));
+                    }
+                    if self.view.is_none() {
+                        self.report_cell(None);
+                    }
                     self.relayout();
                     terminal.backend_mut().forget();
                     terminal.autoresize()?;
@@ -317,6 +350,8 @@ impl App {
                 "reconnected to the daemon".into()
             } else {
                 self.view = None;
+                self.others.clear();
+                self.layout = None;
                 let _ = reset_terminal_modes();
                 "the daemon restarted; restorable sessions came back with new ids".into()
             };
@@ -353,12 +388,13 @@ impl App {
     }
 
     async fn refresh(&mut self) {
-        match self.client.list().await {
-            Ok(sessions) => {
+        match self.client.list_tabs().await {
+            Ok((sessions, layouts)) => {
                 let anchor = self.anchor();
                 self.sessions = sessions;
+                self.layouts = layouts;
                 self.restore(anchor);
-                if let Some(id) = self.view.as_ref().map(|v| v.id) {
+                for id in self.pane_ids() {
                     let status = self.sessions_status(id);
                     // A shell's name follows the agent in its foreground.
                     let name = self
@@ -366,13 +402,14 @@ impl App {
                         .iter()
                         .find(|s| s.id == id)
                         .map(|s| s.name.clone());
-                    if let Some(view) = &mut self.view {
-                        view.status = status;
+                    if let Some(pane) = self.pane_mut(id) {
+                        pane.status = status;
                         if let Some(name) = name {
-                            view.name = name;
+                            pane.name = name;
                         }
                     }
                 }
+                self.sync_panes().await;
             }
             Err(e) => self.status = format!("list failed: {e:#}"),
         }
@@ -398,49 +435,17 @@ impl App {
         }
     }
 
+    /// Attaches to `id`'s tab, every pane of it, with `id` focused.
     async fn attach(&mut self, id: SessionId) {
-        // A TUI running inside a session would feed its own output back to itself.
-        if std::env::var("VALK_SESSION").is_ok_and(|own| own == id.to_string()) {
-            let text = format!("session {id} is this TUI");
-            match &mut self.view {
-                Some(view) => view.notice(text),
-                None => self.status = text,
-            }
-            return;
-        }
-        let name = self
-            .sessions
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| id.to_string());
-        let status = self.sessions_status(id);
-        let size = match self.session_size() {
-            Ok(size) => size,
-            Err(e) => {
-                self.status = format!("{e:#}");
-                return;
-            }
-        };
-        // Switching from another session: its modes and images must not carry over.
-        if self.view.is_some() {
-            let _ = reset_terminal_modes();
-        }
-        // Set the view before the request so the snapshot pushed right after the reply lands in it.
-        self.view = Some(Attached::new(id, name, status));
-        // The snapshot only rewrites modes that differ from the defaults; the mouse
-        // capture has to start now.
-        let _ = write_mouse(Modes::default(), true);
-        self.report_cell(Some(id));
-        if let Err(e) = self.client.attach(id, size).await {
-            self.view = None;
-            let _ = reset_terminal_modes();
-            self.status = format!("attach {id} failed: {e:#}");
-        }
+        self.attach_tab(id).await;
     }
 
     async fn detach(&mut self) {
         self.view = None;
+        self.others.clear();
+        self.layout = None;
+        self.mouse_owner = None;
+        self.divider_drag = None;
         self.tab_cursor = None;
         self.menu = None;
         let _ = reset_terminal_modes();
@@ -457,29 +462,14 @@ impl App {
         if self.settings_cursor.is_some() {
             return self.settings_keys(&bytes);
         }
-        if let Some(view) = &self.view {
-            // A program that asked for the mouse gets the reports untouched.
-            let inputs = if view.ours() {
-                // A report cut off by the end of this read finishes in the next one.
-                if let Some(cut) = mouse::unfinished(&bytes) {
-                    self.partial = bytes.split_off(cut);
-                }
-                mouse::split(&bytes)
-            } else if let Some((main, Some(tabs))) = self.body_areas() {
-                // Except over the tab strip, which is ours either way (the whole
-                // screen while a menu is open); the session sits beside it.
-                let ours = if self.menu.is_some() {
-                    Rect::new(0, 0, u16::MAX, u16::MAX)
-                } else {
-                    tabs
-                };
-                let (rest, clicks) = mouse::route(&bytes, ours, (main.x, main.y));
-                let mut inputs = vec![Input::Bytes(rest)];
-                inputs.extend(clicks.into_iter().map(Input::Mouse));
-                inputs
-            } else {
-                vec![Input::Bytes(bytes)]
-            };
+        if self.view.is_some() {
+            // Every report is Valkyrie's first: it finds the pane under the pointer,
+            // and passes reports on to a program that asked for the mouse.
+            // A report cut off by the end of this read finishes in the next one.
+            if let Some(cut) = mouse::unfinished(&bytes) {
+                self.partial = bytes.split_off(cut);
+            }
+            let inputs = mouse::split(&bytes);
             for input in inputs {
                 match (&self.view, input) {
                     // Detached mid-read: the rest belongs to the home screen.
@@ -490,8 +480,8 @@ impl App {
                     }
                     (None, Input::Mouse(_)) => {}
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
-                    // A finished program: any key returns home, unless you are
-                    // reading its scrollback.
+                    // A finished program: any key returns home (or to the next pane),
+                    // unless you are reading its scrollback.
                     (Some(view), Input::Bytes(keys))
                         if view.exited.is_some()
                             && view.scroll.is_none()
@@ -500,7 +490,11 @@ impl App {
                             && self.menu.is_none()
                             && !keys.contains(&TABS_KEY) =>
                     {
-                        self.detach().await;
+                        if self.others.is_empty() {
+                            self.detach().await;
+                        } else {
+                            self.cycle_focus(1);
+                        }
                     }
                     (Some(_), Input::Bytes(bytes)) => self.on_keys(bytes).await,
                 }
@@ -566,10 +560,16 @@ impl App {
         }
     }
 
-    /// The attached session's place among the tabs.
+    /// The attached tab's place among the tabs.
     fn attached_index(&self) -> Option<usize> {
-        let id = self.view.as_ref()?.id;
-        self.sessions.iter().position(|s| s.id == id)
+        self.tab_of(self.view.as_ref()?.id)
+    }
+
+    /// The session tab `i` shows (see `face`).
+    fn tab_session(&self, i: usize) -> Option<&SessionInfo> {
+        let tabs = self.tabs();
+        let tab = tabs.get(i)?;
+        Some(&self.sessions[self.face(tab)])
     }
 
     /// Keys while the tab strip has the keyboard. Keys after the one that hands the
@@ -582,7 +582,7 @@ impl App {
             // A lone Esc is a key; Esc with more after it is Alt plus that key.
             let whole = key.len() == keys.len();
             keys = &keys[key.len()..];
-            let last = self.sessions.len();
+            let last = self.tabs().len();
             match key {
                 // Across a strip on top, down a column; either works for either.
                 b"h" | b"k" | b"\x1b[D" | b"\x1bOD" | b"\x1b[A" | b"\x1bOA" => {
@@ -598,7 +598,7 @@ impl App {
                 }
                 b"\r" | b"\n" => {
                     self.tab_cursor = None;
-                    match self.sessions.get(cursor).map(|s| s.id) {
+                    match self.tab_session(cursor).map(|s| s.id) {
                         Some(id) => self.switch_to(id).await,
                         None => self.new_shell(self.attached_cwd()).await,
                     }
@@ -609,7 +609,7 @@ impl App {
                     return;
                 }
                 b"H" | b"L" | b"K" | b"J" => {
-                    if let Some(id) = self.sessions.get(cursor).map(|s| s.id) {
+                    if let Some(id) = self.tab_session(cursor).map(|s| s.id) {
                         let to = if matches!(key, b"H" | b"K") {
                             cursor.saturating_sub(1)
                         } else {
@@ -620,7 +620,7 @@ impl App {
                 }
                 [d @ b'1'..=b'9'] => {
                     let i = (d - b'1') as usize;
-                    if let Some(id) = self.sessions.get(i).map(|s| s.id) {
+                    if let Some(id) = self.tab_session(i).map(|s| s.id) {
                         self.tab_cursor = None;
                         self.switch_to(id).await;
                     }
@@ -634,19 +634,40 @@ impl App {
                     self.new_shell(self.attached_cwd()).await;
                 }
                 b"r" => {
-                    if let Some(s) = self.sessions.get(cursor) {
+                    if let Some(s) = self.tab_session(cursor) {
+                        let renaming = Some((s.id, s.name.clone()));
                         self.tab_cursor = None;
-                        self.renaming = Some((s.id, s.name.clone()));
+                        self.renaming = renaming;
                         // What follows `r` in the same read is the new name.
                         return Box::pin(self.rename_keys(keys)).await;
                     }
                 }
                 b"x" => {
-                    if let Some(id) = self.sessions.get(cursor).map(|s| s.id) {
+                    if let Some(id) = self.tab_session(cursor).map(|s| s.id) {
                         self.tab_cursor = None;
                         self.open_menu(id, MENU_CLOSE);
                         return Box::pin(self.menu_keys(keys)).await;
                     }
+                }
+                // Splits of the focused pane, vim's way round: `s` below, `v` beside.
+                b"s" | b"v" | b"S" | b"V" => {
+                    self.tab_cursor = None;
+                    let side = match key {
+                        b"s" => Side::Down,
+                        b"v" => Side::Right,
+                        b"S" => Side::Up,
+                        _ => Side::Left,
+                    };
+                    self.split(side).await;
+                }
+                b"o" | b"O" => {
+                    self.tab_cursor = None;
+                    self.cycle_focus(if key == b"o" { 1 } else { -1 });
+                }
+                b"p" => {
+                    self.tab_cursor = None;
+                    self.open_focused_pane_menu();
+                    return Box::pin(self.menu_keys(keys)).await;
                 }
                 [DETACH_KEY] => {
                     self.tab_cursor = None;
@@ -738,7 +759,9 @@ impl App {
 
     /// Attaches to `id` from another session, unless it is the one already attached.
     async fn switch_to(&mut self, id: SessionId) {
-        if self.view.as_ref().is_none_or(|v| v.id != id) {
+        if self.others.iter().any(|p| p.id == id) {
+            self.focus(id);
+        } else if self.view.as_ref().is_none_or(|v| v.id != id) {
             self.attach(id).await;
         }
     }
@@ -788,7 +811,7 @@ impl App {
         match (m.kind, hit) {
             (MouseKind::Drag, Some(TabHit::Session(over))) => {
                 if let Some(id) = self.tab_drag
-                    && let Some(to) = self.sessions.iter().position(|s| s.id == over)
+                    && let Some(to) = self.tab_of(over)
                 {
                     self.move_tab(id, to).await;
                 }
@@ -800,7 +823,10 @@ impl App {
             }
             (MouseKind::Press, Some(TabHit::Session(id))) => {
                 self.tab_cursor = None;
-                self.switch_to(id).await;
+                // A click on the attached tab keeps the pane you were in.
+                if !self.pane_ids().contains(&id) {
+                    self.switch_to(id).await;
+                }
             }
             (MouseKind::Press, Some(TabHit::New)) => {
                 self.tab_cursor = None;
@@ -817,15 +843,25 @@ impl App {
     /// Moves a tab to place `to`: here at once, so a drag follows the pointer, and
     /// in the daemon, which keeps the order for every client.
     async fn move_tab(&mut self, id: SessionId, to: usize) {
-        let Some(from) = self.sessions.iter().position(|s| s.id == id) else {
+        let mut tabs = self.tabs();
+        let Some(from) = self.tab_of(id) else {
             return;
         };
-        let to = to.min(self.sessions.len() - 1);
+        let to = to.min(tabs.len() - 1);
         if from == to {
             return;
         }
-        let session = self.sessions.remove(from);
-        self.sessions.insert(to, session);
+        let tab = tabs.remove(from);
+        tabs.insert(to, tab);
+        let mut old: Vec<Option<SessionInfo>> = std::mem::take(&mut self.sessions)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.sessions = tabs
+            .iter()
+            .flatten()
+            .filter_map(|&i| old[i].take())
+            .collect();
         if self.tab_cursor.is_some() {
             self.tab_cursor = Some(to);
         }
@@ -840,13 +876,13 @@ impl App {
         let tabs =
             self.tabs_area()
                 .unwrap_or(Rect::new(0, 0, MENU_WIDTH, self.settings.tabs.rows()));
+        let index = self.tab_of(id);
         let tab = self
             .tab_layout(tabs)
             .tabs
             .iter()
-            .find(|(i, _)| self.sessions.get(*i).is_some_and(|s| s.id == id))
+            .find(|(i, _)| Some(*i) == index)
             .map_or(tabs, |&(_, r)| r);
-        let height = Menu::HEIGHT;
         let (x, y) = match self.settings.tab_side {
             TabSide::Top => (
                 tab.x.min(tabs.right().saturating_sub(MENU_WIDTH)),
@@ -855,17 +891,19 @@ impl App {
             TabSide::Left => (tabs.right(), tab.y),
             TabSide::Right => (tabs.x.saturating_sub(MENU_WIDTH), tab.y),
         };
-        let y = match self.settings.tab_side {
-            TabSide::Top => y,
-            _ => y.min(tabs.bottom().saturating_sub(height)),
-        };
-        self.menu = Some(Menu {
+        let mut menu = Menu {
+            kind: MenuKind::Tab,
             session: id,
             x,
             y,
             cursor: item,
             confirm: false,
-        });
+        };
+        // Beside a column, kept above the bar.
+        if self.settings.tab_side != TabSide::Top {
+            menu.y = y.min(tabs.bottom().saturating_sub(menu.rect().height));
+        }
+        self.menu = Some(menu);
     }
 
     /// Keys while a tab's menu is open: move, pick (`r`/`x` pick directly), Esc.
@@ -878,13 +916,18 @@ impl App {
             keys = &keys[key.len()..];
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => menu.cursor = menu.cursor.saturating_sub(1),
-                b"j" | b"\x1b[B" | b"\x1bOB" => menu.cursor = (menu.cursor + 1).min(MENU_CLOSE),
+                b"j" | b"\x1b[B" | b"\x1bOB" => {
+                    menu.cursor = (menu.cursor + 1).min(menu.items().len() - 1)
+                }
                 b"\r" | b"\n" => {
                     let item = menu.cursor;
                     self.pick(item).await;
                 }
-                b"r" => self.pick(MENU_RENAME).await,
-                b"x" | b"c" => self.pick(MENU_CLOSE).await,
+                b"r" if menu.kind == MenuKind::Tab => self.pick(MENU_RENAME).await,
+                b"x" | b"c" => {
+                    let close = menu.items().len() - 1;
+                    self.pick(close).await
+                }
                 [TABS_KEY] | b"q" => self.menu = None,
                 b"\x1b" if whole => self.menu = None,
                 _ => {}
@@ -901,7 +944,7 @@ impl App {
         match m.kind {
             MouseKind::Press if rect.contains(at) => {
                 let row = m.y.saturating_sub(rect.y + 1) as usize;
-                if row <= MENU_CLOSE && m.y > rect.y {
+                if row < menu.items().len() && m.y > rect.y {
                     self.pick(row).await;
                 }
             }
@@ -922,7 +965,11 @@ impl App {
     async fn pick(&mut self, item: usize) {
         let Some(menu) = &mut self.menu else { return };
         let id = menu.session;
-        if item == MENU_RENAME {
+        let close = item + 1 == menu.items().len();
+        if menu.kind == MenuKind::Pane && !close {
+            return self.pick_pane(id, item).await;
+        }
+        if menu.kind == MenuKind::Tab && item == MENU_RENAME {
             self.menu = None;
             let name = self
                 .sessions
@@ -932,24 +979,66 @@ impl App {
             self.renaming = Some((id, name.unwrap_or_default()));
             return;
         }
+        // Closing a tab closes every pane in it.
+        let ids = match menu.kind {
+            MenuKind::Tab => self.tab_ids(id),
+            MenuKind::Pane => vec![id],
+        };
         let agent = self
             .sessions
             .iter()
-            .find(|s| s.id == id)
-            .is_some_and(|s| s.exited.is_none() && is_agent(s));
+            .filter(|s| ids.contains(&s.id))
+            .any(|s| s.exited.is_none() && is_agent(s));
+        let Some(menu) = &mut self.menu else { return };
         if agent && !menu.confirm {
             menu.confirm = true;
-            menu.cursor = MENU_CLOSE;
+            menu.cursor = item;
             return;
         }
+        let kind = menu.kind;
         self.menu = None;
-        self.close_session(id).await;
+        match kind {
+            MenuKind::Pane => self.close_session(id).await,
+            MenuKind::Tab => self.close_tab(id).await,
+        }
+    }
+
+    /// The sessions in `id`'s tab.
+    fn tab_ids(&self, id: SessionId) -> Vec<SessionId> {
+        match self.layouts.iter().find(|p| p.contains(id)) {
+            Some(p) => p.sessions(),
+            None => vec![id],
+        }
+    }
+
+    /// Kills every pane of `id`'s tab. Closing the attached tab moves to the tab
+    /// beside it, or home when it was the last.
+    async fn close_tab(&mut self, id: SessionId) {
+        let ids = self.tab_ids(id);
+        if ids.len() == 1 {
+            return self.close_session(id).await;
+        }
+        let attached = self.pane_ids().contains(&id);
+        let next = self.beside(id);
+        for &pane in &ids {
+            if let Err(e) = self.client.kill(pane).await {
+                return self.say(format!("close failed: {e:#}"));
+            }
+        }
+        if attached {
+            match next {
+                Some(next) => self.attach(next).await,
+                None => self.detach().await,
+            }
+        }
+        self.refresh().await;
     }
 
     /// Kills a session. Closing the attached one moves to the tab beside it, or
     /// home when it was the last.
     async fn close_session(&mut self, id: SessionId) {
-        let attached = self.view.as_ref().is_some_and(|v| v.id == id);
+        // A pane of a split tab: the tab stays, and a neighbor takes the room.
+        let attached = self.pane_ids().contains(&id) && self.others.is_empty();
         let next = self.beside(id);
         if let Err(e) = self.client.kill(id).await {
             return self.say(format!("close failed: {e:#}"));
@@ -963,18 +1052,20 @@ impl App {
     /// The attached session ended. One that leaves the tabs (a shell, anything that
     /// exited 0) goes as if closed; a failure stays on screen until a key.
     async fn on_ended(&mut self, id: SessionId) {
+        // One pane of several: refreshing takes it out of the layout.
+        let alone = self.others.is_empty();
         let next = self.beside(id);
         self.refresh().await;
-        if !self.sessions.iter().any(|s| s.id == id) {
+        if alone && !self.sessions.iter().any(|s| s.id == id) {
             self.leave(id, next).await;
         }
     }
 
-    /// The tab to the right of `id`, else the one to its left.
+    /// The tab to the right of `id`'s, else the one to its left.
     fn beside(&self, id: SessionId) -> Option<SessionId> {
-        let i = self.sessions.iter().position(|s| s.id == id)?;
-        let right = self.sessions.get(i + 1);
-        let left = i.checked_sub(1).and_then(|l| self.sessions.get(l));
+        let i = self.tab_of(id)?;
+        let right = self.tab_session(i + 1);
+        let left = i.checked_sub(1).and_then(|l| self.tab_session(l));
         right.or(left).map(|s| s.id)
     }
 
@@ -1080,42 +1171,34 @@ impl App {
         }
     }
 
-    async fn on_mouse(&mut self, mut m: Mouse) {
+    async fn on_mouse(&mut self, m: Mouse) {
         if self.menu.is_some() {
             return self.menu_click(m).await;
         }
-        let areas = self.body_areas();
-        let Some(view) = &mut self.view else { return };
-        if let Some((main, Some(tabs))) = areas {
-            // A drag that strays over the strip still selects.
+        let tabs = self.tabs_area();
+        let Some(view) = &self.view else { return };
+        if let Some(tabs) = tabs {
+            // A drag that strays over the strip still selects (or moves a divider).
             let dragging =
                 self.tab_drag.is_some() && matches!(m.kind, MouseKind::Drag | MouseKind::Release);
-            if (tabs.contains(Position::new(m.x, m.y)) || dragging) && !view.selecting {
+            let busy = view.selecting || self.mouse_owner.is_some() || self.divider_drag.is_some();
+            if (tabs.contains(Position::new(m.x, m.y)) || dragging) && !busy {
                 return self.tab_click(tabs, m).await;
             }
-            // The session's own cells start past the strip.
-            m.x = m.x.saturating_sub(main.x);
-            m.y = m.y.saturating_sub(main.y);
         }
+        // Below the strip: a pane's, a divider's, or the pane menu's.
+        let Some(m) = self.pane_mouse(m).await else {
+            return;
+        };
+        let Some(view) = &mut self.view else { return };
         let bottom = view.rows.len().saturating_sub(1) as u16;
         let right = view.cols.saturating_sub(1);
         let at = (m.x.min(right), m.y.min(bottom));
         match m.kind {
-            MouseKind::WheelUp | MouseKind::WheelDown if view.modes.alt_screen => {
-                // Full-screen programs have no scrollback; like other terminals, the
-                // wheel becomes arrow keys (mode 1007).
-                if view.modes.alt_scroll {
-                    let key: &[u8] = match (m.kind == MouseKind::WheelUp, view.modes.app_cursor) {
-                        (true, true) => b"\x1bOA",
-                        (true, false) => b"\x1b[A",
-                        (false, true) => b"\x1bOB",
-                        (false, false) => b"\x1b[B",
-                    };
-                    let _ = self.client.input(view.id, key.repeat(WHEEL_LINES as usize));
-                }
+            MouseKind::WheelUp | MouseKind::WheelDown => {
+                let id = view.id;
+                self.wheel(id, m.kind).await;
             }
-            MouseKind::WheelUp => self.scroll_by(-WHEEL_LINES).await,
-            MouseKind::WheelDown => self.scroll_by(WHEEL_LINES).await,
             MouseKind::Press => {
                 view.selection = Some(Selection {
                     anchor: at,
@@ -1152,10 +1235,44 @@ impl App {
         }
     }
 
+    /// The wheel over pane `id`, whose program doesn't want the mouse: its
+    /// scrollback, or arrow keys for a full-screen program.
+    async fn wheel(&mut self, id: SessionId, kind: MouseKind) {
+        let Some(pane) = self.pane_mut(id) else {
+            return;
+        };
+        let up = kind == MouseKind::WheelUp;
+        if pane.modes.alt_screen {
+            // Full-screen programs have no scrollback; like other terminals, the
+            // wheel becomes arrow keys (mode 1007).
+            if pane.modes.alt_scroll {
+                let key: &[u8] = match (up, pane.modes.app_cursor) {
+                    (true, true) => b"\x1bOA",
+                    (true, false) => b"\x1b[A",
+                    (false, true) => b"\x1bOB",
+                    (false, false) => b"\x1b[B",
+                };
+                let _ = self.client.input(id, key.repeat(WHEEL_LINES as usize));
+            }
+            return;
+        }
+        let delta = if up { -WHEEL_LINES } else { WHEEL_LINES };
+        self.scroll_pane(id, delta).await;
+    }
+
     /// Scrolls `delta` lines (negative is up, into history). Scrolling down past the
     /// live screen returns to it.
     async fn scroll_by(&mut self, delta: i64) {
-        let Some(view) = &mut self.view else { return };
+        if let Some(id) = self.view.as_ref().map(|v| v.id) {
+            self.scroll_pane(id, delta).await;
+        }
+    }
+
+    /// `scroll_by` for any pane on screen.
+    async fn scroll_pane(&mut self, id: SessionId, delta: i64) {
+        let Some(view) = self.pane_mut(id) else {
+            return;
+        };
         let anchor = match &view.scroll {
             None if delta >= 0 => return,
             None => ScrollAnchor::Up((-delta).min(u32::MAX as i64) as u32),
@@ -1177,7 +1294,7 @@ impl App {
 
     async fn fetch_scroll(&mut self, id: SessionId, anchor: ScrollAnchor) {
         let result = self.client.scrollback(id, anchor).await;
-        let Some(view) = self.view.as_mut().filter(|v| v.id == id) else {
+        let Some(view) = self.pane_mut(id) else {
             return;
         };
         match result {
@@ -1318,70 +1435,73 @@ impl App {
     /// Returns whether the queue changed.
     fn on_push(&mut self, msg: ServerMsg) -> Result<bool> {
         if let ServerMsg::Queue { items } = msg {
-            let viewing = self.view.as_ref().map(|v| v.id);
-            self.pinger.on_queue(&items, viewing, Instant::now());
+            let viewing = self.pane_ids();
+            self.pinger.on_queue(&items, &viewing, Instant::now());
             let anchor = self.anchor();
             self.queue = items;
             self.restore(anchor);
             return Ok(true);
         }
-        // The session is drawn beside the tab strip.
-        let origin = self
-            .body_areas()
-            .map_or((0, 0), |(main, _)| (main.x, main.y));
-        let Some(view) = &mut self.view else {
+        let session = match &msg {
+            ServerMsg::Screen { session, .. }
+            | ServerMsg::Graphics { session, .. }
+            | ServerMsg::Clipboard { session, .. }
+            | ServerMsg::Exited { session, .. } => *session,
+            _ => return Ok(false),
+        };
+        // Each pane sits at its place below the tab strip.
+        let origin = matches!(msg, ServerMsg::Graphics { .. })
+            .then(|| self.main_area())
+            .flatten()
+            .map(|main| self.pane_layout(main).0)
+            .and_then(|panes| panes.into_iter().find(|p| p.0 == session))
+            .map_or((0, 0), |(_, r)| (r.x, r.y));
+        let focused = self.view.as_ref().is_some_and(|v| v.id == session);
+        let Some(view) = self.pane_mut(session) else {
             return Ok(false);
         };
+        let mut mouse_changed = false;
         match msg {
-            ServerMsg::Screen { session, update } if session == view.id => {
+            ServerMsg::Screen { update, .. } => {
                 let before = (view.modes, view.shape);
                 view.apply(update);
-                if before != (view.modes, view.shape) {
+                if focused && before != (view.modes, view.shape) {
                     write_modes(view.modes, Some(view.shape))?;
                 }
-                // Rewriting the mouse modes mid-drag can lose the drag, so only on change.
-                if mouse::modes(before.0) != mouse::modes(view.modes) {
-                    write_mouse(view.modes, true)?;
-                }
+                mouse_changed = mouse::modes(before.0) != mouse::modes(view.modes);
             }
-            ServerMsg::Graphics {
-                session,
-                x,
-                y,
-                data,
-            } if session == view.id => {
+            ServerMsg::Graphics { x, y, data, .. } => {
                 // At the cell the program's cursor was on, then the cursor back where
                 // ratatui left it. Unicode placeholders (yazi, `kitten icat`) are
                 // ordinary cells on the screen; this only delivers the image data.
                 let mut out = std::io::stdout();
-                let (left, top) = origin;
-                write!(
-                    out,
-                    "\x1b7\x1b[{};{}H{data}\x1b8",
-                    y + 1 + top,
-                    x + 1 + left
-                )?;
+                let (col, row) = (x + 1 + origin.0, y + 1 + origin.1);
+                write!(out, "\x1b7\x1b[{row};{col}H{data}\x1b8")?;
                 out.flush()?;
             }
-            ServerMsg::Clipboard { session, text } if session == view.id => {
+            ServerMsg::Clipboard { text, .. } => {
                 let n = text.chars().count();
-                match mouse::copy_to_clipboard(&text) {
-                    Ok(()) => view.notice(format!("{} copied {n} chars", view.name)),
-                    Err(e) => view.notice(format!("copy failed: {e}")),
-                }
+                let name = view.name.clone();
+                let text = match mouse::copy_to_clipboard(&text) {
+                    Ok(()) => format!("{name} copied {n} chars"),
+                    Err(e) => format!("copy failed: {e}"),
+                };
+                self.say(text);
             }
-            ServerMsg::Exited { session, code } if session == view.id => {
+            ServerMsg::Exited { code, .. } => {
                 view.exited = Some(code);
                 // A program that died with the mouse on: take it back, so a wheel or
-                // a motion report scrolls its last screen instead of leaving it.
-                if view.modes.wants_mouse() {
-                    view.modes.mouse_click = false;
-                    view.modes.mouse_drag = false;
-                    view.modes.mouse_motion = false;
-                    write_mouse(view.modes, true)?;
-                }
+                // a click scrolls or selects its last screen instead.
+                mouse_changed = view.modes.wants_mouse();
+                view.modes.mouse_click = false;
+                view.modes.mouse_drag = false;
+                view.modes.mouse_motion = false;
             }
             _ => {}
+        }
+        // Rewriting the mouse modes mid-drag can lose the drag, so only on change.
+        if mouse_changed {
+            self.update_capture();
         }
         Ok(false)
     }
@@ -1408,20 +1528,11 @@ impl App {
             match &self.view {
                 Some(view) => {
                     let (main, tabs) = self.split_body(body);
-                    render_rows(view.shown(), main, frame.buffer_mut());
-                    if let Some(sel) = &view.selection {
-                        highlight(sel, main, frame.buffer_mut());
-                    }
-                    if let Some((x, y)) = view.cursor.filter(|_| view.scroll.is_none())
-                        && x < main.width
-                        && y < main.height
-                        && self.tab_cursor.is_none()
+                    let cursor = self.tab_cursor.is_none()
                         && self.renaming.is_none()
                         && self.menu.is_none()
-                        && self.settings_cursor.is_none()
-                    {
-                        frame.set_cursor_position(Position::new(main.x + x, main.y + y));
-                    }
+                        && self.settings_cursor.is_none();
+                    self.draw_panes(frame, main, cursor);
                     if let Some(tabs) = tabs {
                         self.draw_tabs(frame, tabs);
                     }
@@ -1471,8 +1582,8 @@ impl App {
     }
 
     fn fire_pings(&mut self) {
-        let viewing = self.view.as_ref().map(|v| v.id);
-        let Some(ping) = self.pinger.due(viewing, Instant::now()) else {
+        let viewing = self.pane_ids();
+        let Some(ping) = self.pinger.due(&viewing, Instant::now()) else {
             return;
         };
         if ping.sound && self.settings.sound {
@@ -1675,9 +1786,10 @@ const HOME_WIDTH: u16 = 9;
 /// Longest name the rename prompt takes.
 const NAME_MAX: usize = 40;
 
-/// A tab's menu: Rename, Close.
+/// A tab's menu (Rename, Close), or a pane's (the splits, Close pane).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Menu {
+    kind: MenuKind,
     session: SessionId,
     /// Its top-left corner, under the tab.
     x: u16,
@@ -1687,16 +1799,36 @@ struct Menu {
     confirm: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuKind {
+    /// Opened on a tab: the whole tab.
+    Tab,
+    /// Opened on a pane, with a right click on it.
+    Pane,
+}
+
 const MENU_RENAME: usize = 0;
 const MENU_CLOSE: usize = 1;
 const MENU_WIDTH: u16 = 20;
 
 impl Menu {
-    /// Two items inside a border.
-    const HEIGHT: u16 = 4;
+    /// The items, Close always last.
+    fn items(&self) -> &'static [&'static str] {
+        match self.kind {
+            MenuKind::Tab => &["Rename", "Close"],
+            MenuKind::Pane => &[
+                "Split right",
+                "Split down",
+                "Split left",
+                "Split up",
+                "Close pane",
+            ],
+        }
+    }
 
+    /// The items inside a border.
     fn rect(&self) -> Rect {
-        Rect::new(self.x, self.y, MENU_WIDTH, Self::HEIGHT)
+        Rect::new(self.x, self.y, MENU_WIDTH, self.items().len() as u16 + 2)
     }
 }
 
@@ -1743,7 +1875,7 @@ impl App {
 
     /// The attached session's area and, when shown, the tab strip's, on screen now.
     fn body_areas(&self) -> Option<(Rect, Option<Rect>)> {
-        let full = session_size().ok()?;
+        let full = self.screen().ok()?;
         Some(self.split_body(Rect::new(0, 0, full.cols, full.rows)))
     }
 
@@ -1754,7 +1886,7 @@ impl App {
 
     /// The terminal minus the bar and, when shown, the tab strip.
     fn session_size(&self) -> Result<Size> {
-        let full = session_size()?;
+        let full = self.screen()?;
         let (main, _) = self.split_body(Rect::new(0, 0, full.cols, full.rows));
         Ok(Size {
             cols: main.width.max(1),
@@ -1762,13 +1894,14 @@ impl App {
         })
     }
 
+    /// The terminal minus the bar.
+    fn screen(&self) -> Result<Size> {
+        self.fixed_size.map_or_else(session_size, Ok)
+    }
+
     /// Tells the attached session its size, after the window changed.
-    fn relayout(&self) {
-        if let Some(view) = &self.view
-            && let Ok(size) = self.session_size()
-        {
-            let _ = self.client.resize(view.id, size);
-        }
+    fn relayout(&mut self) {
+        self.resize_panes();
     }
 
     /// Tabs keep the order sessions were made in, so each stays where you left it.
@@ -1786,7 +1919,11 @@ impl App {
             strip.width.saturating_sub(home.width),
             strip.height,
         );
-        let widths: Vec<u16> = self.sessions.iter().map(tab_width).collect();
+        let widths: Vec<u16> = self
+            .tabs()
+            .iter()
+            .map(|tab| tab_width(&self.sessions[self.face(tab)], tab.len()))
+            .collect();
         let focus = self
             .tab_cursor
             .filter(|&i| i < widths.len())
@@ -1829,7 +1966,7 @@ impl App {
         let row = |y: u16, height: u16| Rect::new(x, y, width, height).intersection(strip);
         let home = row(strip.y, 2);
         let first = home.bottom() + 1;
-        let n = self.sessions.len();
+        let n = self.tabs().len();
         let focus = self
             .tab_cursor
             .filter(|&i| i < n)
@@ -1875,7 +2012,7 @@ impl App {
             return Some(TabHit::New);
         }
         let (i, _) = layout.tabs.iter().find(|(_, r)| r.contains(at))?;
-        Some(TabHit::Session(self.sessions[*i].id))
+        Some(TabHit::Session(self.tab_session(*i)?.id))
     }
 
     /// One tab per session: its name, then what runs in it and its state.
@@ -1924,10 +2061,12 @@ impl App {
         let layout = self.tab_layout(area);
         // Every clickable thing is a card on the darker strip; the cursor's is lit.
         let lit = style::Style::new().bg(t.accent).fg(t.bg);
-        let attached = self.view.as_ref().map(|v| v.id);
+        let attached = self.attached_index();
+        let tabs = self.tabs();
         for &(i, rect) in &layout.tabs {
-            let s = &self.sessions[i];
-            let here = Some(s.id) == attached;
+            let tab = &tabs[i];
+            let s = &self.sessions[self.face(tab)];
+            let here = Some(i) == attached;
             let cursor = self.tab_cursor == Some(i);
             let (state, label) = match s.exited {
                 None => (s.status.state, s.status.state.label()),
@@ -1935,6 +2074,12 @@ impl App {
             };
             let color = t.state(state);
             let queued = self.queue.iter().any(|q| q.session == s.id);
+            // A split tab says how many panes it has.
+            let panes = if tab.len() > 1 {
+                format!("⊞{} ", tab.len())
+            } else {
+                String::new()
+            };
             let bg = if here { t.selection } else { t.card };
             let width = rect.width as usize;
             let mark = if here { "▌" } else { " " };
@@ -1962,7 +2107,7 @@ impl App {
             };
             let mut bottom = vec![mark.fg(t.accent).bold()];
             bottom.extend(detail_spans(
-                s,
+                &format!("{panes}{}", program(s)),
                 label,
                 state_icon(state, spin),
                 color,
@@ -2006,7 +2151,7 @@ impl App {
         let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), "new".fg(t.fg)]))
             .style(style::Style::new().bg(t.card));
         frame.render_widget(plus, layout.plus);
-        if self.tab_cursor == Some(self.sessions.len()) {
+        if self.tab_cursor == Some(tabs.len()) {
             frame.buffer_mut().set_style(layout.plus, lit);
         }
     }
@@ -2095,10 +2240,18 @@ impl App {
                 .buffer_mut()
                 .set_style(rect, style::Style::new().bg(t.selection));
         };
-        let attached = self.view.as_ref().map(|v| v.id);
+        let attached = self.attached_index();
+        let tabs = self.tabs();
         for &(i, rect) in &layout.tabs {
-            let s = &self.sessions[i];
-            let here = Some(s.id) == attached;
+            let tab = &tabs[i];
+            let s = &self.sessions[self.face(tab)];
+            let here = Some(i) == attached;
+            // A split tab says how many panes it has.
+            let panes = if tab.len() > 1 {
+                format!("⊞{} ", tab.len())
+            } else {
+                String::new()
+            };
             let (state, label) = match s.exited {
                 None => (s.status.state, s.status.state.label()),
                 Some(_) => (AgentState::Exited, "exited"),
@@ -2135,7 +2288,7 @@ impl App {
             };
             let mut bottom = vec![Span::raw(" ")];
             bottom.extend(detail_spans(
-                s,
+                &format!("{panes}{}", program(s)),
                 label,
                 state_icon(state, spin),
                 color,
@@ -2207,7 +2360,7 @@ impl App {
             Paragraph::new(Line::from(vec![" + ".fg(t.accent), "new".fg(t.muted)])),
             layout.plus.intersection(text),
         );
-        if self.tab_cursor == Some(self.sessions.len()) {
+        if self.tab_cursor == Some(tabs.len()) {
             lift(frame, layout.plus);
             underline(frame, layout.plus, t.accent2);
         }
@@ -2224,13 +2377,17 @@ impl App {
             .find(|s| s.id == menu.session)
             .map(program)
             .unwrap_or_default();
+        let labels = menu.items();
+        let last = labels.len() - 1;
         let close = if menu.confirm {
             format!("Close {program}? ↩")
         } else {
-            "Close".into()
+            labels[last].into()
         };
-        let items = [("Rename".to_string(), t.fg), (close, t.blocked)]
-            .into_iter()
+        let items = labels[..last]
+            .iter()
+            .map(|l| (l.to_string(), t.fg))
+            .chain([(close, t.blocked)])
             .enumerate()
             .map(|(i, (label, color))| {
                 let line = Line::from(format!(" {label}").fg(color));
@@ -2341,24 +2498,29 @@ fn window(n: usize, focus: usize, fits: impl Fn(usize, usize) -> bool) -> (usize
 }
 
 /// A tab wide enough for its name and its program line, within bounds.
-fn tab_width(s: &SessionInfo) -> u16 {
-    // Mark and number before the name; mark, " · ", icon and state after the program.
+fn tab_width(s: &SessionInfo, panes: usize) -> u16 {
+    // Mark and number before the name; mark, " · ", icon and state after the program,
+    // and `⊞2 ` before it on a split tab.
     let name = 3 + s.name.width();
-    let detail = 1 + program(s).width() + 5 + s.status.state.label().width();
+    let split = if panes > 1 {
+        2 + panes.to_string().len()
+    } else {
+        0
+    };
+    let detail = 1 + split + program(s).width() + 5 + s.status.state.label().width();
     (name.max(detail) as u16 + 1).clamp(TAB_MIN, TAB_MAX)
 }
 
 /// A tab's second line, `claude · ⠋ working` in `width`: the program muted, the
 /// icon and state in the state's color.
 fn detail_spans(
-    s: &SessionInfo,
+    program: &str,
     label: &str,
     icon: &str,
     color: style::Color,
     width: usize,
     t: &Theme,
 ) -> Vec<Span<'static>> {
-    let program = program(s);
     let detail = fit(&format!("{program} · {icon} {label}"), width);
     let split = program.len().min(detail.len());
     vec![
@@ -2595,6 +2757,8 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
             ("0", "home"),
             ("⇥", "next ●"),
             ("n", "new"),
+            ("s/v", "split"),
+            ("o", "pane"),
             ("r", "rename"),
             ("x", "close"),
             (",", "settings"),
@@ -2796,26 +2960,11 @@ fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     Ok(())
 }
 
-/// The mouse: the program's if it asked for it, else Valkyrie's (scrollback,
-/// selection) while `attached`; on the home screen, nobody's.
-fn write_mouse(m: Modes, attached: bool) -> Result<()> {
+/// The mouse off: on the home screen it is nobody's. While attached it is always
+/// Valkyrie's first (`App::update_capture`).
+fn release_mouse() -> Result<()> {
     let mut out = std::io::stdout();
     write!(out, "{}", mouse::CAPTURE_OFF)?;
-    if attached && m.wants_mouse() {
-        for (on, mode) in [
-            (m.mouse_click, 1000),
-            (m.mouse_drag, 1002),
-            (m.mouse_motion, 1003),
-            (m.mouse_sgr, 1006),
-            (m.mouse_utf8, 1005),
-        ] {
-            if on {
-                write!(out, "\x1b[?{mode}h")?;
-            }
-        }
-    } else if attached {
-        write!(out, "{}", mouse::CAPTURE_ON)?;
-    }
     out.flush()?;
     Ok(())
 }
@@ -2823,7 +2972,7 @@ fn write_mouse(m: Modes, attached: bool) -> Result<()> {
 /// Back to what a plain shell expects: no mirrored input modes, the user's cursor shape.
 fn reset_terminal_modes() -> Result<()> {
     write_modes(Modes::default(), None)?;
-    write_mouse(Modes::default(), false)?;
+    release_mouse()?;
     // The session's images must not stay over the home screen (or the shell).
     write!(std::io::stdout(), "{CLEAR_IMAGES}")?;
     execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape)?;
@@ -3327,11 +3476,7 @@ mod tests {
         app.on_keys(b"\x1b".to_vec()).await;
         assert_eq!(app.renaming, None);
         // A right click on a tab starts the same prompt.
-        let right = Mouse {
-            kind: MouseKind::RightPress,
-            x: third.x + 1,
-            y: 0,
-        };
+        let right = Mouse::at(MouseKind::RightPress, third.x + 1, 0);
         // A right click opens the tab's menu; Rename is first.
         app.tab_click(tabs, right).await;
         let menu = app.menu.expect("menu open");
@@ -3341,12 +3486,8 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains(" Close")));
         // Clicking Rename starts the prompt.
         let rect = menu.rect();
-        app.on_mouse(Mouse {
-            kind: MouseKind::Press,
-            x: rect.x + 3,
-            y: rect.y + 1,
-        })
-        .await;
+        app.on_mouse(Mouse::at(MouseKind::Press, rect.x + 3, rect.y + 1))
+            .await;
         assert_eq!(app.menu, None);
         assert_eq!(app.renaming, Some((3, "proj3".into())));
         app.on_keys(b"\x1b".to_vec()).await;
@@ -3368,12 +3509,7 @@ mod tests {
         assert_eq!(app.menu, None);
         // A click outside closes the menu without doing anything.
         app.tab_click(tabs, right).await;
-        app.on_mouse(Mouse {
-            kind: MouseKind::Press,
-            x: 100,
-            y: 15,
-        })
-        .await;
+        app.on_mouse(Mouse::at(MouseKind::Press, 100, 15)).await;
         assert_eq!((app.menu, app.renaming.is_none()), (None, true));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3671,6 +3807,169 @@ mod tests {
         for (_, r) in &layout.tabs {
             assert!(r.right() <= layout.plus.x, "tabs overlap the +");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A tab split in two: one tab on the strip, each pane drawn in its own area
+    /// with a divider between, and the mouse goes to the pane under it.
+    #[tokio::test]
+    async fn split_tab_draws_its_panes_and_routes_the_mouse() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        // Not whatever this machine's settings.toml says: the two-row cards.
+        app.settings = Settings::default();
+        app.settings.tabs = TabStyle::Cards;
+        app.fixed_size = Some(Size { cols: 81, rows: 23 });
+        app.sessions = (1..=3)
+            .map(|id| {
+                let mut s = info(id);
+                s.name = format!("proj{id}");
+                s.command = vec!["/usr/bin/fish".into()];
+                s
+            })
+            .collect();
+        let mut layout = Pane::leaf(1);
+        layout.split(1, 2, Side::Right);
+        app.layouts = vec![layout.clone()];
+        app.layout = Some(layout);
+        let mut left = Attached::new(1, "proj1".into(), None);
+        left.apply(update(true, vec![row(0, "left pane")]));
+        let mut right = Attached::new(2, "proj2".into(), None);
+        right.apply(update(true, vec![row(0, "right pane")]));
+        app.view = Some(left);
+        app.others = vec![right];
+
+        assert_eq!(app.tabs(), vec![vec![0, 1], vec![2]]);
+        assert_eq!(
+            app.tab_session(0).map(|s| s.id),
+            Some(1),
+            "the focused pane"
+        );
+        assert_eq!(app.attached_index(), Some(0));
+
+        let mut terminal = Terminal::new(TestBackend::new(81, 24)).unwrap();
+        let mut draw = |app: &App| {
+            terminal
+                .draw(|frame| {
+                    let [body, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                        .areas(frame.area());
+                    let (main, tabs) = app.split_body(body);
+                    app.draw_panes(frame, main, true);
+                    app.draw_tabs(frame, tabs.unwrap());
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect()
+                })
+                .collect::<Vec<String>>()
+        };
+        let lines = draw(&app);
+        assert!(lines[1].contains("⊞2 fish"), "{}", lines[1]);
+        assert!(
+            !lines[0].contains("proj2"),
+            "one tab for both panes: {}",
+            lines[0]
+        );
+        assert!(lines[0].contains("proj3"), "{}", lines[0]);
+        assert!(lines[2].starts_with("left pane"), "{}", lines[2]);
+        // 80 columns of room: 40 each, the divider between.
+        assert_eq!(lines[2].chars().nth(40), Some('│'));
+        assert_eq!(
+            &lines[2].chars().skip(41).take(10).collect::<String>(),
+            "right pane"
+        );
+        assert_eq!(lines[22].chars().nth(40), Some('│'));
+
+        // A click in the right pane focuses it and, the program not wanting the
+        // mouse, starts a selection in its own cells.
+        app.on_mouse(Mouse::at(MouseKind::Press, 45, 3)).await;
+        let view = app.view.as_ref().unwrap();
+        assert_eq!(view.id, 2);
+        assert_eq!(view.selection.map(|s| s.anchor), Some((4, 1)));
+        assert_eq!(app.mouse_owner, Some(2));
+        // A drag that strays into the other pane still belongs to this one.
+        app.on_mouse(Mouse::at(MouseKind::Drag, 10, 3)).await;
+        assert_eq!(app.view.as_ref().unwrap().selection.unwrap().head, (0, 1));
+        app.on_mouse(Mouse::at(MouseKind::Release, 10, 3)).await;
+        assert_eq!(app.mouse_owner, None);
+        assert_eq!(app.view.as_ref().unwrap().id, 2);
+
+        // A program that wants the mouse gets the click; Valkyrie doesn't select.
+        app.others[0].modes.mouse_click = true;
+        app.others[0].modes.mouse_sgr = true;
+        app.on_mouse(Mouse::at(MouseKind::Press, 3, 4)).await;
+        let view = app.view.as_ref().unwrap();
+        assert_eq!((view.id, view.selection), (1, None));
+        app.on_mouse(Mouse::at(MouseKind::Release, 3, 4)).await;
+
+        // A right click opens the pane menu there, even over a mouse program.
+        app.on_mouse(Mouse::at(MouseKind::RightPress, 5, 6)).await;
+        let menu = app.menu.expect("pane menu");
+        assert_eq!(
+            (menu.kind, menu.session, (menu.x, menu.y)),
+            (MenuKind::Pane, 1, (5, 6))
+        );
+        assert_eq!(menu.items()[0], "Split right");
+        let lines = draw_menu_lines(&app);
+        assert!(lines.iter().any(|l| l.contains("Split down")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("Close pane")));
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert_eq!(app.menu, None);
+        // With Ctrl held, a right click goes to a program that wants the mouse.
+        let ctrl_right = Mouse {
+            code: 2 | 16,
+            ..Mouse::at(MouseKind::RightPress, 5, 6)
+        };
+        app.on_mouse(ctrl_right).await;
+        assert_eq!(app.menu, None);
+        // A release lost outside the window leaves pane 1 owning the mouse; the next
+        // press, over pane 2, is a new gesture there.
+        app.on_mouse(Mouse::at(MouseKind::Press, 3, 4)).await;
+        assert_eq!(app.mouse_owner, Some(1));
+        app.on_mouse(Mouse::at(MouseKind::Press, 45, 3)).await;
+        assert_eq!(
+            (app.mouse_owner, app.view.as_ref().unwrap().id),
+            (Some(2), 2)
+        );
+        app.on_mouse(Mouse::at(MouseKind::Release, 45, 3)).await;
+        app.focus(1);
+        // Near the bottom right it stays on screen.
+        app.on_mouse(Mouse::at(MouseKind::RightPress, 79, 22)).await;
+        let rect = app.menu.unwrap().rect();
+        assert!(rect.right() <= 81 && rect.bottom() <= 24, "{rect:?}");
+        app.menu = None;
+
+        // Dragging the divider moves it; each pane gets its new size.
+        app.on_mouse(Mouse::at(MouseKind::Press, 40, 10)).await;
+        assert!(app.divider_drag.is_some());
+        app.on_mouse(Mouse::at(MouseKind::Drag, 20, 10)).await;
+        let main = app.main_area().unwrap();
+        let (panes, _) = app.pane_layout(main);
+        assert_eq!((panes[0].1.width, panes[1].1.width), (20, 60));
+        assert_eq!(app.pane_mut(2).unwrap().size, Size { cols: 60, rows: 21 });
+        assert_eq!(app.pane_mut(1).unwrap().size, Size { cols: 20, rows: 21 });
+        // The daemon's layout, still at the old ratio, doesn't undo a drag under way.
+        app.sync_panes().await;
+        assert_eq!(app.pane_mut(1).unwrap().size, Size { cols: 20, rows: 21 });
+        app.divider_drag = None;
+
+        // `o` cycles focus through the panes (the right click above focused 2).
+        app.focus(1);
+        app.on_keys(vec![TABS_KEY, b'o']).await;
+        assert_eq!(app.view.as_ref().unwrap().id, 2);
+        app.on_keys(vec![TABS_KEY, b'O']).await;
+        assert_eq!(app.view.as_ref().unwrap().id, 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

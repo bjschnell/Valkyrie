@@ -11,7 +11,7 @@ pub use restore::path as restore_path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use session::{Host, SavedSession, Session, StopPipe};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
 use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -25,7 +25,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use valkyrie_proto::codec::{read_frame, write_frame};
-use valkyrie_proto::{ClientMsg, QueueItem, Reply, ReqId, ServerMsg, SessionId};
+use valkyrie_proto::{ClientMsg, Pane, QueueItem, Reply, ReqId, ServerMsg, SessionId, Side};
 
 /// Format of the state handed across an upgrade exec (ADR-0006). An upgrade is only
 /// attempted when the new binary reports the same number.
@@ -52,6 +52,9 @@ struct Handoff {
     sessions: Vec<SavedSession>,
     /// Killed programs not reaped yet; the next image reaps them.
     orphans: Vec<u32>,
+    /// Tabs split into panes; older images had none.
+    #[serde(default)]
+    layouts: Vec<Pane>,
 }
 
 /// Run by the new binary on `daemon --handoff-check` with a sample handoff on stdin:
@@ -100,6 +103,9 @@ struct Registry {
     unrestored: Mutex<Vec<session::RestoreEntry>>,
     /// Write the restore list now (a session was killed).
     restore_now: Notify,
+    /// Tabs split into panes (DESIGN §8.9). Panes whose session left the lists are
+    /// pruned by `layouts`.
+    layouts: Mutex<Vec<Pane>>,
 }
 
 impl Registry {
@@ -115,18 +121,67 @@ impl Registry {
         self.all().into_iter().filter(|s| !s.gone()).collect()
     }
 
-    fn move_session(&self, id: SessionId, to: usize) -> Result<Reply> {
-        let mut order = self.listed();
-        let from = order
-            .iter()
-            .position(|s| s.id == id)
-            .with_context(|| format!("no session {id}"))?;
-        let session = order.remove(from);
-        order.insert(to.min(order.len()), session);
-        for (rank, s) in order.iter().enumerate() {
+    /// The split layouts as clients see them: without panes whose session left the
+    /// lists. A tab down to one pane has none.
+    fn layouts(&self) -> Vec<Pane> {
+        let listed: HashSet<SessionId> = self.listed().iter().map(|s| s.id).collect();
+        split_only(self.layouts.lock().unwrap().clone(), &listed)
+    }
+
+    /// Takes sessions the daemon no longer holds out of the stored layouts. Not those
+    /// that only left the lists: a shell that a reboot ends keeps its place in its
+    /// split for the restore list, as it keeps its entry. Called with `sessions`
+    /// held, which is taken before `layouts` (as in a handoff), so a split being
+    /// made can't be pruned before its session is in.
+    fn prune_layouts(&self, sessions: &BTreeMap<SessionId, Arc<Session>>) {
+        let held: HashSet<SessionId> = sessions.keys().copied().collect();
+        let mut layouts = self.layouts.lock().unwrap();
+        *layouts = split_only(std::mem::take(&mut *layouts), &held);
+    }
+
+    /// The listed sessions grouped by tab, in tab order: a tab is where its first
+    /// pane is, and its panes follow in tab order.
+    fn tabs(&self) -> Vec<Vec<Arc<Session>>> {
+        let layouts = self.layouts();
+        let listed = self.listed();
+        let mut placed = HashSet::new();
+        let mut tabs = Vec::new();
+        for s in &listed {
+            if placed.contains(&s.id) {
+                continue;
+            }
+            let tab: Vec<Arc<Session>> = match layouts.iter().find(|p| p.contains(s.id)) {
+                Some(p) => listed
+                    .iter()
+                    .filter(|o| p.contains(o.id))
+                    .cloned()
+                    .collect(),
+                None => vec![s.clone()],
+            };
+            placed.extend(tab.iter().map(|o| o.id));
+            tabs.push(tab);
+        }
+        tabs
+    }
+
+    /// Renumbers the ranks to `tabs`' order, keeping each tab's panes together.
+    fn set_order(&self, tabs: &[Vec<Arc<Session>>]) {
+        for (rank, s) in tabs.iter().flatten().enumerate() {
             s.set_rank(rank as u64);
         }
         self.host.changed.notify_one();
+    }
+
+    /// Moves the tab holding `id` to place `to` among the tabs.
+    fn move_session(&self, id: SessionId, to: usize) -> Result<Reply> {
+        let mut tabs = self.tabs();
+        let from = tabs
+            .iter()
+            .position(|t| t.iter().any(|s| s.id == id))
+            .with_context(|| format!("no session {id}"))?;
+        let tab = tabs.remove(from);
+        tabs.insert(to.min(tabs.len()), tab);
+        self.set_order(&tabs);
         Ok(Reply::Done)
     }
 
@@ -137,6 +192,7 @@ impl Registry {
         let before = sessions.len();
         sessions.retain(|_, s| !s.removable(now, restore::EXIT_GRACE_MS));
         if sessions.len() != before {
+            self.prune_layouts(&sessions);
             self.host.changed.notify_one();
         }
     }
@@ -250,6 +306,7 @@ pub async fn resume(fd: RawFd, state_dir: &Path, hook_exe: &Path) -> Result<()> 
             }
         }
     }
+    *registry.layouts.lock().unwrap() = handoff.layouts;
     let kept = registry.sessions.lock().unwrap().len();
     tracing::info!(
         generation,
@@ -291,6 +348,7 @@ fn new_registry(
         restore_file: restore::path(state_dir, &socket_for_restore),
         unrestored: Mutex::default(),
         restore_now: Notify::new(),
+        layouts: Mutex::default(),
     });
     Ok((registry, rx))
 }
@@ -494,6 +552,7 @@ fn snapshot(
         listener,
         sessions: sessions.iter().map(|s| s.save()).collect(),
         orphans,
+        layouts: registry.layouts.lock().unwrap().clone(),
     }
 }
 
@@ -612,7 +671,8 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
         }
     });
 
-    let mut attachment: Option<Attachment> = None;
+    // Every pane of the attached tab; one session for a tab that isn't split.
+    let mut attachments: Vec<Attachment> = Vec::new();
     let mut queue_watch: Option<JoinHandle<()>> = None;
     // Cleanup below must run however the connection ends: a client that dies with
     // unread frames shows up as a read error (ECONNRESET), not EOF.
@@ -684,6 +744,26 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 }),
             ),
             ClientMsg::Move { req, session, to } => (req, registry.move_session(session, to)),
+            ClientMsg::Split {
+                req,
+                session,
+                side,
+                spec,
+            } => (req, split(&registry, session, side, spec)),
+            ClientMsg::Ratio { req, a, b, ratio } => {
+                let set = registry
+                    .layouts
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .any(|p| p.set_ratio(a, b, ratio));
+                let result = if set {
+                    Ok(Reply::Done)
+                } else {
+                    Err(anyhow::anyhow!("sessions {a} and {b} are not split"))
+                };
+                (req, result)
+            }
             ClientMsg::Rename { req, session, name } => (
                 req,
                 registry.get(session).map(|s| {
@@ -695,7 +775,8 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Upgrade { req, exe } => (req, upgrade(&registry, exe).await),
             ClientMsg::List { req } => {
                 let sessions = registry.listed().iter().map(|s| s.info()).collect();
-                (req, Ok(Reply::Sessions { sessions }))
+                let layouts = registry.layouts();
+                (req, Ok(Reply::Sessions { sessions, layouts }))
             }
             ClientMsg::Kill { req, session } => {
                 // Moved to `dying` under the sessions lock, so a handoff sees the
@@ -703,6 +784,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 let removed = {
                     let mut sessions = registry.sessions.lock().unwrap();
                     let removed = sessions.remove(&session);
+                    registry.prune_layouts(&sessions);
                     if let Some(s) = &removed
                         && !s.exited()
                     {
@@ -736,14 +818,14 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 anchor,
             } => (req, registry.get(session).map(|s| s.scrollback(anchor))),
             ClientMsg::Detach { req } => {
-                if let Some(a) = attachment.take() {
+                for a in attachments.drain(..) {
                     a.end().await;
                 }
                 (req, Ok(Reply::Done))
             }
             ClientMsg::Attach { req, session, size } => match registry.get(session) {
                 Ok(s) => {
-                    if let Some(a) = attachment.take() {
+                    for a in attachments.drain(..) {
                         a.end().await;
                     }
                     if let Some(size) = size {
@@ -752,15 +834,53 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     s.attach();
                     reply(&out, req, Ok(Reply::Done)).await;
                     let task = tokio::spawn(forward(s.clone(), out.clone()));
-                    attachment = Some(Attachment { session: s, task });
+                    attachments.push(Attachment { session: s, task });
                     continue;
                 }
                 Err(e) => (req, Err(e)),
             },
+            ClientMsg::AttachPanes { req, panes } => {
+                // A pane killed since the client listed is left out, not the tab.
+                let found: Vec<_> = panes
+                    .iter()
+                    .filter_map(|&(id, size)| registry.get(id).ok().map(|s| (s, size)))
+                    .collect();
+                if found.is_empty() && !panes.is_empty() {
+                    reply(
+                        &out,
+                        req,
+                        Err(anyhow::anyhow!("none of these sessions exist")),
+                    )
+                    .await;
+                    continue;
+                }
+                let (kept, ended): (Vec<_>, Vec<_>) = attachments
+                    .drain(..)
+                    .partition(|a| found.iter().any(|(s, _)| s.id == a.session.id));
+                for a in ended {
+                    a.end().await;
+                }
+                attachments = kept;
+                let mut new = Vec::new();
+                for (s, size) in found {
+                    s.resize(size);
+                    if !attachments.iter().any(|a| a.session.id == s.id) {
+                        s.attach();
+                        new.push(s);
+                    }
+                }
+                // Snapshots follow the reply, as for `Attach`.
+                reply(&out, req, Ok(Reply::Done)).await;
+                for s in new {
+                    let task = tokio::spawn(forward(s.clone(), out.clone()));
+                    attachments.push(Attachment { session: s, task });
+                }
+                continue;
+            }
         };
         reply(&out, req, result).await;
     };
-    if let Some(a) = attachment {
+    for a in attachments {
         a.end().await;
     }
     if let Some(task) = queue_watch {
@@ -768,6 +888,15 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
     }
     writer.abort();
     ended
+}
+
+/// `layouts` without the sessions `keep` lacks, and without trees left with one pane.
+fn split_only(layouts: Vec<Pane>, keep: &HashSet<SessionId>) -> Vec<Pane> {
+    layouts
+        .into_iter()
+        .filter_map(|p| p.retain(&|id| keep.contains(&id)))
+        .filter(|p| matches!(p, Pane::Split { .. }))
+        .collect()
 }
 
 async fn reply(out: &Out, req: ReqId, result: Result<Reply>) {
@@ -783,6 +912,44 @@ async fn reply(out: &Out, req: ReqId, result: Result<Reply>) {
 
 fn spawn(registry: &Registry, spec: valkyrie_proto::SpawnSpec) -> Result<Reply> {
     spawn_with(registry, spec, None)
+}
+
+/// Starts `spec` as a new pane on `side` of `at`, in `at`'s tab, right after it in
+/// the tab order so the tab's panes stay together.
+fn split(
+    registry: &Registry,
+    at: SessionId,
+    side: Side,
+    spec: valkyrie_proto::SpawnSpec,
+) -> Result<Reply> {
+    anyhow::ensure!(
+        registry.listed().iter().any(|s| s.id == at),
+        "no session {at}"
+    );
+    let reply = spawn(registry, spec)?;
+    let Reply::Session { info } = &reply else {
+        return Ok(reply);
+    };
+    {
+        let mut layouts = registry.layouts.lock().unwrap();
+        if !layouts.iter_mut().any(|p| p.split(at, info.id, side)) {
+            let mut pane = Pane::leaf(at);
+            pane.split(at, info.id, side);
+            layouts.push(pane);
+        }
+    }
+    let mut tabs = registry.tabs();
+    if let Some(tab) = tabs.iter_mut().find(|t| t.iter().any(|s| s.id == at)) {
+        // `tabs` orders panes by rank, and the new session's is the highest.
+        let new = tab.iter().position(|s| s.id == info.id);
+        let after = tab.iter().position(|s| s.id == at);
+        if let (Some(new), Some(after)) = (new, after) {
+            let s = tab.remove(new);
+            tab.insert(after + 1, s);
+        }
+    }
+    registry.set_order(&tabs);
+    Ok(reply)
 }
 
 /// `spawn`, starting the session off with the agent conversation it resumes (set
