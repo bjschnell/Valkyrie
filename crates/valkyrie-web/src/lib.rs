@@ -6,12 +6,14 @@
 pub mod auth;
 pub mod chat;
 pub mod notify;
+pub mod places;
 pub mod push;
+pub mod review;
 
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Json, State};
+use axum::extract::{Json, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -103,6 +105,9 @@ pub async fn run(opts: Options) -> Result<()> {
         .route("/api/push/subscribe", post(subscribe))
         .route("/api/push/unsubscribe", post(unsubscribe))
         .route("/api/push/test", post(push_test))
+        .route("/api/places", get(places_route))
+        .route("/api/dirs", get(dirs_route))
+        .route("/api/review/{session}", get(review_route))
         .route("/ws", get(ws))
         .fallback(get(asset))
         .with_state(app);
@@ -189,6 +194,90 @@ async fn push_key(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     match &app.push {
         Some(sender) => Json(serde_json::json!({ "key": sender.public })).into_response(),
         None => (StatusCode::SERVICE_UNAVAILABLE, "notifications are off").into_response(),
+    }
+}
+
+/// The sessions now, from the daemon.
+async fn sessions(app: &App) -> Result<Vec<valkyrie_proto::SessionInfo>> {
+    let (client, _pushes) = valkyrie_proto::client::Client::connect(&app.socket).await?;
+    client.list().await
+}
+
+fn failed(status: StatusCode, e: impl std::fmt::Display) -> Response {
+    (status, e.to_string()).into_response()
+}
+
+/// Where a new session might start (DESIGN §8.8).
+async fn places_route(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    let mut running = sessions(&app).await.unwrap_or_default();
+    running.sort_by_key(|s| std::cmp::Reverse(s.status.since_ms));
+    let result = tokio::task::spawn_blocking(move || {
+        let home = places::home();
+        let mut recent: Vec<places::Place> = Vec::new();
+        for s in running.iter().filter(|s| s.exited.is_none()) {
+            let place = places::place(&s.cwd, &home);
+            if !recent.iter().any(|p| p.path == place.path) {
+                recent.push(place);
+            }
+        }
+        places::Places {
+            home: home.to_string_lossy().into_owned(),
+            shell: places::shell(),
+            repos: places::repos(&home),
+            recent,
+        }
+    })
+    .await;
+    match result {
+        Ok(places) => Json(places).into_response(),
+        Err(e) => failed(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DirsQuery {
+    path: String,
+}
+
+/// The folders in one folder, to browse to where a session starts.
+async fn dirs_route(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<DirsQuery>,
+) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    let listed = tokio::task::spawn_blocking(move || places::list(&q.path, &places::home())).await;
+    match listed {
+        Ok(Ok(listing)) => Json(listing).into_response(),
+        Ok(Err(e)) => failed(StatusCode::NOT_FOUND, e),
+        Err(e) => failed(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// What a session's agent changed: its repo's diff (DESIGN §8.8).
+async fn review_route(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(session): Path<valkyrie_proto::SessionId>,
+) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    let list = match sessions(&app).await {
+        Ok(list) => list,
+        Err(e) => return failed(StatusCode::BAD_GATEWAY, format!("daemon: {e:#}")),
+    };
+    let Some(info) = list.into_iter().find(|s| s.id == session) else {
+        return failed(StatusCode::NOT_FOUND, "no such session");
+    };
+    match review::review(&info.cwd).await {
+        Ok(review) => Json(review).into_response(),
+        Err(e) => failed(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")),
     }
 }
 

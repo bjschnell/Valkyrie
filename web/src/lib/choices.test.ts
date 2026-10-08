@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { findChoices } from "./choices";
+import { findChoices, plainYes, promptContext } from "./choices";
 
 // Real screens recorded from Claude Code and Codex (crates/valkyrie-agents).
 const fixture = (name: string) =>
@@ -47,5 +47,31 @@ describe("findChoices", () => {
   it("ignores a numbered list in ordinary output far above", () => {
     const lines = ["Steps:", "1. build", "2. test", ...Array(40).fill("log line"), "$ "];
     expect(findChoices(lines)).toEqual([]);
+  });
+});
+
+describe("plainYes", () => {
+  const c = (...labels: string[]) => labels.map((label, i) => ({ label, selected: i === 0, n: i + 1 }));
+  it("picks a first choice that is a plain yes", () => {
+    expect(plainYes(c("Yes", "Yes, and don't ask again", "No"))?.label).toBe("Yes");
+    expect(plainYes(c("Yes, proceed", "No, and tell Codex what to do differently"))?.label).toBe("Yes, proceed");
+  });
+  it("never picks a broader grant or a refusal", () => {
+    expect(plainYes(c("Yes, allow all edits during this session", "No"))).toBeNull();
+    expect(plainYes(c("Always allow", "No"))).toBeNull();
+    expect(plainYes(c("No", "Yes"))).toBeNull();
+    expect(plainYes([])).toBeNull();
+  });
+});
+
+describe("promptContext", () => {
+  it("says what Claude's permission prompt is about", () => {
+    expect(promptContext(fixture("claude_permission_bash.txt"))).toBe("touch acc.txt — Create empty acc.txt file");
+  });
+  it("says what Codex's approval is about", () => {
+    expect(promptContext(fixture("codex_approval.txt"))).toBe("touch b.txt");
+  });
+  it("is nothing without a prompt", () => {
+    expect(promptContext(["$ ls", "a b c"])).toBeNull();
   });
 });

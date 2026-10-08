@@ -8,6 +8,7 @@ import { answer, kill, openChoices, rename, sendKey, sendMessage, useApp } from 
 import { Back, Dots, Grid, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
+import { MicButton } from "./Mic";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -73,6 +74,7 @@ export function SessionView({ id }: { id: number }) {
             G: () => el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" }),
             i: () => composer.current?.focus(),
             t: () => hasChat && choose(mode === "chat" ? "terminal" : "chat"),
+            r: () => (location.hash = `#/s/${id}/review`),
             q: () => (location.hash = "#/"),
           };
       const action = actions[e.key];
@@ -277,6 +279,7 @@ function Composer({ id, area }: { id: number; area: RefObject<HTMLTextAreaElemen
           if (e.key === "Escape") area.current?.blur();
         }}
       />
+      <MicButton value={text} onChange={setText} />
       <button className="send" aria-label="Send" disabled={!text.trim()}>
         <Send />
       </button>
@@ -299,6 +302,15 @@ function SessionMenu({ id, name, agent, onClose }: { id: number; name: string; a
           }}
         >
           Rename
+        </button>
+        <button
+          role="menuitem"
+          onClick={() => {
+            onClose();
+            location.hash = `#/s/${id}/review`;
+          }}
+        >
+          Review changes
         </button>
         <button
           role="menuitem"

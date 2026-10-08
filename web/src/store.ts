@@ -5,7 +5,7 @@ import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { QueueItem, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
-import { findChoices, type Choice } from "./lib/choices";
+import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { keyBytes, messageBytes, type Key } from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
 import {
@@ -27,6 +27,8 @@ const KEY_GAP_MS = 70;
 export interface Prompt {
   seq: number;
   choices: Choice[];
+  /** What it asks about, read off the screen (the command, the file). */
+  context: string | null;
 }
 
 interface State {
@@ -231,7 +233,8 @@ async function refreshPrompts(items: QueueItem[]): Promise<void> {
     try {
       const reply = await conn?.request({ t: "dump", session: item.session });
       if (reply?.t !== "text") continue;
-      prompts[item.session] = { seq: item.status.seq, choices: findChoices(reply.text.split("\n")) };
+      const lines = reply.text.split("\n");
+      prompts[item.session] = { seq: item.status.seq, choices: findChoices(lines), context: promptContext(lines) };
     } catch {
       /* shown without buttons */
     }
@@ -324,4 +327,29 @@ export async function kill(id: SessionId): Promise<void> {
 /** The choices on the open session's screen right now. */
 export function openChoices(screen: Screen | null): Choice[] {
   return screen ? findChoices(screenText(screen)) : [];
+}
+
+/** The size a new session starts at; a TUI that attaches later resizes it. */
+const SPAWN_SIZE = { cols: 120, rows: 40 };
+
+/** Starts a session (DESIGN §8.8) and returns its id. */
+export async function spawn(command: string[], cwd: string, name: string | null): Promise<SessionId> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "spawn", spec: { command, cwd, name, size: SPAWN_SIZE, env: [] } });
+  if (reply.t !== "session") throw new Error("unexpected reply");
+  void refresh();
+  return reply.info.id;
+}
+
+/** Types a message into a session that may not be the open one. */
+export function sendTo(session: SessionId, text: string): boolean {
+  if (!text.trim()) return false;
+  const modes = get().openId === session ? get().screen?.modes : undefined;
+  return input(session, messageBytes(text, modes));
+}
+
+/** Answers several prompts, one after another, each with its own choice. */
+export async function answerAll(answers: { session: SessionId; choices: Choice[]; choice: Choice }[]): Promise<void> {
+  for (const a of answers) await answer(a.session, a.choices, a.choice);
+  if (answers.length > 1) toast(`Answered ${answers.length} prompts ✓`);
 }

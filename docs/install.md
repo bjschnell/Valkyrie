@@ -151,6 +151,12 @@ agent's own transcript, with each tool call as a card you can open for the comma
 or output. The Terminal tab is the live screen. A `claude` typed at a shell prompt is
 found too. A Codex typed at a prompt needs `valk setup codex` once.
 
+**Start, review, dictate.** The `+` in the inbox starts Claude Code, Codex or a shell in a
+folder, optionally with a first message. When an agent finishes, **Review changes** shows
+its repo's diff, and one tap tells it to commit, run the tests, or explain. Every message
+box has a mic for dictation. When several prompts wait for a plain yes, **Allow all**
+answers them together, after showing you each one.
+
 **Install it and get notifications.** On iPhone, open the link in Safari, tap Share →
 Add to Home Screen, and open Valkyrie from the Home Screen. iOS only offers
 notifications to an installed app. On Android, use Chrome's Install app. Then tap the

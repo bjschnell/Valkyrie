@@ -81,6 +81,14 @@ export function ChatView({
             <span className="spin" /> Working…
           </div>
         )}
+        {info?.status.state === "review_ready" && (
+          <div className="chat-done">
+            Finished.{" "}
+            <a className="link" href={`#/s/${info.id}/review`}>
+              Review the changes
+            </a>
+          </div>
+        )}
         {waiting && (
           <div className="chat-waiting">
             Waiting on you{info?.status.summary ? `: ${info.status.summary}` : ""}.{" "}

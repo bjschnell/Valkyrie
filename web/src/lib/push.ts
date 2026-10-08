@@ -2,6 +2,8 @@
 // server's record of it. iOS only offers push to an app added to the Home Screen,
 // and every browser only on HTTPS (`tailscale serve`) or localhost.
 
+import { api } from "./api";
+
 export type PushState =
   /** Not checked yet. */
   | "unknown"
@@ -34,19 +36,6 @@ function support(): PushState | "ok" {
 export function registerWorker(): void {
   if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
   void navigator.serviceWorker.register("/sw.js").catch(() => {});
-}
-
-async function api(token: string, path: string, body?: unknown): Promise<Response> {
-  const res = await fetch(path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
-  return res;
 }
 
 function keyBytes(key: string): Uint8Array<ArrayBuffer> {

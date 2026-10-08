@@ -60,3 +60,19 @@ export const BellOff = () => (
     <path d="M8.5 4.2A6 6 0 0118 9c0 2.3.4 3.8.9 4.8M17 15.5H4S6 14 6 9c0-.6.1-1.2.3-1.8M10 19.5a2 2 0 004 0M3 3l18 18" />
   </svg>
 );
+export const Mic = () => (
+  <svg {...base}>
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0014 0M12 18v3" />
+  </svg>
+);
+export const Plus = () => (
+  <svg {...base}>
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+export const Diff = () => (
+  <svg {...base}>
+    <path d="M12 4v8M8 8h8M8 18h8" />
+  </svg>
+);

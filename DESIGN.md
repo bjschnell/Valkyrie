@@ -309,7 +309,7 @@ The phone client, so sessions can be driven from anywhere on the tailnet. It's b
   - **Choices.** A choice is two or more options in the screen's bottom 25 lines, numbered or not, with one under the program's cursor (`❯`/`›`). A numbered list in ordinary output has no cursor, so it isn't a question. Wrapped option labels are joined, and key hints like `(y)` are dropped. Picking a choice moves the program's cursor to it, then presses Enter, one key per write 70 ms apart, so Ink reads separate presses. It never types the digit. This is tested against the recorded Claude permission and trust screens and the Codex approval screen.
   - **Session.** The live screen is reflowed on a phone: soft-wrapped rows are joined into logical lines that wrap at the phone's width. On a wide screen it shows as the exact grid. Below the screen are choice buttons, a key bar (Esc, Tab, ⇧Tab, arrows, ^C, Enter), and a composer. Multi-line text goes as a bracketed paste when the program takes one, and a draft survives the app closing. Rename and Close (Close confirms) are in the session menu.
 - **Verified** with Playwright as an iPhone 13 against a throwaway daemon. The phone paired from the link, the inbox showed the recorded Claude dialog as four buttons, and tapping "No" delivered `↓↓↓⏎` to the session. A message from the composer ran in a shell. The grid view rendered at desktop width.
-- **Next slices:** PWA install and Web Push (done: §8.6); a Chat view from the agents' transcripts (done: §8.7); a new-session launcher; and reviewing an agent's diff on the phone when it's done.
+- **Next slices:** PWA install and Web Push (done: §8.6); a Chat view from the agents' transcripts (done: §8.7); a new-session launcher, reviewing an agent's diff on the phone, dictation and allowing several prompts at once (done: §8.8).
 
 ### 8.6 Web app, slice 2: install and notifications (2026-10-08)
 
@@ -359,6 +359,38 @@ A terminal is the wrong shape for a phone: Claude's TUI is 120 columns of boxes,
   - **Keys** (desktop, when not typing): `t` switches tabs, `i` focuses the composer (Esc leaves it with the draft kept), `j`/`k` scroll, `Ctrl-d`/`Ctrl-u` half a page, `g`/`G` top and bottom, `q` back to the inbox.
 - **Verified** with Playwright, as an iPhone 13 and at 1280 px, against a throwaway daemon. Fake `SessionStart` hooks pointed sessions at copies of a real Claude transcript and a real Codex rollout. The chat loaded with folded runs. A prompt, text and an `Edit` appended to the file appeared within a second, with the card going from running to done in place. The tabs switch, and a plain shell has none. The keys worked, and typing `t` in the composer didn't switch tabs. Separately, a `sleep` named `claude` typed at a shell prompt, with a fake `sessions/<pid>.json` under `CLAUDE_CONFIG_DIR`, gave the session its transcript path with no hooks at all. The path survived `valk upgrade`.
 - **Not yet:** loading older history on demand (the view says "Earlier messages aren't loaded"), images in messages (shown as `[image]`), subagent conversations, and Codex commands while they run (its transcript only records them finished).
+
+### 8.8 Web app, slice 4: start, review, dictate, allow all (2026-10-08)
+
+With this, the phone does the whole loop: start an agent, answer it, see what it changed, and tell it what's next.
+
+- **New sessions** (`#/new`, the `+` in the inbox, `n` on a keyboard). You pick Claude Code, Codex or Shell, a folder, an optional name, and an optional first message. The message goes on the agent's command line (`claude "<message>"`, `codex "<message>"`), so it starts working at once and nothing has to be typed into a TUI that's still drawing. The command is the agent itself, not a shell wrapping it, so Claude still gets its per-session hooks. The session starts at 120×40, and a TUI that attaches later resizes it. Afterwards the app opens the new session. The last agent and folder are remembered.
+  - **Folders** come from `valk web` (`places.rs`). `GET /api/places` lists:
+    - where live sessions run, most recent first;
+    - git repos one level under `~/repos`, `~/src`, `~/code`, `~/projects`, `~/dev`, `~/work` and `~/git`, newest first by their index's mtime;
+    - the server's `$SHELL`, for Shell.
+
+    `GET /api/dirs?path=` lists one folder's subfolders (`~` expanded, canonicalized, hidden ones last, at most 400) for browsing anywhere. Only directories are listed, never files, and only to paired devices, which can already start shells.
+- **Review** (`#/s/<id>/review`; from a finished card in the inbox, the session menu, the Chat view's "Finished" note, or `r`). `GET /api/review/<id>` (`review.rs`) runs git in the session's live directory:
+  - `diff HEAD`, so staged and unstaged together, falling back to `--cached` before the first commit;
+  - untracked files as additions, at most 40, each read up to 64 kB, with binary files detected by NUL.
+
+  Git runs with `GIT_OPTIONAL_LOCKS=0`, so a review never takes the index lock under a working agent. It has a 15 s timeout. Each file's patch is capped at 200 kB and the total at 2 MB; past that, files are cut, and the view says so.
+
+  The page shows the branch and totals, and one card per file: a status badge (M/A/D/R/U), the name before its directory, and `+a −r`. Opened, a card shows numbered lines (the new number, or the old one for a removal), hunk headers, and lines that scroll sideways under a sticky gutter. Files open in order until about 150 changed lines are showing.
+
+  Below are replies that go straight to the agent: **Commit it**, **Run the tests**, **Explain**, or your own words (dictation works here too). After sending, the session opens so you see the answer. **Mark seen** clears a finished item. Keys: `j`/`k` move between files, `o` opens one, `r` re-reads, `i` writes, `q` goes back.
+- **Dictation** (`lib/dictation.ts`, a mic beside every message box). It uses the browser's own speech recognition (`SpeechRecognition`, or `webkitSpeechRecognition` on Safari): continuous, with interim results shown as they form, after whatever was already typed, and left editable. Tap again to stop. It's hidden where the browser can't listen. The phone keyboard's own mic does much the same, but this one keeps listening across pauses and works while the key bar has the focus. Chrome sends audio to Google's service and Safari to Apple's, as with any web dictation.
+- **Allow all.** When two or more prompts are waiting and each one's first choice is a plain yes, the inbox offers "N prompts waiting for a yes · Allow all…". It opens a list: each session, what it asks (see below) and the choice that will be picked, with a box to leave any out. **Allow N** answers them one by one, the same way a single tap does. `plainYes` takes only "Yes"/"Allow"/"Approve"/"Proceed", never a broader grant ("don't ask again", "always", "all", "for this session"), which you can still pick on the prompt itself.
+- **What a prompt asks**, read off the screen. A screen-detected ask's summary said only "bell". `promptContext` reads the paragraph just above the choices, past generic lines like "Do you want to proceed?". It gives "touch acc.txt — Create empty acc.txt file" for Claude's dialog and "touch b.txt" for Codex's, checked against the recorded screens. Cards and the allow-all list show it whenever the summary says nothing.
+- **Inbox keys:** `n` new session, `j`/`k` pick a card or row, `Enter`/`o` open it, `r` review it, `s` mark a card seen.
+- **Verified** with Playwright as an iPhone 13 (and at 1280 px), against a throwaway daemon:
+  - **Allow all.** Two sessions showed the recorded Claude and Codex prompts. The bar offered both, with what each asks, and "Allow 2" pressed Enter on each one's "Yes".
+  - **Launcher.** It listed the live sessions' folders and this machine's repos, browsed into a folder, and started a named shell there.
+  - **Review.** A repo with an edit, a deletion and a new file showed 4 files, `+6 −4`, with numbered hunks. "Explain" sent its text to that session and opened it.
+  - **Dictation.** A stand-in recognizer filled the composer with "run the tests again". Headless Chromium can't really listen, and it has the unprefixed `SpeechRecognition`, which the stand-in had to replace too.
+  - **Keys.** `j j j` then `r` opened the third session's review.
+- **Not yet:** staging or committing from the review itself (it asks the agent instead), per-hunk comments, dictation on a real phone (Safari's recognizer in a Home Screen app is the one to check), and starting an agent with options (model, permission mode).
 
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.

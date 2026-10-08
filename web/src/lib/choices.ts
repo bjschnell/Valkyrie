@@ -109,3 +109,57 @@ function clean(label: string): string {
 export function isNegative(label: string): boolean {
   return /^(no\b|deny|reject|cancel|abort|don'?t)/i.test(label);
 }
+
+/**
+ * The prompt's plain yes, if its first choice is one: what "allow all" picks. Never
+ * a broader grant ("Yes, and don't ask again", "always"), which stays a choice you
+ * make on the prompt itself.
+ */
+export function plainYes(choices: Choice[]): Choice | null {
+  const first = choices[0];
+  if (!first) return null;
+  const yes = /^(yes|allow|approve|proceed)\b/i.test(first.label);
+  const broader = /(always|don'?t ask|for this session|all\b|every)/i.test(first.label);
+  return yes && !broader ? first : null;
+}
+
+const GENERIC = /^(do you want|would you like|press enter|select an option|esc to|enter to|tip:)/i;
+const BORDER = /^[\s│┃║╭╮╰╯─━═┌┐└┘]+|[\s│┃║╭╮╰╯─━═┌┐└┘]+$/gu;
+
+/**
+ * What a prompt on screen is about, in a line: the paragraph just above its
+ * choices (the command, the file), past generic lines like "Do you want to
+ * proceed?". For a prompt known only from the screen, whose summary says nothing.
+ */
+export function promptContext(lines: string[], lookback = 25): string | null {
+  const tail = lines.slice(Math.max(0, lines.length - lookback));
+  let first = -1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const numbered = NUMBERED.exec(tail[i]);
+    if ((numbered && numbered[3] === "1") || (first < 0 && POINTED.test(tail[i]))) first = i;
+    if (numbered && numbered[3] === "1") break;
+  }
+  if (first < 0) return null;
+  const para: string[] = [];
+  for (let i = first - 1; i >= 0 && para.length < 3; i--) {
+    const text = tail[i].replace(BORDER, "").trim();
+    if (!text) {
+      if (para.length) break;
+      continue;
+    }
+    if (GENERIC.test(text)) {
+      if (para.length) break;
+      continue;
+    }
+    if (NUMBERED.test(tail[i]) || POINTED.test(tail[i])) break;
+    para.unshift(text.replace(/^\$\s+/, ""));
+  }
+  if (!para.length) return null;
+  const line = para.join(" — ");
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+}
+
+/** A summary that says nothing about what is being asked. */
+export function weakSummary(summary: string | null | undefined): boolean {
+  return !summary || /^(bell|screen|needs input)$/i.test(summary.trim());
+}
