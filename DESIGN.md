@@ -174,6 +174,13 @@ Decision {
 
 TUI (ratatui): queue is the home screen; split into queue | session view | context pane. Keyboard-first; jump to top queue item in one key.
 
+**Session sidebar (done 2026-10-07).** An attached session used to look like a plain terminal, with no sign of the other sessions or how to start one. The sidebar fixes that:
+- **Where.** It sits on the right of the attached session, 30 columns wide. Every session gets two lines: its state icon, name, and age, then its state and directory. The attached session is marked `▌`, the title counts the items that need you, and `+ new shell` sits at the bottom. On the right, the session's own coordinates don't move, so mouse reports and image placement need no offsets.
+- **When.** It's on by default and the choice is remembered (`<state dir>/tui-sidebar`). The session's PTY shrinks by its width. Below 100 columns it shows only while it has the keyboard.
+- **Keys.** `Ctrl-\` shows it and gives it the keyboard, with the cursor on the attached session. There, `j`/`k` move, `Enter` switches, `n` starts a shell in the attached session's directory, `h` hides it, and `Esc`/`q`/`Ctrl-\` give the keyboard back. `Ctrl-\` no longer reaches the program, so SIGQUIT from the keyboard is gone inside sessions.
+- **Mouse.** A click on a session switches to it, and a click on `+ new shell` starts one. Clicks over the sidebar are taken even when the program owns the mouse, as long as the reports are SGR.
+
+
 Web/PWA: installable, push notifications, queue-first mobile layout, session drive (send input, approve, interrupt), start session in a chosen repo, decision review cards. Rendering via diffed screen stream; xterm.js (or custom canvas/WebGL renderer) for terminal view. Reference UX: the author's existing "kawaii"/Alice PWA.
 **No network listener by default** (decided 2026-10-06). The daemon speaks only its unix socket, as Leader does, so it stays defensible on a managed work laptop. The web listener starts only when it's explicitly enabled in config.
 Auth: token + WebAuthn/passkey; once enabled, assume exposure over Tailscale only; TLS and origin checks required. Never expose PTY control unauthenticated.
@@ -333,7 +340,7 @@ CLI surface (one binary):
 - `valk new [--cwd DIR] [--name N] -- CMD...` — spawn a session (auto-starts daemon if absent).
 - `valk ls` · `valk kill ID` · `valk dump ID` (plain-text screen; used for headless verification).
 - `valk send ID TEXT` — inject input (`\r \n \t \e \xHH` escapes); headless driving and future supervisor plumbing.
-- `valk attach [ID]` / `valk` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches.
+- `valk attach [ID]` / `valk` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches, `Ctrl-\` focuses the session sidebar.
 - `valk bench latency [-n N]` — keystroke→screen-update round trip through the daemon against `cat`; prints p50/p99/max.
 - `valk bench parse FILE` — VT parse throughput over a recorded `.raw` transcript.
 

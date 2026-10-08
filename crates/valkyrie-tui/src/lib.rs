@@ -27,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use theme::{Theme, state_icon};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{
     AgentState, AgentStatus, Color, CursorShape, Modes, QueueItem, Row, ScreenUpdate, ScrollAnchor,
@@ -35,6 +36,8 @@ use valkyrie_proto::{
 
 /// Ctrl-] — detach from the attached session.
 pub const DETACH_KEY: u8 = 0x1d;
+/// Ctrl-\ — show the session sidebar and give it the keyboard, or give it back.
+pub const SIDEBAR_KEY: u8 = 0x1c;
 
 /// How long the TUI keeps trying to reach the daemon after the connection drops. An
 /// upgrade handoff (ADR-0006) takes milliseconds; a daemon restart is not coming back.
@@ -85,6 +88,11 @@ struct App {
     toast: Option<(Ping, Instant)>,
     /// The start of a mouse report the last read cut off.
     partial: Vec<u8>,
+    /// The session sidebar beside an attached session; remembered across starts.
+    sidebar: bool,
+    /// The sidebar has the keyboard, its cursor on this row (one past the sessions
+    /// is "new shell").
+    sidebar_focus: Option<usize>,
 }
 
 struct Attached {
@@ -180,6 +188,8 @@ impl App {
             sound: ping::load_enabled(),
             toast: None,
             partial: Vec::new(),
+            sidebar: load_sidebar(),
+            sidebar_focus: None,
         }
     }
 
@@ -230,11 +240,7 @@ impl App {
                     // A font size change resizes the window too. First, so the PTY
                     // resize below carries the new pixel size in one SIGWINCH.
                     self.report_cell(self.view.as_ref().map(|v| v.id));
-                    if let Some(view) = &self.view
-                        && let Ok(size) = session_size()
-                    {
-                        let _ = self.client.resize(view.id, size);
-                    }
+                    self.relayout();
                     terminal.autoresize()?;
                 }
                 _ = tick.tick() => {
@@ -298,9 +304,9 @@ impl App {
         anyhow::bail!("lost the daemon connection")
     }
 
-    /// Something on the home screen is spinning.
+    /// Something on the home screen or the sidebar is spinning.
     fn animating(&self) -> bool {
-        self.view.is_none()
+        (self.view.is_none() || self.sidebar)
             && self
                 .sessions
                 .iter()
@@ -339,7 +345,11 @@ impl App {
     async fn attach(&mut self, id: SessionId) {
         // A TUI running inside a session would feed its own output back to itself.
         if std::env::var("VALK_SESSION").is_ok_and(|own| own == id.to_string()) {
-            self.status = format!("session {id} is this TUI");
+            let text = format!("session {id} is this TUI");
+            match &mut self.view {
+                Some(view) => view.notice(text),
+                None => self.status = text,
+            }
             return;
         }
         let name = self
@@ -349,13 +359,17 @@ impl App {
             .map(|s| s.name.clone())
             .unwrap_or_else(|| id.to_string());
         let status = self.sessions_status(id);
-        let size = match session_size() {
+        let size = match self.session_size() {
             Ok(size) => size,
             Err(e) => {
                 self.status = format!("{e:#}");
                 return;
             }
         };
+        // Switching from another session: its modes and images must not carry over.
+        if self.view.is_some() {
+            let _ = reset_terminal_modes();
+        }
         // Set the view before the request so the snapshot pushed right after the reply lands in it.
         self.view = Some(Attached::new(id, name, status));
         // The snapshot only rewrites modes that differ from the defaults; the mouse
@@ -371,6 +385,7 @@ impl App {
 
     async fn detach(&mut self) {
         self.view = None;
+        self.sidebar_focus = None;
         let _ = reset_terminal_modes();
         let _ = self.client.detach().await;
         self.refresh().await;
@@ -390,6 +405,13 @@ impl App {
                     self.partial = bytes.split_off(cut);
                 }
                 mouse::split(&bytes)
+            } else if let Some(side) = self.sidebar_area() {
+                // Except over the sidebar, which is ours either way.
+                let (rest, clicks) =
+                    mouse::take(&bytes, |m| side.contains(Position::new(m.x, m.y)));
+                let mut inputs = vec![Input::Bytes(rest)];
+                inputs.extend(clicks.into_iter().map(Input::Mouse));
+                inputs
             } else {
                 vec![Input::Bytes(bytes)]
             };
@@ -405,8 +427,11 @@ impl App {
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
                     // A finished program: any key returns home, unless you are
                     // reading its scrollback.
-                    (Some(view), Input::Bytes(_))
-                        if view.exited.is_some() && view.scroll.is_none() =>
+                    (Some(view), Input::Bytes(keys))
+                        if view.exited.is_some()
+                            && view.scroll.is_none()
+                            && self.sidebar_focus.is_none()
+                            && !keys.contains(&SIDEBAR_KEY) =>
                     {
                         self.detach().await;
                     }
@@ -422,6 +447,9 @@ impl App {
 
     /// Keys while attached: scrollback keys when scrolled back, else the program's.
     async fn on_keys(&mut self, bytes: Vec<u8>) {
+        if self.sidebar_focus.is_some() {
+            return self.sidebar_keys(&bytes).await;
+        }
         let Some(view) = &mut self.view else { return };
         view.selection = None;
         let page = view.rows.len().max(2) as i64 - 1;
@@ -440,10 +468,18 @@ impl App {
         }
         let Some(view) = &self.view else { return };
         let id = view.id;
-        match rest.iter().position(|&b| b == DETACH_KEY) {
+        match rest
+            .iter()
+            .position(|&b| b == DETACH_KEY || b == SIDEBAR_KEY)
+        {
             Some(i) => {
                 if i > 0 {
                     let _ = self.client.input(id, rest[..i].to_vec());
+                }
+                if rest[i] == SIDEBAR_KEY {
+                    self.focus_sidebar();
+                    // Keys typed right after ^\ in the same read belong to the sidebar.
+                    return Box::pin(self.sidebar_keys(&rest[i + 1..])).await;
                 }
                 self.detach().await;
                 // Keys typed right after ^] in the same read belong to the home screen.
@@ -454,6 +490,121 @@ impl App {
             None => {
                 let _ = self.client.input(id, rest.to_vec());
             }
+        }
+    }
+
+    /// Shows the sidebar and gives it the keyboard, the cursor on this session.
+    fn focus_sidebar(&mut self) {
+        if !self.sidebar {
+            self.sidebar = true;
+            save_sidebar(true);
+        }
+        let attached = self.view.as_ref().map(|v| v.id);
+        let at = self.sessions.iter().position(|s| Some(s.id) == attached);
+        self.sidebar_focus = Some(at.unwrap_or(0));
+        self.relayout();
+    }
+
+    /// Gives the keyboard back to the session.
+    fn unfocus_sidebar(&mut self) {
+        self.sidebar_focus = None;
+        // A terminal too narrow for the sidebar only showed it while it had the keyboard.
+        self.relayout();
+    }
+
+    /// Keys while the sidebar has the keyboard. Keys after the one that hands the
+    /// keyboard back go to the session.
+    async fn sidebar_keys(&mut self, mut keys: &[u8]) {
+        while let Some(cursor) = self.sidebar_focus
+            && !keys.is_empty()
+        {
+            let key = next_key(keys);
+            // A lone Esc is a key; Esc with more after it is Alt plus that key.
+            let whole = key.len() == keys.len();
+            keys = &keys[key.len()..];
+            match key {
+                b"k" | b"\x1b[A" | b"\x1bOA" => self.sidebar_focus = Some(cursor.saturating_sub(1)),
+                b"j" | b"\x1b[B" | b"\x1bOB" => {
+                    self.sidebar_focus = Some((cursor + 1).min(self.sessions.len()));
+                }
+                b"\r" | b"\n" => {
+                    self.unfocus_sidebar();
+                    match self.sessions.get(cursor).map(|s| s.id) {
+                        Some(id) => self.switch_to(id).await,
+                        None => self.new_shell(self.attached_cwd()).await,
+                    }
+                }
+                b"n" => {
+                    self.unfocus_sidebar();
+                    self.new_shell(self.attached_cwd()).await;
+                }
+                b"h" => {
+                    self.sidebar = false;
+                    save_sidebar(false);
+                    self.unfocus_sidebar();
+                }
+                [SIDEBAR_KEY] | b"q" => self.unfocus_sidebar(),
+                b"\x1b" if whole => self.unfocus_sidebar(),
+                _ => {}
+            }
+        }
+        if !keys.is_empty() && self.view.is_some() {
+            Box::pin(self.on_keys(keys.to_vec())).await;
+        }
+    }
+
+    /// Attaches to `id` from another session, unless it is the one already attached.
+    async fn switch_to(&mut self, id: SessionId) {
+        if self.view.as_ref().is_none_or(|v| v.id != id) {
+            self.attach(id).await;
+        }
+    }
+
+    /// The attached session's directory, for a new shell started beside it.
+    fn attached_cwd(&self) -> Option<PathBuf> {
+        let id = self.view.as_ref()?.id;
+        Some(self.sessions.iter().find(|s| s.id == id)?.cwd.clone())
+    }
+
+    /// Starts `$SHELL` (in `cwd`, else the daemon's default) and attaches to it.
+    async fn new_shell(&mut self, cwd: Option<PathBuf>) {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let spec = SpawnSpec {
+            command: vec![shell],
+            cwd,
+            name: None,
+            size,
+            env: valkyrie_proto::login_env(),
+        };
+        match self.client.spawn(spec).await {
+            Ok(info) => {
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => {
+                let text = format!("spawn failed: {e:#}");
+                match &mut self.view {
+                    Some(view) => view.notice(text),
+                    None => self.status = text,
+                }
+            }
+        }
+    }
+
+    /// A click on the sidebar: switch to that session, or start a new shell.
+    async fn sidebar_click(&mut self, side: Rect, m: Mouse) {
+        if m.kind != MouseKind::Press {
+            return;
+        }
+        let hit = self.sidebar_hit(side, m.x, m.y);
+        if self.sidebar_focus.is_some() {
+            self.unfocus_sidebar();
+        }
+        match hit {
+            Some(SidebarHit::Session(id)) => self.switch_to(id).await,
+            Some(SidebarHit::New) => self.new_shell(self.attached_cwd()).await,
+            None => {}
         }
     }
 
@@ -500,9 +651,18 @@ impl App {
     }
 
     async fn on_mouse(&mut self, m: Mouse) {
+        let side = self.sidebar_area();
         let Some(view) = &mut self.view else { return };
+        // A drag that strays over the sidebar still selects.
+        if let Some(side) = side
+            && side.contains(Position::new(m.x, m.y))
+            && !view.selecting
+        {
+            return self.sidebar_click(side, m).await;
+        }
         let bottom = view.rows.len().saturating_sub(1) as u16;
-        let at = (m.x, m.y.min(bottom));
+        let right = view.cols.saturating_sub(1);
+        let at = (m.x.min(right), m.y.min(bottom));
         match m.kind {
             MouseKind::WheelUp | MouseKind::WheelDown if view.modes.alt_screen => {
                 // Full-screen programs have no scrollback; like other terminals, the
@@ -706,24 +866,7 @@ impl App {
                     self.refresh().await;
                 }
             }
-            HomeKey::NewShell => {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-                let size = session_size().unwrap_or(Size { cols: 80, rows: 24 });
-                let spec = SpawnSpec {
-                    command: vec![shell],
-                    cwd: None,
-                    name: None,
-                    size,
-                    env: valkyrie_proto::login_env(),
-                };
-                match self.client.spawn(spec).await {
-                    Ok(info) => {
-                        self.refresh().await;
-                        self.attach(info.id).await;
-                    }
-                    Err(e) => self.status = format!("spawn failed: {e:#}"),
-                }
-            }
+            HomeKey::NewShell => self.new_shell(None).await,
         }
     }
 
@@ -817,17 +960,22 @@ impl App {
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
             match &self.view {
                 Some(view) => {
-                    render_rows(view.shown(), body, frame.buffer_mut());
+                    let (main, side) = self.split_body(body);
+                    render_rows(view.shown(), main, frame.buffer_mut());
                     if let Some(sel) = &view.selection {
-                        highlight(sel, body, frame.buffer_mut());
+                        highlight(sel, main, frame.buffer_mut());
                     }
                     if let Some((x, y)) = view.cursor.filter(|_| view.scroll.is_none())
-                        && x < body.width
-                        && y < body.height
+                        && x < main.width
+                        && y < main.height
+                        && self.sidebar_focus.is_none()
                     {
-                        frame.set_cursor_position(Position::new(body.x + x, body.y + y));
+                        frame.set_cursor_position(Position::new(main.x + x, main.y + y));
                     }
-                    let mut line = attached_bar(view, self.theme);
+                    if let Some(side) = side {
+                        self.draw_sidebar(frame, side);
+                    }
+                    let mut line = attached_bar(view, self.sidebar_focus.is_some(), self.theme);
                     if let Some(toast) = self.toast() {
                         line.spans.extend(toast_spans(toast, self.theme));
                     }
@@ -1042,6 +1190,220 @@ impl App {
     }
 }
 
+/// The sidebar's width, borders included.
+const SIDEBAR_WIDTH: u16 = 30;
+/// Narrower terminals show the sidebar only while it has the keyboard, so the
+/// session keeps a usable width.
+const SIDEBAR_MIN_WIDTH: u16 = 100;
+/// Lines per session in the sidebar.
+const SIDEBAR_ROW: u16 = 2;
+
+/// What a click on the sidebar landed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarHit {
+    Session(SessionId),
+    New,
+}
+
+impl App {
+    /// The attached session's area and, when shown, the sidebar's, within `body`.
+    fn split_body(&self, body: Rect) -> (Rect, Option<Rect>) {
+        let shown = self.sidebar
+            && (body.width >= SIDEBAR_MIN_WIDTH
+                || (self.sidebar_focus.is_some() && body.width >= SIDEBAR_WIDTH * 2));
+        if !shown {
+            return (body, None);
+        }
+        let [main, side] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(SIDEBAR_WIDTH)])
+                .areas(body);
+        (main, Some(side))
+    }
+
+    /// Where the sidebar is on screen now, if shown.
+    fn sidebar_area(&self) -> Option<Rect> {
+        let full = session_size().ok()?;
+        self.split_body(Rect::new(0, 0, full.cols, full.rows)).1
+    }
+
+    /// The terminal minus the bar and, when shown, the sidebar.
+    fn session_size(&self) -> Result<Size> {
+        let full = session_size()?;
+        let (main, _) = self.split_body(Rect::new(0, 0, full.cols, full.rows));
+        Ok(Size {
+            cols: main.width.max(1),
+            rows: full.rows,
+        })
+    }
+
+    /// Tells the attached session its size, after the window or the sidebar changed.
+    fn relayout(&self) {
+        if let Some(view) = &self.view
+            && let Ok(size) = self.session_size()
+        {
+            let _ = self.client.resize(view.id, size);
+        }
+    }
+
+    /// The first session the sidebar lists, so the cursor (else the attached
+    /// session) stays in view.
+    fn sidebar_offset(&self, capacity: usize) -> usize {
+        let attached = self.view.as_ref().map(|v| v.id);
+        let cursor = self
+            .sidebar_focus
+            .filter(|&i| i < self.sessions.len())
+            .or_else(|| self.sessions.iter().position(|s| Some(s.id) == attached))
+            .unwrap_or(0);
+        cursor.saturating_sub(capacity.saturating_sub(1))
+    }
+
+    fn sidebar_hit(&self, side: Rect, x: u16, y: u16) -> Option<SidebarHit> {
+        let (list, new) = sidebar_parts(side);
+        let at = Position::new(x, y);
+        if new.contains(at) {
+            return Some(SidebarHit::New);
+        }
+        if !list.contains(at) {
+            return None;
+        }
+        let capacity = (list.height / SIDEBAR_ROW) as usize;
+        let i = self.sidebar_offset(capacity) + ((y - list.y) / SIDEBAR_ROW) as usize;
+        self.sessions.get(i).map(|s| SidebarHit::Session(s.id))
+    }
+
+    /// Every session, two lines each, the attached one marked; "new shell" at the bottom.
+    fn draw_sidebar(&self, frame: &mut ratatui::Frame, side: Rect) {
+        let t = self.theme;
+        let now = now_ms();
+        let spin = (now / SPIN_EVERY.as_millis() as u64) as usize;
+        let mut title = vec![
+            " ◆ ".fg(t.accent).bold(),
+            "sessions ".fg(t.fg).bold(),
+            format!("{} ", self.sessions.len()).fg(t.muted),
+        ];
+        if !self.queue.is_empty() {
+            title.push(
+                format!(" ● {} ", self.queue.len())
+                    .fg(t.bg)
+                    .bg(t.needs)
+                    .bold(),
+            );
+            title.push(" ".into());
+        }
+        let focused = self.sidebar_focus.is_some();
+        frame.render_widget(panel(Line::from(title), t, focused), side);
+
+        let (list, new) = sidebar_parts(side);
+        let attached = self.view.as_ref().map(|v| v.id);
+        let capacity = (list.height / SIDEBAR_ROW) as usize;
+        let offset = self.sidebar_offset(capacity);
+        let width = list.width as usize;
+        for (i, s) in self.sessions.iter().enumerate().skip(offset).take(capacity) {
+            let y = list.y + (i - offset) as u16 * SIDEBAR_ROW;
+            let area = Rect::new(list.x, y, list.width, SIDEBAR_ROW);
+            let (state, label) = match s.exited {
+                None => (s.status.state, s.status.state.label().to_string()),
+                Some(Some(code)) => (AgentState::Exited, format!("exited {code}")),
+                Some(None) => (AgentState::Exited, "exited".into()),
+            };
+            let color = t.state(state);
+            let here = Some(s.id) == attached;
+            let mark = if here { "▌" } else { " " };
+            let age = age(s.status.since_ms, now);
+            // Mark, icon, a space, the name, a space, the age.
+            let name = fit(&s.name, width.saturating_sub(4 + age.len()));
+            let gap = width.saturating_sub(4 + name.width() + age.len());
+            let dir = s.cwd.file_name().map(|d| d.to_string_lossy().into_owned());
+            let detail = match dir {
+                Some(dir) => format!("{label} · {dir}"),
+                None => label,
+            };
+            let lines = vec![
+                Line::from(vec![
+                    mark.fg(t.accent).bold(),
+                    format!("{} ", state_icon(state, spin)).fg(color),
+                    name.fg(t.fg).add_modifier(if here {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                    " ".repeat(gap + 1).into(),
+                    age.fg(t.muted),
+                ]),
+                Line::from(vec![
+                    mark.fg(t.accent).bold(),
+                    "  ".into(),
+                    fit(&detail, width.saturating_sub(3)).fg(t.muted),
+                ]),
+            ];
+            let mut row = Paragraph::new(lines);
+            if self.sidebar_focus == Some(i) {
+                row = row.style(style::Style::new().bg(t.selection));
+            }
+            frame.render_widget(row, area);
+        }
+
+        let mut add = Paragraph::new(Line::from(vec![
+            " + ".fg(t.accent).bold(),
+            "new shell".fg(t.fg),
+        ]));
+        if self.sidebar_focus == Some(self.sessions.len()) {
+            add = add.style(style::Style::new().bg(t.selection));
+        }
+        frame.render_widget(add, new);
+    }
+}
+
+/// The sidebar's session list and its "new shell" line, inside its panel.
+fn sidebar_parts(side: Rect) -> (Rect, Rect) {
+    let inner = Block::bordered()
+        .padding(Padding::horizontal(1))
+        .inner(side);
+    let [list, _, new] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    (list, new)
+}
+
+/// `text` cut to `max` columns, with `…` when cut.
+fn fit(text: &str, max: usize) -> String {
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if out.width() + c.width().unwrap_or(0) + 1 > max {
+            break;
+        }
+        out.push(c);
+    }
+    if max > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// The sidebar on or off, as last toggled; on by default.
+fn load_sidebar() -> bool {
+    std::fs::read_to_string(sidebar_path()).map_or(true, |s| s.trim() != "off")
+}
+
+/// Remembers the toggle for the next start; failing to is not worth an error.
+fn save_sidebar(on: bool) {
+    let path = sidebar_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, if on { "on" } else { "off" });
+}
+
+fn sidebar_path() -> PathBuf {
+    valkyrie_proto::state_dir().join("tui-sidebar")
+}
+
 /// A rounded panel; the focused one gets the accent border.
 fn panel(title: Line<'static>, t: &Theme, focused: bool) -> Block<'static> {
     Block::bordered()
@@ -1167,7 +1529,7 @@ fn footer_line(status: &str, sound: bool, t: &Theme) -> Line<'static> {
 }
 
 /// The bar under an attached session.
-fn attached_bar(view: &Attached, t: &Theme) -> Line<'static> {
+fn attached_bar(view: &Attached, sidebar_focused: bool, t: &Theme) -> Line<'static> {
     let mut spans = vec![
         " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
         format!(" {} ", view.name).fg(t.fg).bold(),
@@ -1209,9 +1571,22 @@ fn attached_bar(view: &Attached, t: &Theme) -> Line<'static> {
     {
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
-    spans.push(" ".into());
-    spans.push(" ^] ".fg(t.bg).bg(t.accent).bold());
-    spans.push(" detach ".fg(t.muted));
+    let keys: &[(&str, &str)] = if sidebar_focused {
+        &[
+            ("j/k", "move"),
+            ("↩", "switch"),
+            ("n", "new"),
+            ("h", "hide"),
+            ("esc", "back"),
+        ]
+    } else {
+        &[("^\\", "sessions"), ("^]", "home")]
+    };
+    for (key, what) in keys {
+        spans.push(" ".into());
+        spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
+        spans.push(format!(" {what}").fg(t.muted));
+    }
     Line::from(spans).style(style::Style::new().bg(t.panel))
 }
 
@@ -1765,6 +2140,118 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An attached session with the sidebar: the session gets the width left over,
+    /// clicks land on the rows drawn, and the keys move, switch focus, and hide.
+    #[tokio::test]
+    async fn sidebar_lists_sessions_beside_the_attached_one() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-side-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.sidebar = true;
+        app.sessions = (1..=3)
+            .map(|id| {
+                let mut s = info(id);
+                s.name = format!("agent-{id}");
+                s.cwd = format!("/repos/proj{id}").into();
+                s
+            })
+            .collect();
+        app.queue = vec![queued(3)];
+        let mut view = Attached::new(2, "agent-2".into(), None);
+        view.apply(update(true, vec![row(0, "inside session 2")]));
+        app.view = Some(view);
+
+        let body = Rect::new(0, 0, 120, 23);
+        let (main, side) = app.split_body(body);
+        let side = side.expect("wide enough for the sidebar");
+        assert_eq!(main.width, 120 - SIDEBAR_WIDTH);
+        assert_eq!(side.x, main.width);
+        // Too narrow: hidden, unless it has the keyboard.
+        assert!(app.split_body(Rect::new(0, 0, 80, 23)).1.is_none());
+        app.sidebar_focus = Some(0);
+        assert!(app.split_body(Rect::new(0, 0, 80, 23)).1.is_some());
+        app.sidebar_focus = None;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let [body, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                    .areas(frame.area());
+                let (main, side) = app.split_body(body);
+                render_rows(app.view.as_ref().unwrap().shown(), main, frame.buffer_mut());
+                app.draw_sidebar(frame, side.unwrap());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = |y: u16| -> String {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
+        let text: String = (0..buffer.area.height).map(line).collect();
+        for want in [
+            "inside session 2",
+            "sessions 3",
+            "● 1",
+            "agent-1",
+            "agent-3",
+            "proj2",
+            "new shell",
+        ] {
+            assert!(text.contains(want), "sidebar lacks {want:?}");
+        }
+        // The attached session is marked.
+        let (list, new) = sidebar_parts(side);
+        assert!(line(list.y + SIDEBAR_ROW).contains("▌"));
+        assert!(!line(list.y).contains("▌"));
+
+        assert_eq!(
+            app.sidebar_hit(side, list.x + 3, list.y),
+            Some(SidebarHit::Session(1))
+        );
+        assert_eq!(
+            app.sidebar_hit(side, list.x, list.y + 2 * SIDEBAR_ROW + 1),
+            Some(SidebarHit::Session(3))
+        );
+        assert_eq!(
+            app.sidebar_hit(side, list.x, list.y + 3 * SIDEBAR_ROW),
+            None
+        );
+        assert_eq!(
+            app.sidebar_hit(side, new.x + 2, new.y),
+            Some(SidebarHit::New)
+        );
+        assert_eq!(app.sidebar_hit(side, side.x, side.y), None, "the border");
+
+        // ^\ focuses on the attached session; j/k stop at "new shell" and the top.
+        app.on_keys(vec![SIDEBAR_KEY]).await;
+        assert_eq!(app.sidebar_focus, Some(1));
+        app.on_keys(b"jjjj".to_vec()).await;
+        assert_eq!(app.sidebar_focus, Some(3));
+        app.on_keys(b"\x1b[Akkkk".to_vec()).await;
+        assert_eq!(app.sidebar_focus, Some(0));
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert_eq!(app.sidebar_focus, None);
+        // Enter on the attached session just hands the keyboard back.
+        app.on_keys(vec![SIDEBAR_KEY, b'\r']).await;
+        assert_eq!(app.sidebar_focus, None);
+        assert_eq!(app.view.as_ref().map(|v| v.id), Some(2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fit_cuts_with_an_ellipsis() {
+        assert_eq!(fit("api-auth", 8), "api-auth");
+        assert_eq!(fit("api-auth", 5), "api-…");
+        assert_eq!(fit("日本語", 4), "日…");
     }
 
     #[test]

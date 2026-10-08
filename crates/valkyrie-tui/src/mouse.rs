@@ -86,6 +86,31 @@ pub fn split(bytes: &[u8]) -> Vec<Input> {
     out
 }
 
+/// Takes the SGR reports `ours` picks out of input bound for a program that wants the
+/// mouse; every other byte, other reports included, stays as it was.
+pub fn take(bytes: &[u8], ours: impl Fn(&Mouse) -> bool) -> (Vec<u8>, Vec<Mouse>) {
+    let mut rest = Vec::with_capacity(bytes.len());
+    let mut taken = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match parse_sgr(&bytes[i..]) {
+            Some((mouse, len)) if ours(&mouse) => {
+                taken.push(mouse);
+                i += len;
+            }
+            Some((_, len)) => {
+                rest.extend_from_slice(&bytes[i..i + len]);
+                i += len;
+            }
+            None => {
+                rest.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    (rest, taken)
+}
+
 fn parse_sgr(b: &[u8]) -> Option<(Mouse, usize)> {
     let rest = b.strip_prefix(b"\x1b[<")?;
     let end = rest.iter().position(|&c| c == b'M' || c == b'm')?;
@@ -260,6 +285,21 @@ mod tests {
                 .collect(),
             wrapped,
         }
+    }
+
+    #[test]
+    fn takes_only_the_reports_asked_for() {
+        // A press at column 90 is taken; one at column 5, an X10 report, and keys stay.
+        let (rest, taken) = take(b"a\x1b[<0;91;3M\x1b[<0;5;3Mb\x1b[M !!", |m| m.x >= 80);
+        assert_eq!(rest, b"a\x1b[<0;5;3Mb\x1b[M !!");
+        assert_eq!(
+            taken,
+            [Mouse {
+                kind: MouseKind::Press,
+                x: 90,
+                y: 2
+            }]
+        );
     }
 
     #[test]
