@@ -16,7 +16,26 @@ permissions:
   contents: write
 
 jobs:
+  # The release first, so each build uploads to it directly: no Actions
+  # artifacts, which count against the account's storage quota.
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: tag
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          gh release upload "$TAG" install-release.sh --clobber
+
   build:
+    needs: release
     strategy:
       matrix:
         include:
@@ -30,38 +49,18 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --locked --release -p valkyrie --target ${{ matrix.target }}
-      - name: package
-        run: |
-          mkdir dist
-          tar -czf dist/valk-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release valk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: valk-${{ matrix.target }}
-          path: dist/*
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ needs.release.outputs.tag }}
+          NAME: valk-${{ matrix.target }}.tar.gz
         run: |
-          cd dist && sha256sum *.tar.gz > SHA256SUMS
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
-          cp "$GITHUB_WORKSPACE/install-release.sh" .
-          gh release upload "$TAG" *.tar.gz SHA256SUMS install-release.sh --clobber
+          tar -czf "$NAME" -C target/${{ matrix.target }}/release valk
+          shasum -a 256 "$NAME" > "$NAME.sha256"
+          gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber

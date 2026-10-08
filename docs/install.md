@@ -44,9 +44,9 @@ cd ~/repos/valkyrie && ./install.sh
 ## Prebuilt binary (no checkout)
 
 Each `v*` tag builds `valk` for Linux x86_64 and arm64 (static, musl: it runs on any
-distro and any WSL, whatever its glibc) and macOS arm64, and attaches the builds to a
-GitHub release with `install-release.sh` and `SHA256SUMS`. The binary carries the web
-app too, so it is the only file you need.
+distro and any WSL, whatever its glibc) and macOS arm64, and attaches the builds, each
+with a `.sha256`, to a GitHub release with `install-release.sh`. The binary carries the
+web app too, so it is the only file you need.
 
 The repo is private, so you need the GitHub CLI logged in (`gh auth login`). That
 grants read access to the repo, but nothing is cloned:

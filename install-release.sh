@@ -29,8 +29,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 say "downloading valk ${version:-(latest)} for $target"
 gh release download ${version:+"$version"} -R "$repo" -D "$tmp" \
-    -p "valk-$target.tar.gz" -p SHA256SUMS
-(cd "$tmp" && grep " valk-$target.tar.gz\$" SHA256SUMS | sha256sum -c --quiet -) \
+    -p "valk-$target.tar.gz" -p "valk-$target.tar.gz.sha256"
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+(cd "$tmp" && sha256 -c --quiet "valk-$target.tar.gz.sha256") \
     || die "checksum mismatch for valk-$target.tar.gz"
 tar -xzf "$tmp/valk-$target.tar.gz" -C "$tmp"
 
