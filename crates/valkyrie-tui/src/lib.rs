@@ -946,8 +946,8 @@ impl App {
         let Some(view) = &mut self.view else { return };
         if let Some(tabs) = tabs {
             // A drag that strays over the strip still selects.
-            let dragging = self.tab_drag.is_some()
-                && matches!(m.kind, MouseKind::Drag | MouseKind::Release);
+            let dragging =
+                self.tab_drag.is_some() && matches!(m.kind, MouseKind::Drag | MouseKind::Release);
             if (m.y < tabs.bottom() || dragging) && !view.selecting {
                 return self.tab_click(tabs, m).await;
             }
@@ -1520,10 +1520,10 @@ const TABS_MIN_ROWS: u16 = 12;
 /// A tab's width bounds, padding included.
 const TAB_MIN: u16 = 10;
 const TAB_MAX: u16 = 24;
-/// The "+" at the end of the strip.
-const PLUS_WIDTH: u16 = 3;
-/// The home tab at the start: ` ⌂` over ` ●3`, and a gap.
-const HOME_WIDTH: u16 = 5;
+/// The ` + new` card at the end of the strip.
+const PLUS_WIDTH: u16 = 7;
+/// The home card at the start, ` ⌂ home` over ` ● 3`, and a gap.
+const HOME_WIDTH: u16 = 9;
 /// Longest name the rename prompt takes.
 const NAME_MAX: usize = 40;
 
@@ -1677,8 +1677,10 @@ impl App {
         let t = self.theme;
         let spin = (now_ms() / SPIN_EVERY.as_millis() as u64) as usize;
         let buf = frame.buffer_mut();
-        buf.set_style(area, style::Style::new().bg(t.panel));
+        buf.set_style(area, style::Style::new().bg(t.strip));
         let layout = self.tab_layout(area);
+        // Every clickable thing is a card on the darker strip; the cursor's is lit.
+        let lit = style::Style::new().bg(t.accent).fg(t.bg);
         let attached = self.view.as_ref().map(|v| v.id);
         for &(i, rect) in &layout.tabs {
             let s = &self.sessions[i];
@@ -1690,13 +1692,7 @@ impl App {
             };
             let color = t.state(state);
             let queued = self.queue.iter().any(|q| q.session == s.id);
-            let bg = if cursor {
-                t.border
-            } else if here {
-                t.selection
-            } else {
-                t.panel
-            };
+            let bg = if here { t.selection } else { t.card };
             let width = rect.width as usize;
             let mark = if here { "▌" } else { " " };
             let number = if i < 9 {
@@ -1737,16 +1733,27 @@ impl App {
                 Paragraph::new(vec![top, bottom]).style(style::Style::new().bg(bg)),
                 rect,
             );
+            if cursor {
+                frame.buffer_mut().set_style(rect, lit);
+            }
         }
         // Home: the way back to the whole picture, with how many need you.
         let needs = if self.queue.is_empty() {
             Line::default()
         } else {
-            Line::from(format!(" ●{}", self.queue.len()).fg(t.needs).bold())
+            Line::from(format!(" ● {}", self.queue.len()).fg(t.needs).bold())
+        };
+        let home = Rect {
+            width: layout.home.width.saturating_sub(1),
+            ..layout.home
         };
         frame.render_widget(
-            Paragraph::new(vec![Line::from(" ⌂".fg(t.accent).bold()), needs]),
-            layout.home,
+            Paragraph::new(vec![
+                Line::from(vec![" ⌂ ".fg(t.accent).bold(), "home".fg(t.fg).bold()]),
+                needs,
+            ])
+            .style(style::Style::new().bg(t.card)),
+            home,
         );
         if layout.more_left {
             frame.render_widget(
@@ -1758,10 +1765,12 @@ impl App {
             let x = layout.plus.x.saturating_sub(1);
             frame.render_widget(Paragraph::new("›".fg(t.muted)), Rect::new(x, area.y, 1, 1));
         }
-        let cursor_on_plus = self.tab_cursor == Some(self.sessions.len());
-        let plus = Paragraph::new(" + ".fg(t.accent).bold())
-            .style(style::Style::new().bg(if cursor_on_plus { t.border } else { t.panel }));
+        let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), "new".fg(t.fg)]))
+            .style(style::Style::new().bg(t.card));
         frame.render_widget(plus, layout.plus);
+        if self.tab_cursor == Some(self.sessions.len()) {
+            frame.buffer_mut().set_style(layout.plus, lit);
+        }
     }
 }
 
@@ -2401,6 +2410,35 @@ mod tests {
         assert_eq!(home_keys(b"\x1b_Gi=1;EINVAL:q\x1b\\j"), [HomeKey::Down]);
     }
 
+    /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)
+    /// as `<name>.json` there, for eyeballing a theme as an image.
+    fn snapshot(buffer: &ratatui::buffer::Buffer, name: &str) {
+        let Some(out) = std::env::var_os("VALK_SNAPSHOT_DIR") else {
+            return;
+        };
+        let color = |c: style::Color| match c {
+            style::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            _ => String::new(),
+        };
+        let rows: Vec<Vec<serde_json::Value>> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        let c = &buffer[(x, y)];
+                        serde_json::json!([
+                            c.symbol(),
+                            color(c.fg),
+                            color(c.bg),
+                            c.modifier.contains(Modifier::BOLD)
+                        ])
+                    })
+                    .collect()
+            })
+            .collect();
+        let path = PathBuf::from(out).join(format!("{name}.json"));
+        std::fs::write(path, serde_json::to_string(&rows).unwrap()).unwrap();
+    }
+
     fn update(full: bool, rows: Vec<Row>) -> ScreenUpdate {
         ScreenUpdate {
             full,
@@ -2583,29 +2621,7 @@ mod tests {
             ] {
                 assert!(text.contains(want), "{} theme lacks {want:?}", theme.name);
             }
-            if let Some(out) = std::env::var_os("VALK_SNAPSHOT_DIR") {
-                let color = |c: style::Color| match c {
-                    style::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
-                    _ => String::new(),
-                };
-                let rows: Vec<Vec<serde_json::Value>> = (0..buffer.area.height)
-                    .map(|y| {
-                        (0..buffer.area.width)
-                            .map(|x| {
-                                let c = &buffer[(x, y)];
-                                serde_json::json!([
-                                    c.symbol(),
-                                    color(c.fg),
-                                    color(c.bg),
-                                    c.modifier.contains(Modifier::BOLD)
-                                ])
-                            })
-                            .collect()
-                    })
-                    .collect();
-                let path = PathBuf::from(out).join(format!("{}.json", theme.name));
-                std::fs::write(path, serde_json::to_string(&rows).unwrap()).unwrap();
-            }
+            snapshot(buffer, theme.name);
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2678,6 +2694,19 @@ mod tests {
                 })
                 .collect::<Vec<String>>()
         };
+        for theme in theme::THEMES {
+            app.theme = theme;
+            draw(&app, &mut terminal);
+            snapshot(terminal.backend().buffer(), &format!("tabs-{}", theme.name));
+            app.tab_cursor = Some(0);
+            draw(&app, &mut terminal);
+            snapshot(
+                terminal.backend().buffer(),
+                &format!("tabs-cursor-{}", theme.name),
+            );
+            app.tab_cursor = None;
+        }
+        app.theme = theme::THEMES[0];
         let lines = draw(&app, &mut terminal);
         assert!(
             lines[0].contains("1 proj1") && lines[0].contains("2 proj2"),
@@ -2687,7 +2716,7 @@ mod tests {
         assert!(lines[1].contains("fish · ○ idle"), "{}", lines[1]);
         assert!(lines[1].contains("claude · ") && lines[1].contains("working"));
         assert!(lines[1].contains("codex · ● needs input"));
-        assert!(lines[0].trim_end().ends_with('+'));
+        assert!(lines[0].trim_end().ends_with("+ new"), "{}", lines[0]);
         assert!(
             lines[2].starts_with("inside session 2"),
             "the session sits below"
@@ -2707,8 +2736,8 @@ mod tests {
         assert_eq!(app.tab_hit(tabs, layout.plus.x + 1, 0), Some(TabHit::New));
         // Home comes first, with how many need you under it.
         assert_eq!(app.tab_hit(tabs, 1, 1), Some(TabHit::Home));
-        assert!(lines[0].starts_with(" ⌂"), "{}", lines[0]);
-        assert!(lines[1].starts_with(" ●1"), "{}", lines[1]);
+        assert!(lines[0].starts_with(" ⌂ home"), "{}", lines[0]);
+        assert!(lines[1].starts_with(" ● 1"), "{}", lines[1]);
         assert!(first.x >= HOME_WIDTH);
         assert_eq!(app.tab_hit(tabs, 119, 0), None, "past the +");
 

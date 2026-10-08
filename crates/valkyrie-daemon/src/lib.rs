@@ -398,14 +398,10 @@ fn finish_kills(registry: &Registry) -> Vec<u32> {
         .collect()
 }
 
-fn exec_successor(
-    registry: &Registry,
-    listener: &UnixListener,
-    exe: &Path,
-    sessions: &[Arc<Session>],
-    orphans: Vec<u32>,
-) -> Result<std::convert::Infallible> {
-    let handoff = snapshot(registry, listener.as_raw_fd(), sessions, orphans);
+/// An anonymous file the next image inherits across the exec: a memfd on Linux,
+/// elsewhere a private file unlinked as soon as it is open.
+#[cfg(target_os = "linux")]
+fn handoff_file(_dir: &Path) -> Result<std::fs::File> {
     let name = CString::new("valkyrie-handoff")?;
     // No MFD_CLOEXEC: the next image reads it.
     // SAFETY: valid NUL-terminated name.
@@ -414,7 +410,39 @@ fn exec_successor(
         return Err(std::io::Error::last_os_error()).context("memfd_create");
     }
     // SAFETY: memfd_create just returned it.
-    let mut memfd = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn handoff_file(dir: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join(format!("handoff-{}", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("create {}", path.display()))?;
+    std::fs::remove_file(&path)?;
+    // std opens close-on-exec; the next image must inherit it.
+    // SAFETY: clears a flag on a descriptor we own.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("handoff fd");
+    }
+    Ok(file)
+}
+
+fn exec_successor(
+    registry: &Registry,
+    listener: &UnixListener,
+    exe: &Path,
+    sessions: &[Arc<Session>],
+    orphans: Vec<u32>,
+) -> Result<std::convert::Infallible> {
+    let handoff = snapshot(registry, listener.as_raw_fd(), sessions, orphans);
+    let mut memfd = handoff_file(&registry.host.transcript_dir)?;
+    let fd = memfd.as_raw_fd();
     memfd.write_all(&serde_json::to_vec(&handoff)?)?;
     memfd.rewind()?;
 

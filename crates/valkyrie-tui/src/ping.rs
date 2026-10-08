@@ -213,7 +213,8 @@ pub fn play(kind: Kind) {
         return;
     };
     std::thread::spawn(move || {
-        for player in ["pw-play", "paplay", "aplay"] {
+        // macOS ships afplay; Linux has one of the others.
+        for player in ["pw-play", "paplay", "aplay", "afplay"] {
             let mut cmd = Command::new(player);
             if player == "aplay" {
                 cmd.arg("-q");

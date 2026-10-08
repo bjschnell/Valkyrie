@@ -292,8 +292,12 @@ pub fn legacy_socket_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Longest path a unix socket address holds (`sun_path` is 108 bytes with the NUL).
+/// Longest path a unix socket address holds (`sun_path` with its NUL: 108 bytes on
+/// Linux, 104 on macOS and the BSDs).
+#[cfg(target_os = "linux")]
 pub const MAX_SOCKET_PATH: usize = 107;
+#[cfg(not(target_os = "linux"))]
+pub const MAX_SOCKET_PATH: usize = 103;
 
 /// This machine's name, safe as a file name.
 pub fn hostname() -> String {

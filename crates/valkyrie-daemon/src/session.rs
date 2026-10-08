@@ -78,14 +78,12 @@ pub struct StopPipe {
 
 impl StopPipe {
     pub fn new() -> std::io::Result<Self> {
-        let mut fds = [0; 2];
-        // SAFETY: `fds` has room for the two descriptors pipe2 writes.
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: pipe2 just returned these, and nothing else owns them.
-        let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        Ok(Self { read, write })
+        // Close-on-exec, on every platform.
+        let (read, write) = std::io::pipe()?;
+        Ok(Self {
+            read: read.into(),
+            write: write.into(),
+        })
     }
 
     /// Level-triggered and never drained, so every poller sees it, now and later.

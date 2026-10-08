@@ -10,6 +10,10 @@ pub struct Theme {
     /// Page background, and the slightly lifted panel and selection backgrounds.
     pub bg: Color,
     pub panel: Color,
+    /// Behind the tab strip, darker than anything on it.
+    pub strip: Color,
+    /// A clickable card on the strip (tab, home, new), a step lighter than `bg`.
+    pub card: Color,
     pub selection: Color,
     pub border: Color,
     pub fg: Color,
@@ -35,6 +39,8 @@ pub const DRACULA: Theme = Theme {
     name: "dracula",
     bg: hex(0x282a36),
     panel: hex(0x21222c),
+    strip: hex(0x191a21),
+    card: hex(0x343746),
     selection: hex(0x44475a),
     border: hex(0x44475a),
     fg: hex(0xf8f8f2),
@@ -54,6 +60,8 @@ pub const CYBERPUNK: Theme = Theme {
     name: "cyberpunk",
     bg: hex(0x0b0c1a),
     panel: hex(0x11132a),
+    strip: hex(0x05060d),
+    card: hex(0x1b1e3d),
     selection: hex(0x2b1748),
     border: hex(0x3a2a66),
     fg: hex(0xe6e9ff),
