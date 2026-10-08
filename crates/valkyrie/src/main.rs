@@ -171,14 +171,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             Ok(())
         }
         Some(Cmd::Daemon { resume_fd, .. }) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info".into()),
-                )
-                .with_writer(std::io::stderr)
-                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-                .init();
+            init_logging();
             let exe = std::env::current_exe()?;
             let state = valkyrie_proto::state_dir();
             match resume_fd {
@@ -270,6 +263,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             action,
         }) => match action {
             None => {
+                init_logging();
                 // The daemon must be up, and speak this protocol, before phones arrive.
                 drop(connect(&socket).await?);
                 valkyrie_web::run(valkyrie_web::Options {
@@ -508,6 +502,17 @@ fn unescape(s: &str) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+/// Logs to stderr, at `info` unless `RUST_LOG` says otherwise.
+fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .init();
 }
 
 #[cfg(test)]

@@ -4,6 +4,8 @@
 //! serve` puts HTTPS in front of it, reachable only on the tailnet.
 
 pub mod auth;
+pub mod notify;
+pub mod push;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -17,6 +19,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::UnixStream;
 use valkyrie_proto::ClientMsg;
@@ -41,9 +44,19 @@ pub struct Options {
     pub url: Option<String>,
 }
 
-struct App {
+pub(crate) struct App {
     store: auth::Store,
     socket: PathBuf,
+    /// Sends Web Push; `None` if the VAPID key couldn't be set up.
+    push: Option<push::Sender>,
+    /// Connected web apps on screen right now.
+    visible: AtomicUsize,
+}
+
+impl App {
+    pub(crate) fn visible(&self) -> bool {
+        self.visible.load(Ordering::Relaxed) > 0
+    }
 }
 
 pub fn store() -> Result<auth::Store> {
@@ -69,12 +82,26 @@ pub async fn run(opts: Options) -> Result<()> {
         );
     }
     print_pairing(&store, &url)?;
+    let push = match store.vapid_secret().and_then(|key| push::Sender::new(&key)) {
+        Ok(sender) => Some(sender),
+        Err(e) => {
+            println!("  no notifications: {e:#}");
+            None
+        }
+    };
     let app = Arc::new(App {
         store,
         socket: opts.socket,
+        push,
+        visible: AtomicUsize::new(0),
     });
+    tokio::spawn(notify::run(app.clone()));
     let router = Router::new()
         .route("/api/pair", post(pair))
+        .route("/api/push", get(push_key))
+        .route("/api/push/subscribe", post(subscribe))
+        .route("/api/push/unsubscribe", post(unsubscribe))
+        .route("/api/push/test", post(push_test))
         .route("/ws", get(ws))
         .fallback(get(asset))
         .with_state(app);
@@ -136,6 +163,116 @@ async fn pair(State(app): State<Arc<App>>, Json(req): Json<PairRequest>) -> Resp
     }
 }
 
+/// The paired device making an HTTP request (`Authorization: Bearer <token>`).
+fn device(app: &App, headers: &HeaderMap) -> Option<auth::Device> {
+    if !same_origin(headers) {
+        return None;
+    }
+    let token = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?;
+    app.store.check(token.trim())
+}
+
+fn unpaired() -> Response {
+    (StatusCode::UNAUTHORIZED, "pair this device first").into_response()
+}
+
+/// The key browsers subscribe with.
+async fn push_key(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    match &app.push {
+        Some(sender) => Json(serde_json::json!({ "key": sender.public })).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "notifications are off").into_response(),
+    }
+}
+
+/// A browser's `PushSubscription`, as `toJSON()` gives it.
+#[derive(Deserialize)]
+struct SubscribeRequest {
+    endpoint: String,
+    keys: SubscriptionKeys,
+}
+
+#[derive(Deserialize)]
+struct SubscriptionKeys {
+    p256dh: String,
+    auth: String,
+}
+
+async fn subscribe(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(req): Json<SubscribeRequest>,
+) -> Response {
+    let Some(device) = device(&app, &headers) else {
+        return unpaired();
+    };
+    if !req.endpoint.starts_with("https://") {
+        return (StatusCode::BAD_REQUEST, "push endpoint isn't https").into_response();
+    }
+    let sub = auth::Subscription {
+        device: String::new(),
+        endpoint: req.endpoint,
+        p256dh: req.keys.p256dh,
+        auth: req.keys.auth,
+    };
+    match app.store.subscribe(&device, sub) {
+        Ok(()) => {
+            tracing::info!(device = device.name, "push subscribed");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UnsubscribeRequest {
+    endpoint: String,
+}
+
+async fn unsubscribe(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(req): Json<UnsubscribeRequest>,
+) -> Response {
+    let Some(device) = device(&app, &headers) else {
+        return unpaired();
+    };
+    // Only its own subscriptions.
+    let mine = app
+        .store
+        .subscriptions()
+        .iter()
+        .any(|s| s.endpoint == req.endpoint && s.device == device.id());
+    if mine && let Err(e) = app.store.unsubscribe(&req.endpoint) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Sends the asking device a notification, to show that pushes arrive.
+async fn push_test(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let Some(device) = device(&app, &headers) else {
+        return unpaired();
+    };
+    let note = notify::Note {
+        title: "Valkyrie".into(),
+        body: "Notifications work. You'll hear from your agents when you're away.".into(),
+        session: None,
+        seq: 0,
+        tag: "test".into(),
+        badge: 0,
+        urgency: push::Urgency::High,
+        from_screen: false,
+    };
+    Json(notify::send(&app, &note, Some(device.id())).await).into_response()
+}
+
 async fn ws(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -165,11 +302,14 @@ async fn ws(
                 let _ = ws.send(Message::Close(Some(close))).await;
             });
     };
-    let socket = app.socket.clone();
     upgrade
         .protocols([SUBPROTOCOL])
         .on_upgrade(move |ws| async move {
-            if let Err(e) = bridge(ws, &socket).await {
+            let mut presence = Presence {
+                app,
+                visible: false,
+            };
+            if let Err(e) = bridge(ws, &mut presence).await {
                 tracing::debug!(device = device.name, "bridge ended: {e:#}");
             }
         })
@@ -196,8 +336,35 @@ fn allowed(msg: &ClientMsg) -> bool {
     !matches!(msg, ClientMsg::Upgrade { .. } | ClientMsg::Hook { .. })
 }
 
-/// One daemon connection per browser connection; frames pass through as JSON.
-async fn bridge(mut ws: WebSocket, socket: &std::path::Path) -> Result<()> {
+/// Whether one connected app is on screen; it stops counting when it disconnects.
+struct Presence {
+    app: Arc<App>,
+    visible: bool,
+}
+
+impl Presence {
+    fn set(&mut self, visible: bool) {
+        if visible != self.visible {
+            self.visible = visible;
+            if visible {
+                self.app.visible.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.app.visible.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for Presence {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+/// One daemon connection per browser connection; frames pass through as JSON,
+/// except the app's own `{"t":"visible"}`, which stays here.
+async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
+    let socket = &presence.app.socket;
     let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("connect {}", socket.display()))?;
@@ -217,6 +384,10 @@ async fn bridge(mut ws: WebSocket, socket: &std::path::Path) -> Result<()> {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                if value["t"] == "visible" {
+                    presence.set(value["visible"] == true);
+                    continue;
+                }
                 match serde_json::from_value::<ClientMsg>(value.clone()) {
                     Ok(msg) if allowed(&msg) => write_frame(&mut to_daemon, &value).await?,
                     _ => {

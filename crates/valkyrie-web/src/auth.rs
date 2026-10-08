@@ -1,6 +1,7 @@
 //! Who may use the web app. A browser pairs once with a one-time code (shown as a
 //! QR code by `valk web` or `valk web pair`) and gets a device token for good. Only
-//! SHA-256 hashes of codes and tokens are written to disk.
+//! SHA-256 hashes of codes and tokens are written to disk. A device may also leave a
+//! push subscription, which goes when the device is revoked.
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -19,6 +20,25 @@ pub struct Device {
     pub name: String,
     token_sha256: String,
     pub created_unix: u64,
+}
+
+impl Device {
+    /// Names the device on its push subscriptions, without the token.
+    pub fn id(&self) -> &str {
+        &self.token_sha256
+    }
+}
+
+/// Where and how to reach one browser by Web Push (its `PushSubscription`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Subscription {
+    /// The paired device it belongs to (`Device::id`).
+    #[serde(default)]
+    pub device: String,
+    pub endpoint: String,
+    /// The browser's P-256 public key and auth secret, base64url.
+    pub p256dh: String,
+    pub auth: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,14 +117,70 @@ impl Store {
         self.read("devices.json")
     }
 
-    /// Forgets devices by name (or every one, for `all`). Returns how many.
+    /// Forgets devices by name (or every one, for `all`), and their push
+    /// subscriptions. Returns how many devices.
     pub fn revoke(&self, name: &str) -> Result<usize> {
         let _guard = self.lock.lock().unwrap();
         let mut devices: Vec<Device> = self.read("devices.json");
         let before = devices.len();
         devices.retain(|d| name != "all" && d.name != name);
         self.write("devices.json", &devices)?;
+        let mut subs: Vec<Subscription> = self.read("subscriptions.json");
+        subs.retain(|s| devices.iter().any(|d| d.id() == s.device));
+        self.write("subscriptions.json", &subs)?;
         Ok(before - devices.len())
+    }
+
+    /// Adds (or replaces) a device's push subscription.
+    pub fn subscribe(&self, device: &Device, mut sub: Subscription) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        sub.device = device.id().to_owned();
+        let mut subs: Vec<Subscription> = self.read("subscriptions.json");
+        subs.retain(|s| s.endpoint != sub.endpoint);
+        subs.push(sub);
+        self.write("subscriptions.json", &subs)
+    }
+
+    /// Drops a push subscription, by its endpoint.
+    pub fn unsubscribe(&self, endpoint: &str) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        let mut subs: Vec<Subscription> = self.read("subscriptions.json");
+        subs.retain(|s| s.endpoint != endpoint);
+        self.write("subscriptions.json", &subs)
+    }
+
+    /// Push subscriptions of devices still paired.
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        let devices = self.devices();
+        let mut subs: Vec<Subscription> = self.read("subscriptions.json");
+        subs.retain(|s| devices.iter().any(|d| d.id() == s.device));
+        subs
+    }
+
+    /// This server's VAPID signing key (RFC 8292), made on first use. Browsers bind
+    /// their subscriptions to its public half, so it must stay the same.
+    pub fn vapid_secret(&self) -> Result<[u8; 32]> {
+        #[derive(Serialize, Deserialize)]
+        struct Vapid {
+            secret: String,
+        }
+        let _guard = self.lock.lock().unwrap();
+        let stored: Vec<Vapid> = self.read("vapid.json");
+        if let Some(bytes) = stored
+            .first()
+            .and_then(|v| URL_SAFE_NO_PAD.decode(&v.secret).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        {
+            return Ok(bytes);
+        }
+        let secret = crate::push::new_secret()?;
+        self.write(
+            "vapid.json",
+            &[Vapid {
+                secret: URL_SAFE_NO_PAD.encode(secret),
+            }],
+        )?;
+        Ok(secret)
     }
 
     fn read<T: for<'de> Deserialize<'de>>(&self, file: &str) -> Vec<T> {
@@ -170,8 +246,22 @@ mod tests {
         // Nothing secret on disk.
         let disk = std::fs::read_to_string(dir.join("devices.json")).unwrap();
         assert!(!disk.contains(&token));
+        let device = store.check(&token).unwrap();
+        let sub = Subscription {
+            device: String::new(),
+            endpoint: "https://push.example/1".into(),
+            p256dh: "k".into(),
+            auth: "a".into(),
+        };
+        store.subscribe(&device, sub.clone()).unwrap();
+        store.subscribe(&device, sub).unwrap();
+        assert_eq!(store.subscriptions().len(), 1, "one per endpoint");
+        assert_eq!(store.subscriptions()[0].device, device.id());
+        let key = store.vapid_secret().unwrap();
+        assert_eq!(store.vapid_secret().unwrap(), key, "the VAPID key stays");
         assert_eq!(store.revoke("phone").unwrap(), 1);
         assert!(store.check(&token).is_none());
+        assert!(store.subscriptions().is_empty(), "revoking drops its push");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

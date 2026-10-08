@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="0.5" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#2c2e3e"/>
+      <stop offset="1" stop-color="#15161c"/>
+    </radialGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#d4b5ff"/>
+      <stop offset="1" stop-color="#9a6cf0"/>
+    </linearGradient>
+    <linearGradient id="right" x1="1" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#ff9bd6"/>
+      <stop offset="1" stop-color="#e2509f"/>
+    </linearGradient>
+  </defs>
+  <rect class="bg" width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Two blades of a V, a hair apart, with the ◆ held between them. -->
+  <path d="M106 134 H202 L253 292 V404 Z" fill="url(#left)"/>
+  <path d="M406 134 H310 L259 292 V404 Z" fill="url(#right)"/>
+  <path d="M256 150 L284 178 L256 206 L228 178 Z" fill="#f1fa8c"/>
+</svg>

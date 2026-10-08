@@ -777,3 +777,118 @@ code {
     transition: none !important;
   }
 }
+
+/* Notifications -------------------------------------------------------- */
+
+.notify {
+  position: relative;
+}
+
+.icon-btn.lit {
+  color: var(--accent);
+}
+
+.primary {
+  padding: 9px 16px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #1b1530;
+  font-weight: 650;
+  font-size: 14.5px;
+}
+
+.primary:active {
+  transform: scale(0.97);
+  filter: brightness(0.92);
+}
+
+.menu.panel {
+  right: -4px;
+  width: min(330px, calc(100vw - 24px));
+  padding: 14px 14px 12px;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 650;
+  font-size: 16px;
+}
+
+.panel-state {
+  padding: 1px 8px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--raised);
+  color: var(--muted);
+}
+
+.panel-state.on {
+  background: color-mix(in srgb, var(--done) 18%, var(--raised));
+  color: var(--done);
+}
+
+.panel-text {
+  margin: 8px 0 12px;
+  color: var(--soft);
+  font-size: 14px;
+}
+
+.panel-actions,
+.hint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.menu.panel .panel-actions button {
+  display: inline-block;
+  width: auto;
+  text-align: center;
+}
+
+.menu.panel .panel-actions .primary {
+  padding: 9px 16px;
+}
+
+.hint {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 14px;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--card)), var(--card) 70%);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  animation: rise 0.28s ease-out;
+}
+
+.hint-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.hint-body {
+  min-width: 0;
+}
+
+.hint-title {
+  font-weight: 650;
+}
+
+.hint-text {
+  margin: 2px 0 10px;
+  color: var(--soft);
+  font-size: 14px;
+}
+
+.primary:disabled {
+  opacity: 0.6;
+}

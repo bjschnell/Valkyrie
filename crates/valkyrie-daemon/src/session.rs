@@ -213,6 +213,8 @@ pub struct Session {
     pid: Option<u32>,
     created_unix: u64,
     pub clients: AtomicU32,
+    /// When a client last typed into it (ms since the epoch; 0: never).
+    last_input_ms: AtomicU64,
     adapter: &'static dyn Adapter,
     state: Mutex<State>,
     input: Arc<InputQueue>,
@@ -501,6 +503,7 @@ impl Session {
             pid: meta.pid,
             created_unix: meta.created_unix,
             clients: AtomicU32::new(0),
+            last_input_ms: AtomicU64::new(0),
             adapter,
             state: Mutex::new(state),
             input: Arc::default(),
@@ -1008,6 +1011,12 @@ impl Session {
         self.input.push(data);
     }
 
+    /// Input a client typed (not the terminal's own replies to queries).
+    pub fn typed(&self, data: Vec<u8>) {
+        self.last_input_ms.store(now_ms(), Ordering::Relaxed);
+        self.write_input(data);
+    }
+
     pub fn resize(&self, size: Size) {
         let size = size.clamped();
         let mut state = self.state.lock().unwrap();
@@ -1118,6 +1127,7 @@ impl Session {
             clients: self.clients.load(Ordering::Relaxed),
             exited: state.exited,
             status: state.tracker.status().clone(),
+            last_input_ms: self.last_input_ms.load(Ordering::Relaxed),
         }
     }
 }

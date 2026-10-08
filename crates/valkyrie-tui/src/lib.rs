@@ -2998,6 +2998,7 @@ mod tests {
             clients: 0,
             exited: None,
             status: AgentStatus::default(),
+            last_input_ms: 0,
         }
     }
 

@@ -7,6 +7,15 @@ import type { QueueItem, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { findChoices, type Choice } from "./lib/choices";
 import { keyBytes, messageBytes, type Key } from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
+import {
+  clearNotifications,
+  disablePush,
+  enablePush,
+  pushState,
+  setBadge,
+  testPush,
+  type PushState,
+} from "./lib/push";
 
 const TOKEN_KEY = "valk.token";
 /** The list has no push of its own; the TUI polls it about as often. */
@@ -32,6 +41,11 @@ interface State {
   prompts: Record<SessionId, Prompt>;
   toast: { text: string; at: number } | null;
   now: number;
+  push: PushState;
+  /** Turning notifications on: the browser's push service can take a while. */
+  pushBusy: boolean;
+  /** Android's install prompt, kept for an Install button. */
+  canInstall: boolean;
 }
 
 export const useApp = create<State>(() => ({
@@ -45,6 +59,9 @@ export const useApp = create<State>(() => ({
   prompts: {},
   toast: null,
   now: Date.now(),
+  push: "unknown",
+  pushBusy: false,
+  canInstall: false,
 }));
 
 const set = useApp.setState;
@@ -76,6 +93,7 @@ export function connect(): void {
     onStatus: (status) => set({ status }),
     onPush,
     onReady: () => {
+      reportVisible();
       void conn?.request({ t: "watch_queue" }).catch(() => {});
       void refresh();
       const open = get().openId;
@@ -83,6 +101,8 @@ export function connect(): void {
     },
   });
   conn.start();
+  document.addEventListener("visibilitychange", reportVisible);
+  void checkPush();
   if (listTimer === null) {
     listTimer = window.setInterval(() => {
       set({ now: Date.now() });
@@ -95,6 +115,7 @@ function onPush(msg: ServerMsg): void {
   switch (msg.t) {
     case "queue":
       set({ queue: msg.items });
+      setBadge(msg.items.length);
       void refreshPrompts(msg.items);
       void refresh();
       break;
@@ -111,6 +132,72 @@ function onPush(msg: ServerMsg): void {
       );
       break;
   }
+}
+
+/** Tells the server whether this app is on screen: notifications wait while it is. */
+function reportVisible(): void {
+  const visible = document.visibilityState === "visible";
+  conn?.send({ t: "visible", visible });
+  if (visible) void clearNotifications();
+}
+
+export async function checkPush(): Promise<void> {
+  const token = get().token;
+  if (token) set({ push: await pushState(token).catch(() => "unsupported" as const) });
+}
+
+export async function turnOnPush(): Promise<void> {
+  const token = get().token;
+  if (!token || get().pushBusy) return;
+  set({ pushBusy: true });
+  try {
+    const on = await enablePush(token);
+    set({ push: on ? "on" : Notification.permission === "denied" ? "denied" : "off" });
+    if (on) toast("Notifications on");
+  } catch (e) {
+    toast(`Couldn't turn on notifications: ${(e as Error).message}`);
+  } finally {
+    set({ pushBusy: false });
+  }
+}
+
+export async function turnOffPush(): Promise<void> {
+  const token = get().token;
+  if (!token) return;
+  await disablePush(token).catch(() => {});
+  set({ push: "off" });
+  toast("Notifications off");
+}
+
+export async function sendTestPush(): Promise<void> {
+  const token = get().token;
+  if (!token) return;
+  try {
+    const d = await testPush(token);
+    toast(
+      d.sent
+        ? "Sent. It should arrive in a moment"
+        : d.errors.length
+          ? `Not sent: ${d.errors[0]}`
+          : "Not sent: this device isn't subscribed",
+    );
+  } catch (e) {
+    toast(`Test failed: ${(e as Error).message}`);
+  }
+}
+
+let installEvent: (Event & { prompt: () => Promise<void> }) | null = null;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installEvent = e as typeof installEvent;
+  set({ canInstall: true });
+});
+
+export async function install(): Promise<void> {
+  await installEvent?.prompt();
+  installEvent = null;
+  set({ canInstall: false });
 }
 
 export async function refresh(): Promise<void> {

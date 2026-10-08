@@ -632,7 +632,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
             ),
             ClientMsg::Input { session, data } => {
                 if let Ok(s) = registry.get(session) {
-                    s.write_input(data);
+                    s.typed(data);
                 }
                 continue;
             }

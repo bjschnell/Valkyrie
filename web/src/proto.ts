@@ -115,7 +115,11 @@ export type Request =
   | { t: "spawn"; spec: SpawnSpec };
 
 /** Fire-and-forget messages. */
-export type Notice = { t: "input"; session: SessionId; data: number[] };
+export type Notice =
+  | { t: "input"; session: SessionId; data: number[] }
+  /** To `valk web` itself, not the daemon: whether this app is on screen, which
+   * holds back notifications. */
+  | { t: "visible"; visible: boolean };
 
 export type Reply =
   | { t: "done" }

@@ -144,4 +144,12 @@ valk web            # keep it running, e.g. as a session: valk new --name web --
 
 Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
 prints another. `valk web devices` lists paired devices, and `valk web revoke <name>`
-unpairs one.
+unpairs one (and stops its notifications).
+
+**Install it and get notifications.** On iPhone, open the link in Safari, tap Share →
+Add to Home Screen, and open Valkyrie from the Home Screen. iOS only offers
+notifications to an installed app. On Android, use Chrome's Install app. Then tap the
+bell in the app and turn notifications on. You'll get one when an agent needs you,
+finishes or stops while you're away: no typing at any session for 90 seconds, and the
+app not open. Notifications need the HTTPS address (`tailscale serve`), and `valk web`
+has to keep running to send them.

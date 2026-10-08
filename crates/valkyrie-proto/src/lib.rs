@@ -83,6 +83,10 @@ pub struct SessionInfo {
     pub exited: Option<Option<i32>>,
     #[serde(default)]
     pub status: AgentStatus,
+    /// When a client last typed into it (ms since the epoch; 0: never). The web
+    /// app's server reads it to tell someone at a keyboard from someone away.
+    #[serde(default)]
+    pub last_input_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

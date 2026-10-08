@@ -50,3 +50,13 @@ export const Dots = () => (
     <circle cx="19" cy="12" r="1" />
   </svg>
 );
+export const Bell = () => (
+  <svg {...base}>
+    <path d="M6 9a6 6 0 0112 0c0 5 2 6.5 2 6.5H4S6 14 6 9zM10 19.5a2 2 0 004 0" />
+  </svg>
+);
+export const BellOff = () => (
+  <svg {...base}>
+    <path d="M8.5 4.2A6 6 0 0118 9c0 2.3.4 3.8.9 4.8M17 15.5H4S6 14 6 9c0-.6.1-1.2.3-1.8M10 19.5a2 2 0 004 0M3 3l18 18" />
+  </svg>
+);

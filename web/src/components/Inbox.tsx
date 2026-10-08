@@ -5,6 +5,7 @@ import { age } from "../lib/time";
 import { answer, markSeen, useApp } from "../store";
 import { Chevron } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
+import { NotifyButton, NotifyHint } from "./Notify";
 
 const go = (id: number) => {
   location.hash = `#/s/${id}`;
@@ -23,9 +24,11 @@ export function Inbox() {
           <span className="brand-mark">◆</span> Valkyrie
         </div>
         <ConnectionPill />
+        <NotifyButton />
       </header>
 
       <main className="inbox">
+        <NotifyHint />
         <section>
           <h2 className="section-title">
             Needs you <span className="count">{queue.length}</span>

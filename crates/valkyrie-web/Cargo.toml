@@ -18,6 +18,13 @@ sha2 = "0.10"
 getrandom = "0.3"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
+# Web Push: RFC 8291 encryption and VAPID signing.
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+hkdf = "0.12"
+aes-gcm = "0.10"
+# Posting to push services; TLS by rustls with ring (no C toolchain beyond cc).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
 tokio.workspace = true
