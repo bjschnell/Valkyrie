@@ -92,3 +92,18 @@ Then run `wsl --shutdown` once for it to take effect.
 - `valk setup codex` once, if you use Codex: it adds Valkyrie's hooks, for accurate
   states. Claude Code needs nothing, because its hooks are added per session.
 - To update, `git pull && ./install.sh`.
+
+## Phone and web
+
+`valk web` serves the web app on `127.0.0.1:8790` and prints a QR code that pairs
+your phone. To reach it from your phone, put it on your tailnet (HTTPS, reachable
+only by your devices):
+
+```sh
+tailscale serve --bg 8790
+valk web            # keep it running, e.g. as a session: valk new --name web -- valk web
+```
+
+Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
+prints another. `valk web devices` lists paired devices, and `valk web revoke <name>`
+unpairs one.

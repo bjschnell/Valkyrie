@@ -16,7 +16,7 @@ pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 7;
+pub const PROTOCOL: u32 = 8;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -104,10 +104,12 @@ pub enum ClientMsg {
         session: SessionId,
     },
     /// Subscribe this connection to a session's screen. Replaces any previous attachment.
+    /// With a size the session takes it (the TUI); without, the screen is watched at
+    /// whatever size it has (a phone must not shrink the desktop's session).
     Attach {
         req: ReqId,
         session: SessionId,
-        size: Size,
+        size: Option<Size>,
     },
     Detach {
         req: ReqId,

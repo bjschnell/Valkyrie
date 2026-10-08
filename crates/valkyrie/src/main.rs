@@ -77,6 +77,19 @@ enum Cmd {
     /// Install agent integrations.
     #[command(subcommand)]
     Setup(SetupCmd),
+    /// Serve the web app (phones, other machines) on localhost; put it on your
+    /// tailnet with `tailscale serve`.
+    Web {
+        /// Where to listen. Keep it on localhost unless you know why not.
+        #[arg(long, default_value = "127.0.0.1:8790")]
+        listen: std::net::SocketAddr,
+        /// The address phones open, for the pairing QR code (default: this
+        /// machine's tailnet name).
+        #[arg(long)]
+        url: Option<String>,
+        #[command(subcommand)]
+        action: Option<WebCmd>,
+    },
     /// Print the screen a recorded transcript (`.raw`) leaves behind.
     Render {
         file: PathBuf,
@@ -98,6 +111,16 @@ enum Cmd {
     },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
+}
+
+#[derive(Subcommand)]
+enum WebCmd {
+    /// Show a new pairing QR code for the running server.
+    Pair,
+    /// List paired devices.
+    Devices,
+    /// Unpair a device by name, or `all`.
+    Revoke { name: String },
 }
 
 #[derive(Subcommand)]
@@ -241,6 +264,37 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Web {
+            listen,
+            url,
+            action,
+        }) => match action {
+            None => {
+                // The daemon must be up, and speak this protocol, before phones arrive.
+                drop(connect(&socket).await?);
+                valkyrie_web::run(valkyrie_web::Options {
+                    listen,
+                    socket,
+                    url,
+                })
+                .await
+            }
+            Some(WebCmd::Pair) => {
+                let url = valkyrie_web::public_url(url, listen);
+                valkyrie_web::print_pairing(&valkyrie_web::store()?, &url)
+            }
+            Some(WebCmd::Devices) => {
+                for d in valkyrie_web::store()?.devices() {
+                    println!("{}  (paired {})", d.name, d.created_unix);
+                }
+                Ok(())
+            }
+            Some(WebCmd::Revoke { name }) => {
+                let n = valkyrie_web::store()?.revoke(&name)?;
+                println!("unpaired {n} device(s)");
+                Ok(())
+            }
+        },
         Some(Cmd::Kill { session }) => connect(&socket).await?.0.kill(session).await,
         Some(Cmd::Rename { session, name }) => {
             connect(&socket).await?.0.rename(session, name).await

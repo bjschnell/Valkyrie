@@ -1,0 +1,23 @@
+[package]
+name = "valkyrie-web"
+description = "Valkyrie web app server: serves the app and bridges it to the daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+valkyrie-proto.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+include_dir = "0.7"
+sha2 = "0.10"
+getrandom = "0.3"
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+tokio.workspace = true

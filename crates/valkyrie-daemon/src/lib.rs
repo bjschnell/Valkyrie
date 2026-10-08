@@ -745,7 +745,9 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     if let Some(a) = attachment.take() {
                         a.end().await;
                     }
-                    s.resize(size);
+                    if let Some(size) = size {
+                        s.resize(size);
+                    }
                     s.attach();
                     reply(&out, req, Ok(Reply::Done)).await;
                     let task = tokio::spawn(forward(s.clone(), out.clone()));

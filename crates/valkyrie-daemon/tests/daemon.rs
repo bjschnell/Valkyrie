@@ -606,7 +606,7 @@ async fn a_client_dying_with_unread_frames_still_detaches() {
         &valkyrie_proto::ClientMsg::Attach {
             req: 1,
             session: id,
-            size: SIZE,
+            size: Some(SIZE),
         },
     )
     .await

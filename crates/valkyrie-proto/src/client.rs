@@ -162,6 +162,7 @@ impl Client {
     }
 
     pub async fn attach(&self, session: SessionId, size: Size) -> Result<()> {
+        let size = Some(size);
         self.request(|req| ClientMsg::Attach { req, session, size })
             .await
             .map(drop)
