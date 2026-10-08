@@ -34,7 +34,7 @@ use valkyrie_proto::AgentStatus;
 use valkyrie_proto::{
     AgentState, Reply, ScrollAnchor, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec,
 };
-use valkyrie_term::{Signal, VtScreen};
+use valkyrie_term::{Signal, VtScreen, graphics};
 
 /// Server pushes for one session. Lagging receivers resync from a fresh snapshot.
 pub type Feed = broadcast::Receiver<Arc<ServerMsg>>;
@@ -48,6 +48,8 @@ const SCAN_QUIET_MS: u64 = 150;
 /// never goes quiet, and Codex's auto-reviewer only shows under one. Glances only
 /// drive `Tracker::glance`.
 const SCAN_EVERY_MS: u64 = 500;
+/// Per session, the most image data kept for clients that attach later.
+const GRAPHICS_LIMIT: usize = 32 << 20;
 /// At most one output offset mark per this interval in the event log.
 const MARK_EVERY_MS: u64 = 250;
 
@@ -62,6 +64,8 @@ pub struct Host {
     pub changed: Arc<Notify>,
     /// Set to stop every reader for an upgrade handoff; replaced if it fails.
     pub stop: Mutex<Arc<StopPipe>>,
+    /// The last cell size in pixels a client reported; new sessions start with it.
+    pub cell_px: Mutex<Option<(u16, u16)>>,
 }
 
 /// Readers poll this alongside their PTY and return, before reading another byte,
@@ -94,12 +98,13 @@ impl StopPipe {
 struct Pty(OwnedFd);
 
 impl Pty {
-    fn resize(&self, size: Size) -> std::io::Result<()> {
+    /// `cell` in pixels fills the winsize pixel fields, which image programs read.
+    fn resize(&self, size: Size, cell: (u16, u16)) -> std::io::Result<()> {
         let ws = libc::winsize {
             ws_row: size.rows,
             ws_col: size.cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+            ws_xpixel: size.cols.saturating_mul(cell.0),
+            ws_ypixel: size.rows.saturating_mul(cell.1),
         };
         // SAFETY: TIOCSWINSZ reads a winsize from a valid pointer.
         if unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCSWINSZ, &ws) } != 0 {
@@ -238,6 +243,8 @@ struct State {
     conversation: Option<String>,
     /// When the program exited (ms), if it did while this image ran.
     exited_ms: Option<u64>,
+    /// Images still shown, for clients that attach later (DESIGN §8.4).
+    graphics: graphics::Log,
 }
 
 impl State {
@@ -294,14 +301,17 @@ impl Session {
         let transcript_path = stem.with_extension("raw");
         let events_path = stem.with_extension("events.jsonl");
 
+        let cell = *host.cell_px.lock().unwrap();
         let pair = native_pty_system()
-            .openpty(pty_size(size))
+            .openpty(pty_size(size, cell.unwrap_or((0, 0))))
             .context("openpty")?;
         let mut argv = spec.command.clone();
         adapter.prepare(&mut argv, &host.hook_exe);
         let mut cmd = CommandBuilder::new(&program);
         cmd.args(&argv[1..]);
         cmd.cwd(&cwd);
+        // Not the daemon's: programs that trust `$PWD` (yazi) would start elsewhere.
+        cmd.env("PWD", &cwd);
         for (key, value) in &spec.env {
             match value {
                 Some(value) => cmd.env(key, value),
@@ -324,8 +334,12 @@ impl Session {
         drop(pair.master);
 
         let now_ms = now.as_millis() as u64;
+        let mut screen = VtScreen::new(size);
+        if let Some(cell) = cell {
+            screen.set_cell_pixels(cell);
+        }
         let mut state = State {
-            screen: VtScreen::new(size),
+            screen,
             exited: None,
             tracker: Tracker::new(adapter.name(), adapter.hook_gaps(), now_ms),
             log,
@@ -336,6 +350,7 @@ impl Session {
             scan_due: false,
             conversation: None,
             exited_ms: None,
+            graphics: graphics::Log::new(GRAPHICS_LIMIT),
         };
         state.log(
             now_ms,
@@ -375,14 +390,21 @@ impl Session {
         unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
         let adapter = valkyrie_agents::adapter_for(&saved.command);
         // Best effort from here on: losing the screen or a log beats losing the agent.
-        let screen = rebuild_screen(&saved.transcript, &saved.events, saved.offset, saved.size)
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    session = saved.id,
-                    "screen not rebuilt, starting blank: {e:#}"
-                );
-                VtScreen::new(saved.size)
-            });
+        let (mut screen, graphics) =
+            rebuild_screen(&saved.transcript, &saved.events, saved.offset, saved.size)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        session = saved.id,
+                        "screen not rebuilt, starting blank: {e:#}"
+                    );
+                    (
+                        VtScreen::new(saved.size),
+                        graphics::Log::new(GRAPHICS_LIMIT),
+                    )
+                });
+        if let Some(cell) = *host.cell_px.lock().unwrap() {
+            screen.set_cell_pixels(cell);
+        }
         let now = now_ms();
         let log = append_private(&saved.events)?;
         let transcript = append_private(&saved.transcript)?;
@@ -404,6 +426,7 @@ impl Session {
             conversation: saved.conversation,
             // Exited under the old image: long enough ago to drop from the restore list.
             exited_ms: saved.exited.map(|_| 0),
+            graphics,
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -649,6 +672,15 @@ impl Session {
                         changed |= state.tracker.apply(&AgentEvent::Bell, now, self.watching());
                     }
                     Signal::Title(_) => {}
+                    Signal::Graphics(cmd) => {
+                        let kept = state.graphics.record(cmd);
+                        let _ = self.feed.send(Arc::new(ServerMsg::Graphics {
+                            session: self.id,
+                            x: kept.x,
+                            y: kept.y,
+                            data: kept.data.to_string(),
+                        }));
+                    }
                     Signal::Clipboard(text) => {
                         state.log(now, "copy", json!({"chars": text.chars().count()}));
                         let _ = self.feed.send(Arc::new(ServerMsg::Clipboard {
@@ -806,7 +838,7 @@ impl Session {
 
     /// Subscribe to diffs and get the snapshot they apply on top of, plus the `Exited`
     /// message if the program already ended (its broadcast predates this subscriber).
-    pub fn subscribe(&self) -> (Feed, ServerMsg, Option<ServerMsg>) {
+    pub fn subscribe(&self) -> (Feed, ServerMsg, Option<ServerMsg>, Vec<ServerMsg>) {
         let state = self.state.lock().unwrap();
         let rx = self.feed.subscribe();
         let snapshot = ServerMsg::Screen {
@@ -817,7 +849,20 @@ impl Session {
             session: self.id,
             code,
         });
-        (rx, snapshot, exited)
+        // The images a new client's terminal has not seen: shared under the lock,
+        // copied into messages after it.
+        let kept = state.graphics.replay();
+        drop(state);
+        let graphics = kept
+            .into_iter()
+            .map(|cmd| ServerMsg::Graphics {
+                session: self.id,
+                x: cmd.x,
+                y: cmd.y,
+                data: cmd.data.to_string(),
+            })
+            .collect();
+        (rx, snapshot, exited, graphics)
     }
 
     /// Never blocks: input is queued for the writer thread.
@@ -833,7 +878,7 @@ impl Session {
         }
         state.screen.resize(size);
         state.log(now_ms(), "resize", json!({"size": size}));
-        if let Err(e) = self.pty.resize(size) {
+        if let Err(e) = self.pty.resize(size, state.screen.cell_pixels()) {
             tracing::warn!(session = self.id, "pty resize failed: {e}");
         }
         if let Some(update) = state.screen.take_diff() {
@@ -871,6 +916,20 @@ impl Session {
 
     pub fn text(&self) -> String {
         self.state.lock().unwrap().screen.text()
+    }
+
+    /// The attached client's cell size in pixels: answers for image programs, and the
+    /// PTY's pixel size.
+    pub fn set_cell_pixels(&self, cell: (u16, u16)) {
+        let mut state = self.state.lock().unwrap();
+        if state.screen.cell_pixels() == cell {
+            return;
+        }
+        state.screen.set_cell_pixels(cell);
+        let size = state.screen.size();
+        if let Err(e) = self.pty.resize(size, cell) {
+            tracing::warn!(session = self.id, "pty resize failed: {e}");
+        }
     }
 
     /// Starts the restore list off with the conversation a restored agent resumes, so
@@ -1089,7 +1148,13 @@ fn wait_pid(pid: u32) -> Option<i32> {
 /// The screen as it stood at `upto` bytes into the transcript: replays the bytes with
 /// the resizes from the event log at the offsets they happened. Replies to terminal
 /// queries are discarded; the program got the real ones long ago.
-fn rebuild_screen(transcript: &Path, events: &Path, upto: u64, size: Size) -> Result<VtScreen> {
+/// The screen, and the images it shows, rebuilt from the transcript.
+fn rebuild_screen(
+    transcript: &Path,
+    events: &Path,
+    upto: u64,
+    size: Size,
+) -> Result<(VtScreen, graphics::Log)> {
     let mut start = None;
     let mut resizes = Vec::new();
     for line in BufReader::new(File::open(events)?).lines() {
@@ -1104,6 +1169,7 @@ fn rebuild_screen(transcript: &Path, events: &Path, upto: u64, size: Size) -> Re
         }
     }
     let mut screen = VtScreen::new(start.unwrap_or(size));
+    let mut graphics = graphics::Log::new(GRAPHICS_LIMIT);
     let mut raw = BufReader::new(File::open(transcript)?).take(upto);
     let mut resizes = resizes.into_iter().peekable();
     let mut pos = 0u64;
@@ -1123,22 +1189,26 @@ fn rebuild_screen(transcript: &Path, events: &Path, upto: u64, size: Size) -> Re
         if n == 0 {
             break;
         }
-        screen.feed(&buf[..n]);
+        for signal in screen.feed(&buf[..n]) {
+            if let Signal::Graphics(cmd) = signal {
+                graphics.record(cmd);
+            }
+        }
         pos += n as u64;
     }
     if screen.size() != size {
         screen.resize(size);
     }
     let _ = screen.take_diff();
-    Ok(screen)
+    Ok((screen, graphics))
 }
 
-fn pty_size(size: Size) -> PtySize {
+fn pty_size(size: Size, cell: (u16, u16)) -> PtySize {
     PtySize {
         rows: size.rows,
         cols: size.cols,
-        pixel_width: 0,
-        pixel_height: 0,
+        pixel_width: size.cols.saturating_mul(cell.0),
+        pixel_height: size.rows.saturating_mul(cell.1),
     }
 }
 
@@ -1206,7 +1276,7 @@ mod tests {
         std::fs::write(&events, log + "garbage\n").unwrap();
 
         let upto = (first.len() + second.len()) as u64;
-        let rebuilt = super::rebuild_screen(&raw, &events, upto, wide).unwrap();
+        let (rebuilt, _) = super::rebuild_screen(&raw, &events, upto, wide).unwrap();
         assert_eq!(rebuilt.text(), live.text());
         assert_eq!(rebuilt.snapshot(), live.snapshot());
         let _ = std::fs::remove_dir_all(&dir);

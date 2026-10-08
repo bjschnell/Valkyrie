@@ -243,6 +243,7 @@ fn new_registry(
             socket,
             changed: Arc::new(Notify::new()),
             stop: Mutex::new(Arc::new(StopPipe::new()?)),
+            cell_px: Mutex::default(),
         },
         queue: watch::Sender::new(Arc::default()),
         generation,
@@ -577,6 +578,19 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 }
                 continue;
             }
+            ClientMsg::CellPixels {
+                session,
+                width,
+                height,
+            } => {
+                if width > 0 && height > 0 {
+                    *registry.host.cell_px.lock().unwrap() = Some((width, height));
+                    if let Some(s) = session.and_then(|id| registry.get(id).ok()) {
+                        s.set_cell_pixels((width, height));
+                    }
+                }
+                continue;
+            }
             ClientMsg::Hook {
                 session,
                 agent,
@@ -749,9 +763,10 @@ async fn forward_queue(mut rx: watch::Receiver<Queue>, out: Out) {
 /// queue, restarts from a fresh snapshot.
 async fn forward(session: Arc<Session>, out: Out) {
     'resync: loop {
-        let (mut feed, snapshot, exited) = session.subscribe();
-        // Waiting for room here is what makes the dropped diffs safe to skip.
-        for msg in std::iter::once(snapshot).chain(exited) {
+        let (mut feed, snapshot, exited, graphics) = session.subscribe();
+        // Waiting for room here is what makes the dropped diffs safe to skip. The
+        // images follow the screen whose placeholder cells show them.
+        for msg in std::iter::once(snapshot).chain(exited).chain(graphics) {
             if out.send(Arc::new(msg)).await.is_err() {
                 return;
             }

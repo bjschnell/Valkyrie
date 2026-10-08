@@ -3,6 +3,8 @@
 //! Wraps `alacritty_terminal` so no alacritty type escapes this crate: bytes go in,
 //! [`Signal`]s and protocol [`ScreenUpdate`]s come out.
 
+pub mod graphics;
+
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -15,6 +17,8 @@ use valkyrie_proto::{
 };
 
 pub const SCROLLBACK: usize = 10_000;
+/// Cell size in pixels until a client reports its own (a common 10×20 font cell).
+const DEFAULT_CELL_PX: (u16, u16) = (10, 20);
 /// The largest copy (OSC 52) a program may put on the user's clipboard.
 pub const MAX_COPY: usize = 1 << 20;
 
@@ -27,6 +31,9 @@ pub enum Signal {
     Title(Option<String>),
     /// The program copied this text (OSC 52). Pasting (OSC 52 load) is never allowed.
     Clipboard(String),
+    /// A Kitty graphics command for clients to draw (support queries are answered
+    /// here, as `Reply`).
+    Graphics(graphics::Command),
 }
 
 #[derive(Clone, Default)]
@@ -55,6 +62,10 @@ impl Dimensions for Dims {
 pub struct VtScreen {
     term: Term<Listener>,
     parser: Processor,
+    graphics: graphics::Scanner,
+    images: graphics::Graphics,
+    /// One cell in pixels, as the attached client's terminal reported it.
+    cell_px: (u16, u16),
     events: Listener,
     size: Size,
     title: Option<String>,
@@ -74,6 +85,9 @@ impl VtScreen {
         Self {
             term,
             parser: Processor::new(),
+            graphics: graphics::Scanner::default(),
+            images: graphics::Graphics::default(),
+            cell_px: DEFAULT_CELL_PX,
             events,
             size,
             title: None,
@@ -86,10 +100,49 @@ impl VtScreen {
         self.size
     }
 
+    /// One cell in pixels. Programs ask for it to size images (`CSI 14 t`, `CSI 16 t`).
+    pub fn set_cell_pixels(&mut self, cell: (u16, u16)) {
+        if cell.0 > 0 && cell.1 > 0 {
+            self.cell_px = cell;
+        }
+    }
+
+    pub fn cell_pixels(&self) -> (u16, u16) {
+        self.cell_px
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Signal> {
-        self.parser.advance(&mut self.term, bytes);
-        let events = std::mem::take(&mut *self.events.0.lock().unwrap());
         let mut signals = Vec::new();
+        let mut scanner = std::mem::take(&mut self.graphics);
+        for piece in scanner.split(bytes) {
+            match piece {
+                // Events after each piece, so replies keep the order of the queries
+                // (yazi takes the answer to its trailing DA1 as "no more answers").
+                graphics::Piece::Text(text) => {
+                    self.parser.advance(&mut self.term, text);
+                    self.drain_events(&mut signals);
+                }
+                graphics::Piece::CellSizeQuery => signals.push(Signal::Reply(
+                    format!("\x1b[6;{};{}t", self.cell_px.1, self.cell_px.0).into_bytes(),
+                )),
+                graphics::Piece::Graphics(data) => {
+                    let point = self.term.grid().cursor.point;
+                    let (x, y) = (point.column.0 as u16, point.line.0.max(0) as u16);
+                    for outcome in self.images.handle(&data, x, y) {
+                        signals.push(match outcome {
+                            graphics::Outcome::Reply(reply) => Signal::Reply(reply),
+                            graphics::Outcome::Forward(cmd) => Signal::Graphics(cmd),
+                        });
+                    }
+                }
+            }
+        }
+        self.graphics = scanner;
+        signals
+    }
+
+    fn drain_events(&mut self, signals: &mut Vec<Signal>) {
+        let events = std::mem::take(&mut *self.events.0.lock().unwrap());
         for event in events {
             match event {
                 Event::PtyWrite(s) => signals.push(Signal::Reply(s.into_bytes())),
@@ -100,8 +153,8 @@ impl VtScreen {
                     let ws = WindowSize {
                         num_lines: self.size.rows,
                         num_cols: self.size.cols,
-                        cell_width: 8,
-                        cell_height: 16,
+                        cell_width: self.cell_px.0,
+                        cell_height: self.cell_px.1,
                     };
                     signals.push(Signal::Reply(format(ws).into_bytes()))
                 }
@@ -122,7 +175,6 @@ impl VtScreen {
                 _ => {}
             }
         }
-        signals
     }
 
     pub fn resize(&mut self, size: Size) {
@@ -588,6 +640,48 @@ mod tests {
         assert!(m.mouse_drag && m.mouse_sgr && m.wants_mouse());
         s.feed(b"\x1b[?1002l");
         assert!(!s.snapshot().modes.wants_mouse());
+    }
+
+    #[test]
+    fn image_queries_are_answered_in_order_and_commands_pass_through() {
+        let mut s = screen();
+        s.set_cell_pixels((9, 18));
+        // yazi's probe: a kitty query, the cell size, then DA1 last.
+        let signals = s.feed(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[0c");
+        let replies: Vec<String> = signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::Reply(r) => Some(String::from_utf8_lossy(r).into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies[0], "\x1b_Gi=31;OK\x1b\\");
+        assert_eq!(replies[1], "\x1b[6;18;9t");
+        assert!(replies[2].starts_with("\x1b[?"), "{replies:?}");
+        // A transmission goes out with the cursor position, and never reaches the
+        // screen as text.
+        let signals = s.feed(b"ab\x1b_Ga=T,U=1,i=5;AAAA\x1b\\c");
+        assert_eq!(
+            signals,
+            [
+                Signal::Reply(b"\x1b_Gi=5;OK\x1b\\".to_vec()),
+                Signal::Graphics(graphics::Command {
+                    data: b"\x1b_Ga=T,U=1,i=5,q=2;AAAA\x1b\\".to_vec(),
+                    x: 2,
+                    y: 0,
+                })
+            ]
+        );
+        assert_eq!(s.text(), "abc\n");
+    }
+
+    #[test]
+    fn a_cut_out_image_resets_the_parser_like_a_real_terminal() {
+        let mut s = screen();
+        // `ESC [ 1` left unfinished: in a real terminal the APC's ESC aborts it, so
+        // the `m` after is printed, not taken as SGR's final byte.
+        s.feed(b"\x1b[1\x1b_Ga=t,i=1;AAAA\x1b\\m");
+        assert_eq!(s.text(), "m\n");
     }
 
     #[test]

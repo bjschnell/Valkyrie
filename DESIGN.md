@@ -245,6 +245,42 @@ herdr resumes its agent panes into their own conversations after its server rest
   - Restored sessions have no scrollback from before.
   - Restore is still unverified against a live Claude or Codex conversation.
 
+### 8.4 Images (Kitty graphics) (2026-10-07)
+The author's Ghostty image previews (yazi) break under herdr, whose `experimental.kitty_graphics` is off by default. Valkyrie passes them through.
+- **Why they broke.** A multiplexer emulates its own terminal. `alacritty_terminal`'s parser drops APC strings, so graphics commands vanished. yazi probes at startup, and with nothing answering it decided there was no image support (`ya env`: `kgp: false`, `csi_16t: (0, 0)`). The probe is a Kitty query (`a=q`), `CSI 16 t`, the PTY's pixel size, then DA1 last.
+- **Daemon.** `valkyrie_term::graphics::Scanner` cuts `ESC _ G … ESC \` commands out of the output before the VT parser, across reads.
+  - **What reaches a client's real terminal is checked first.**
+    - An APC ends where the VT parser would end it: at `ESC \`, or at any other ESC, which then starts a new sequence. CAN or SUB abort it. So nothing can be smuggled inside one, and a stray `ESC _` in binary output costs one sequence, not the session.
+    - A command passes only if its control part is `[A-Za-z0-9=,-]` and its payload is base64.
+    - Only direct transmission (`t=d`) is forwarded. A file, temp file or shared memory would be read on the client's machine, by a path the program chose.
+  - **The daemon answers the program itself**, once, however many clients are attached:
+    - `OK` to queries (`a=q`), transmissions and placements that asked for one.
+    - `EINVAL` for other media, so yazi falls back to direct.
+    - `CSI 16 t` and `CSI 14 t` with the client's real cell size in pixels, which also fills the PTY winsize pixel fields.
+
+    VT events are drained per text piece, so replies keep the queries' order; yazi treats the DA1 answer as the end. Clients get every command with `q=2`, so their terminals never answer.
+  - **Forwarding and the log.**
+    - The chunks of one transmission travel as one `ServerMsg::Graphics`, carrying the cursor cell where the transmission began. That keeps a large image from flooding the session feed. Transmissions are capped at 12 MiB so they fit a frame.
+    - Each forwarded command is also kept in a per-session `graphics::Log` of what is still shown, shared as `Arc<str>` so replay costs nothing under the session lock. A new transmission of an id replaces the old one. Uppercase deletes (`d=A/I/N`) forget the data; lowercase ones forget only the placements, and a kept `a=T` becomes `a=t`. The log is capped at 32 MiB per session, evicting whole commands.
+  - **Attach.** The client gets the log after the snapshot.
+  - **Upgrades.** The log is rebuilt from the transcript.
+- **Client.** The TUI writes each command at its cell (save cursor, `CUP`, command, restore) and clears all images (`a=d,d=A,q=2`) when it leaves a session or exits.
+  - It reports `ClientMsg::CellPixels` from `TIOCGWINSZ` (Ghostty sets it, and SSH forwards it): at startup, before `valk new` spawns, on attach and on every resize.
+  - Any late reply from the terminal is skipped as a whole on the home screen.
+- **Placement styles.** Both work.
+  - Direct placements at the cursor are what yazi 26 uses (one `a=t`, then a placement per cell).
+  - Unicode placeholders (`U=1`) are ordinary text cells on the screen, so they scroll and redraw with everything else.
+- **Verified.** yazi 26.9.1 previewing a PNG inside a session now transmits and places the image, and the TUI wrote all 26 commands. Attaching after yazi drew while detached replayed all 24 kept commands with `q=2`. Both runs used a pty without real graphics, so the final check is visual, in Ghostty.
+- **Also fixed:** sessions inherited the daemon's `$PWD`, so yazi opened in the wrong directory.
+- **Limits.**
+  - Direct placements stay where they were drawn while you are in Valkyrie's own scroll mode. Agents and yazi are full-screen programs, which don't use it.
+  - A client whose terminal has no Kitty graphics just ignores the commands (APC strings are skipped by terminals). The program still believes images work, because the daemon answers the query for every client.
+  - Sixel and iTerm2 images are not handled; Ghostty supports neither.
+  - A direct placement without `C=1` moves a real terminal's cursor past the image; the daemon's VT doesn't. yazi uses `C=1` and placeholders don't move it.
+  - `CSI 16 t` split across reads isn't seen (alacritty ignores it, so the program gets no answer).
+  - The cell size is the last client's. With two clients on different fonts, programs size images for one of them; placeholders scale either way.
+  - A program that clears the screen leaves direct placements on the client's terminal until it deletes them itself.
+
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
 - Web: Rust-compiled WASM vs TypeScript (Svelte/Solid) is an open choice. Lean TS for PWA speed of iteration unless a shared protocol crate to WASM gives real wins.

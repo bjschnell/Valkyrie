@@ -216,6 +216,17 @@ impl Client {
             .map(drop)
     }
 
+    /// Fire-and-forget: the terminal's cell size in pixels (see `ClientMsg::CellPixels`).
+    pub fn cell_pixels(&self, session: Option<SessionId>, width: u16, height: u16) -> Result<()> {
+        self.out
+            .send(ClientMsg::CellPixels {
+                session,
+                width,
+                height,
+            })
+            .map_err(|_| anyhow!("daemon connection closed"))
+    }
+
     /// Fire-and-forget, like `valk hook`.
     pub fn hook(
         &self,

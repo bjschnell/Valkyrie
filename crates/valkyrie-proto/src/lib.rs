@@ -16,7 +16,7 @@ pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -132,6 +132,13 @@ pub enum ClientMsg {
         session: SessionId,
         size: Size,
     },
+    /// The client terminal's cell size in pixels, for programs that size images by
+    /// it. Without `session`, the default for sessions spawned from now on. No reply.
+    CellPixels {
+        session: Option<SessionId>,
+        width: u16,
+        height: u16,
+    },
     /// An agent hook event, forwarded by `valk hook <agent>` (ADR-0005). No reply:
     /// the hook never waits on the daemon.
     Hook {
@@ -189,6 +196,15 @@ pub enum ServerMsg {
     Clipboard {
         session: SessionId,
         text: String,
+    },
+    /// A Kitty graphics command from the attached session's program (DESIGN §8.4),
+    /// to write to the client's terminal with the cursor at (`x`, `y`) of the session
+    /// screen. Sent live, and replayed after the snapshot on attach.
+    Graphics {
+        session: SessionId,
+        x: u16,
+        y: u16,
+        data: String,
     },
 }
 

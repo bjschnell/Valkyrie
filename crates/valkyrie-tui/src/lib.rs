@@ -117,6 +117,8 @@ struct Scrolled {
 
 /// What most terminals send for Shift-PageUp.
 const SHIFT_PAGE_UP: &[u8] = b"\x1b[5;2~";
+/// Deletes every image (and its data) from the outer terminal, asking for no reply.
+const CLEAR_IMAGES: &str = "\x1b_Ga=d,d=A,q=2\x1b\\";
 /// Lines per wheel notch.
 const WHEEL_LINES: i64 = 3;
 /// How long a notice stays in the attached bar.
@@ -194,6 +196,7 @@ impl App {
         let mut anim = tokio::time::interval(SPIN_EVERY);
         anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.boot = self.client.hello_info().await.ok().map(|info| info.boot);
+        self.report_cell(None);
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
         }
@@ -224,6 +227,9 @@ impl App {
                     }
                 }
                 _ = winch.recv() => {
+                    // A font size change resizes the window too. First, so the PTY
+                    // resize below carries the new pixel size in one SIGWINCH.
+                    self.report_cell(self.view.as_ref().map(|v| v.id));
                     if let Some(view) = &self.view
                         && let Ok(size) = session_size()
                     {
@@ -282,6 +288,7 @@ impl App {
             if let Err(e) = self.client.watch_queue().await {
                 self.status = format!("queue unavailable: {e:#}");
             }
+            self.report_cell(None);
             self.refresh().await;
             if let Some(id) = self.view.as_ref().map(|v| v.id) {
                 self.attach(id).await;
@@ -354,6 +361,7 @@ impl App {
         // The snapshot only rewrites modes that differ from the defaults; the mouse
         // capture has to start now.
         let _ = write_mouse(Modes::default(), true);
+        self.report_cell(Some(id));
         if let Err(e) = self.client.attach(id, size).await {
             self.view = None;
             let _ = reset_terminal_modes();
@@ -752,6 +760,19 @@ impl App {
                     write_mouse(view.modes, true)?;
                 }
             }
+            ServerMsg::Graphics {
+                session,
+                x,
+                y,
+                data,
+            } if session == view.id => {
+                // At the cell the program's cursor was on, then the cursor back where
+                // ratatui left it. Unicode placeholders (yazi, `kitten icat`) are
+                // ordinary cells on the screen; this only delivers the image data.
+                let mut out = std::io::stdout();
+                write!(out, "\x1b7\x1b[{};{}H{data}\x1b8", y + 1, x + 1)?;
+                out.flush()?;
+            }
             ServerMsg::Clipboard { session, text } if session == view.id => {
                 let n = text.chars().count();
                 match mouse::copy_to_clipboard(&text) {
@@ -826,6 +847,15 @@ impl App {
 const TOAST_FOR: Duration = Duration::from_secs(6);
 
 impl App {
+    /// Tells the daemon this terminal's cell size in pixels, for image programs (as
+    /// the default for new sessions, and for `session`). Terminals that do not report
+    /// pixels (some over SSH) leave the daemon's guess.
+    fn report_cell(&self, session: Option<SessionId>) {
+        if let Some((width, height)) = cell_pixels() {
+            let _ = self.client.cell_pixels(session, width, height);
+        }
+    }
+
     fn fire_pings(&mut self) {
         let viewing = self.view.as_ref().map(|v| v.id);
         let Some(ping) = self.pinger.due(viewing, Instant::now()) else {
@@ -1328,6 +1358,14 @@ fn to_color(c: Color) -> style::Color {
     }
 }
 
+/// This terminal's cell size in pixels, if it reports its pixel size (Ghostty does,
+/// and SSH forwards it).
+pub fn cell_pixels() -> Option<(u16, u16)> {
+    let ws = ratatui::crossterm::terminal::window_size().ok()?;
+    (ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0)
+        .then(|| (ws.width / ws.columns, ws.height / ws.rows))
+}
+
 /// The session gets the whole terminal minus the status bar.
 pub fn session_size() -> Result<Size> {
     let (cols, rows) = ratatui::crossterm::terminal::size()?;
@@ -1389,6 +1427,8 @@ fn write_mouse(m: Modes, attached: bool) -> Result<()> {
 fn reset_terminal_modes() -> Result<()> {
     write_modes(Modes::default(), None)?;
     write_mouse(Modes::default(), false)?;
+    // The session's images must not stay over the home screen (or the shell).
+    write!(std::io::stdout(), "{CLEAR_IMAGES}")?;
     execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape)?;
     Ok(())
 }
@@ -1449,6 +1489,14 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
     let mut i = 0;
     while i < bytes.len() {
         let rest = &bytes[i..];
+        // The terminal's late answer to an image command (`ESC _ G ... ESC \`).
+        if rest.starts_with(b"\x1b_") {
+            i += rest
+                .windows(2)
+                .position(|w| w == b"\x1b\\")
+                .map_or(rest.len(), |end| end + 2);
+            continue;
+        }
         if rest.len() >= 2 && (rest.starts_with(b"\x1b[") || rest.starts_with(b"\x1bO")) {
             // Whole sequences, so a stray mouse report (`ESC[<0;5;3m`) is not read as
             // keys; an X10 report (`ESC[M` + 3 raw bytes) has no final byte at all.
@@ -1506,6 +1554,8 @@ mod tests {
         // an X10 report's raw bytes could be `q` or `x`).
         assert_eq!(home_keys(b"\x1b[<0;5;3m\x1b[Mqxj"), []);
         assert_eq!(home_keys(b"\x1b[<0;5;3mj"), [HomeKey::Down]);
+        // Nor is the terminal's answer to an image command.
+        assert_eq!(home_keys(b"\x1b_Gi=1;EINVAL:q\x1b\\j"), [HomeKey::Down]);
     }
 
     fn update(full: bool, rows: Vec<Row>) -> ScreenUpdate {

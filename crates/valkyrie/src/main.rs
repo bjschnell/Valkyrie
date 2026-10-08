@@ -193,6 +193,10 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Some(dir) => std::fs::canonicalize(dir)?,
                 None => std::env::current_dir()?,
             });
+            // Before the spawn: an image program asks for the cell size at startup.
+            if let Some((width, height)) = valkyrie_tui::cell_pixels() {
+                let _ = client.cell_pixels(None, width, height);
+            }
             let info = client
                 .spawn(SpawnSpec {
                     command,

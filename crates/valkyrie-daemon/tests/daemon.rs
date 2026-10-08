@@ -126,6 +126,48 @@ async fn scrollback_and_program_copies_reach_the_client() {
     client.kill(id).await.unwrap();
 }
 
+/// DESIGN §8.4: an image a program drew while nobody was attached reaches the client
+/// that attaches later, after the screen and asking for no reply; one drawn while
+/// attached arrives live, at the cursor.
+#[tokio::test]
+async fn images_reach_clients_live_and_on_attach() {
+    let (client, mut pushes, _dir) = start().await;
+    let id = client
+        .spawn(sh(
+            // Like a real image program: no echo, and the daemon's answers (the
+            // terminal's `OK`) read raw.
+            "stty -echo; printf 'ab\\033_Ga=T,i=4;AAAA\\033\\\\'; read -r go; \
+             printf 'xyz\\033_Ga=p,i=4\\033\\\\'; sleep 5",
+            SIZE,
+        ))
+        .await
+        .unwrap()
+        .id;
+    wait_dump(&client, id, |t| t.contains("ab")).await;
+    client.attach(id, SIZE).await.unwrap();
+    let ServerMsg::Screen { update, .. } = next_push(&mut pushes).await else {
+        panic!("expected the screen first")
+    };
+    assert!(update.full);
+    let ServerMsg::Graphics { x, y, data, .. } = next_push(&mut pushes).await else {
+        panic!("expected the replayed image")
+    };
+    assert_eq!(
+        (x, y, data.as_str()),
+        (2, 0, "\x1b_Ga=T,i=4,q=2;AAAA\x1b\\")
+    );
+    client.input(id, b"\r".to_vec()).unwrap();
+    loop {
+        if let ServerMsg::Graphics { x, y, data, .. } = next_push(&mut pushes).await {
+            assert_eq!((x, y, data.as_str()), (5, 0, "\x1b_Ga=p,i=4,q=2\x1b\\"));
+            break;
+        }
+    }
+    // The image commands never show as text.
+    assert!(!client.dump(id).await.unwrap().contains("_G"));
+    client.kill(id).await.unwrap();
+}
+
 /// Sessions take login-bound variables from the client that spawns them, not from
 /// whichever login started the daemon (DESIGN §8.1); `None` unsets one.
 #[tokio::test]
