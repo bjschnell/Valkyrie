@@ -1,0 +1,22 @@
+    composer.
+  Build order:
+  1. The gateway, pairing, inbox, Screen view, composer and Approve buttons. That alone lets you drive sessions remotely.
+  2. PWA install and push.
+  3. The Chat view.
+  4. The launcher and diff review.
+  On the installs, which are done but not committed:
+  - ./install.sh and docs/install.md cover Linux, Windows (WSL2) and macOS. I tested a fresh install and a rerun that upgrades a running daemon; it kept its sessions.
+  - The Linux-only calls are ported, and the whole workspace compiles for macOS. It hasn't been run on a Mac yet, so the doc lists what to check on your first run.
+  - The work laptop clones from GitHub, so the work has to be pushed before you can install there.
+  - The macOS check toolchain sits in target/scratch-toolchain (about 840 MB, gitignored); cargo clean removes it.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Push  ☐ Stack  ☐ Assets  ✔ Submit  →
+│ The installer and macOS port are ready. Your work laptop installs by cloning from GitHub, so should I commit and push to origin (github.com/bjschnell/Valkyrie)?
+❯ 1. Commit and push (Recommended)
+     Commit the macOS port + install.sh + docs/install.md and push main (6 commits ahead) so work/mac can clone it.
+  2. Commit only
+     Commit locally; you'll push yourself.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

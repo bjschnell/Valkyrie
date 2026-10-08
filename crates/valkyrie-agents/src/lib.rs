@@ -61,6 +61,9 @@ pub enum Screen {
     /// `approvals_reviewer = "auto_review"`); no human is needed unless it hands the
     /// request over with a dialog.
     Reviewing,
+    /// The turn is over, but work it started (background shells or agents) is still
+    /// running and the agent will pick it back up.
+    Background,
     /// The agent's input prompt, ready for the next message.
     Idle,
 }

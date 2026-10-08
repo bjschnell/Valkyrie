@@ -1182,6 +1182,7 @@ fn screen_label(verdict: &Option<Screen>) -> Value {
         None => Value::Null,
         Some(Screen::Busy) => "busy".into(),
         Some(Screen::Reviewing) => "reviewing".into(),
+        Some(Screen::Background) => "background".into(),
         Some(Screen::Idle) => "idle".into(),
         Some(Screen::Prompt { summary }) => json!({"prompt": summary}),
     }

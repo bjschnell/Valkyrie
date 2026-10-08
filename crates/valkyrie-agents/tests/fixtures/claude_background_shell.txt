@@ -1,0 +1,16 @@
+     f221ccb79ca1a47d35d2896af62a4237ecee6aa5
+     Updating 0941b4c..523b642
+     … +17 lines
+  ⎿  Updated docs/install.md (+45 -11)
+  ⎿  Created install-release.sh (+65 -0)
+  ⎿  Created .github/workflows/release.yml (+67 -0)
+  ⎿  (a git step in this command can move the working tree, so these may be its changes, not edits)
+  ⎿  Allowed by auto mode classifier
+● Pushed. origin/main was one commit behind, so the push also published your web-app commit (0941b4c). Next I'll watch the release build.
+  Ran 1 shell command
+● The release workflow is running (it usually takes a few minutes). I'll report back when it finishes.
+✻ Cooked for 44s · done 10:16 a.m. · 1 shell still running
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on|· 1 shell · ← for agents                                                                                             4

@@ -1,0 +1,16 @@
+       6 on:
+       7   push:
+       8     tags: ["v*"]
+       9   workflow_dispatch:
+      10     inputs:
+     … +55 lines
+● Write(install-release.sh)
+● Running 1 shell command…
+  ⎿  $ chmod +x install-release.sh && sed -i 's| gh release upload "$TAG" \*.tar.gz SHA256SUMS --clobber| cp "$GITHUB_WORKSPACE/install-release.sh" .\n gh release upload "$TAG" *.tar.gz
+     SHA256SUMS install-release.sh --clobber|' .github/workflows/release.yml && sed -n '/needs: build/,$p' .github/workflow…
+✶ Elucidating… (1m 5s · ↓ 5.6k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  [OMC#4.15.10L]?| ⇡1 shell · ←5for agents                                                                                            7

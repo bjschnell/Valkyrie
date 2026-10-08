@@ -84,6 +84,14 @@ pub fn replay(events: &Path) -> Result<Replay> {
                 out.start_ms = t;
                 next_tick = t + TICK_MS;
             }
+            // A shell session took on (or dropped) the agent its foreground runs.
+            "foreground" => {
+                let agent = line["agent"].as_str().unwrap_or("generic");
+                adapter = valkyrie_agents::by_name(agent);
+                let mut fresh = AgentStatus::new(adapter.name(), t);
+                fresh.seq = tracker.status().seq + 1;
+                tracker = Tracker::resume(fresh, adapter.hook_gaps(), false, t);
+            }
             "out" => {
                 tracker.output(t);
             }

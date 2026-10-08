@@ -1,0 +1,16 @@
+  rebuild and run `valk upgrade`. (disable recaps in /config)
+❯ Yep! Commit away!
+  Ran 1 shell command
+● I committed it as f005458 on main. main is now 5 commits ahead of origin, and nothing is pushed.
+  To start using it, run cargo build --release and then valk upgrade. Your sessions keep running. Shells that already exited disappear a few seconds after the upgrade.
+✻ Churned for 16s · done 10:57 p.m. · 1 shell still running
+❯ updated now Looking good from the changes. Minor nits, the home icon is very small so its not super clear what it is, plus I think they might benefit from an outline or something that
+  distinguishes them visually to teach people that they are buttons or at least clickable? If you know any cooler ways to present that though I am open. We're looking really good so far
+  and honestly seem like we're matching herdr already in most features
+● The home icon is a single small glyph, and the tabs don't look clickable because every inactive tab has the same background as the strip, so nothing marks where a tab starts or ends.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  branch:main | ⇡5
+  [OMC#4.15.10L] | Model: Opus 5.5 | 5h:[###-----]33%(0h40m) wk:[####----]45%(3d9h) | session:287m | ctx:[###-------]34% | 🔧159
+  ⏵⏵ auto mode on · 1 shell · ← for agents

@@ -1,0 +1,16 @@
+● Moved, and the main checkout now holds only the other agent's changes. Next I'll fix one doc line that ran past the file's wrap width, then commit on the branch.
+  Ran 3 shell commands
+● I've moved the release work into its own worktree (valkyrie-release, branch release-binaries, commit 523b642), and the main checkout is clean except for the other agent's crate changes.
+  Nothing's pushed yet—let me know whether to push to main (then tag later) or push this branch and tag v0.0.1 directly.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Ship it
+How should the release branch go out?
+❯ 1. Push main + tag v0.0.1 (Recommended)
+     Fast-forward main to the release commit, push it, and push tag v0.0.1 so the workflow builds the first release. main currently has no new commits, so it's a clean fast-forward.
+  2. Push branch only
+     Push release-binaries to GitHub and open a PR; no release yet.
+  3. Keep it local
+     Leave the commit on the local branch for now.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Enter to select · ↑/↓ to n vigate · Esc to cancel

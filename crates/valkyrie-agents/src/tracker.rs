@@ -14,6 +14,8 @@ pub const DENY_AFTER_MS: u64 = 2_000;
 const CLOCK_STEP_US: u64 = 5_000_000;
 /// Working with no output or events for this long → `Stale`.
 pub const STALE_AFTER_MS: u64 = 5 * 60_000;
+/// The summary while a finished turn waits on background work it started.
+const BACKGROUND: &str = "background work still running";
 
 pub struct Tracker {
     status: AgentStatus,
@@ -33,6 +35,9 @@ pub struct Tracker {
     /// A permission request an automatic reviewer took over: its summary, so the
     /// request can go back to the human if the reviewer hands it on with a dialog.
     reviewing: Option<String>,
+    /// The last turn's end (its summary, and whether it had been seen), which
+    /// background agents the turn started can put off: `Stop` fires while they run.
+    turn_end: Option<(Option<String>, bool)>,
     /// Whether the agent can miss transitions that only the screen shows.
     hook_gaps: bool,
     ended: bool,
@@ -50,6 +55,7 @@ impl Tracker {
             screen_idle_since: None,
             dialog_seen: false,
             reviewing: None,
+            turn_end: None,
             hook_gaps,
             ended: false,
         }
@@ -98,6 +104,19 @@ impl Tracker {
         if !matches!(event, E::ToolStarted) {
             self.reviewing = None;
         }
+        // Subagents' tool calls and dialogs belong to the background work.
+        if !matches!(
+            event,
+            E::ToolStarted
+                | E::ToolFinished
+                | E::PermissionAsked { .. }
+                | E::QuestionAsked { .. }
+                | E::InputAsked { .. }
+                | E::PermissionNotified { .. }
+                | E::Bell
+        ) {
+            self.turn_end = None;
+        }
         let state = self.status.state;
         match event {
             E::SessionStarted | E::SessionEnded | E::Interrupted => {
@@ -144,6 +163,7 @@ impl Tracker {
                 }
             }
             E::TurnEnded { summary } => {
+                self.turn_end = Some((summary.clone(), false));
                 self.set(S::ReviewReady, None, summary.clone(), now, watching)
             }
             E::TurnFailed { summary } => {
@@ -207,7 +227,9 @@ impl Tracker {
             return false;
         }
         if self.status.hooked {
-            return self.review(verdict, now, watching) | self.check_interrupted(now, watching);
+            return self.background(&verdict, now, watching)
+                | self.review(verdict, now, watching)
+                | self.check_interrupted(now, watching);
         }
         // Heuristics only: before the first hook (trust prompts), or no hooks at all.
         let state = self.status.state;
@@ -223,6 +245,9 @@ impl Tracker {
             Some(Screen::Busy | Screen::Reviewing) => {
                 self.set(S::Working, None, None, now, watching)
             }
+            Some(Screen::Background) => {
+                self.set(S::Working, None, Some(BACKGROUND.into()), now, watching)
+            }
             Some(Screen::Idle) if state == S::Working => {
                 self.set(S::ReviewReady, None, None, now, watching)
             }
@@ -236,6 +261,30 @@ impl Tracker {
     /// box under the spinner), so idle detection and heuristics wait for quiet.
     pub fn glance(&mut self, verdict: Option<Screen>, now: u64, watching: bool) -> bool {
         !self.ended && self.status.hooked && self.review(verdict, now, watching)
+    }
+
+    /// A turn that ended while background agents still run isn't done until they
+    /// are: the agent takes their results back up in a new turn, whose `Stop` settles
+    /// it. Should the screen go idle without one, `check_interrupted` restores the
+    /// held turn end instead of guessing an interrupt.
+    fn background(&mut self, verdict: &Option<Screen>, now: u64, watching: bool) -> bool {
+        use AgentState as S;
+        let Some((_, seen)) = &mut self.turn_end else {
+            return false;
+        };
+        match (verdict, self.status.state) {
+            (Some(Screen::Background), S::ReviewReady) => {
+                *seen = self.status.seen;
+                self.set(S::Working, None, Some(BACKGROUND.into()), now, watching)
+            }
+            // Resumed: only its own `Stop` settles it now (a streaming answer can scan
+            // idle for a moment).
+            (Some(Screen::Busy), S::Working) => {
+                self.turn_end = None;
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Codex fires `PermissionRequest` before its automatic reviewer decides, so the
@@ -307,6 +356,17 @@ impl Tracker {
             INTERRUPT_AFTER_MS
         };
         if self.hook_gaps && busy && idle_for.is_some_and(|d| d >= grace) {
+            if self.status.state == AgentState::Working
+                && let Some((summary, seen)) = self.turn_end.take()
+            {
+                return self.set(
+                    AgentState::ReviewReady,
+                    None,
+                    summary,
+                    now,
+                    watching || seen,
+                );
+            }
             return self.set(
                 AgentState::Interrupted,
                 None,
@@ -685,6 +745,83 @@ mod tests {
             now += 500;
         }
         assert_eq!(t.status().state, S::Working);
+    }
+
+    #[test]
+    fn a_turn_ending_with_background_work_is_done_once_that_work_is() {
+        let mut t = tracker();
+        hook(&mut t, E::PromptSubmitted, 0);
+        let end = |s: &str| E::TurnEnded {
+            summary: Some(s.into()),
+        };
+        hook(
+            &mut t,
+            end("I'll report back when the build finishes."),
+            1_000,
+        );
+        assert_eq!(t.status().state, S::ReviewReady);
+        t.screen(Some(Screen::Background), 1_200, false);
+        assert_eq!(t.status().state, S::Working);
+        assert_eq!(t.status().summary.as_deref(), Some(BACKGROUND));
+        // Long background work never reads as an interrupt.
+        assert!(!t.tick(1_200 + INTERRUPT_AFTER_MS * 3, false));
+        assert_eq!(t.status().state, S::Working);
+        // A subagent's tool call is part of it.
+        hook(&mut t, E::ToolStarted, 40_000);
+        hook(&mut t, E::ToolFinished, 41_000);
+        t.screen(Some(Screen::Background), 41_200, false);
+        assert_eq!(t.status().state, S::Working);
+        // The agent takes the result back up in a new turn; a streaming answer
+        // scanning idle for a moment doesn't end it.
+        t.screen(Some(Screen::Busy), 50_000, false);
+        t.screen(Some(Screen::Idle), 55_000, false);
+        assert!(!t.tick(55_000 + INTERRUPT_AFTER_MS - 1, false));
+        assert_eq!(t.status().state, S::Working);
+        hook(&mut t, end("The build passed."), 60_000);
+        t.screen(Some(Screen::Idle), 60_200, false);
+        assert_eq!(t.status().state, S::ReviewReady);
+        assert_eq!(t.status().summary.as_deref(), Some("The build passed."));
+        assert!(!t.status().seen);
+    }
+
+    #[test]
+    fn background_work_ending_without_a_new_turn_restores_the_turn_end() {
+        let mut t = tracker();
+        hook(&mut t, E::PromptSubmitted, 0);
+        hook(
+            &mut t,
+            E::TurnEnded {
+                summary: Some("Started the agents.".into()),
+            },
+            1_000,
+        );
+        let seq = t.status().seq;
+        t.annotate(seq, "uncommitted: 1 file +1 -0");
+        assert!(t.seen());
+        t.screen(Some(Screen::Background), 1_200, false);
+        t.screen(Some(Screen::Idle), 30_000, false);
+        assert_eq!(t.status().state, S::Working, "one idle scan isn't enough");
+        assert!(t.tick(30_000 + INTERRUPT_AFTER_MS, false));
+        assert_eq!(t.status().state, S::ReviewReady);
+        assert_eq!(t.status().summary.as_deref(), Some("Started the agents."));
+        assert!(t.status().seen, "already seen before the hold");
+        // Settled: a later background line from scrollback churn doesn't reopen it.
+        assert!(!t.screen(Some(Screen::Background), 31_000, false));
+        // Nor does one after the next prompt, until that turn ends.
+        hook(&mut t, E::PromptSubmitted, 32_000);
+        hook(&mut t, E::TurnEnded { summary: None }, 33_000);
+        assert!(t.screen(Some(Screen::Background), 33_200, false));
+        assert_eq!(t.status().state, S::Working);
+    }
+
+    #[test]
+    fn without_hooks_background_work_reads_as_working() {
+        let mut t = tracker();
+        t.screen(Some(Screen::Busy), 1, false);
+        t.screen(Some(Screen::Background), 2, false);
+        assert_eq!(t.status().state, S::Working);
+        t.screen(Some(Screen::Idle), 3, false);
+        assert_eq!(t.status().state, S::ReviewReady);
     }
 
     #[test]
