@@ -102,13 +102,47 @@ struct Registry {
 }
 
 impl Registry {
+    /// Every session, in tab order.
     fn all(&self) -> Vec<Arc<Session>> {
-        self.sessions.lock().unwrap().values().cloned().collect()
+        let mut all: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
+        all.sort_by_key(|s| (s.rank(), s.id));
+        all
+    }
+
+    /// The sessions lists show: not the ones that exited with nothing to show.
+    fn listed(&self) -> Vec<Arc<Session>> {
+        self.all().into_iter().filter(|s| !s.gone()).collect()
+    }
+
+    fn move_session(&self, id: SessionId, to: usize) -> Result<Reply> {
+        let mut order = self.listed();
+        let from = order
+            .iter()
+            .position(|s| s.id == id)
+            .with_context(|| format!("no session {id}"))?;
+        let session = order.remove(from);
+        order.insert(to.min(order.len()), session);
+        for (rank, s) in order.iter().enumerate() {
+            s.set_rank(rank as u64);
+        }
+        self.host.changed.notify_one();
+        Ok(Reply::Done)
+    }
+
+    /// Drops sessions that are gone, once a reboot could no longer need them on the
+    /// restore list.
+    fn sweep(&self, now: u64) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let before = sessions.len();
+        sessions.retain(|_, s| !s.removable(now, restore::EXIT_GRACE_MS));
+        if sessions.len() != before {
+            self.host.changed.notify_one();
+        }
     }
 
     fn compute_queue(&self) -> Vec<QueueItem> {
         let mut items: Vec<QueueItem> = self
-            .all()
+            .listed()
             .iter()
             .map(|s| s.info())
             .filter(|info| valkyrie_agents::queued(&info.status))
@@ -519,6 +553,7 @@ async fn tick(registry: Arc<Registry>) {
         for session in registry.all() {
             session.tick(now);
         }
+        registry.sweep(now);
     }
 }
 
@@ -619,6 +654,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     Reply::Done
                 }),
             ),
+            ClientMsg::Move { req, session, to } => (req, registry.move_session(session, to)),
             ClientMsg::Rename { req, session, name } => (
                 req,
                 registry.get(session).map(|s| {
@@ -629,13 +665,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Spawn { req, spec } => (req, spawn(&registry, spec)),
             ClientMsg::Upgrade { req, exe } => (req, upgrade(&registry, exe).await),
             ClientMsg::List { req } => {
-                let sessions = registry
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .map(|s| s.info())
-                    .collect();
+                let sessions = registry.listed().iter().map(|s| s.info()).collect();
                 (req, Ok(Reply::Sessions { sessions }))
             }
             ClientMsg::Kill { req, session } => {

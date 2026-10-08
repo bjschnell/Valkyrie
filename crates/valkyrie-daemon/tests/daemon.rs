@@ -796,3 +796,64 @@ async fn a_fresh_daemon_restores_agents_and_shells() {
         let _ = client.kill(s.id).await;
     }
 }
+
+#[tokio::test]
+async fn exited_shells_and_successes_leave_the_list_failures_stay() {
+    let (client, _pushes, _dir) = start().await;
+    let shell = SpawnSpec {
+        command: vec!["sh".into()],
+        ..sh("", SIZE)
+    };
+    let exited = client.spawn(shell).await.unwrap().id;
+    client.spawn(sh("exit 0", SIZE)).await.unwrap();
+    let failed = client.spawn(sh("exit 3", SIZE)).await.unwrap().id;
+    // `exit` passes on the last command's code; a shell leaves anyway.
+    client.input(exited, b"false; exit\r".to_vec()).unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..100 {
+        ids = client.list().await.unwrap().iter().map(|s| s.id).collect();
+        if ids == [failed] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(ids, [failed], "only the failure is still listed");
+    // Kept, unlisted, for the restore list's grace; then dropped altogether.
+    let mut dropped = false;
+    for _ in 0..100 {
+        if client.dump(exited).await.is_err() {
+            dropped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(dropped, "an exited shell was never dropped");
+    client.kill(failed).await.unwrap();
+}
+
+#[tokio::test]
+async fn move_reorders_the_list() {
+    let (client, _pushes, _dir) = start().await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(client.spawn(sh("sleep 30", SIZE)).await.unwrap().id);
+    }
+    let order =
+        |list: Vec<valkyrie_proto::SessionInfo>| list.iter().map(|s| s.id).collect::<Vec<_>>();
+    client.move_session(ids[2], 0).await.unwrap();
+    assert_eq!(
+        order(client.list().await.unwrap()),
+        [ids[2], ids[0], ids[1]]
+    );
+    // Past the end goes last; a new session goes after them all.
+    client.move_session(ids[2], 99).await.unwrap();
+    let fourth = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+    assert_eq!(
+        order(client.list().await.unwrap()),
+        [ids[0], ids[1], ids[2], fourth]
+    );
+    assert!(client.move_session(999, 0).await.is_err());
+    for id in ids.into_iter().chain([fourth]) {
+        client.kill(id).await.unwrap();
+    }
+}

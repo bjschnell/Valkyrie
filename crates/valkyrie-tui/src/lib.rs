@@ -95,6 +95,8 @@ struct App {
     renaming: Option<(SessionId, String)>,
     /// A tab's menu, opened with a right click or `x` in tab mode.
     menu: Option<Menu>,
+    /// The tab being dragged to a new place.
+    tab_drag: Option<SessionId>,
 }
 
 struct Attached {
@@ -193,6 +195,7 @@ impl App {
             tab_cursor: None,
             renaming: None,
             menu: None,
+            tab_drag: None,
         }
     }
 
@@ -544,6 +547,21 @@ impl App {
                         None => self.new_shell(self.attached_cwd()).await,
                     }
                 }
+                b"0" => {
+                    self.tab_cursor = None;
+                    self.detach().await;
+                    return;
+                }
+                b"H" | b"L" => {
+                    if let Some(id) = self.sessions.get(cursor).map(|s| s.id) {
+                        let to = if key == b"H" {
+                            cursor.saturating_sub(1)
+                        } else {
+                            cursor + 1
+                        };
+                        self.move_tab(id, to).await;
+                    }
+                }
                 [d @ b'1'..=b'9'] => {
                     let i = (d - b'1') as usize;
                     if let Some(id) = self.sessions.get(i).map(|s| s.id) {
@@ -698,8 +716,28 @@ impl App {
     /// A click on the tab strip: switch to that session or start a new shell; a
     /// right click renames.
     async fn tab_click(&mut self, tabs: Rect, m: Mouse) {
-        let hit = self.tab_hit(tabs, m.x, m.y);
+        // While dragging, only across matters: the pointer may stray off the strip.
+        let y = if self.tab_drag.is_some() { tabs.y } else { m.y };
+        let hit = self.tab_hit(tabs, m.x, y);
+        if m.kind == MouseKind::Press {
+            self.tab_drag = match hit {
+                Some(TabHit::Session(id)) => Some(id),
+                _ => None,
+            };
+        }
         match (m.kind, hit) {
+            (MouseKind::Drag, Some(TabHit::Session(over))) => {
+                if let Some(id) = self.tab_drag
+                    && let Some(to) = self.sessions.iter().position(|s| s.id == over)
+                {
+                    self.move_tab(id, to).await;
+                }
+            }
+            (MouseKind::Release, _) => self.tab_drag = None,
+            (MouseKind::Press, Some(TabHit::Home)) => {
+                self.tab_cursor = None;
+                self.detach().await;
+            }
             (MouseKind::Press, Some(TabHit::Session(id))) => {
                 self.tab_cursor = None;
                 self.switch_to(id).await;
@@ -713,6 +751,26 @@ impl App {
                 self.open_menu(id, MENU_RENAME);
             }
             _ => {}
+        }
+    }
+
+    /// Moves a tab to place `to`: here at once, so a drag follows the pointer, and
+    /// in the daemon, which keeps the order for every client.
+    async fn move_tab(&mut self, id: SessionId, to: usize) {
+        let Some(from) = self.sessions.iter().position(|s| s.id == id) else {
+            return;
+        };
+        let to = to.min(self.sessions.len() - 1);
+        if from == to {
+            return;
+        }
+        let session = self.sessions.remove(from);
+        self.sessions.insert(to, session);
+        if self.tab_cursor.is_some() {
+            self.tab_cursor = Some(to);
+        }
+        if let Err(e) = self.client.move_session(id, to).await {
+            self.say(format!("move failed: {e:#}"));
         }
     }
 
@@ -888,7 +946,9 @@ impl App {
         let Some(view) = &mut self.view else { return };
         if let Some(tabs) = tabs {
             // A drag that strays over the strip still selects.
-            if m.y < tabs.bottom() && !view.selecting {
+            let dragging = self.tab_drag.is_some()
+                && matches!(m.kind, MouseKind::Drag | MouseKind::Release);
+            if (m.y < tabs.bottom() || dragging) && !view.selecting {
                 return self.tab_click(tabs, m).await;
             }
             // The session's own rows start below the strip.
@@ -1462,6 +1522,8 @@ const TAB_MIN: u16 = 10;
 const TAB_MAX: u16 = 24;
 /// The "+" at the end of the strip.
 const PLUS_WIDTH: u16 = 3;
+/// The home tab at the start: ` ⌂` over ` ●3`, and a gap.
+const HOME_WIDTH: u16 = 5;
 /// Longest name the rename prompt takes.
 const NAME_MAX: usize = 40;
 
@@ -1491,12 +1553,14 @@ impl Menu {
 /// What a click on the tab strip landed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TabHit {
+    Home,
     Session(SessionId),
     New,
 }
 
 /// Where each visible tab is drawn, and what is left off either end.
 struct TabLayout {
+    home: Rect,
     tabs: Vec<(usize, Rect)>,
     plus: Rect,
     more_left: bool,
@@ -1542,7 +1606,15 @@ impl App {
     /// Tabs keep the order sessions were made in, so each stays where you left it.
     /// When they don't all fit, the strip slides to keep the cursor (else the
     /// attached tab) in view.
-    fn tab_layout(&self, area: Rect) -> TabLayout {
+    fn tab_layout(&self, strip: Rect) -> TabLayout {
+        // Home first, where the queue lives; the tabs after it.
+        let home = Rect::new(strip.x, strip.y, HOME_WIDTH.min(strip.width), strip.height);
+        let area = Rect::new(
+            home.right(),
+            strip.y,
+            strip.width.saturating_sub(home.width),
+            strip.height,
+        );
         let widths: Vec<u16> = self.sessions.iter().map(tab_width).collect();
         let focus = self
             .tab_cursor
@@ -1579,6 +1651,7 @@ impl App {
         let more_right = end < widths.len();
         let plus_x = (x + u16::from(more_right)).min(area.right().saturating_sub(PLUS_WIDTH));
         TabLayout {
+            home,
             tabs,
             plus: Rect::new(plus_x, area.y, PLUS_WIDTH, area.height),
             more_left: start > 0,
@@ -1589,6 +1662,9 @@ impl App {
     fn tab_hit(&self, area: Rect, x: u16, y: u16) -> Option<TabHit> {
         let layout = self.tab_layout(area);
         let at = Position::new(x, y);
+        if layout.home.contains(at) {
+            return Some(TabHit::Home);
+        }
         if layout.plus.contains(at) {
             return Some(TabHit::New);
         }
@@ -1662,10 +1738,20 @@ impl App {
                 rect,
             );
         }
+        // Home: the way back to the whole picture, with how many need you.
+        let needs = if self.queue.is_empty() {
+            Line::default()
+        } else {
+            Line::from(format!(" ●{}", self.queue.len()).fg(t.needs).bold())
+        };
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(" ⌂".fg(t.accent).bold()), needs]),
+            layout.home,
+        );
         if layout.more_left {
             frame.render_widget(
                 Paragraph::new("‹".fg(t.muted)),
-                Rect::new(area.x, area.y, 1, 1),
+                Rect::new(layout.home.right(), area.y, 1, 1),
             );
         }
         if layout.more_right {
@@ -1948,10 +2034,12 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
     let keys: &[(&str, &str)] = match mode {
         BarMode::Session => &[("^\\", "tabs"), ("^]", "home")],
         BarMode::Tabs => &[
-            ("←/→", "move"),
+            ("h/l", "move"),
+            ("H/L", "reorder"),
             ("↩", "switch"),
             ("1-9", "jump"),
-            ("⇥", "next needing you"),
+            ("0", "home"),
+            ("⇥", "next ●"),
             ("n", "new"),
             ("r", "rename"),
             ("x", "close"),
@@ -2617,6 +2705,11 @@ mod tests {
             Some(TabHit::Session(3))
         );
         assert_eq!(app.tab_hit(tabs, layout.plus.x + 1, 0), Some(TabHit::New));
+        // Home comes first, with how many need you under it.
+        assert_eq!(app.tab_hit(tabs, 1, 1), Some(TabHit::Home));
+        assert!(lines[0].starts_with(" ⌂"), "{}", lines[0]);
+        assert!(lines[1].starts_with(" ●1"), "{}", lines[1]);
+        assert!(first.x >= HOME_WIDTH);
         assert_eq!(app.tab_hit(tabs, 119, 0), None, "past the +");
 
         // ^\ puts the cursor on the attached tab; ←/→ stop at "+" and the first.

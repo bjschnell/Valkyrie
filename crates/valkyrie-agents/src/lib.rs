@@ -116,6 +116,11 @@ pub fn adapter_for(command: &[String]) -> &'static dyn Adapter {
     by_name(program)
 }
 
+/// An interactive shell (`fish`, `bash --norc`), not a command one runs (`sh -c …`).
+pub fn is_shell(command: &[String]) -> bool {
+    restore::shell(command).is_some()
+}
+
 /// The adapter a hook names (`valk hook <agent>`).
 pub fn by_name(name: &str) -> &'static dyn Adapter {
     match name {

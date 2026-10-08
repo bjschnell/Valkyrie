@@ -25,7 +25,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -189,6 +189,9 @@ pub struct SavedSession {
     pub input: Vec<u8>,
     #[serde(default)]
     conversation: Option<String>,
+    /// Its place in the tab order; older images had none (id order).
+    #[serde(default)]
+    rank: Option<u64>,
 }
 
 /// What brings a session back after the daemon restarts (DESIGN §8.3).
@@ -205,6 +208,8 @@ pub struct Session {
     pub id: SessionId,
     /// The name given at spawn or by a rename; lists otherwise show the directory.
     name: Mutex<Option<String>>,
+    /// Its place in the tab order: a new session goes last.
+    rank: AtomicU64,
     command: Vec<String>,
     cwd: PathBuf,
     pid: Option<u32>,
@@ -226,6 +231,7 @@ pub struct Session {
 struct Meta {
     id: SessionId,
     name: Option<String>,
+    rank: u64,
     command: Vec<String>,
     cwd: PathBuf,
     pid: Option<u32>,
@@ -381,6 +387,8 @@ impl Session {
             Meta {
                 id,
                 name: own_name(spec.name, &spec.command),
+                // Ids only grow, and ranks are renumbered from 0 on a move.
+                rank: id as u64,
                 command: spec.command,
                 cwd,
                 pid,
@@ -458,6 +466,7 @@ impl Session {
             Meta {
                 id: saved.id,
                 name: own_name(Some(saved.name), &saved.command),
+                rank: saved.rank.unwrap_or(saved.id as u64),
                 command: saved.command,
                 cwd: saved.cwd,
                 pid: saved.pid,
@@ -488,6 +497,7 @@ impl Session {
         Arc::new(Session {
             id: meta.id,
             name: Mutex::new(meta.name),
+            rank: AtomicU64::new(meta.rank),
             command: meta.command,
             cwd: meta.cwd,
             pid: meta.pid,
@@ -589,6 +599,7 @@ impl Session {
         SavedSession {
             id: self.id,
             name: self.saved_name(),
+            rank: Some(self.rank()),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             pid: self.pid,
@@ -875,6 +886,32 @@ impl Session {
     fn saved_name(&self) -> String {
         let name = self.name.lock().unwrap().clone();
         name.unwrap_or_else(|| default_name(&self.command))
+    }
+
+    pub fn rank(&self) -> u64 {
+        self.rank.load(Ordering::Relaxed)
+    }
+
+    pub fn set_rank(&self, rank: u64) {
+        self.rank.store(rank, Ordering::Relaxed);
+    }
+
+    /// Exited with nothing to show for it: an interactive shell, however it ended
+    /// (`exit` passes on the last command's code), or anything that succeeded. A
+    /// failure (an agent that crashed, `valk new -- cargo test`) stays until closed,
+    /// `blocked` in the queue.
+    pub fn gone(&self) -> bool {
+        match self.state.lock().unwrap().exited {
+            None => false,
+            Some(code) => code == Some(0) || valkyrie_agents::is_shell(&self.command),
+        }
+    }
+
+    /// Gone for `grace_ms`: long enough that a reboot, which ends every program at
+    /// once, would have taken the daemon down too, so the restore list can drop it.
+    pub fn removable(&self, now: u64, grace_ms: u64) -> bool {
+        let exited_ms = self.state.lock().unwrap().exited_ms;
+        self.gone() && exited_ms.is_some_and(|at| now.saturating_sub(at) >= grace_ms)
     }
 
     pub fn rename(&self, name: Option<String>) {

@@ -16,7 +16,7 @@ pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 6;
+pub const PROTOCOL: u32 = 7;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -158,6 +158,12 @@ pub enum ClientMsg {
         req: ReqId,
         session: SessionId,
         seq: u64,
+    },
+    /// Move a session to place `to` in the list (the tab order every client shows).
+    Move {
+        req: ReqId,
+        session: SessionId,
+        to: usize,
     },
     /// Give a session its own name; `None` goes back to the default, its directory.
     Rename {

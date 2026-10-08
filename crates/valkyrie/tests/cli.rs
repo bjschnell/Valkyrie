@@ -609,7 +609,10 @@ fn sessions_are_named_after_their_directory_until_renamed() {
         .unwrap();
     let sh = String::from_utf8(out.stdout).unwrap().trim().to_string();
     let cd = format!("cd {}\\r", other.display());
-    let out = valk(&socket, &dir).args(["send", &sh, &cd]).output().unwrap();
+    let out = valk(&socket, &dir)
+        .args(["send", &sh, &cd])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{out:?}");
     let followed = (0..50).any(|_| {
         std::thread::sleep(Duration::from_millis(100));

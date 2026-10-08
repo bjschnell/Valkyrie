@@ -210,6 +210,12 @@ impl Client {
             .map(drop)
     }
 
+    pub async fn move_session(&self, session: SessionId, to: usize) -> Result<()> {
+        self.request(|req| ClientMsg::Move { req, session, to })
+            .await
+            .map(drop)
+    }
+
     pub async fn rename(&self, session: SessionId, name: Option<String>) -> Result<()> {
         self.request(|req| ClientMsg::Rename { req, session, name })
             .await
