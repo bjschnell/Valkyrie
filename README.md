@@ -80,7 +80,8 @@ right-click a pane to split it, and drag a divider to resize.
 
 ### Settings
 
-`,` opens the settings panel: theme (`dracula`, `cyberpunk`), tab style
+`,` opens the settings panel: theme (`dracula`, `cyberpunk`, `blackout`,
+`catppuccin`, `nord`, `gruvbox`, `tokyonight`), tab style
 (`underline`, `folder`, `cards`), tab side (`top`, `left`, `right`), and sound.
 They're kept in `~/.config/valkyrie/settings.toml`, which you can also edit by hand.
 `VALK_THEME`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for one run.

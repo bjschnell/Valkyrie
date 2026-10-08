@@ -75,7 +75,120 @@ pub const CYBERPUNK: Theme = Theme {
     idle: hex(0x5a5f8a),
 };
 
-pub const THEMES: &[&Theme] = &[&DRACULA, &CYBERPUNK];
+/// Pure black with pastel neon: mint, hot pink, lavender.
+pub const BLACKOUT: Theme = Theme {
+    name: "blackout",
+    bg: hex(0x000000),
+    panel: hex(0x0a0a0c),
+    strip: hex(0x000000),
+    card: hex(0x141418),
+    selection: hex(0x221a2c),
+    border: hex(0x2c2833),
+    fg: hex(0xf0eef5),
+    muted: hex(0x6f6a7d),
+    accent: hex(0xc9a7ff),
+    accent2: hex(0xff8fd0),
+    needs: hex(0xfff3a0),
+    blocked: hex(0xff8a9e),
+    done: hex(0x8dffbf),
+    working: hex(0x9ae6ff),
+    interrupted: hex(0xffc39e),
+    idle: hex(0x5a5666),
+};
+
+/// Catppuccin Mocha (catppuccin.com).
+pub const CATPPUCCIN: Theme = Theme {
+    name: "catppuccin",
+    bg: hex(0x1e1e2e),
+    panel: hex(0x181825),
+    strip: hex(0x11111b),
+    card: hex(0x313244),
+    selection: hex(0x45475a),
+    border: hex(0x45475a),
+    fg: hex(0xcdd6f4),
+    muted: hex(0x7f849c),
+    accent: hex(0xcba6f7),
+    accent2: hex(0xf5c2e7),
+    needs: hex(0xf9e2af),
+    blocked: hex(0xf38ba8),
+    done: hex(0xa6e3a1),
+    working: hex(0x89dceb),
+    interrupted: hex(0xfab387),
+    idle: hex(0x6c7086),
+};
+
+/// Nord (nordtheme.com).
+pub const NORD: Theme = Theme {
+    name: "nord",
+    bg: hex(0x2e3440),
+    panel: hex(0x292e39),
+    strip: hex(0x242933),
+    card: hex(0x3b4252),
+    selection: hex(0x434c5e),
+    border: hex(0x4c566a),
+    fg: hex(0xeceff4),
+    muted: hex(0x7b88a1),
+    accent: hex(0x88c0d0),
+    accent2: hex(0xb48ead),
+    needs: hex(0xebcb8b),
+    blocked: hex(0xbf616a),
+    done: hex(0xa3be8c),
+    working: hex(0x81a1c1),
+    interrupted: hex(0xd08770),
+    idle: hex(0x616e88),
+};
+
+/// Gruvbox dark (github.com/morhetz/gruvbox).
+pub const GRUVBOX: Theme = Theme {
+    name: "gruvbox",
+    bg: hex(0x282828),
+    panel: hex(0x1d2021),
+    strip: hex(0x141617),
+    card: hex(0x32302f),
+    selection: hex(0x3c3836),
+    border: hex(0x504945),
+    fg: hex(0xebdbb2),
+    muted: hex(0x928374),
+    accent: hex(0xfe8019),
+    accent2: hex(0xd3869b),
+    needs: hex(0xfabd2f),
+    blocked: hex(0xfb4934),
+    done: hex(0xb8bb26),
+    working: hex(0x83a598),
+    interrupted: hex(0x8ec07c),
+    idle: hex(0x7c6f64),
+};
+
+/// Tokyo Night (github.com/folke/tokyonight.nvim).
+pub const TOKYONIGHT: Theme = Theme {
+    name: "tokyonight",
+    bg: hex(0x1a1b26),
+    panel: hex(0x16161e),
+    strip: hex(0x101014),
+    card: hex(0x24283b),
+    selection: hex(0x283457),
+    border: hex(0x3b4261),
+    fg: hex(0xc0caf5),
+    muted: hex(0x737aa2),
+    accent: hex(0x7aa2f7),
+    accent2: hex(0xbb9af7),
+    needs: hex(0xe0af68),
+    blocked: hex(0xf7768e),
+    done: hex(0x9ece6a),
+    working: hex(0x7dcfff),
+    interrupted: hex(0xff9e64),
+    idle: hex(0x565f89),
+};
+
+pub const THEMES: &[&Theme] = &[
+    &DRACULA,
+    &CYBERPUNK,
+    &BLACKOUT,
+    &CATPPUCCIN,
+    &NORD,
+    &GRUVBOX,
+    &TOKYONIGHT,
+];
 
 impl Theme {
     pub fn state(&self, state: AgentState) -> Color {
