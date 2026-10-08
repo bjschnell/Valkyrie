@@ -1,0 +1,67 @@
+# Builds `valk` and attaches it to a GitHub release, so a machine can install
+# the binary without the source (docs/install.md). Push a tag to cut one:
+#   git tag v0.0.2 && git push origin v0.0.2
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update, e.g. v0.0.2"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Static (musl), so one file runs on any Linux and any WSL distro,
+          # whatever its glibc.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --locked --release -p valkyrie --target ${{ matrix.target }}
+      - name: package
+        run: |
+          mkdir dist
+          tar -czf dist/valk-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release valk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: valk-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          cd dist && sha256sum *.tar.gz > SHA256SUMS
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          cp "$GITHUB_WORKSPACE/install-release.sh" .
+          gh release upload "$TAG" *.tar.gz SHA256SUMS install-release.sh --clobber

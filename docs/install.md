@@ -1,9 +1,14 @@
 # Installing Valkyrie
 
-`./install.sh` builds `valk` from this checkout and installs it to `~/.cargo/bin`. It
-installs Rust with rustup first if you don't have it (it asks). Rerun it to update: if
-a daemon is running, the script hands it to the new binary with `valk upgrade`, and
-every session keeps running.
+There are two ways in:
+
+- **From a release** (no source on the machine): `install-release.sh` downloads the
+  prebuilt `valk`, a single static binary, to `~/.local/bin`. See
+  [Prebuilt binary](#prebuilt-binary-no-checkout).
+- **From a checkout**: `./install.sh` builds `valk` from this checkout and installs it
+  to `~/.cargo/bin`. It installs Rust with rustup first if you don't have it (it asks).
+  Rerun it to update: if a daemon is running, the script hands it to the new binary
+  with `valk upgrade`, and every session keeps running.
 
 Valkyrie needs a Unix: PTYs, unix sockets, and process inspection. On Windows it runs
 inside WSL2.
@@ -36,6 +41,28 @@ cd ~/repos/valkyrie && ./install.sh
   run `claude`. The tab should be named after the directory and show `claude ·`. Then
   run `valk upgrade` and confirm the sessions survive.
 
+## Prebuilt binary (no checkout)
+
+Each `v*` tag builds `valk` for Linux x86_64 and arm64 (static, musl: it runs on any
+distro and any WSL, whatever its glibc) and macOS arm64, and attaches the builds to a
+GitHub release with `install-release.sh` and `SHA256SUMS`. The binary carries the web
+app too, so it is the only file you need.
+
+The repo is private, so you need the GitHub CLI logged in (`gh auth login`). That
+grants read access to the repo, but nothing is cloned:
+
+```sh
+gh release download -R bjschnell/Valkyrie -p install-release.sh -O - | bash
+```
+
+It installs to `~/.local/bin` (set `VALK_BIN_DIR` for another directory, `VALK_VERSION`
+for a tag other than the latest), checks the checksum, and hands a running daemon to
+the new binary. Rerun the same line to update. Ubuntu puts `~/.local/bin` on PATH at
+login once it exists, so open a new shell after the first install.
+
+To cut a release, from a checkout: `git tag v0.0.2 && git push origin v0.0.2`. The
+`release` workflow builds and publishes it in a few minutes.
+
 ## Windows (WSL2)
 
 Valkyrie runs inside the WSL Linux VM, and you use it from Windows Terminal. Your
@@ -51,11 +78,17 @@ agents (Claude Code, Codex) and the repos you work on live in WSL too.
    ```sh
    sudo apt update && sudo apt install -y build-essential git curl pulseaudio-utils
    ```
-   `pulseaudio-utils` gives `paplay`. WSLg forwards it to Windows audio, so pings make a
-   sound.
-3. **Clone into the Linux filesystem** (`~/repos`), not `/mnt/c`: it's much faster, and
-   file watching works. The repo is private, so authenticate first, with `gh auth login`
-   or an SSH key inside WSL.
+   `build-essential` is only needed to build from a checkout. `pulseaudio-utils` gives
+   `paplay`. WSLg forwards it to Windows audio, so pings make a sound.
+3. **Install valk.** Either take the [prebuilt binary](#prebuilt-binary-no-checkout),
+   which keeps the source off the machine:
+   ```sh
+   sudo apt install -y gh && gh auth login
+   gh release download -R bjschnell/Valkyrie -p install-release.sh -O - | bash
+   ```
+   or **clone into the Linux filesystem** (`~/repos`), not `/mnt/c`: it's much faster,
+   and file watching works. The repo is private, so authenticate first, with
+   `gh auth login` or an SSH key inside WSL.
    ```sh
    git clone https://github.com/bjschnell/Valkyrie.git ~/repos/valkyrie
    cd ~/repos/valkyrie && ./install.sh
@@ -67,7 +100,7 @@ agents (Claude Code, Codex) and the repos you work on live in WSL too.
 5. **A Windows Terminal profile** that opens straight into Valkyrie. Go to Settings →
    Add a new profile, and set:
    - Command line: `wsl.exe -d Ubuntu --exec bash -lc valk`. The login shell puts
-     `~/.cargo/bin` on PATH.
+     `~/.local/bin` (prebuilt) or `~/.cargo/bin` (from a checkout) on PATH.
    - Font: Cascadia Mono, JetBrains Mono or another font with the `⌂ ● ⠋` glyphs.
    - Starting directory doesn't matter; sessions keep their own.
 
@@ -91,7 +124,8 @@ Then run `wsl --shutdown` once for it to take effect.
 - `valk` opens the TUI. `valk new -a -- claude` starts an agent and attaches.
 - `valk setup codex` once, if you use Codex: it adds Valkyrie's hooks, for accurate
   states. Claude Code needs nothing, because its hooks are added per session.
-- To update, `git pull && ./install.sh`.
+- To update, rerun the `install-release.sh` line, or `git pull && ./install.sh` in a
+  checkout.
 
 ## Phone and web
 
