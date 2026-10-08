@@ -16,7 +16,7 @@ pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -158,6 +158,12 @@ pub enum ClientMsg {
         req: ReqId,
         session: SessionId,
         seq: u64,
+    },
+    /// Give a session its own name; `None` goes back to the default, its directory.
+    Rename {
+        req: ReqId,
+        session: SessionId,
+        name: Option<String>,
     },
     /// Re-exec the daemon as `exe`, keeping every session (ADR-0006). Only a refusal
     /// is answered; on success the connection simply closes and the next `Hello`

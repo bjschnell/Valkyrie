@@ -210,6 +210,12 @@ impl Client {
             .map(drop)
     }
 
+    pub async fn rename(&self, session: SessionId, name: Option<String>) -> Result<()> {
+        self.request(|req| ClientMsg::Rename { req, session, name })
+            .await
+            .map(drop)
+    }
+
     pub async fn mark_seen(&self, session: SessionId, seq: u64) -> Result<()> {
         self.request(|req| ClientMsg::MarkSeen { req, session, seq })
             .await

@@ -547,3 +547,59 @@ fn killed_sessions_release_their_fds() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn sessions_are_named_after_their_directory_until_renamed() {
+    let dir = temp("rename");
+    let socket = dir.join("run/o.sock");
+    let proj = dir.join("myproj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let mut daemon = valk(&socket, &dir)
+        .arg("daemon")
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = (0..100)
+        .find_map(|_| {
+            let out = valk(&socket, &dir)
+                .args(["new", "--cwd"])
+                .arg(&proj)
+                .args(["--", "sleep", "30"])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                return Some(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .expect("daemon did not start");
+    let id = String::from_utf8(new.stdout).unwrap().trim().to_string();
+    let name = || {
+        let ls = valk(&socket, &dir).arg("ls").output().unwrap();
+        let ls = String::from_utf8(ls.stdout).unwrap();
+        ls.split_whitespace().nth(1).unwrap().to_string()
+    };
+    assert_eq!(name(), "myproj");
+    let rename = |args: &[&str]| {
+        let out = valk(&socket, &dir)
+            .args(["rename", &id])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    rename(&["api-auth"]);
+    assert_eq!(name(), "api-auth");
+    // Blank goes back to the directory's name, as does no name at all.
+    rename(&["  "]);
+    assert_eq!(name(), "myproj");
+    rename(&["web"]);
+    rename(&[]);
+    assert_eq!(name(), "myproj");
+
+    let _ = valk(&socket, &dir).args(["kill", &id]).output();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

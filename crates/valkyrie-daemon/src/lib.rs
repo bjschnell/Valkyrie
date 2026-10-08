@@ -619,6 +619,13 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     Reply::Done
                 }),
             ),
+            ClientMsg::Rename { req, session, name } => (
+                req,
+                registry.get(session).map(|s| {
+                    s.rename(name);
+                    Reply::Done
+                }),
+            ),
             ClientMsg::Spawn { req, spec } => (req, spawn(&registry, spec)),
             ClientMsg::Upgrade { req, exe } => (req, upgrade(&registry, exe).await),
             ClientMsg::List { req } => {

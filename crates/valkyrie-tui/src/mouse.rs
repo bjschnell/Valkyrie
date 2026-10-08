@@ -20,6 +20,8 @@ pub enum MouseKind {
     Release,
     WheelUp,
     WheelDown,
+    /// The right button went down.
+    RightPress,
     /// Other buttons, and plain motion.
     Other,
 }
@@ -86,32 +88,50 @@ pub fn split(bytes: &[u8]) -> Vec<Input> {
     out
 }
 
-/// Takes the SGR reports `ours` picks out of input bound for a program that wants the
-/// mouse; every other byte, other reports included, stays as it was.
-pub fn take(bytes: &[u8], ours: impl Fn(&Mouse) -> bool) -> (Vec<u8>, Vec<Mouse>) {
+/// Input for a program that wants the mouse, drawn `top` rows below the terminal's
+/// top: SGR reports above it are taken out for Valkyrie, the rest move up by `top`.
+/// Legacy X10 reports (`ESC [ M` and three bytes) move too; ones above are dropped.
+pub fn route(bytes: &[u8], top: u16) -> (Vec<u8>, Vec<Mouse>) {
     let mut rest = Vec::with_capacity(bytes.len());
     let mut taken = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        match parse_sgr(&bytes[i..]) {
-            Some((mouse, len)) if ours(&mouse) => {
-                taken.push(mouse);
-                i += len;
+        let b = &bytes[i..];
+        if let Some((raw, len)) = parse_sgr_raw(b) {
+            if raw.y <= top {
+                taken.extend(to_mouse(raw));
+            } else {
+                let end = if raw.release { 'm' } else { 'M' };
+                let (code, x, y) = (raw.code, raw.x, raw.y - top);
+                rest.extend_from_slice(format!("\x1b[<{code};{x};{y}{end}").as_bytes());
             }
-            Some((_, len)) => {
-                rest.extend_from_slice(&bytes[i..i + len]);
-                i += len;
+            i += len;
+        } else if b.len() >= 6 && b.starts_with(b"\x1b[M") {
+            // The row byte is 32 + the 1-based row.
+            let row = b[5].saturating_sub(32) as u16;
+            if row > top {
+                rest.extend_from_slice(&b[..5]);
+                rest.push(b[5] - top as u8);
             }
-            None => {
-                rest.push(bytes[i]);
-                i += 1;
-            }
+            i += 6;
+        } else {
+            rest.push(b[0]);
+            i += 1;
         }
     }
     (rest, taken)
 }
 
-fn parse_sgr(b: &[u8]) -> Option<(Mouse, usize)> {
+/// An SGR report as sent: the button code and 1-based cell.
+#[derive(Debug, Clone, Copy)]
+struct RawSgr {
+    code: u16,
+    x: u16,
+    y: u16,
+    release: bool,
+}
+
+fn parse_sgr_raw(b: &[u8]) -> Option<(RawSgr, usize)> {
     let rest = b.strip_prefix(b"\x1b[<")?;
     let end = rest.iter().position(|&c| c == b'M' || c == b'm')?;
     let body = std::str::from_utf8(&rest[..end]).ok()?;
@@ -121,6 +141,29 @@ fn parse_sgr(b: &[u8]) -> Option<(Mouse, usize)> {
         return None;
     }
     let release = rest[end] == b'm';
+    Some((
+        RawSgr {
+            code,
+            x,
+            y,
+            release,
+        },
+        3 + end + 1,
+    ))
+}
+
+fn parse_sgr(b: &[u8]) -> Option<(Mouse, usize)> {
+    let (raw, len) = parse_sgr_raw(b)?;
+    Some((to_mouse(raw)?, len))
+}
+
+fn to_mouse(raw: RawSgr) -> Option<Mouse> {
+    let RawSgr {
+        code,
+        x,
+        y,
+        release,
+    } = raw;
     // Low bits: button; 32: motion; 64: wheel. 4/8/16 are Shift/Alt/Ctrl.
     let button = code & 0b11;
     let kind = if code & 128 != 0 {
@@ -133,6 +176,8 @@ fn parse_sgr(b: &[u8]) -> Option<(Mouse, usize)> {
             1 => MouseKind::WheelDown,
             _ => MouseKind::Other,
         }
+    } else if button == 2 && code & 32 == 0 && !release {
+        MouseKind::RightPress
     } else if button != 0 {
         MouseKind::Other
     } else if code & 32 != 0 {
@@ -142,12 +187,11 @@ fn parse_sgr(b: &[u8]) -> Option<(Mouse, usize)> {
     } else {
         MouseKind::Press
     };
-    let mouse = Mouse {
+    Some(Mouse {
         kind,
         x: x.saturating_sub(1),
         y: y.saturating_sub(1),
-    };
-    Some((mouse, 3 + end + 1))
+    })
 }
 
 /// A drag's two ends, in screen cells.
@@ -288,16 +332,16 @@ mod tests {
     }
 
     #[test]
-    fn takes_only_the_reports_asked_for() {
-        // A press at column 90 is taken; one at column 5, an X10 report, and keys stay.
-        let (rest, taken) = take(b"a\x1b[<0;91;3M\x1b[<0;5;3Mb\x1b[M !!", |m| m.x >= 80);
-        assert_eq!(rest, b"a\x1b[<0;5;3Mb\x1b[M !!");
+    fn routes_reports_above_the_session_to_us_and_moves_the_rest_up() {
+        // Row 2 (1-based) is in a 2-row strip; row 7 is the session's row 5.
+        let (rest, taken) = route(b"a\x1b[<2;10;2M\x1b[<0;5;7mb\x1b[M !(\x1b[M !\"", 2);
+        assert_eq!(rest, b"a\x1b[<0;5;5mb\x1b[M !&");
         assert_eq!(
             taken,
             [Mouse {
-                kind: MouseKind::Press,
-                x: 90,
-                y: 2
+                kind: MouseKind::RightPress,
+                x: 9,
+                y: 1
             }]
         );
     }

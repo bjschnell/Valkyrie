@@ -61,6 +61,11 @@ enum Cmd {
     Attach { session: Option<SessionId> },
     /// Kill a session.
     Kill { session: SessionId },
+    /// Name a session; without a name it goes back to its directory's.
+    Rename {
+        session: SessionId,
+        name: Option<String>,
+    },
     /// Print a session's visible screen as plain text.
     Dump { session: SessionId },
     /// Send input to a session. Understands \r \n \t \e and \xHH escapes.
@@ -237,6 +242,9 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             Ok(())
         }
         Some(Cmd::Kill { session }) => connect(&socket).await?.0.kill(session).await,
+        Some(Cmd::Rename { session, name }) => {
+            connect(&socket).await?.0.rename(session, name).await
+        }
         Some(Cmd::Dump { session }) => {
             print!("{}", connect(&socket).await?.0.dump(session).await?);
             Ok(())
@@ -344,7 +352,8 @@ async fn connect(socket: &Path) -> Result<(Client, Pushes)> {
     match conn.0.hello().await {
         Ok(p) if p == valkyrie_proto::PROTOCOL => Ok(conn),
         Ok(p) => bail!(
-            "the running daemon speaks protocol {p}, this valk {}; restart the daemon",
+            "the running daemon speaks protocol {p}, this valk {}; run `valk upgrade` \
+             (keeps every session)",
             valkyrie_proto::PROTOCOL
         ),
         // Daemons before protocol 2 hang up on `Hello`.

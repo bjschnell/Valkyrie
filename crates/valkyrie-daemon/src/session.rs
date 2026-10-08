@@ -203,7 +203,8 @@ pub struct RestoreEntry {
 
 pub struct Session {
     pub id: SessionId,
-    name: String,
+    /// The name given at spawn or by a rename; lists otherwise show the directory.
+    name: Mutex<Option<String>>,
     command: Vec<String>,
     cwd: PathBuf,
     pid: Option<u32>,
@@ -224,7 +225,7 @@ pub struct Session {
 /// The fixed facts about a session, whether spawned or adopted.
 struct Meta {
     id: SessionId,
-    name: String,
+    name: Option<String>,
     command: Vec<String>,
     cwd: PathBuf,
     pid: Option<u32>,
@@ -376,7 +377,7 @@ impl Session {
         let session = Session::new(
             Meta {
                 id,
-                name: spec.name.unwrap_or_else(|| default_name(&spec.command)),
+                name: own_name(spec.name, &spec.command),
                 command: spec.command,
                 cwd,
                 pid,
@@ -452,7 +453,7 @@ impl Session {
         let session = Session::new(
             Meta {
                 id: saved.id,
-                name: saved.name,
+                name: own_name(Some(saved.name), &saved.command),
                 command: saved.command,
                 cwd: saved.cwd,
                 pid: saved.pid,
@@ -482,7 +483,7 @@ impl Session {
         let (feed, _) = broadcast::channel(FEED_CAPACITY);
         Arc::new(Session {
             id: meta.id,
-            name: meta.name,
+            name: Mutex::new(meta.name),
             command: meta.command,
             cwd: meta.cwd,
             pid: meta.pid,
@@ -583,7 +584,7 @@ impl Session {
         let state = self.state.lock().unwrap();
         SavedSession {
             id: self.id,
-            name: self.name.clone(),
+            name: self.saved_name(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             pid: self.pid,
@@ -842,17 +843,34 @@ impl Session {
         true
     }
 
-    /// What lists show: the name given at spawn, else the agent in a shell's
-    /// foreground over the shell's own name.
-    fn display_name(&self, state: &State) -> String {
-        let agent = self.agent(state).name();
-        if self.adapter.name() == "generic"
-            && agent != "generic"
-            && self.name == default_name(&self.command)
-        {
-            return agent.to_string();
+    /// What lists show: the session's own name, else its directory. The agent or
+    /// program running is shown beside it, from the status and the command.
+    fn display_name(&self) -> String {
+        if let Some(name) = self.name.lock().unwrap().clone() {
+            return name;
         }
-        self.name.clone()
+        match self.cwd.file_name() {
+            Some(dir) => dir.to_string_lossy().into_owned(),
+            None => default_name(&self.command),
+        }
+    }
+
+    /// The name saved for an upgrade or a restart: older images expect one always.
+    fn saved_name(&self) -> String {
+        let name = self.name.lock().unwrap().clone();
+        name.unwrap_or_else(|| default_name(&self.command))
+    }
+
+    pub fn rename(&self, name: Option<String>) {
+        let name = own_name(name, &self.command);
+        let now = now_ms();
+        self.state
+            .lock()
+            .unwrap()
+            .log(now, "rename", json!({"name": name}));
+        *self.name.lock().unwrap() = name;
+        // The queue carries names too.
+        self.changed.notify_one();
     }
 
     /// A client attached: whatever it is showing is now seen.
@@ -1018,7 +1036,7 @@ impl Session {
             return None;
         }
         Some(RestoreEntry {
-            name: self.name.clone(),
+            name: self.saved_name(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             conversation: state.conversation.clone(),
@@ -1038,7 +1056,7 @@ impl Session {
         let state = self.state.lock().unwrap();
         SessionInfo {
             id: self.id,
-            name: self.display_name(&state),
+            name: self.display_name(),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             pid: self.pid,
@@ -1283,6 +1301,13 @@ fn pty_size(size: Size, cell: (u16, u16)) -> PtySize {
 /// How often a shell session's foreground is searched for an agent while its group
 /// stays the same (a group change is checked every tick).
 const FOREGROUND_RECHECK_MS: u64 = 2000;
+
+/// A name worth keeping: not blank, and not just the program's (what older images
+/// saved for an unnamed session).
+fn own_name(name: Option<String>, command: &[String]) -> Option<String> {
+    let name = name?.trim().to_string();
+    (!name.is_empty() && name != default_name(command)).then_some(name)
+}
 
 fn default_name(command: &[String]) -> String {
     command

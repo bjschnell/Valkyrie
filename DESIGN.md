@@ -174,15 +174,15 @@ Decision {
 
 TUI (ratatui): queue is the home screen; split into queue | session view | context pane. Keyboard-first; jump to top queue item in one key.
 
-**Session sidebar (done 2026-10-07).** An attached session used to look like a plain terminal, with no sign of the other sessions or how to start one. The sidebar fixes that:
-- **Where.** It sits on the right of the attached session, 30 columns wide. Every session gets two lines: its state icon, name, and age, then its state and directory. The attached session is marked `▌`, the title counts the items that need you, and `+ new shell` sits at the bottom. On the right, the session's own coordinates don't move, so mouse reports and image placement need no offsets.
-- **When.** It's on by default and the choice is remembered (`<state dir>/tui-sidebar`). The session's PTY shrinks by its width. Below 100 columns it shows only while it has the keyboard.
-- **Keys.** `Ctrl-\` shows it and gives it the keyboard, with the cursor on the attached session. There, `j`/`k` move, `Enter` switches, `n` starts a shell in the attached session's directory, `h` hides it, and `Esc`/`q`/`Ctrl-\` give the keyboard back. `Ctrl-\` no longer reaches the program, so SIGQUIT from the keyboard is gone inside sessions.
-- **Mouse.** A click on a session switches to it, and a click on `+ new shell` starts one. Clicks over the sidebar are taken even when the program owns the mouse, as long as the reports are SGR.
+**Session tabs (done 2026-10-07).** An attached session used to look like a plain terminal, with no sign of the other sessions or how to start one. A right sidebar came first, but it took 30 columns from agents whose diffs and tool output use the width. It became a 2-row tab strip above the session, which costs about 5% of the height instead of 23% of the width:
+- **Tabs.** Each tab shows its number and name, then `program · state`, for example `claude · ⠋ working` or `fish · ○ idle`. The attached tab is marked `▌`. A tab whose session needs you has its name in the state's color. Tabs keep spawn order, so each project stays where you left it. When they don't fit, the strip slides to keep the cursor's tab in view, with `‹`/`›` showing that more are hidden. A `+` at the end starts a shell.
+- **Names** (protocol 6). A session is named after its directory, unless it was given a name: `--name`, a right-click on its tab, `r` in tab mode, `R` on the home screen, or `valk rename ID [NAME]`. A blank name goes back to the directory. The agent is never lost, because it has its own line. The shell's window title (`user@host:path`) is no longer shown anywhere. Upgrade and restore still save a name for every session, and a saved name equal to the program's is read as unnamed.
+- **Keys.** `Ctrl-\` gives the strip the keyboard. There, `←`/`→` (or `h`/`l`) move, `Enter` switches, `1`–`9` jump straight to a tab, `Tab` jumps to the next session that needs you in queue order, `n` starts a shell in the attached session's directory, `r` renames, and `Esc` gives the keyboard back. `Ctrl-\` no longer reaches the program, so SIGQUIT from the keyboard is gone inside sessions.
+- **Mouse.** A click switches, a click on `+` starts a shell, and a right-click renames. The session sits below the strip, so mouse reports going to a program that owns the mouse are moved up 2 rows. That applies to SGR reports, and to X10 reports too, where the ones over the strip are dropped. Kitty images are placed 2 rows lower. The strip hides below 12 rows.
 
 **Agents started from a shell (done 2026-10-07).** herdr names a pane after the agent running in it, but a `claude` typed at a Valkyrie shell prompt showed as `fish · generic · idle`. It had no hooks (those are added only at spawn) and no screen scans (the adapter is picked from the spawn command). Now the daemon follows each shell session's foreground:
 - **Detection.** Every tick it reads the PTY's foreground process group (`tcgetpgrp` on the master). On a change, and every 2 s while the group stays the same, it walks that group's process tree from the leader, up to 64 processes. It picks the shallowest `claude`/`codex`, so an agent under a wrapper script counts. A JS runtime's script also counts (`node …/codex.js`), but other programs' arguments don't (`vim claude.md`).
-- **Effect.** The session gets a fresh tracker for that agent, with seq bumped. Screen scans then use that agent's adapter, and lists and the queue show the agent's name, unless a name was given at spawn. When the agent exits, the session goes back to the shell. A `foreground` line goes into the event log on each change.
+- **Effect.** The session gets a fresh tracker for that agent, with seq bumped. Screen scans then use that agent's adapter, and the tab's second line shows the agent's name. When the agent exits, the session goes back to the shell. A `foreground` line goes into the event log on each change.
 - **Limit.** State is screen-only, because hooks can't be added to a running process, so the TUI keeps its `no hooks yet` hint. `valk new -- claude` still gives the hooked, accurate state.
 
 Web/PWA: installable, push notifications, queue-first mobile layout, session drive (send input, approve, interrupt), start session in a chosen repo, decision review cards. Rendering via diffed screen stream; xterm.js (or custom canvas/WebGL renderer) for terminal view. Reference UX: the author's existing "kawaii"/Alice PWA.
@@ -344,7 +344,8 @@ CLI surface (one binary):
 - `valk new [--cwd DIR] [--name N] -- CMD...` — spawn a session (auto-starts daemon if absent).
 - `valk ls` · `valk kill ID` · `valk dump ID` (plain-text screen; used for headless verification).
 - `valk send ID TEXT` — inject input (`\r \n \t \e \xHH` escapes); headless driving and future supervisor plumbing.
-- `valk attach [ID]` / `valk` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches, `Ctrl-\` focuses the session sidebar.
+- `valk attach [ID]` / `valk` — TUI: session list home screen, Enter attaches, `Ctrl-]` detaches, `Ctrl-\` gives the tab strip the keyboard.
+- `valk rename ID [NAME]` — name a session; without a name it goes back to its directory's.
 - `valk bench latency [-n N]` — keystroke→screen-update round trip through the daemon against `cat`; prints p50/p99/max.
 - `valk bench parse FILE` — VT parse throughput over a recorded `.raw` transcript.
 
