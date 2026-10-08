@@ -5,7 +5,7 @@ use crate::{ClientMsg, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size, Sp
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -20,8 +20,53 @@ pub struct Client {
     next: Arc<AtomicU64>,
 }
 
+/// Screen and image pushes held for a consumer that isn't reading (a TUI whose
+/// terminal stalled, e.g. over SSH from a sleeping laptop). Past this, newer ones are
+/// dropped and `Pushes::take_lagged` says to fetch a fresh snapshot instead. The
+/// connection keeps being read either way, so replies still arrive.
+const SCREEN_BACKLOG: usize = 1024;
+
 /// Server-pushed messages (`Screen`, `Exited`, `Queue`). Closes when the connection drops.
-pub type Pushes = mpsc::UnboundedReceiver<ServerMsg>;
+pub struct Pushes {
+    rx: mpsc::UnboundedReceiver<ServerMsg>,
+    lag: Arc<Lag>,
+}
+
+#[derive(Default)]
+struct Lag {
+    /// Screen and image pushes sent but not yet received.
+    held: AtomicUsize,
+    dropped: AtomicBool,
+}
+
+/// Pushes that only make sense in order on top of the screen before them.
+fn is_screen(msg: &ServerMsg) -> bool {
+    matches!(msg, ServerMsg::Screen { .. } | ServerMsg::Graphics { .. })
+}
+
+impl Pushes {
+    pub async fn recv(&mut self) -> Option<ServerMsg> {
+        let msg = self.rx.recv().await?;
+        Some(self.received(msg))
+    }
+
+    pub fn try_recv(&mut self) -> Result<ServerMsg, mpsc::error::TryRecvError> {
+        self.rx.try_recv().map(|msg| self.received(msg))
+    }
+
+    /// Whether screen pushes were dropped since the last call: the attached screen is
+    /// stale until re-attached (which sends a fresh snapshot).
+    pub fn take_lagged(&self) -> bool {
+        self.lag.dropped.swap(false, Ordering::SeqCst)
+    }
+
+    fn received(&self, msg: ServerMsg) -> ServerMsg {
+        if is_screen(&msg) {
+            self.lag.held.fetch_sub(1, Ordering::SeqCst);
+        }
+        msg
+    }
+}
 
 /// What `Hello` tells about the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +87,8 @@ impl Client {
         let (mut rd, mut wr) = stream.into_split();
         let (out, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
         let (push_tx, push_rx) = mpsc::unbounded_channel();
+        let lag = Arc::new(Lag::default());
+        let reader_lag = lag.clone();
         let pending: Pending = Arc::default();
 
         tokio::spawn(async move {
@@ -67,6 +114,15 @@ impl Client {
                             let _ = tx.send(msg);
                         }
                     }
+                    None if is_screen(&msg) => {
+                        // Counted before sending, so the receiver never counts it first.
+                        if reader_lag.held.fetch_add(1, Ordering::SeqCst) >= SCREEN_BACKLOG
+                            || push_tx.send(msg).is_err()
+                        {
+                            reader_lag.held.fetch_sub(1, Ordering::SeqCst);
+                            reader_lag.dropped.store(true, Ordering::SeqCst);
+                        }
+                    }
                     // Nobody listening for pushes must not stop replies from arriving.
                     None => {
                         let _ = push_tx.send(msg);
@@ -86,7 +142,7 @@ impl Client {
                 closed,
                 next: Arc::new(AtomicU64::new(1)),
             },
-            push_rx,
+            Pushes { rx: push_rx, lag },
         ))
     }
 

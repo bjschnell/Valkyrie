@@ -6,13 +6,15 @@
 
 mod mouse;
 mod ping;
+mod quiet;
 mod settings;
 mod theme;
 
 use anyhow::Result;
 use mouse::{Input, Mouse, MouseKind, Selection};
 use ping::{Kind, Ping, Pinger};
-use ratatui::DefaultTerminal;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -45,13 +47,20 @@ pub const TABS_KEY: u8 = 0x1c;
 /// upgrade handoff (ADR-0006) takes milliseconds; a daemon restart is not coming back.
 const RECONNECT_FOR: Duration = Duration::from_secs(10);
 
+/// The terminal, through a backend that stays silent while nothing changes.
+type Term = Terminal<quiet::Quiet<CrosstermBackend<std::io::Stdout>>>;
+
 pub async fn run(
     client: Client,
     pushes: Pushes,
     attach_to: Option<SessionId>,
     socket: PathBuf,
 ) -> Result<()> {
-    let mut terminal = ratatui::try_init()?;
+    // Raw mode, the alternate screen and ratatui's panic hook; then the same
+    // terminal behind `Quiet`.
+    drop(ratatui::try_init()?);
+    let mut terminal = Terminal::new(quiet::Quiet::new(CrosstermBackend::new(std::io::stdout())))
+        .inspect_err(|_| ratatui::restore())?;
     // ratatui's own hook (installed by init) restores raw mode and the screen; chain
     // ours in front so mirrored input modes don't outlive a panic either.
     let ratatui_hook = std::panic::take_hook();
@@ -207,7 +216,7 @@ impl App {
 
     async fn run(
         &mut self,
-        terminal: &mut DefaultTerminal,
+        terminal: &mut Term,
         mut pushes: Pushes,
         attach_to: Option<SessionId>,
     ) -> Result<()> {
@@ -251,12 +260,16 @@ impl App {
                     } else if queue_changed {
                         self.refresh().await;
                     }
+                    if pushes.take_lagged() {
+                        self.resync().await;
+                    }
                 }
                 _ = winch.recv() => {
                     // A font size change resizes the window too. First, so the PTY
                     // resize below carries the new pixel size in one SIGWINCH.
                     self.report_cell(self.view.as_ref().map(|v| v.id));
                     self.relayout();
+                    terminal.backend_mut().forget();
                     terminal.autoresize()?;
                 }
                 _ = tick.tick() => {
@@ -274,7 +287,7 @@ impl App {
 
     /// The daemon connection dropped, usually for an upgrade handoff: reconnect and
     /// put the same view back.
-    async fn reconnect(&mut self, terminal: &mut DefaultTerminal) -> Result<Pushes> {
+    async fn reconnect(&mut self, terminal: &mut Term) -> Result<Pushes> {
         self.status = "daemon connection lost; reconnecting…".into();
         self.draw(terminal)?;
         let deadline = std::time::Instant::now() + RECONNECT_FOR;
@@ -362,6 +375,26 @@ impl App {
                 }
             }
             Err(e) => self.status = format!("list failed: {e:#}"),
+        }
+    }
+
+    /// Screen pushes were dropped while this TUI couldn't keep up (its terminal
+    /// stalled): attach again for a fresh snapshot, keeping the view as it is.
+    async fn resync(&mut self) {
+        // An exited session too: its last output may be among the dropped pushes.
+        let Some(id) = self.view.as_ref().map(|v| v.id) else {
+            return;
+        };
+        // A dropped image delete would leave its image up; the replay after the
+        // snapshot puts back the ones still shown.
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{CLEAR_IMAGES}").and_then(|()| out.flush());
+        let attached = match self.session_size() {
+            Ok(size) => self.client.attach(id, size).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = attached {
+            self.status = format!("resync failed: {e:#}");
         }
     }
 
@@ -1368,7 +1401,7 @@ impl App {
             })
     }
 
-    fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+    fn draw(&mut self, terminal: &mut Term) -> Result<()> {
         terminal.draw(|frame| {
             let [body, bar] =
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
@@ -2626,7 +2659,8 @@ fn now_ms() -> u64 {
 fn age(since_ms: u64, now_ms: u64) -> String {
     let s = now_ms.saturating_sub(since_ms) / 1000;
     match s {
-        0..60 => format!("{s}s"),
+        // Not seconds: a label that changes every second keeps the TUI writing.
+        0..60 => "<1m".into(),
         60..3600 => format!("{}m", s / 60),
         3600..86400 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86400),

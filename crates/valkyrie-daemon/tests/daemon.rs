@@ -857,3 +857,39 @@ async fn move_reorders_the_list() {
         client.kill(id).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_client_that_stops_reading_holds_a_bounded_backlog_and_resyncs() {
+    // A TUI whose terminal stalled (SSH from a sleeping laptop) stops taking pushes.
+    let (client, mut pushes, _dir) = start().await;
+    let id = client
+        .spawn(sh("i=0; while :; do i=$((i+1)); echo line $i; done", SIZE))
+        .await
+        .unwrap()
+        .id;
+    client.attach(id, SIZE).await.unwrap();
+    // Replies still arrive while the pushes pile up.
+    let mut waited = 0;
+    while !pushes.take_lagged() {
+        client.dump(id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        waited += 1;
+        assert!(waited < 200, "never lagged");
+    }
+    let mut held = 0;
+    while let Ok(msg) = pushes.try_recv() {
+        assert!(matches!(msg, ServerMsg::Screen { .. }), "{msg:?}");
+        held += 1;
+    }
+    assert!(held <= 1024, "held {held}");
+    // Attaching again starts over from a full snapshot.
+    client.attach(id, SIZE).await.unwrap();
+    loop {
+        if let ServerMsg::Screen { update, .. } = next_push(&mut pushes).await
+            && update.full
+        {
+            break;
+        }
+    }
+    client.kill(id).await.unwrap();
+}
