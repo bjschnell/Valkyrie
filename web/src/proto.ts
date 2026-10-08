@@ -40,6 +40,8 @@ export interface SessionInfo {
   clients: number;
   exited: number | null;
   status: AgentStatus;
+  /** The agent's own transcript, when known: the Chat view reads it. */
+  chat?: string;
 }
 
 export interface QueueItem {
@@ -119,7 +121,9 @@ export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
-  | { t: "visible"; visible: boolean };
+  | { t: "visible"; visible: boolean }
+  /** To `valk web`: follow this session's agent transcript (`null`: stop). */
+  | { t: "chat"; session: SessionId | null };
 
 export type Reply =
   | { t: "done" }
@@ -135,7 +139,37 @@ export type ServerMsg =
   | { t: "exited"; session: SessionId; code: number | null }
   | { t: "queue"; items: QueueItem[] }
   | { t: "clipboard"; session: SessionId; text: string }
-  | { t: "graphics"; session: SessionId };
+  | { t: "graphics"; session: SessionId }
+  | ChatUpdate;
+
+/** One entry in the Chat view (crates/valkyrie-web/src/chat.rs). */
+export type ChatItem =
+  | { k: "user"; id: string; text: string; at?: string }
+  | { k: "say"; id: string; text: string; at?: string }
+  | { k: "tool"; id: string; tool: string; summary: string; status: ToolStatus; detail: ToolDetail }
+  | { k: "mark"; id: string; text: string; at?: string };
+export type ToolStatus = "running" | "ok" | "error" | "denied";
+export interface ToolDetail {
+  file?: string;
+  command?: string;
+  diff?: string;
+  content?: string;
+  result?: string;
+}
+/** From `valk web`: a reset replaces the chat; otherwise items are added, or
+ * replace the item with their id (a tool call that finished). */
+export interface ChatUpdate {
+  t: "chat";
+  session: SessionId;
+  items: ChatItem[];
+  reset?: boolean;
+  /** Older items exist that weren't loaded. */
+  more?: boolean;
+  /** No transcript known for this session. */
+  missing?: boolean;
+  /** The session is gone. */
+  gone?: boolean;
+}
 
 /** What a session runs: its agent, else its program (`fish`). */
 export function program(s: SessionInfo): string {

@@ -7,9 +7,9 @@ use std::path::Path;
 /// Processes looked at per check, so a fork bomb in the foreground costs nothing.
 const MAX_PROCS: usize = 64;
 
-/// The agent in foreground process group `pgrp`: the one nearest the group's
-/// leader, which may be a wrapper script that started it.
-pub fn agent(pgrp: i32) -> Option<&'static str> {
+/// The agent in foreground process group `pgrp`, and its pid: the one nearest the
+/// group's leader, which may be a wrapper script that started it.
+pub fn agent(pgrp: i32) -> Option<(&'static str, i32)> {
     let mut queue = VecDeque::from([pgrp]);
     let mut looked = 0;
     while let Some(pid) = queue.pop_front() {
@@ -18,7 +18,7 @@ pub fn agent(pgrp: i32) -> Option<&'static str> {
             break;
         }
         if let Some(agent) = cmdline(pid).and_then(|argv| agent_of(&argv)) {
-            return Some(agent);
+            return Some((agent, pid));
         }
         // Background jobs a wrapper started are in other groups.
         queue.extend(
@@ -267,6 +267,8 @@ mod tests {
         unsafe { libc::kill(-pgrp, libc::SIGKILL) };
         let _ = wrapper.wait();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(found, Some("claude"));
+        let (name, pid) = found.unwrap();
+        assert_eq!(name, "claude");
+        assert_ne!(pid, pgrp, "the agent, not its wrapper");
     }
 }

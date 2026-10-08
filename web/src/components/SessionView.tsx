@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { STATE_LABEL, program } from "../proto";
 import { isNegative } from "../lib/choices";
 import type { Key } from "../lib/keys";
@@ -7,9 +7,22 @@ import { age } from "../lib/time";
 import { answer, kill, openChoices, rename, sendKey, sendMessage, useApp } from "../store";
 import { Back, Dots, Grid, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
+import { ChatView } from "./Chat";
 
 const VIEW_KEY = "valk.view";
+const MODE_KEY = "valk.mode";
 const DRAFT_KEY = (id: number) => `valk.draft.${id}`;
+
+type Mode = "chat" | "terminal";
+
+/** Chat when the session has an agent conversation, unless you chose the terminal. */
+function savedMode(): Mode {
+  try {
+    return localStorage.getItem(MODE_KEY) === "terminal" ? "terminal" : "chat";
+  } catch {
+    return "chat";
+  }
+}
 
 /** Reflowed on a phone (lines wrap at its width), the exact grid on a wide screen. */
 function defaultView(): "reflow" | "grid" {
@@ -24,9 +37,53 @@ export function SessionView({ id }: { id: number }) {
   const exited = useApp((s) => s.exited);
   const now = useApp((s) => s.now);
   const [view, setView] = useState(defaultView);
+  const [chosen, setChosen] = useState(savedMode);
   const [menu, setMenu] = useState(false);
+  const scroller = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const choices = useMemo(() => openChoices(screen), [screen]);
   const state = exited || info?.exited != null ? "exited" : (info?.status.state ?? "idle");
+  const hasChat = !!info?.chat;
+  const mode: Mode = hasChat ? chosen : "terminal";
+
+  const choose = (next: Mode) => {
+    try {
+      localStorage.setItem(MODE_KEY, next);
+    } catch {
+      /* remembered for this visit only */
+    }
+    setChosen(next);
+  };
+
+  // Keys on a desktop keyboard, vim-style, when you aren't typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("textarea, input, [contenteditable]") || e.altKey || e.metaKey) return;
+      const el = scroller.current;
+      const page = (el?.clientHeight ?? 400) / 2;
+      const by = (dy: number) => el?.scrollBy({ top: dy, behavior: "smooth" });
+      const ctrl = e.ctrlKey;
+      const actions: Record<string, () => void> = ctrl
+        ? { d: () => by(page), u: () => by(-page) }
+        : {
+            j: () => by(80),
+            k: () => by(-80),
+            g: () => el?.scrollTo({ top: 0, behavior: "smooth" }),
+            G: () => el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" }),
+            i: () => composer.current?.focus(),
+            t: () => hasChat && choose(mode === "chat" ? "terminal" : "chat"),
+            q: () => (location.hash = "#/"),
+          };
+      const action = actions[e.key];
+      if (action) {
+        e.preventDefault();
+        action();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const toggleView = () => {
     const next = view === "reflow" ? "grid" : "reflow";
@@ -49,16 +106,32 @@ export function SessionView({ id }: { id: number }) {
           </div>
         </div>
         <ConnectionPill />
-        <button className="icon-btn" aria-label={view === "reflow" ? "Show the grid" : "Reflow"} onClick={toggleView}>
-          {view === "reflow" ? <Grid /> : <Wrap />}
-        </button>
+        {mode === "terminal" && (
+          <button className="icon-btn" aria-label={view === "reflow" ? "Show the grid" : "Reflow"} onClick={toggleView}>
+            {view === "reflow" ? <Grid /> : <Wrap />}
+          </button>
+        )}
         <button className="icon-btn" aria-label="Session menu" onClick={() => setMenu((m) => !m)}>
           <Dots />
         </button>
         {menu && <SessionMenu id={id} name={info?.name ?? ""} agent={info ? program(info) : ""} onClose={() => setMenu(false)} />}
       </header>
 
-      <ScreenView view={view} />
+      {hasChat && (
+        <div className="modes" role="tablist">
+          {(["chat", "terminal"] as const).map((m) => (
+            <button key={m} role="tab" aria-selected={mode === m} className={mode === m ? "on" : ""} onClick={() => choose(m)}>
+              {m === "chat" ? "Chat" : "Terminal"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {mode === "chat" ? (
+        <ChatView info={info} scroller={scroller} onTerminal={() => choose("terminal")} />
+      ) : (
+        <ScreenView view={view} scroller={scroller} />
+      )}
 
       {exited && (
         <div className="banner">
@@ -83,16 +156,15 @@ export function SessionView({ id }: { id: number }) {
             </div>
           )}
           <KeyBar />
-          <Composer id={id} />
+          <Composer id={id} area={composer} />
         </footer>
       )}
     </div>
   );
 }
 
-function ScreenView({ view }: { view: "reflow" | "grid" }) {
+function ScreenView({ view, scroller: ref }: { view: "reflow" | "grid"; scroller: RefObject<HTMLDivElement | null> }) {
   const screen = useApp((s) => s.screen);
-  const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
   // Follow new output unless you scrolled up to read.
@@ -103,9 +175,9 @@ function ScreenView({ view }: { view: "reflow" | "grid" }) {
   useLayoutEffect(() => {
     const el = ref.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [screen, view]);
+  }, [screen, view, ref]);
 
-  if (!screen) return <div className="screen loading">Opening…</div>;
+  if (!screen) return <div ref={ref} className="screen loading">Opening…</div>;
   const lines: Run[][] = view === "reflow" ? reflow(screen) : screen.rows.map(rowRuns);
   return (
     <div ref={ref} className={`screen ${view}`} onScroll={onScroll}>
@@ -160,9 +232,8 @@ function KeyBar() {
   );
 }
 
-function Composer({ id }: { id: number }) {
+function Composer({ id, area }: { id: number; area: RefObject<HTMLTextAreaElement | null> }) {
   const [text, setText] = useState(() => localStorage.getItem(DRAFT_KEY(id)) ?? "");
-  const area = useRef<HTMLTextAreaElement>(null);
 
   // A draft survives the app being closed mid-sentence.
   useEffect(() => {
@@ -175,7 +246,7 @@ function Composer({ id }: { id: number }) {
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-  }, [text]);
+  }, [text, area]);
 
   const send = () => {
     if (sendMessage(text)) setText("");
@@ -202,6 +273,8 @@ function Composer({ id }: { id: number }) {
             e.preventDefault();
             send();
           }
+          // Back to the keys above; the draft stays.
+          if (e.key === "Escape") area.current?.blur();
         }}
       />
       <button className="send" aria-label="Send" disabled={!text.trim()}>

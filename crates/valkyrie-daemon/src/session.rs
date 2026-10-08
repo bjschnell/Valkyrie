@@ -14,7 +14,7 @@
 //! reaches goes to `<ns>-<id>.events.jsonl` next to the transcript, so a recorded
 //! session replays to the same states (DESIGN §14.6).
 
-use crate::foreground;
+use crate::{chat, foreground};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
@@ -187,6 +187,8 @@ pub struct SavedSession {
     pub input: Vec<u8>,
     #[serde(default)]
     conversation: Option<String>,
+    #[serde(default)]
+    chat: Option<PathBuf>,
     /// Its place in the tab order; older images had none (id order).
     #[serde(default)]
     rank: Option<u64>,
@@ -256,6 +258,8 @@ struct State {
     scan_due: bool,
     /// The agent's own conversation id, from its hooks, to resume it after a restart.
     conversation: Option<String>,
+    /// The agent's own transcript, for the web app's Chat view (DESIGN §8.7).
+    chat: Option<PathBuf>,
     /// When the program exited (ms), if it did while this image ran.
     exited_ms: Option<u64>,
     /// Images still shown, for clients that attach later (DESIGN §8.4).
@@ -370,6 +374,7 @@ impl Session {
             last_scan_ms: 0,
             scan_due: false,
             conversation: None,
+            chat: None,
             exited_ms: None,
             graphics: graphics::Log::new(GRAPHICS_LIMIT),
             fg_group: None,
@@ -450,6 +455,7 @@ impl Session {
             last_scan_ms: 0,
             scan_due: false,
             conversation: saved.conversation,
+            chat: saved.chat,
             // Exited under the old image: long enough ago to drop from the restore list.
             exited_ms: saved.exited.map(|_| 0),
             graphics,
@@ -613,6 +619,7 @@ impl Session {
             status: state.tracker.status().clone(),
             exited: state.exited,
             conversation: state.conversation.clone(),
+            chat: state.chat.clone(),
             input: self
                 .input
                 .state
@@ -782,6 +789,18 @@ impl Session {
         {
             state.conversation = Some(id);
         }
+        // Its transcript too, by the same rule; a prompt names it as well, for an
+        // agent that started before this daemon did.
+        if ours
+            && (events.contains(&AgentEvent::SessionStarted)
+                || events.contains(&AgentEvent::PromptSubmitted))
+            && state.tracker.status().state != AgentState::Working
+            && let Some(path) = chat::from_hook(&payload)
+            && state.chat.as_ref() != Some(&path)
+        {
+            state.chat = Some(path);
+            self.changed.notify_one();
+        }
         if ours && state.tracker.hook(&events, sent_us, now, self.watching()) {
             self.after_change(&mut state, now);
         }
@@ -850,7 +869,17 @@ impl Session {
         }
         state.fg_group = group;
         state.fg_checked_ms = now;
-        let agent = group.and_then(foreground::agent).unwrap_or("generic");
+        let found = group.and_then(foreground::agent);
+        let agent = found.map_or("generic", |(name, _)| name);
+        // A `claude` typed at the prompt has no hooks to name its transcript. Looked
+        // at each check, since `/clear` starts another.
+        if let Some(("claude", pid)) = found
+            && let Some(path) = chat::claude(pid)
+            && state.chat.as_ref() != Some(&path)
+        {
+            state.chat = Some(path);
+            self.changed.notify_one();
+        }
         let status = state.tracker.status();
         if status.agent == agent {
             return false;
@@ -1128,6 +1157,7 @@ impl Session {
             exited: state.exited,
             status: state.tracker.status().clone(),
             last_input_ms: self.last_input_ms.load(Ordering::Relaxed),
+            chat: state.chat.clone(),
         }
     }
 }

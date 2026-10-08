@@ -87,6 +87,10 @@ pub struct SessionInfo {
     /// app's server reads it to tell someone at a keyboard from someone away.
     #[serde(default)]
     pub last_input_ms: u64,
+    /// The agent's own transcript (Claude's or Codex's JSONL log), when known: the
+    /// web app's Chat view reads it (DESIGN §8.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

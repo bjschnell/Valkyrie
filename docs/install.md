@@ -146,6 +146,11 @@ Scan the QR code it prints. The code works once, for ten minutes; `valk web pair
 prints another. `valk web devices` lists paired devices, and `valk web revoke <name>`
 unpairs one (and stops its notifications).
 
+**Chat.** A Claude Code or Codex session opens on its Chat tab: the conversation from the
+agent's own transcript, with each tool call as a card you can open for the command, diff
+or output. The Terminal tab is the live screen. A `claude` typed at a shell prompt is
+found too. A Codex typed at a prompt needs `valk setup codex` once.
+
 **Install it and get notifications.** On iPhone, open the link in Safari, tap Share →
 Add to Home Screen, and open Valkyrie from the Home Screen. iOS only offers
 notifications to an installed app. On Android, use Chrome's Install app. Then tap the

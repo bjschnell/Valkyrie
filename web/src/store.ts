@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { QueueItem, ServerMsg, SessionId, SessionInfo } from "./proto";
+import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, type Choice } from "./lib/choices";
 import { keyBytes, messageBytes, type Key } from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
@@ -37,6 +38,8 @@ interface State {
   openId: SessionId | null;
   screen: Screen | null;
   exited: { code: number | null } | null;
+  /** The open session's agent conversation, from its transcript; `null` until it loads. */
+  chat: Chat | null;
   /** Choices on the screens of queued sessions, by session, for the inbox. */
   prompts: Record<SessionId, Prompt>;
   toast: { text: string; at: number } | null;
@@ -56,6 +59,7 @@ export const useApp = create<State>(() => ({
   openId: null,
   screen: null,
   exited: null,
+  chat: null,
   prompts: {},
   toast: null,
   now: Date.now(),
@@ -98,6 +102,8 @@ export function connect(): void {
       void refresh();
       const open = get().openId;
       if (open !== null) void attach(open);
+      // The server forgets what a dropped connection followed.
+      if (open !== null) conn?.send({ t: "chat", session: open });
     },
   });
   conn.start();
@@ -121,6 +127,9 @@ function onPush(msg: ServerMsg): void {
       break;
     case "screen":
       if (msg.session === get().openId) set({ screen: apply(get().screen, msg.update) });
+      break;
+    case "chat":
+      if (msg.session === get().openId) set({ chat: applyChat(get().chat, msg) });
       break;
     case "exited":
       if (msg.session === get().openId) set({ exited: { code: msg.code } });
@@ -232,7 +241,9 @@ async function refreshPrompts(items: QueueItem[]): Promise<void> {
 
 export async function open(id: SessionId): Promise<void> {
   if (get().openId === id) return;
-  set({ openId: id, screen: null, exited: null });
+  set({ openId: id, screen: null, exited: null, chat: null });
+  // Followed whichever view shows, so switching to Chat is instant.
+  conn?.send({ t: "chat", session: id });
   await attach(id);
 }
 
@@ -249,7 +260,8 @@ async function attach(id: SessionId): Promise<void> {
 
 export async function close(): Promise<void> {
   if (get().openId === null) return;
-  set({ openId: null, screen: null, exited: null });
+  set({ openId: null, screen: null, exited: null, chat: null });
+  conn?.send({ t: "chat", session: null });
   await conn?.request({ t: "detach" }).catch(() => {});
 }
 

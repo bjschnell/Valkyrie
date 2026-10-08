@@ -4,6 +4,7 @@
 //! serve` puts HTTPS in front of it, reachable only on the tailnet.
 
 pub mod auth;
+pub mod chat;
 pub mod notify;
 pub mod push;
 
@@ -362,15 +363,20 @@ impl Drop for Presence {
 }
 
 /// One daemon connection per browser connection; frames pass through as JSON,
-/// except the app's own `{"t":"visible"}`, which stays here.
+/// except the app's own messages, which stay here: `{"t":"visible"}`, and
+/// `{"t":"chat","session":id|null}`, which follows (or stops following) one
+/// session's agent transcript (DESIGN §8.7).
 async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
-    let socket = &presence.app.socket;
-    let stream = UnixStream::connect(socket)
+    let socket = presence.app.socket.clone();
+    let stream = UnixStream::connect(&socket)
         .await
         .with_context(|| format!("connect {}", socket.display()))?;
     let (mut from_daemon, mut to_daemon) = stream.into_split();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(16);
+    // Held only to stop the task when replaced or when the browser leaves.
+    let mut _chat: Option<AbortOnDrop> = None;
     loop {
         tokio::select! {
             msg = ws.recv() => {
@@ -386,6 +392,16 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                 };
                 if value["t"] == "visible" {
                     presence.set(value["visible"] == true);
+                    continue;
+                }
+                if value["t"] == "chat" {
+                    // The old one stops first, so its messages can't follow the new one's.
+                    _chat = None;
+                    while chat_rx.try_recv().is_ok() {}
+                    if let Some(session) = value["session"].as_u64().and_then(|s| u32::try_from(s).ok()) {
+                        let task = chat::follow(socket.clone(), session, chat_tx.clone());
+                        _chat = Some(AbortOnDrop(tokio::spawn(task)));
+                    }
                     continue;
                 }
                 match serde_json::from_value::<ClientMsg>(value.clone()) {
@@ -409,8 +425,20 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                     }
                 }
             }
+            Some(update) = chat_rx.recv() => {
+                ws.send(Message::Text(update.to_string().into())).await?;
+            }
             _ = ping.tick() => ws.send(Message::Ping(Vec::new().into())).await?,
         }
+    }
+}
+
+/// A task that ends with its owner.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
