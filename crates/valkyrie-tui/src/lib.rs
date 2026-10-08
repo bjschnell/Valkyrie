@@ -233,12 +233,16 @@ impl App {
                         pushes = self.reconnect(terminal).await?;
                         continue;
                     };
+                    let running = self.view.as_ref().filter(|v| v.exited.is_none()).map(|v| v.id);
                     let mut queue_changed = self.on_push(msg)?;
                     // Coalesce bursts into one redraw.
                     while let Ok(msg) = pushes.try_recv() {
                         queue_changed |= self.on_push(msg)?;
                     }
-                    if queue_changed {
+                    let ended = running.filter(|_| self.view.as_ref().is_some_and(|v| v.exited.is_some()));
+                    if let Some(id) = ended {
+                        self.on_ended(id).await;
+                    } else if queue_changed {
                         self.refresh().await;
                     }
                 }
@@ -876,24 +880,43 @@ impl App {
     /// home when it was the last.
     async fn close_session(&mut self, id: SessionId) {
         let attached = self.view.as_ref().is_some_and(|v| v.id == id);
-        let next = self.sessions.iter().position(|s| s.id == id).and_then(|i| {
-            let right = self.sessions.get(i + 1);
-            let left = i.checked_sub(1).and_then(|l| self.sessions.get(l));
-            right.or(left).map(|s| s.id)
-        });
+        let next = self.beside(id);
         if let Err(e) = self.client.kill(id).await {
             return self.say(format!("close failed: {e:#}"));
         }
         if attached {
-            if let Some(next) = next {
-                self.attach(next).await;
-            }
-            // No tab beside it, or that one is this TUI's own session.
-            if self.view.as_ref().is_some_and(|v| v.id == id) {
-                self.detach().await;
-            }
+            self.leave(id, next).await;
         }
         self.refresh().await;
+    }
+
+    /// The attached session ended. One that leaves the tabs (a shell, anything that
+    /// exited 0) goes as if closed; a failure stays on screen until a key.
+    async fn on_ended(&mut self, id: SessionId) {
+        let next = self.beside(id);
+        self.refresh().await;
+        if !self.sessions.iter().any(|s| s.id == id) {
+            self.leave(id, next).await;
+        }
+    }
+
+    /// The tab to the right of `id`, else the one to its left.
+    fn beside(&self, id: SessionId) -> Option<SessionId> {
+        let i = self.sessions.iter().position(|s| s.id == id)?;
+        let right = self.sessions.get(i + 1);
+        let left = i.checked_sub(1).and_then(|l| self.sessions.get(l));
+        right.or(left).map(|s| s.id)
+    }
+
+    /// Moves off the attached `id`: to `next`, or home.
+    async fn leave(&mut self, id: SessionId, next: Option<SessionId>) {
+        if let Some(next) = next {
+            self.attach(next).await;
+        }
+        // No tab beside it, or that one is this TUI's own session.
+        if self.view.as_ref().is_some_and(|v| v.id == id) {
+            self.detach().await;
+        }
     }
 
     /// Takes the scrollback keys from the front of `keys` and returns the rest, which
