@@ -1866,6 +1866,22 @@ impl App {
         }
     }
 
+    /// Down a column, a card reaches half a row into the gap under it, so cards
+    /// are set apart by a thin line of the strip rather than a whole row.
+    fn card_edge(&self, frame: &mut ratatui::Frame, area: Rect, card: Rect, color: style::Color) {
+        let y = card.bottom();
+        if self.settings.tab_side == TabSide::Top || y >= area.bottom() {
+            return;
+        }
+        let buf = frame.buffer_mut();
+        for x in card.left()..card.right() {
+            buf[(x, y)]
+                .set_symbol("▀")
+                .set_fg(color)
+                .set_bg(self.settings.theme.strip);
+        }
+    }
+
     /// Tabs as cards on a darker strip, the attached one marked with a bar.
     fn draw_cards(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
@@ -1928,6 +1944,7 @@ impl App {
             if cursor {
                 frame.buffer_mut().set_style(rect, lit);
             }
+            self.card_edge(frame, area, rect, if cursor { t.accent } else { bg });
         }
         // Home: the way back to the whole picture, with how many need you.
         let needs = if self.queue.is_empty() {
@@ -1951,6 +1968,7 @@ impl App {
             .style(style::Style::new().bg(t.card)),
             home,
         );
+        self.card_edge(frame, area, home, t.card);
         self.draw_more(frame, &layout);
         let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), "new".fg(t.fg)]))
             .style(style::Style::new().bg(t.card));
@@ -2073,6 +2091,23 @@ impl App {
                 underline(frame, rect, t.accent2);
             } else if here {
                 underline(frame, rect, t.accent);
+            }
+        }
+        // Down a column, a faint rule between tabs meets the edge's, so each tab
+        // reads as its own.
+        if rule.width == 1 {
+            let join = if rule.x > text.x { "┤" } else { "├" };
+            let buf = frame.buffer_mut();
+            let below = std::iter::once(layout.home).chain(layout.tabs.iter().map(|&(_, r)| r));
+            for r in below {
+                let y = r.bottom();
+                if y >= area.bottom() {
+                    continue;
+                }
+                for x in r.left()..r.right() {
+                    buf[(x, y)].set_symbol("─").set_fg(t.border);
+                }
+                buf[(rule.x, y)].set_symbol(join).set_fg(t.border);
             }
         }
         // Home: the way back to the whole picture, with how many need you.
