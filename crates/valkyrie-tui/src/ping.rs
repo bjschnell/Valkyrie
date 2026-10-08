@@ -174,33 +174,6 @@ impl Pinger {
     }
 }
 
-/// Sounds on or off: `$VALK_SOUND` (`on`/`off`), else the last `m` toggle, else on.
-pub fn load_enabled() -> bool {
-    let parse = |s: &str| match s.trim() {
-        "on" => Some(true),
-        "off" => Some(false),
-        _ => None,
-    };
-    std::env::var("VALK_SOUND")
-        .ok()
-        .and_then(|v| parse(&v))
-        .or_else(|| parse(&std::fs::read_to_string(saved_path()).ok()?))
-        .unwrap_or(true)
-}
-
-/// Remembers the toggle for the next start; failing to is not worth an error.
-pub fn save_enabled(on: bool) {
-    let path = saved_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, if on { "on" } else { "off" });
-}
-
-fn saved_path() -> PathBuf {
-    valkyrie_proto::state_dir().join("tui-sound")
-}
-
 /// Plays `kind` without blocking: a bell over SSH, else the sound file through the
 /// first audio player that works. Failures are silent; a ping is never worth an error.
 pub fn play(kind: Kind) {

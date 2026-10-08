@@ -6,6 +6,7 @@
 
 mod mouse;
 mod ping;
+mod settings;
 mod theme;
 
 use anyhow::Result;
@@ -21,10 +22,11 @@ use ratatui::widgets::{
     Block, BorderType, Cell, HighlightSpacing, Padding, Paragraph, Row as TableRow, Table,
     TableState, Wrap,
 };
+use settings::{Field, Settings, TabSide, TabStyle};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use theme::{TabStyle, Theme, state_icon};
+use theme::{Theme, state_icon};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -78,13 +80,15 @@ struct App {
     view: Option<Attached>,
     status: String,
     quit: bool,
-    theme: &'static Theme,
-    tab_style: TabStyle,
+    /// Theme, tabs and sound; `,` opens the panel that changes them.
+    settings: Settings,
+    /// Where `settings` are kept.
+    settings_file: PathBuf,
+    /// The settings panel is open, its cursor on this field.
+    settings_cursor: Option<usize>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
-    /// Ping sounds on (`m` toggles).
-    sound: bool,
     /// The last ping, shown in the bar for `TOAST_FOR`.
     toast: Option<(Ping, Instant)>,
     /// The start of a mouse report the last read cut off.
@@ -187,11 +191,11 @@ impl App {
             view: None,
             status: String::new(),
             quit: false,
-            theme: Theme::load(),
-            tab_style: TabStyle::load(),
+            settings: Settings::load(),
+            settings_file: settings::path(),
+            settings_cursor: None,
             preview: None,
             pinger: Pinger::default(),
-            sound: ping::load_enabled(),
             toast: None,
             partial: Vec::new(),
             tab_cursor: None,
@@ -417,6 +421,9 @@ impl App {
             joined.extend(bytes);
             bytes = joined;
         }
+        if self.settings_cursor.is_some() {
+            return self.settings_keys(&bytes);
+        }
         if let Some(view) = &self.view {
             // A program that asked for the mouse gets the reports untouched.
             let inputs = if view.ours() {
@@ -425,15 +432,15 @@ impl App {
                     self.partial = bytes.split_off(cut);
                 }
                 mouse::split(&bytes)
-            } else if let Some(tabs) = self.tabs_area() {
-                // Except over the tab strip, which is ours either way (all of it
-                // while a menu is open); the session sits below it.
-                let top = if self.menu.is_some() {
-                    u16::MAX
+            } else if let Some((main, Some(tabs))) = self.body_areas() {
+                // Except over the tab strip, which is ours either way (the whole
+                // screen while a menu is open); the session sits beside it.
+                let ours = if self.menu.is_some() {
+                    Rect::new(0, 0, u16::MAX, u16::MAX)
                 } else {
-                    tabs.bottom()
+                    tabs
                 };
-                let (rest, clicks) = mouse::route(&bytes, top);
+                let (rest, clicks) = mouse::route(&bytes, ours, (main.x, main.y));
                 let mut inputs = vec![Input::Bytes(rest)];
                 inputs.extend(clicks.into_iter().map(Input::Mouse));
                 inputs
@@ -544,8 +551,18 @@ impl App {
             keys = &keys[key.len()..];
             let last = self.sessions.len();
             match key {
-                b"h" | b"\x1b[D" | b"\x1bOD" => self.tab_cursor = Some(cursor.saturating_sub(1)),
-                b"l" | b"\x1b[C" | b"\x1bOC" => self.tab_cursor = Some((cursor + 1).min(last)),
+                // Across a strip on top, down a column; either works for either.
+                b"h" | b"k" | b"\x1b[D" | b"\x1bOD" | b"\x1b[A" | b"\x1bOA" => {
+                    self.tab_cursor = Some(cursor.saturating_sub(1))
+                }
+                b"l" | b"j" | b"\x1b[C" | b"\x1bOC" | b"\x1b[B" | b"\x1bOB" => {
+                    self.tab_cursor = Some((cursor + 1).min(last))
+                }
+                b"," => {
+                    self.tab_cursor = None;
+                    self.settings_cursor = Some(0);
+                    return self.settings_keys(keys);
+                }
                 b"\r" | b"\n" => {
                     self.tab_cursor = None;
                     match self.sessions.get(cursor).map(|s| s.id) {
@@ -558,9 +575,9 @@ impl App {
                     self.detach().await;
                     return;
                 }
-                b"H" | b"L" => {
+                b"H" | b"L" | b"K" | b"J" => {
                     if let Some(id) = self.sessions.get(cursor).map(|s| s.id) {
-                        let to = if key == b"H" {
+                        let to = if matches!(key, b"H" | b"K") {
                             cursor.saturating_sub(1)
                         } else {
                             cursor + 1
@@ -722,9 +739,13 @@ impl App {
     /// A click on the tab strip: switch to that session or start a new shell; a
     /// right click renames.
     async fn tab_click(&mut self, tabs: Rect, m: Mouse) {
-        // While dragging, only across matters: the pointer may stray off the strip.
-        let y = if self.tab_drag.is_some() { tabs.y } else { m.y };
-        let hit = self.tab_hit(tabs, m.x, y);
+        // While dragging, only along the strip matters: the pointer may stray off it.
+        let (x, y) = match (self.tab_drag.is_some(), self.settings.tab_side) {
+            (false, _) => (m.x, m.y),
+            (true, TabSide::Top) => (m.x, tabs.y),
+            (true, _) => (tabs.x + tabs.width / 2, m.y),
+        };
+        let hit = self.tab_hit(tabs, x, y);
         if m.kind == MouseKind::Press {
             self.tab_drag = match hit {
                 Some(TabHit::Session(id)) => Some(id),
@@ -780,21 +801,35 @@ impl App {
         }
     }
 
-    /// Opens a tab's menu under the tab, the cursor on `item`.
+    /// Opens a tab's menu under the tab (beside it, for a column), the cursor on
+    /// `item`.
     fn open_menu(&mut self, id: SessionId, item: usize) {
-        let tabs = self
-            .tabs_area()
-            .unwrap_or(Rect::new(0, 0, MENU_WIDTH, self.tab_style.rows()));
-        let x = self
+        let tabs =
+            self.tabs_area()
+                .unwrap_or(Rect::new(0, 0, MENU_WIDTH, self.settings.tabs.rows()));
+        let tab = self
             .tab_layout(tabs)
             .tabs
             .iter()
             .find(|(i, _)| self.sessions.get(*i).is_some_and(|s| s.id == id))
-            .map_or(tabs.x, |(_, r)| r.x);
+            .map_or(tabs, |&(_, r)| r);
+        let height = Menu::HEIGHT;
+        let (x, y) = match self.settings.tab_side {
+            TabSide::Top => (
+                tab.x.min(tabs.right().saturating_sub(MENU_WIDTH)),
+                tabs.bottom(),
+            ),
+            TabSide::Left => (tabs.right(), tab.y),
+            TabSide::Right => (tabs.x.saturating_sub(MENU_WIDTH), tab.y),
+        };
+        let y = match self.settings.tab_side {
+            TabSide::Top => y,
+            _ => y.min(tabs.bottom().saturating_sub(height)),
+        };
         self.menu = Some(Menu {
             session: id,
-            x: x.min(tabs.right().saturating_sub(MENU_WIDTH)),
-            y: tabs.bottom(),
+            x,
+            y,
             cursor: item,
             confirm: false,
         });
@@ -841,7 +876,7 @@ impl App {
             MouseKind::RightPress if !rect.contains(at) => {
                 self.menu = None;
                 if let Some(tabs) = self.tabs_area()
-                    && m.y < tabs.bottom()
+                    && tabs.contains(Position::new(m.x, m.y))
                 {
                     Box::pin(self.tab_click(tabs, m)).await;
                 }
@@ -963,21 +998,71 @@ impl App {
         keys
     }
 
+    /// Steps a setting, keeps it, and lays the screen out again if the tabs moved.
+    fn change(&mut self, field: Field, by: isize) {
+        let before = self.settings;
+        self.settings.cycle(field, by);
+        self.settings.save_field(field, &self.settings_file);
+        if (before.tabs, before.tab_side) != (self.settings.tabs, self.settings.tab_side) {
+            self.relayout();
+        }
+        self.status = format!(
+            "{}: {}",
+            field.label().to_lowercase(),
+            self.settings.value(field)
+        );
+    }
+
+    /// Keys while the settings panel is open: ↑/↓ pick a setting, ←/→ change it,
+    /// Esc (or `,` or `q`) closes. Anything else, mouse reports too, is ignored.
+    fn settings_keys(&mut self, mut keys: &[u8]) {
+        while let Some(cursor) = self.settings_cursor
+            && !keys.is_empty()
+        {
+            let key = next_key(keys);
+            let whole = key.len() == keys.len();
+            keys = &keys[key.len()..];
+            // Not keys: a legacy mouse report's three bytes, and pasted text.
+            if key == b"\x1b[M" {
+                keys = &keys[keys.len().min(3)..];
+                continue;
+            }
+            if key == b"\x1b[200~" {
+                let end = keys.windows(6).position(|w| w == b"\x1b[201~");
+                keys = &keys[end.map_or(keys.len(), |i| i + 6)..];
+                continue;
+            }
+            let last = Field::ALL.len() - 1;
+            match key {
+                b"k" | b"\x1b[A" | b"\x1bOA" => {
+                    self.settings_cursor = Some(cursor.saturating_sub(1))
+                }
+                b"j" | b"\x1b[B" | b"\x1bOB" => self.settings_cursor = Some((cursor + 1).min(last)),
+                b"h" | b"\x1b[D" | b"\x1bOD" => self.change(Field::ALL[cursor], -1),
+                b"l" | b"\x1b[C" | b"\x1bOC" | b"\r" | b" " => self.change(Field::ALL[cursor], 1),
+                b"\x1b" if whole => self.settings_cursor = None,
+                b"," | b"q" | [0x03] => self.settings_cursor = None,
+                _ => {}
+            }
+        }
+    }
+
     async fn on_mouse(&mut self, mut m: Mouse) {
         if self.menu.is_some() {
             return self.menu_click(m).await;
         }
-        let tabs = self.tabs_area();
+        let areas = self.body_areas();
         let Some(view) = &mut self.view else { return };
-        if let Some(tabs) = tabs {
+        if let Some((main, Some(tabs))) = areas {
             // A drag that strays over the strip still selects.
             let dragging =
                 self.tab_drag.is_some() && matches!(m.kind, MouseKind::Drag | MouseKind::Release);
-            if (m.y < tabs.bottom() || dragging) && !view.selecting {
+            if (tabs.contains(Position::new(m.x, m.y)) || dragging) && !view.selecting {
                 return self.tab_click(tabs, m).await;
             }
-            // The session's own rows start below the strip.
-            m.y = m.y.saturating_sub(tabs.bottom());
+            // The session's own cells start past the strip.
+            m.x = m.x.saturating_sub(main.x);
+            m.y = m.y.saturating_sub(main.y);
         }
         let bottom = view.rows.len().saturating_sub(1) as u16;
         let right = view.cols.saturating_sub(1);
@@ -1138,24 +1223,9 @@ impl App {
                 self.clamp_selection();
                 self.update_preview().await;
             }
-            HomeKey::Sound => {
-                self.sound = !self.sound;
-                ping::save_enabled(self.sound);
-                self.status = format!("sound: {}", if self.sound { "on" } else { "off" });
-                if std::env::var_os("VALK_SOUND").is_some() {
-                    self.status += " (VALK_SOUND decides at the next start)";
-                }
-            }
-            HomeKey::Theme => {
-                self.theme = self.theme.next();
-                self.theme.save();
-                self.status = format!("theme: {}", self.theme.name);
-            }
-            HomeKey::TabStyle => {
-                self.tab_style = self.tab_style.next();
-                self.tab_style.save();
-                self.status = format!("tabs: {}", self.tab_style.name());
-            }
+            HomeKey::Sound => self.change(Field::Sound, 1),
+            HomeKey::Theme => self.change(Field::Theme, 1),
+            HomeKey::Settings => self.settings_cursor = Some(0),
             HomeKey::Top => {
                 if let Some(top) = self.queue.first() {
                     let id = top.session;
@@ -1222,8 +1292,10 @@ impl App {
             self.restore(anchor);
             return Ok(true);
         }
-        // The session is drawn below the tab strip.
-        let top = self.tabs_area().map_or(0, |r| r.bottom());
+        // The session is drawn beside the tab strip.
+        let origin = self
+            .body_areas()
+            .map_or((0, 0), |(main, _)| (main.x, main.y));
         let Some(view) = &mut self.view else {
             return Ok(false);
         };
@@ -1249,7 +1321,13 @@ impl App {
                 // ratatui left it. Unicode placeholders (yazi, `kitten icat`) are
                 // ordinary cells on the screen; this only delivers the image data.
                 let mut out = std::io::stdout();
-                write!(out, "\x1b7\x1b[{};{}H{data}\x1b8", y + 1 + top, x + 1)?;
+                let (left, top) = origin;
+                write!(
+                    out,
+                    "\x1b7\x1b[{};{}H{data}\x1b8",
+                    y + 1 + top,
+                    x + 1 + left
+                )?;
                 out.flush()?;
             }
             ServerMsg::Clipboard { session, text } if session == view.id => {
@@ -1307,6 +1385,7 @@ impl App {
                         && self.tab_cursor.is_none()
                         && self.renaming.is_none()
                         && self.menu.is_none()
+                        && self.settings_cursor.is_none()
                     {
                         frame.set_cursor_position(Position::new(main.x + x, main.y + y));
                     }
@@ -1325,16 +1404,20 @@ impl App {
                     } else {
                         BarMode::Session
                     };
-                    let mut line = attached_bar(view, mode, self.theme);
+                    let mut line = attached_bar(view, mode, self.settings.theme);
                     if let Some(toast) = self.toast() {
-                        line.spans.extend(toast_spans(toast, self.theme));
+                        line.spans.extend(toast_spans(toast, self.settings.theme));
                     }
                     frame.render_widget(
-                        Paragraph::new(line).style(style::Style::new().bg(self.theme.panel)),
+                        Paragraph::new(line)
+                            .style(style::Style::new().bg(self.settings.theme.panel)),
                         bar,
                     );
                 }
                 None => self.draw_home(frame, body, bar),
+            }
+            if let Some(cursor) = self.settings_cursor {
+                self.draw_settings(frame, cursor);
             }
         })?;
         Ok(())
@@ -1359,7 +1442,7 @@ impl App {
         let Some(ping) = self.pinger.due(viewing, Instant::now()) else {
             return;
         };
-        if ping.sound && self.sound {
+        if ping.sound && self.settings.sound {
             ping::play(ping.kind);
         }
         // A fresh request stays up over a later finish.
@@ -1402,7 +1485,7 @@ const PREVIEW_MIN_WIDTH: u16 = 130;
 
 impl App {
     fn draw_home(&self, frame: &mut ratatui::Frame, body: Rect, bar: Rect) {
-        let t = self.theme;
+        let t = self.settings.theme;
         let now = now_ms();
         let spin = (now / SPIN_EVERY.as_millis() as u64) as usize;
         frame.render_widget(
@@ -1479,7 +1562,7 @@ impl App {
 
         let mut footer = match &self.renaming {
             Some((id, typed)) => rename_line(*id, typed, t),
-            None => footer_line(&self.status, self.sound, t),
+            None => footer_line(&self.status, self.settings.sound, t),
         };
         if let Some(toast) = self.toast() {
             footer.spans.splice(0..0, toast_spans(toast, t));
@@ -1492,7 +1575,7 @@ impl App {
 
     /// The selected session: its full summary, then the bottom of its screen.
     fn draw_preview(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let t = self.theme;
+        let t = self.settings.theme;
         let (selected, _) = self.selection();
         let session = selected.and_then(|id| self.sessions.iter().find(|s| s.id == id));
         let Some(session) = session else {
@@ -1545,6 +1628,10 @@ impl App {
 
 /// Shorter terminals leave the session every row.
 const TABS_MIN_ROWS: u16 = 12;
+/// The column of tabs beside the session: the widest tab, its rule and a margin.
+const SIDE_WIDTH: u16 = TAB_MAX + 2;
+/// Narrower terminals leave the session every column.
+const SIDE_MIN_COLS: u16 = 70;
 /// A tab's width bounds, padding included.
 const TAB_MIN: u16 = 10;
 const TAB_MAX: u16 = 24;
@@ -1573,8 +1660,10 @@ const MENU_WIDTH: u16 = 20;
 
 impl Menu {
     /// Two items inside a border.
+    const HEIGHT: u16 = 4;
+
     fn rect(&self) -> Rect {
-        Rect::new(self.x, self.y, MENU_WIDTH, 4)
+        Rect::new(self.x, self.y, MENU_WIDTH, Self::HEIGHT)
     }
 }
 
@@ -1586,33 +1675,48 @@ enum TabHit {
     New,
 }
 
-/// Where each visible tab is drawn, and what is left off either end.
+/// Where each visible tab is drawn, and where the marks for tabs left off either
+/// end go (before: left or above; after: right or below).
 struct TabLayout {
     home: Rect,
     tabs: Vec<(usize, Rect)>,
     plus: Rect,
-    more_left: bool,
-    more_right: bool,
+    more_before: Option<Rect>,
+    more_after: Option<Rect>,
 }
 
 impl App {
     /// The attached session's area and, when shown, the tab strip's, within `body`.
     fn split_body(&self, body: Rect) -> (Rect, Option<Rect>) {
-        if body.height < TABS_MIN_ROWS {
-            return (body, None);
+        let side = |at| Layout::horizontal(at).areas::<2>(body);
+        match self.settings.tab_side {
+            TabSide::Top if body.height >= TABS_MIN_ROWS => {
+                let rows = self.settings.tabs.rows();
+                let [tabs, main] =
+                    Layout::vertical([Constraint::Length(rows), Constraint::Fill(1)]).areas(body);
+                (main, Some(tabs))
+            }
+            TabSide::Left if body.width >= SIDE_MIN_COLS && body.height >= TABS_MIN_ROWS => {
+                let [tabs, main] = side([Constraint::Length(SIDE_WIDTH), Constraint::Fill(1)]);
+                (main, Some(tabs))
+            }
+            TabSide::Right if body.width >= SIDE_MIN_COLS && body.height >= TABS_MIN_ROWS => {
+                let [main, tabs] = side([Constraint::Fill(1), Constraint::Length(SIDE_WIDTH)]);
+                (main, Some(tabs))
+            }
+            _ => (body, None),
         }
-        let [tabs, main] = Layout::vertical([
-            Constraint::Length(self.tab_style.rows()),
-            Constraint::Fill(1),
-        ])
-        .areas(body);
-        (main, Some(tabs))
+    }
+
+    /// The attached session's area and, when shown, the tab strip's, on screen now.
+    fn body_areas(&self) -> Option<(Rect, Option<Rect>)> {
+        let full = session_size().ok()?;
+        Some(self.split_body(Rect::new(0, 0, full.cols, full.rows)))
     }
 
     /// Where the tab strip is on screen now, if shown.
     fn tabs_area(&self) -> Option<Rect> {
-        let full = session_size().ok()?;
-        self.split_body(Rect::new(0, 0, full.cols, full.rows)).1
+        self.body_areas()?.1
     }
 
     /// The terminal minus the bar and, when shown, the tab strip.
@@ -1620,7 +1724,7 @@ impl App {
         let full = session_size()?;
         let (main, _) = self.split_body(Rect::new(0, 0, full.cols, full.rows));
         Ok(Size {
-            cols: full.cols,
+            cols: main.width.max(1),
             rows: main.height.max(1),
         })
     }
@@ -1638,6 +1742,9 @@ impl App {
     /// When they don't all fit, the strip slides to keep the cursor (else the
     /// attached tab) in view.
     fn tab_layout(&self, strip: Rect) -> TabLayout {
+        if self.settings.tab_side != TabSide::Top {
+            return self.column_layout(strip);
+        }
         // Home first, where the queue lives; the tabs after it.
         let home = Rect::new(strip.x, strip.y, HOME_WIDTH.min(strip.width), strip.height);
         let area = Rect::new(
@@ -1658,20 +1765,7 @@ impl App {
             let used: u16 = widths[start..end].iter().map(|w| w + 1).sum();
             used + arrows + PLUS_WIDTH <= area.width
         };
-        let mut start = 0;
-        let mut end = loop {
-            let mut end = start;
-            while end < widths.len() && fits(start, end + 1) {
-                end += 1;
-            }
-            if focus < end || start >= focus {
-                break end.max(start + 1).min(widths.len());
-            }
-            start += 1;
-        };
-        if widths.is_empty() {
-            end = 0;
-        }
+        let (start, end) = window(widths.len(), focus, fits);
         let mut x = area.x + u16::from(start > 0);
         let mut tabs = Vec::new();
         for (i, &w) in widths.iter().enumerate().take(end).skip(start) {
@@ -1685,8 +1779,56 @@ impl App {
             home,
             tabs,
             plus: Rect::new(plus_x, area.y, PLUS_WIDTH, area.height),
-            more_left: start > 0,
-            more_right,
+            more_before: (start > 0).then(|| Rect::new(home.right(), area.y, 1, 1)),
+            more_after: more_right.then(|| Rect::new(plus_x.saturating_sub(1), area.y, 1, 1)),
+        }
+    }
+
+    /// Tabs in a column beside the session: home on top, then a tab of two rows per
+    /// session with a row between, then "+". The column's edge toward the session
+    /// is left for underlined tabs' rule.
+    fn column_layout(&self, strip: Rect) -> TabLayout {
+        let x = match self.settings.tab_side {
+            TabSide::Right => strip.x + 1,
+            _ => strip.x,
+        };
+        let width = strip.width.saturating_sub(1);
+        let row = |y: u16, height: u16| Rect::new(x, y, width, height).intersection(strip);
+        let home = row(strip.y, 2);
+        let first = home.bottom() + 1;
+        let n = self.sessions.len();
+        let focus = self
+            .tab_cursor
+            .filter(|&i| i < n)
+            .or_else(|| self.attached_index())
+            .unwrap_or(0);
+        // Each tab and the row after it; the marks and "+" a row each.
+        let room = strip.bottom().saturating_sub(first);
+        let fits = |start: usize, end: usize| {
+            let marks = u16::from(start > 0) + u16::from(end < n);
+            (end - start) as u16 * 3 + marks < room
+        };
+        let (start, end) = window(n, focus, fits);
+        let mut y = first;
+        let more_before = (start > 0).then(|| {
+            y += 1;
+            row(first, 1)
+        });
+        let mut tabs = Vec::new();
+        for i in start..end {
+            tabs.push((i, row(y, 2)));
+            y += 3;
+        }
+        let more_after = (end < n).then(|| {
+            y += 1;
+            row(y - 1, 1)
+        });
+        TabLayout {
+            home,
+            tabs,
+            plus: row(y.min(strip.bottom().saturating_sub(1)), 1),
+            more_before,
+            more_after,
         }
     }
 
@@ -1705,15 +1847,28 @@ impl App {
 
     /// One tab per session: its name, then what runs in it and its state.
     fn draw_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
-        match self.tab_style {
+        match self.settings.tabs {
             TabStyle::Cards => self.draw_cards(frame, area),
             TabStyle::Underline => self.draw_underlined(frame, area),
         }
     }
 
+    /// Marks for tabs that did not fit: before the first shown and after the last.
+    fn draw_more(&self, frame: &mut ratatui::Frame, layout: &TabLayout) {
+        let (before, after) = match self.settings.tab_side {
+            TabSide::Top => ("‹", "›"),
+            _ => ("  ▲ more", "  ▼ more"),
+        };
+        for (rect, mark) in [(layout.more_before, before), (layout.more_after, after)] {
+            if let Some(rect) = rect {
+                frame.render_widget(Paragraph::new(mark.fg(self.settings.theme.muted)), rect);
+            }
+        }
+    }
+
     /// Tabs as cards on a darker strip, the attached one marked with a bar.
     fn draw_cards(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let t = self.theme;
+        let t = self.settings.theme;
         let spin = (now_ms() / SPIN_EVERY.as_millis() as u64) as usize;
         let buf = frame.buffer_mut();
         buf.set_style(area, style::Style::new().bg(t.strip));
@@ -1780,9 +1935,13 @@ impl App {
         } else {
             Line::from(format!(" ● {}", self.queue.len()).fg(t.needs).bold())
         };
-        let home = Rect {
-            width: layout.home.width.saturating_sub(1),
-            ..layout.home
+        // On top the home card ends a column early, like the gap after a tab.
+        let home = match self.settings.tab_side {
+            TabSide::Top => Rect {
+                width: layout.home.width.saturating_sub(1),
+                ..layout.home
+            },
+            _ => layout.home,
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -1792,16 +1951,7 @@ impl App {
             .style(style::Style::new().bg(t.card)),
             home,
         );
-        if layout.more_left {
-            frame.render_widget(
-                Paragraph::new("‹".fg(t.muted)),
-                Rect::new(layout.home.right(), area.y, 1, 1),
-            );
-        }
-        if layout.more_right {
-            let x = layout.plus.x.saturating_sub(1);
-            frame.render_widget(Paragraph::new("›".fg(t.muted)), Rect::new(x, area.y, 1, 1));
-        }
+        self.draw_more(frame, &layout);
         let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), "new".fg(t.fg)]))
             .style(style::Style::new().bg(t.card));
         frame.render_widget(plus, layout.plus);
@@ -1814,24 +1964,51 @@ impl App {
     /// underlined in the accent, the rest muted. The tab cursor lifts its tab and
     /// underlines it in the second accent.
     fn draw_underlined(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let t = self.theme;
+        let t = self.settings.theme;
         let spin = (now_ms() / SPIN_EVERY.as_millis() as u64) as usize;
         let layout = self.tab_layout(area);
-        let page = style::Style::new().bg(t.bg);
-        let rule_y = area.bottom().saturating_sub(1);
-        let text = Rect {
-            height: area.height.saturating_sub(1),
-            ..area
+        // The session's own background, so the tabs sit on the same page.
+        let page = style::Style::new().bg(style::Color::Reset);
+        // The rule runs along the strip's edge toward the session: under a strip on
+        // top, beside a column. A tab is underlined where it meets the rule.
+        let (rule, text) = match self.settings.tab_side {
+            TabSide::Top => {
+                let [text, rule] =
+                    Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+                (rule, text)
+            }
+            TabSide::Left => {
+                let [text, rule] =
+                    Layout::horizontal([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+                (rule, text)
+            }
+            TabSide::Right => {
+                let [rule, text] =
+                    Layout::horizontal([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+                (rule, text)
+            }
+        };
+        let (thin, thick) = if rule.height == 1 {
+            ("─", "━")
+        } else {
+            ("│", "┃")
         };
         let buf = frame.buffer_mut();
         buf.set_style(area, page);
-        for x in area.left()..area.right() {
-            buf[(x, rule_y)].set_symbol("─").set_fg(t.border);
+        for at in rule.positions() {
+            buf[at].set_symbol(thin).set_fg(t.border);
         }
         let underline = |frame: &mut ratatui::Frame, rect: Rect, color| {
             let buf = frame.buffer_mut();
-            for x in rect.left()..rect.right() {
-                buf[(x, rule_y)].set_symbol("━").set_fg(color);
+            for at in rule.positions() {
+                let along = if rule.height == 1 {
+                    (rect.left()..rect.right()).contains(&at.x)
+                } else {
+                    (rect.top()..rect.bottom()).contains(&at.y)
+                };
+                if along {
+                    buf[at].set_symbol(thick).set_fg(color);
+                }
             }
         };
         let lift = |frame: &mut ratatui::Frame, rect: Rect| {
@@ -1911,16 +2088,7 @@ impl App {
             ]),
             layout.home.intersection(text),
         );
-        if layout.more_left {
-            frame.render_widget(
-                Paragraph::new("‹".fg(t.muted)),
-                Rect::new(layout.home.right(), area.y, 1, 1),
-            );
-        }
-        if layout.more_right {
-            let x = layout.plus.x.saturating_sub(1);
-            frame.render_widget(Paragraph::new("›".fg(t.muted)), Rect::new(x, area.y, 1, 1));
-        }
+        self.draw_more(frame, &layout);
         frame.render_widget(
             Paragraph::new(Line::from(vec![" + ".fg(t.accent), "new".fg(t.muted)])),
             layout.plus.intersection(text),
@@ -1934,7 +2102,7 @@ impl App {
 
 impl App {
     fn draw_menu(&self, frame: &mut ratatui::Frame, menu: &Menu) {
-        let t = self.theme;
+        let t = self.settings.theme;
         let rect = menu.rect().intersection(frame.area());
         let program = self
             .sessions
@@ -1966,11 +2134,96 @@ impl App {
             .style(style::Style::new().bg(t.panel).fg(t.fg));
         frame.render_widget(Paragraph::new(items).block(block), rect);
     }
+
+    /// The settings panel, in the middle of the screen: one row per setting with
+    /// its value between arrows, and where the settings are kept.
+    fn draw_settings(&self, frame: &mut ratatui::Frame, cursor: usize) {
+        let t = self.settings.theme;
+        let file = &self.settings_file;
+        let file = match std::env::var_os("HOME") {
+            Some(home) => match file.strip_prefix(&home) {
+                Ok(rest) => format!("~/{}", rest.display()),
+                Err(_) => file.display().to_string(),
+            },
+            None => file.display().to_string(),
+        };
+        let width = (file.width() as u16 + 6).max(40);
+        let height = Field::ALL.len() as u16 + 5;
+        let area = frame.area();
+        let rect = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        )
+        .intersection(area);
+        let mut lines = vec![Line::default()];
+        for (i, &field) in Field::ALL.iter().enumerate() {
+            let here = i == cursor;
+            let arrow = |a: &'static str| if here { a.fg(t.accent) } else { "  ".into() };
+            let value = self.settings.value(field);
+            let mut line = Line::from(vec![
+                format!("  {:<12}", field.label()).fg(if here { t.fg } else { t.muted }),
+                arrow("‹ "),
+                if here {
+                    value.fg(t.accent).bold()
+                } else {
+                    value.fg(t.fg)
+                },
+                arrow(" ›"),
+            ]);
+            // Across the panel, so the cursor's row is lit edge to edge.
+            let pad = (width as usize).saturating_sub(2 + line.width());
+            line.spans.push(" ".repeat(pad).into());
+            lines.push(if here {
+                line.style(style::Style::new().bg(t.selection))
+            } else {
+                line
+            });
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(format!("  {file}").fg(t.muted)));
+        let hints = Line::from(vec![
+            " ↑↓ ".fg(t.accent).bold(),
+            "choose ".fg(t.muted),
+            " ←→ ".fg(t.accent).bold(),
+            "change ".fg(t.muted),
+            " esc ".fg(t.accent).bold(),
+            "done ".fg(t.muted),
+        ]);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(style::Style::new().fg(t.accent))
+            .title(" Settings ".fg(t.fg).bold())
+            .title_bottom(hints.centered())
+            .style(style::Style::new().bg(t.panel).fg(t.fg));
+        frame.render_widget(Paragraph::new(lines).block(block), rect);
+    }
 }
 
 /// Whether an agent (not a shell or another program) runs in the session.
 fn is_agent(s: &SessionInfo) -> bool {
     !matches!(s.status.agent.as_str(), "generic" | "unknown" | "")
+}
+
+/// The run of `n` tabs to show: from the first, sliding just far enough that
+/// `focus` is in it, as many as `fits(start, end)` allows (at least one).
+fn window(n: usize, focus: usize, fits: impl Fn(usize, usize) -> bool) -> (usize, usize) {
+    if n == 0 {
+        return (0, 0);
+    }
+    let mut start = 0;
+    loop {
+        let mut end = start;
+        while end < n && fits(start, end + 1) {
+            end += 1;
+        }
+        if focus < end || start >= focus {
+            return (start, end.max(start + 1).min(n));
+        }
+        start += 1;
+    }
 }
 
 /// A tab wide enough for its name and its program line, within bounds.
@@ -2157,7 +2410,7 @@ fn footer_line(status: &str, sound: bool, t: &Theme) -> Line<'static> {
         ("x", "kill"),
         ("R", "rename"),
         ("t", "theme"),
-        ("T", "tabs"),
+        (",", "settings"),
         ("m", if sound { "sound" } else { "muted" }),
         ("q", "quit"),
     ] {
@@ -2230,6 +2483,7 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
             ("n", "new"),
             ("r", "rename"),
             ("x", "close"),
+            (",", "settings"),
             ("esc", "back"),
         ],
         BarMode::Menu => &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")],
@@ -2507,8 +2761,8 @@ enum HomeKey {
     Refresh,
     /// Cycle the color theme.
     Theme,
-    /// Switch how the tab strip is drawn.
-    TabStyle,
+    /// Open the settings panel.
+    Settings,
     /// Ping sounds on/off.
     Sound,
     Rename,
@@ -2551,7 +2805,7 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
             b'x' => keys.push(HomeKey::Kill),
             b'r' => keys.push(HomeKey::Refresh),
             b't' => keys.push(HomeKey::Theme),
-            b'T' => keys.push(HomeKey::TabStyle),
+            b',' => keys.push(HomeKey::Settings),
             b'm' => keys.push(HomeKey::Sound),
             b'R' => keys.push(HomeKey::Rename),
             b'q' | 0x03 => keys.push(HomeKey::Quit),
@@ -2685,6 +2939,8 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
+        // Not whatever this machine's settings.toml says.
+        app.settings = Settings::default();
         app.sessions = vec![info(1), info(2), info(3)];
         app.selected = 2; // session 3
         app.on_push(ServerMsg::Queue {
@@ -2716,6 +2972,8 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
+        // Not whatever this machine's settings.toml says.
+        app.settings = Settings::default();
         let now = now_ms();
         let home = std::env::var("HOME").unwrap_or_default();
         let session = |id, name: &str, state, summary: Option<&str>, ago: u64, cwd: &str| {
@@ -2779,7 +3037,7 @@ mod tests {
             "● Running the auth tests\n  ⎿  $ cargo test -p auth\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No".into(),
         ));
         for theme in theme::THEMES {
-            app.theme = theme;
+            app.settings.theme = theme;
             let mut terminal = Terminal::new(TestBackend::new(160, 22)).unwrap();
             terminal
                 .draw(|frame| {
@@ -2821,6 +3079,8 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
+        // Not whatever this machine's settings.toml says.
+        app.settings = Settings::default();
         app.sessions = (1..=3)
             .map(|id| {
                 let mut s = info(id);
@@ -2838,7 +3098,7 @@ mod tests {
         view.apply(update(true, vec![row(0, "inside session 2")]));
         view.title = Some("xdx@Thor:~/repos/proj2".into());
         app.view = Some(view);
-        app.tab_style = TabStyle::Cards;
+        app.settings.tabs = TabStyle::Cards;
 
         let body = Rect::new(0, 0, 120, 23);
         let (main, tabs) = app.split_body(body);
@@ -2862,7 +3122,7 @@ mod tests {
                     render_rows(view.shown(), main, frame.buffer_mut());
                     app.draw_tabs(frame, tabs.unwrap());
                     frame.render_widget(
-                        Paragraph::new(attached_bar(view, BarMode::Session, app.theme)),
+                        Paragraph::new(attached_bar(view, BarMode::Session, app.settings.theme)),
                         bar,
                     );
                 })
@@ -2877,7 +3137,7 @@ mod tests {
                 .collect::<Vec<String>>()
         };
         for theme in theme::THEMES {
-            app.theme = theme;
+            app.settings.theme = theme;
             draw(&app, &mut terminal);
             snapshot(terminal.backend().buffer(), &format!("tabs-{}", theme.name));
             app.tab_cursor = Some(0);
@@ -2888,7 +3148,7 @@ mod tests {
             );
             app.tab_cursor = None;
         }
-        app.theme = theme::THEMES[0];
+        app.settings.theme = theme::THEMES[0];
         let lines = draw(&app, &mut terminal);
         assert!(
             lines[0].contains("1 proj1") && lines[0].contains("2 proj2"),
@@ -3032,7 +3292,9 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
-        app.tab_style = TabStyle::Underline;
+        // Not whatever this machine's settings.toml says.
+        app.settings = Settings::default();
+        app.settings.tabs = TabStyle::Underline;
         app.sessions = (1..=3)
             .map(|id| {
                 let mut s = info(id);
@@ -3088,6 +3350,168 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Tabs in a column on either side: the session beside it, each tab two rows
+    /// with one between, the rule on the edge toward the session thick along the
+    /// attached tab, and clicks finding the tab they land on.
+    #[tokio::test]
+    async fn tabs_stand_in_a_column_on_either_side() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-side-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = (1..=3)
+            .map(|id| {
+                let mut s = info(id);
+                s.name = format!("proj{id}");
+                s.command = vec!["/usr/bin/fish".into()];
+                s
+            })
+            .collect();
+        app.sessions[1].status.agent = "claude".into();
+        app.sessions[1].status.state = AgentState::Working;
+        app.sessions[2].status.agent = "codex".into();
+        app.sessions[2].status.state = AgentState::NeedsInput;
+        app.queue = vec![queued(3)];
+        let mut view = Attached::new(2, "proj2".into(), None);
+        view.apply(update(true, vec![row(0, "inside session 2")]));
+        app.view = Some(view);
+
+        let body = Rect::new(0, 0, 100, 20);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        for (side, style) in [
+            (TabSide::Left, TabStyle::Underline),
+            (TabSide::Right, TabStyle::Underline),
+            (TabSide::Left, TabStyle::Cards),
+            (TabSide::Right, TabStyle::Cards),
+        ] {
+            app.settings.tab_side = side;
+            app.settings.tabs = style;
+            let (main, tabs) = app.split_body(body);
+            let tabs = tabs.expect("wide enough for a column");
+            assert_eq!(
+                (tabs.width, tabs.height, main.width),
+                (SIDE_WIDTH, 20, 100 - SIDE_WIDTH)
+            );
+            assert_eq!(main.x, if side == TabSide::Left { SIDE_WIDTH } else { 0 });
+            terminal
+                .draw(|frame| {
+                    render_rows(app.view.as_ref().unwrap().shown(), main, frame.buffer_mut());
+                    app.draw_tabs(frame, tabs);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            snapshot(&buffer, &format!("tabs-{}-{}", side.name(), style.name()));
+            let at = |x: u16, y: u16| buffer[(x, y)].symbol().to_string();
+            let text = |r: Rect, y: u16| (r.x..r.right()).map(|x| at(x, y)).collect::<String>();
+
+            let layout = app.tab_layout(tabs);
+            assert!(text(layout.home, 0).contains("home"), "{side:?}");
+            let rects: Vec<Rect> = layout.tabs.iter().map(|&(_, r)| r).collect();
+            assert_eq!(rects.len(), 3);
+            assert_eq!(rects[1].y, rects[0].y + 3, "two rows and a gap");
+            assert!(text(rects[1], rects[1].y).contains("2 proj2"));
+            assert!(text(rects[2], rects[2].y + 1).contains("codex · ● needs input"));
+            assert!(
+                text(main, main.y).starts_with("inside session 2"),
+                "{side:?} {style:?}"
+            );
+            if style == TabStyle::Underline {
+                let rule_x = if side == TabSide::Left {
+                    tabs.right() - 1
+                } else {
+                    tabs.x
+                };
+                assert_eq!(at(rule_x, rects[1].y), "┃", "{side:?}: attached tab marked");
+                assert_eq!(at(rule_x, rects[0].y), "│", "{side:?}: others not");
+            }
+            assert_eq!(
+                app.tab_hit(tabs, rects[2].x + 3, rects[2].y + 1),
+                Some(TabHit::Session(3))
+            );
+            assert_eq!(
+                app.tab_hit(tabs, layout.plus.x + 1, layout.plus.y),
+                Some(TabHit::New)
+            );
+            assert_eq!(app.tab_hit(tabs, layout.home.x + 1, 0), Some(TabHit::Home));
+        }
+
+        // Too narrow for a column: the session gets the whole width.
+        app.settings.tab_side = TabSide::Left;
+        assert!(app.split_body(Rect::new(0, 0, 60, 20)).1.is_none());
+        assert!(
+            app.split_body(Rect::new(0, 0, 100, 8)).1.is_none(),
+            "too short"
+        );
+
+        // A short column slides to keep the attached tab in view.
+        app.sessions = (1..=12).map(info).collect();
+        app.view = Some(Attached::new(11, "eleven".into(), None));
+        let layout = app.tab_layout(Rect::new(0, 0, SIDE_WIDTH, 16));
+        assert!(layout.more_before.is_some());
+        assert!(layout.tabs.iter().any(|&(i, _)| i == 10));
+        for &(_, r) in &layout.tabs {
+            assert!(r.bottom() <= layout.plus.y, "tabs overlap the +");
+        }
+        assert!(layout.plus.bottom() <= 16);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The settings panel: arrows change the setting under the cursor, Esc closes.
+    #[tokio::test]
+    async fn settings_panel_changes_what_it_shows() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir =
+            std::env::temp_dir().join(format!("valkyrie-tui-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        // Saves go to a throwaway file, not this machine's.
+        app.settings_file = dir.join("valkyrie/settings.toml");
+        app.on_home_key(HomeKey::Settings).await;
+        assert_eq!(app.settings_cursor, Some(0));
+        // Down twice to "Tabs on", right: left. Mouse reports (SGR, and legacy with a
+        // space and `l` for bytes) and pasted text are not keys.
+        app.on_input(b"jj\x1b[C\x1b[<0;5;5M\x1b[M lj\x1b[200~ll,q\x1b[201~".to_vec())
+            .await;
+        assert_eq!(app.settings.tab_side, TabSide::Left);
+        assert_eq!(app.settings.theme.name, "dracula");
+        let saved = std::fs::read_to_string(dir.join("valkyrie/settings.toml")).unwrap();
+        assert!(saved.contains("tab_side = \"left\""), "{saved}");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.draw_settings(frame, 2)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        snapshot(&buffer, "settings");
+        let screen: String = (0..24)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            screen.contains("Settings") && screen.contains("‹ left ›"),
+            "{screen}"
+        );
+        assert!(screen.contains("settings.toml"), "{screen}");
+
+        app.on_input(b"\x1b".to_vec()).await;
+        assert_eq!(app.settings_cursor, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn tab_strip_slides_to_the_cursor() {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-slide-{}", std::process::id()));
@@ -3097,15 +3521,17 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
+        // Not whatever this machine's settings.toml says.
+        app.settings = Settings::default();
         app.sessions = (1..=20).map(info).collect();
         let area = Rect::new(0, 0, 80, 2);
         let layout = app.tab_layout(area);
         assert_eq!(layout.tabs[0].0, 0);
-        assert!(layout.more_right && !layout.more_left);
+        assert!(layout.more_after.is_some() && layout.more_before.is_none());
         app.tab_cursor = Some(17);
         let layout = app.tab_layout(area);
         assert!(layout.tabs.iter().any(|(i, _)| *i == 17));
-        assert!(layout.more_left);
+        assert!(layout.more_before.is_some());
         assert!(layout.plus.right() <= area.right());
         for (_, r) in &layout.tabs {
             assert!(r.right() <= layout.plus.x, "tabs overlap the +");

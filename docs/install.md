@@ -126,6 +126,10 @@ Then run `wsl --shutdown` once for it to take effect.
   states. Claude Code needs nothing, because its hooks are added per session.
 - To update, rerun the `install-release.sh` line, or `git pull && ./install.sh` in a
   checkout.
+- `,` opens the settings: the theme, the tab style (`underline` or `cards`), which
+  side the tabs are on (`top`, `left`, `right`), and sound. They are kept in
+  `~/.config/valkyrie/settings.toml`, which you can also edit by hand.
+  `VALK_THEME`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for one run.
 
 ## Phone and web
 

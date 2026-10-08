@@ -114,7 +114,7 @@ Web push for PWA; TUI bell/OS notification. Rate-limited and deduped: queue is t
   - The sounds are generated two-note chimes, written once to `<state dir>/sounds/{request,done}.wav`. Replace the files to use your own sounds.
   - They play through `pw-play`, then `paplay`, then `aplay`. A player still running after 5 s is killed; herdr's hung for 15 s on a dead audio server.
 - **Over SSH** (`SSH_CONNECTION`/`SSH_TTY` set), the TUI rings the outer terminal's bell instead, so the ping reaches the machine you sit at.
-- **Mute.** `m` toggles sounds and the choice is remembered; `VALK_SOUND=on|off` overrides it.
+- **Mute.** `m` toggles sounds, or the settings panel (`,`); the choice is kept in `settings.toml`, and `VALK_SOUND=on|off` overrides it.
 - **Limits.** Pings come from the client, so none sound without a TUI open, and each open TUI pings. Desktop notifications (herdr's `ui.toast` terminal/system delivery) are a follow-up.
 
 ### 5.5 herdr logic reuse

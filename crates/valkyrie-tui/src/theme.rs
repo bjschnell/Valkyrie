@@ -2,7 +2,6 @@
 //! screen is always drawn in its own colors.
 
 use ratatui::style::Color;
-use std::path::PathBuf;
 use valkyrie_proto::AgentState;
 
 pub struct Theme {
@@ -96,97 +95,6 @@ impl Theme {
             .copied()
             .find(|t| t.name.eq_ignore_ascii_case(name.trim()))
     }
-
-    pub fn next(&self) -> &'static Theme {
-        let i = THEMES.iter().position(|t| t.name == self.name).unwrap_or(0);
-        THEMES[(i + 1) % THEMES.len()]
-    }
-
-    /// `$VALK_THEME`, else the last one picked with `t`, else Dracula.
-    pub fn load() -> &'static Theme {
-        std::env::var("VALK_THEME")
-            .ok()
-            .and_then(|n| Theme::by_name(&n))
-            .or_else(|| {
-                let saved = std::fs::read_to_string(saved_path()).ok()?;
-                Theme::by_name(&saved)
-            })
-            .unwrap_or(&DRACULA)
-    }
-
-    /// Remembers the pick for the next start; failing to is not worth an error.
-    pub fn save(&self) {
-        let path = saved_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.name);
-    }
-}
-
-fn saved_path() -> PathBuf {
-    valkyrie_proto::state_dir().join("tui-theme")
-}
-
-/// How the tab strip is drawn; `T` switches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabStyle {
-    /// Flat tabs on the page, the attached one underlined in the accent.
-    Underline,
-    /// Two-row cards on a darker strip, the attached one marked with a bar.
-    Cards,
-}
-
-impl TabStyle {
-    pub const ALL: [TabStyle; 2] = [TabStyle::Underline, TabStyle::Cards];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            TabStyle::Underline => "underline",
-            TabStyle::Cards => "cards",
-        }
-    }
-
-    pub fn by_name(name: &str) -> Option<TabStyle> {
-        Self::ALL
-            .into_iter()
-            .find(|s| s.name().eq_ignore_ascii_case(name.trim()))
-    }
-
-    pub fn next(self) -> TabStyle {
-        let i = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
-    }
-
-    /// Rows the strip takes: the name, then what runs and its state, and under
-    /// underlined tabs their rule.
-    pub fn rows(self) -> u16 {
-        match self {
-            TabStyle::Underline => 3,
-            TabStyle::Cards => 2,
-        }
-    }
-
-    /// `$VALK_TABS`, else the last one picked with `T`, else underline.
-    pub fn load() -> TabStyle {
-        std::env::var("VALK_TABS")
-            .ok()
-            .and_then(|n| TabStyle::by_name(&n))
-            .or_else(|| TabStyle::by_name(&std::fs::read_to_string(tabs_path()).ok()?))
-            .unwrap_or(TabStyle::Underline)
-    }
-
-    pub fn save(self) {
-        let path = tabs_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.name());
-    }
-}
-
-fn tabs_path() -> PathBuf {
-    valkyrie_proto::state_dir().join("tui-tabs")
 }
 
 /// The glyph in front of a state: a spinner frame while working. All are in common
@@ -210,24 +118,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_round_trip_and_cycle() {
+    fn names_round_trip() {
         for theme in THEMES {
             assert_eq!(Theme::by_name(theme.name).unwrap().name, theme.name);
         }
         assert_eq!(Theme::by_name(" Cyberpunk\n").unwrap().name, "cyberpunk");
         assert!(Theme::by_name("nope").is_none());
-        assert_eq!(DRACULA.next().name, "cyberpunk");
-        assert_eq!(CYBERPUNK.next().name, "dracula");
-    }
-
-    #[test]
-    fn tab_styles_round_trip_and_cycle() {
-        for style in TabStyle::ALL {
-            assert_eq!(TabStyle::by_name(style.name()), Some(style));
-            assert_ne!(style.next(), style);
-        }
-        assert_eq!(TabStyle::by_name(" Cards\n"), Some(TabStyle::Cards));
-        assert!(TabStyle::by_name("nope").is_none());
     }
 
     #[test]

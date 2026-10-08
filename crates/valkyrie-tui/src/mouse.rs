@@ -4,6 +4,7 @@
 //! still gives the terminal's own selection in most terminals.
 
 use base64::Engine;
+use ratatui::layout::{Position, Rect};
 use std::io::Write;
 use unicode_width::UnicodeWidthStr;
 use valkyrie_proto::{Modes, Row};
@@ -88,30 +89,43 @@ pub fn split(bytes: &[u8]) -> Vec<Input> {
     out
 }
 
-/// Input for a program that wants the mouse, drawn `top` rows below the terminal's
-/// top: SGR reports above it are taken out for Valkyrie, the rest move up by `top`.
-/// Legacy X10 reports (`ESC [ M` and three bytes) move too; ones above are dropped.
-pub fn route(bytes: &[u8], top: u16) -> (Vec<u8>, Vec<Mouse>) {
+/// Input for a program that wants the mouse, drawn with its top-left cell at
+/// `origin`: SGR reports inside `ours` (the tab strip) are taken out for Valkyrie,
+/// the rest move by `origin`. Legacy X10 reports (`ESC [ M` and three bytes) move
+/// too; ones inside `ours` are dropped. All cells are 0-based.
+pub fn route(bytes: &[u8], ours: Rect, origin: (u16, u16)) -> (Vec<u8>, Vec<Mouse>) {
+    let (dx, dy) = origin;
+    // Reports count from 1.
+    let mine =
+        |x: u16, y: u16| ours.contains(Position::new(x.saturating_sub(1), y.saturating_sub(1)));
     let mut rest = Vec::with_capacity(bytes.len());
     let mut taken = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         let b = &bytes[i..];
         if let Some((raw, len)) = parse_sgr_raw(b) {
-            if raw.y <= top {
+            if mine(raw.x, raw.y) {
                 taken.extend(to_mouse(raw));
             } else {
                 let end = if raw.release { 'm' } else { 'M' };
-                let (code, x, y) = (raw.code, raw.x, raw.y - top);
+                let (code, x, y) = (
+                    raw.code,
+                    raw.x.saturating_sub(dx).max(1),
+                    raw.y.saturating_sub(dy).max(1),
+                );
                 rest.extend_from_slice(format!("\x1b[<{code};{x};{y}{end}").as_bytes());
             }
             i += len;
         } else if b.len() >= 6 && b.starts_with(b"\x1b[M") {
-            // The row byte is 32 + the 1-based row.
-            let row = b[5].saturating_sub(32) as u16;
-            if row > top {
-                rest.extend_from_slice(&b[..5]);
-                rest.push(b[5] - top as u8);
+            // The column and row bytes are 32 + the 1-based cell.
+            let (col, row) = (
+                b[4].saturating_sub(32) as u16,
+                b[5].saturating_sub(32) as u16,
+            );
+            if !mine(col, row) {
+                rest.extend_from_slice(&b[..4]);
+                rest.push(b[4].saturating_sub(dx as u8).max(33));
+                rest.push(b[5].saturating_sub(dy as u8).max(33));
             }
             i += 6;
         } else {
@@ -334,7 +348,12 @@ mod tests {
     #[test]
     fn routes_reports_above_the_session_to_us_and_moves_the_rest_up() {
         // Row 2 (1-based) is in a 2-row strip; row 7 is the session's row 5.
-        let (rest, taken) = route(b"a\x1b[<2;10;2M\x1b[<0;5;7mb\x1b[M !(\x1b[M !\"", 2);
+        let strip = Rect::new(0, 0, 80, 2);
+        let (rest, taken) = route(
+            b"a\x1b[<2;10;2M\x1b[<0;5;7mb\x1b[M !(\x1b[M !\"",
+            strip,
+            (0, 2),
+        );
         assert_eq!(rest, b"a\x1b[<0;5;5mb\x1b[M !&");
         assert_eq!(
             taken,
@@ -342,6 +361,22 @@ mod tests {
                 kind: MouseKind::RightPress,
                 x: 9,
                 y: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn routes_a_column_of_tabs_on_the_left() {
+        // Columns 1-26 are the tabs; column 30 is the session's column 4.
+        let strip = Rect::new(0, 0, 26, 40);
+        let (rest, taken) = route(b"\x1b[<0;3;9M\x1b[<0;30;9M", strip, (26, 0));
+        assert_eq!(rest, b"\x1b[<0;4;9M");
+        assert_eq!(
+            taken,
+            [Mouse {
+                kind: MouseKind::Press,
+                x: 2,
+                y: 8
             }]
         );
     }
