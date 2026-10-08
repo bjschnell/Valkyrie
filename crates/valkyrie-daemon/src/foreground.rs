@@ -53,6 +53,11 @@ fn agent_of(argv: &[String]) -> Option<&'static str> {
     }
 }
 
+/// A process's working directory.
+pub fn cwd(pid: i32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
 fn cmdline(pid: i32) -> Option<Vec<String>> {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     Some(

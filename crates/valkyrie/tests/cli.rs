@@ -598,6 +598,29 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     rename(&[]);
     assert_eq!(name(), "myproj");
 
+    // An unnamed shell follows its `cd`.
+    let other = dir.join("otherproj");
+    std::fs::create_dir_all(&other).unwrap();
+    let out = valk(&socket, &dir)
+        .args(["new", "--cwd"])
+        .arg(&proj)
+        .args(["--", "sh"])
+        .output()
+        .unwrap();
+    let sh = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let cd = format!("cd {}\\r", other.display());
+    let out = valk(&socket, &dir).args(["send", &sh, &cd]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let followed = (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(100));
+        let ls = valk(&socket, &dir).arg("ls").output().unwrap();
+        let ls = String::from_utf8(ls.stdout).unwrap();
+        ls.lines()
+            .any(|l| l.split_whitespace().take(2).eq([sh.as_str(), "otherproj"]))
+    });
+    assert!(followed, "the shell's name did not follow its cd");
+    let _ = valk(&socket, &dir).args(["kill", &sh]).output();
+
     let _ = valk(&socket, &dir).args(["kill", &id]).output();
     daemon.kill().unwrap();
     daemon.wait().unwrap();

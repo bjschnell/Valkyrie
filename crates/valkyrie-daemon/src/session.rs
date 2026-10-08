@@ -258,6 +258,8 @@ struct State {
     /// processes in it were last checked for an agent.
     fg_group: Option<i32>,
     fg_checked_ms: u64,
+    /// Where the foreground program is now (`cd` moves a shell); `None` until known.
+    live_cwd: Option<PathBuf>,
 }
 
 impl State {
@@ -366,6 +368,7 @@ impl Session {
             graphics: graphics::Log::new(GRAPHICS_LIMIT),
             fg_group: None,
             fg_checked_ms: 0,
+            live_cwd: None,
         };
         state.log(
             now_ms,
@@ -444,6 +447,7 @@ impl Session {
             graphics,
             fg_group: None,
             fg_checked_ms: 0,
+            live_cwd: None,
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -775,6 +779,12 @@ impl Session {
     /// the tracker's timers.
     pub fn tick(self: &Arc<Self>, now: u64) {
         let mut state = self.state.lock().unwrap();
+        if state.exited.is_none() {
+            let pid = self.pty.foreground().or(self.pid.map(|p| p as i32));
+            if let Some(cwd) = pid.and_then(foreground::cwd) {
+                state.live_cwd = Some(cwd);
+            }
+        }
         let mut changed = self.follow_foreground(&mut state, now);
         if let Some(quiet) = scan_kind(
             state.scan_due,
@@ -845,14 +855,20 @@ impl Session {
 
     /// What lists show: the session's own name, else its directory. The agent or
     /// program running is shown beside it, from the status and the command.
-    fn display_name(&self) -> String {
+    fn display_name(&self, state: &State) -> String {
         if let Some(name) = self.name.lock().unwrap().clone() {
             return name;
         }
-        match self.cwd.file_name() {
+        match self.live_cwd(state).file_name() {
             Some(dir) => dir.to_string_lossy().into_owned(),
             None => default_name(&self.command),
         }
+    }
+
+    /// Where the session is now: the foreground program's directory, else where it
+    /// started.
+    fn live_cwd(&self, state: &State) -> PathBuf {
+        state.live_cwd.clone().unwrap_or_else(|| self.cwd.clone())
     }
 
     /// The name saved for an upgrade or a restart: older images expect one always.
@@ -909,7 +925,8 @@ impl Session {
         if status.state == AgentState::ReviewReady && !status.seen {
             let session = self.clone();
             std::thread::spawn(move || {
-                let Some(stat) = diff_stat(&session.cwd) else {
+                let cwd = session.live_cwd(&session.state.lock().unwrap());
+                let Some(stat) = diff_stat(&cwd) else {
                     return;
                 };
                 let mut state = session.state.lock().unwrap();
@@ -1038,7 +1055,8 @@ impl Session {
         Some(RestoreEntry {
             name: self.saved_name(),
             command: self.command.clone(),
-            cwd: self.cwd.clone(),
+            // A shell comes back where it was, not where it started.
+            cwd: self.live_cwd(&state),
             conversation: state.conversation.clone(),
         })
     }
@@ -1056,9 +1074,9 @@ impl Session {
         let state = self.state.lock().unwrap();
         SessionInfo {
             id: self.id,
-            name: self.display_name(),
+            name: self.display_name(&state),
             command: self.command.clone(),
-            cwd: self.cwd.clone(),
+            cwd: self.live_cwd(&state),
             pid: self.pid,
             created_unix: self.created_unix,
             title: state.screen.title().map(str::to_owned),

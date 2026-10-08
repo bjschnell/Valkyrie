@@ -93,6 +93,8 @@ struct App {
     tab_cursor: Option<usize>,
     /// The session being renamed, and the name typed so far.
     renaming: Option<(SessionId, String)>,
+    /// A tab's menu, opened with a right click or `x` in tab mode.
+    menu: Option<Menu>,
 }
 
 struct Attached {
@@ -190,6 +192,7 @@ impl App {
             partial: Vec::new(),
             tab_cursor: None,
             renaming: None,
+            menu: None,
         }
     }
 
@@ -393,6 +396,7 @@ impl App {
     async fn detach(&mut self) {
         self.view = None;
         self.tab_cursor = None;
+        self.menu = None;
         let _ = reset_terminal_modes();
         let _ = self.client.detach().await;
         self.refresh().await;
@@ -413,9 +417,14 @@ impl App {
                 }
                 mouse::split(&bytes)
             } else if let Some(tabs) = self.tabs_area() {
-                // Except over the tab strip, which is ours either way; the session
-                // sits below it.
-                let (rest, clicks) = mouse::route(&bytes, tabs.bottom());
+                // Except over the tab strip, which is ours either way (all of it
+                // while a menu is open); the session sits below it.
+                let top = if self.menu.is_some() {
+                    u16::MAX
+                } else {
+                    tabs.bottom()
+                };
+                let (rest, clicks) = mouse::route(&bytes, top);
                 let mut inputs = vec![Input::Bytes(rest)];
                 inputs.extend(clicks.into_iter().map(Input::Mouse));
                 inputs
@@ -439,6 +448,7 @@ impl App {
                             && view.scroll.is_none()
                             && self.tab_cursor.is_none()
                             && self.renaming.is_none()
+                            && self.menu.is_none()
                             && !keys.contains(&TABS_KEY) =>
                     {
                         self.detach().await;
@@ -460,6 +470,9 @@ impl App {
     async fn on_keys(&mut self, bytes: Vec<u8>) {
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
+        }
+        if self.menu.is_some() {
+            return self.menu_keys(&bytes).await;
         }
         if self.tab_cursor.is_some() {
             return self.tab_keys(&bytes).await;
@@ -552,6 +565,13 @@ impl App {
                         self.renaming = Some((s.id, s.name.clone()));
                         // What follows `r` in the same read is the new name.
                         return Box::pin(self.rename_keys(keys)).await;
+                    }
+                }
+                b"x" => {
+                    if let Some(id) = self.sessions.get(cursor).map(|s| s.id) {
+                        self.tab_cursor = None;
+                        self.open_menu(id, MENU_CLOSE);
+                        return Box::pin(self.menu_keys(keys)).await;
                     }
                 }
                 [DETACH_KEY] => {
@@ -689,16 +709,133 @@ impl App {
                 self.new_shell(self.attached_cwd()).await;
             }
             (MouseKind::RightPress, Some(TabHit::Session(id))) => {
-                let name = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == id)
-                    .map(|s| s.name.clone());
                 self.tab_cursor = None;
-                self.renaming = Some((id, name.unwrap_or_default()));
+                self.open_menu(id, MENU_RENAME);
             }
             _ => {}
         }
+    }
+
+    /// Opens a tab's menu under the tab, the cursor on `item`.
+    fn open_menu(&mut self, id: SessionId, item: usize) {
+        let tabs = self
+            .tabs_area()
+            .unwrap_or(Rect::new(0, 0, MENU_WIDTH, TAB_ROWS));
+        let x = self
+            .tab_layout(tabs)
+            .tabs
+            .iter()
+            .find(|(i, _)| self.sessions.get(*i).is_some_and(|s| s.id == id))
+            .map_or(tabs.x, |(_, r)| r.x);
+        self.menu = Some(Menu {
+            session: id,
+            x: x.min(tabs.right().saturating_sub(MENU_WIDTH)),
+            y: tabs.bottom(),
+            cursor: item,
+            confirm: false,
+        });
+    }
+
+    /// Keys while a tab's menu is open: move, pick (`r`/`x` pick directly), Esc.
+    async fn menu_keys(&mut self, mut keys: &[u8]) {
+        while let Some(menu) = &mut self.menu
+            && !keys.is_empty()
+        {
+            let key = next_key(keys);
+            let whole = key.len() == keys.len();
+            keys = &keys[key.len()..];
+            match key {
+                b"k" | b"\x1b[A" | b"\x1bOA" => menu.cursor = menu.cursor.saturating_sub(1),
+                b"j" | b"\x1b[B" | b"\x1bOB" => menu.cursor = (menu.cursor + 1).min(MENU_CLOSE),
+                b"\r" | b"\n" => {
+                    let item = menu.cursor;
+                    self.pick(item).await;
+                }
+                b"r" => self.pick(MENU_RENAME).await,
+                b"x" | b"c" => self.pick(MENU_CLOSE).await,
+                [TABS_KEY] | b"q" => self.menu = None,
+                b"\x1b" if whole => self.menu = None,
+                _ => {}
+            }
+        }
+    }
+
+    /// A click while a menu is open: on an item picks it; anywhere else closes the
+    /// menu (a right click on another tab opens that tab's).
+    async fn menu_click(&mut self, m: Mouse) {
+        let Some(menu) = &self.menu else { return };
+        let rect = menu.rect();
+        let at = Position::new(m.x, m.y);
+        match m.kind {
+            MouseKind::Press if rect.contains(at) => {
+                let row = m.y.saturating_sub(rect.y + 1) as usize;
+                if row <= MENU_CLOSE && m.y > rect.y {
+                    self.pick(row).await;
+                }
+            }
+            MouseKind::Press => self.menu = None,
+            MouseKind::RightPress if !rect.contains(at) => {
+                self.menu = None;
+                if let Some(tabs) = self.tabs_area()
+                    && m.y < tabs.bottom()
+                {
+                    Box::pin(self.tab_click(tabs, m)).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Does what a menu item says. Closing a session that runs an agent asks first.
+    async fn pick(&mut self, item: usize) {
+        let Some(menu) = &mut self.menu else { return };
+        let id = menu.session;
+        if item == MENU_RENAME {
+            self.menu = None;
+            let name = self
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.name.clone());
+            self.renaming = Some((id, name.unwrap_or_default()));
+            return;
+        }
+        let agent = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| s.exited.is_none() && is_agent(s));
+        if agent && !menu.confirm {
+            menu.confirm = true;
+            menu.cursor = MENU_CLOSE;
+            return;
+        }
+        self.menu = None;
+        self.close_session(id).await;
+    }
+
+    /// Kills a session. Closing the attached one moves to the tab beside it, or
+    /// home when it was the last.
+    async fn close_session(&mut self, id: SessionId) {
+        let attached = self.view.as_ref().is_some_and(|v| v.id == id);
+        let next = self.sessions.iter().position(|s| s.id == id).and_then(|i| {
+            let right = self.sessions.get(i + 1);
+            let left = i.checked_sub(1).and_then(|l| self.sessions.get(l));
+            right.or(left).map(|s| s.id)
+        });
+        if let Err(e) = self.client.kill(id).await {
+            return self.say(format!("close failed: {e:#}"));
+        }
+        if attached {
+            if let Some(next) = next {
+                self.attach(next).await;
+            }
+            // No tab beside it, or that one is this TUI's own session.
+            if self.view.as_ref().is_some_and(|v| v.id == id) {
+                self.detach().await;
+            }
+        }
+        self.refresh().await;
     }
 
     /// Takes the scrollback keys from the front of `keys` and returns the rest, which
@@ -744,6 +881,9 @@ impl App {
     }
 
     async fn on_mouse(&mut self, mut m: Mouse) {
+        if self.menu.is_some() {
+            return self.menu_click(m).await;
+        }
         let tabs = self.tabs_area();
         let Some(view) = &mut self.view else { return };
         if let Some(tabs) = tabs {
@@ -1076,14 +1216,20 @@ impl App {
                         && y < main.height
                         && self.tab_cursor.is_none()
                         && self.renaming.is_none()
+                        && self.menu.is_none()
                     {
                         frame.set_cursor_position(Position::new(main.x + x, main.y + y));
                     }
                     if let Some(tabs) = tabs {
                         self.draw_tabs(frame, tabs);
                     }
+                    if let Some(menu) = &self.menu {
+                        self.draw_menu(frame, menu);
+                    }
                     let mode = if self.renaming.is_some() {
                         BarMode::Renaming
+                    } else if self.menu.is_some() {
+                        BarMode::Menu
                     } else if self.tab_cursor.is_some() {
                         BarMode::Tabs
                     } else {
@@ -1319,6 +1465,29 @@ const PLUS_WIDTH: u16 = 3;
 /// Longest name the rename prompt takes.
 const NAME_MAX: usize = 40;
 
+/// A tab's menu: Rename, Close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Menu {
+    session: SessionId,
+    /// Its top-left corner, under the tab.
+    x: u16,
+    y: u16,
+    cursor: usize,
+    /// Close was picked once on a session running an agent; the next pick closes.
+    confirm: bool,
+}
+
+const MENU_RENAME: usize = 0;
+const MENU_CLOSE: usize = 1;
+const MENU_WIDTH: u16 = 20;
+
+impl Menu {
+    /// Two items inside a border.
+    fn rect(&self) -> Rect {
+        Rect::new(self.x, self.y, MENU_WIDTH, 4)
+    }
+}
+
 /// What a click on the tab strip landed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TabHit {
@@ -1510,6 +1679,47 @@ impl App {
     }
 }
 
+impl App {
+    fn draw_menu(&self, frame: &mut ratatui::Frame, menu: &Menu) {
+        let t = self.theme;
+        let rect = menu.rect().intersection(frame.area());
+        let program = self
+            .sessions
+            .iter()
+            .find(|s| s.id == menu.session)
+            .map(program)
+            .unwrap_or_default();
+        let close = if menu.confirm {
+            format!("Close {program}? ↩")
+        } else {
+            "Close".into()
+        };
+        let items = [("Rename".to_string(), t.fg), (close, t.blocked)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (label, color))| {
+                let line = Line::from(format!(" {label}").fg(color));
+                if i == menu.cursor {
+                    line.style(style::Style::new().bg(t.selection)).bold()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(style::Style::new().fg(t.accent))
+            .style(style::Style::new().bg(t.panel).fg(t.fg));
+        frame.render_widget(Paragraph::new(items).block(block), rect);
+    }
+}
+
+/// Whether an agent (not a shell or another program) runs in the session.
+fn is_agent(s: &SessionInfo) -> bool {
+    !matches!(s.status.agent.as_str(), "generic" | "unknown" | "")
+}
+
 /// A tab wide enough for its name and its program line, within bounds.
 fn tab_width(s: &SessionInfo) -> u16 {
     // Mark and number before the name; mark, " · ", icon and state after the program.
@@ -1521,7 +1731,7 @@ fn tab_width(s: &SessionInfo) -> u16 {
 /// What runs in a session: its agent, else its program (`fish`).
 fn program(s: &SessionInfo) -> String {
     match s.status.agent.as_str() {
-        "generic" | "unknown" | "" => s
+        _ if !is_agent(s) => s
             .command
             .first()
             .and_then(|p| std::path::Path::new(p).file_name())
@@ -1691,6 +1901,7 @@ fn footer_line(status: &str, sound: bool, t: &Theme) -> Line<'static> {
 enum BarMode {
     Session,
     Tabs,
+    Menu,
     Renaming,
 }
 
@@ -1743,8 +1954,10 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
             ("⇥", "next needing you"),
             ("n", "new"),
             ("r", "rename"),
+            ("x", "close"),
             ("esc", "back"),
         ],
+        BarMode::Menu => &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")],
         BarMode::Renaming => &[("↩", "save"), ("esc", "cancel"), ("blank", "folder name")],
     };
     for (key, what) in keys {
@@ -2438,9 +2651,67 @@ mod tests {
             x: third.x + 1,
             y: 0,
         };
+        // A right click opens the tab's menu; Rename is first.
         app.tab_click(tabs, right).await;
+        let menu = app.menu.expect("menu open");
+        assert_eq!((menu.session, menu.cursor), (3, MENU_RENAME));
+        let lines = draw_menu_lines(&app);
+        assert!(lines.iter().any(|l| l.contains(" Rename")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains(" Close")));
+        // Clicking Rename starts the prompt.
+        let rect = menu.rect();
+        app.on_mouse(Mouse {
+            kind: MouseKind::Press,
+            x: rect.x + 3,
+            y: rect.y + 1,
+        })
+        .await;
+        assert_eq!(app.menu, None);
         assert_eq!(app.renaming, Some((3, "proj3".into())));
+        app.on_keys(b"\x1b".to_vec()).await;
+        // Close on an agent's tab asks first; Esc keeps the session.
+        app.on_keys(vec![TABS_KEY, b'l', b'x']).await;
+        let menu = app.menu.expect("x opens the menu on Close");
+        assert_eq!(
+            (menu.session, menu.cursor, menu.confirm),
+            (3, MENU_CLOSE, false)
+        );
+        app.on_keys(b"\r".to_vec()).await;
+        assert!(app.menu.expect("still open").confirm);
+        assert!(
+            draw_menu_lines(&app)
+                .iter()
+                .any(|l| l.contains("Close codex?"))
+        );
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert_eq!(app.menu, None);
+        // A click outside closes the menu without doing anything.
+        app.tab_click(tabs, right).await;
+        app.on_mouse(Mouse {
+            kind: MouseKind::Press,
+            x: 100,
+            y: 15,
+        })
+        .await;
+        assert_eq!((app.menu, app.renaming.is_none()), (None, true));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn draw_menu_lines(app: &App) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| app.draw_menu(frame, app.menu.as_ref().unwrap()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
     }
 
     /// Many sessions: the strip slides to keep the cursor's tab in view.
