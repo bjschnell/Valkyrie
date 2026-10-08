@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 pub enum TabStyle {
     /// Flat tabs on the page, the attached one underlined in the accent.
     Underline,
+    /// Flat tabs; the attached one has an accent bar along its top and no rule
+    /// under it, so it opens into the session like a folder's tab.
+    Folder,
     /// Cards on a darker strip, the attached one marked with a bar.
     Cards,
 }
@@ -24,19 +27,21 @@ pub enum TabSide {
 }
 
 impl TabStyle {
-    pub const ALL: &[TabStyle] = &[TabStyle::Underline, TabStyle::Cards];
+    pub const ALL: &[TabStyle] = &[TabStyle::Underline, TabStyle::Folder, TabStyle::Cards];
 
     pub fn name(self) -> &'static str {
         match self {
             TabStyle::Underline => "underline",
+            TabStyle::Folder => "folder",
             TabStyle::Cards => "cards",
         }
     }
 
-    /// Rows a strip on top takes: the name, then what runs and its state, and
-    /// under underlined tabs their rule.
+    /// Rows a strip on top takes: the name, then what runs and its state; under
+    /// flat tabs their rule, and over folder tabs the attached one's bar.
     pub fn rows(self) -> u16 {
         match self {
+            TabStyle::Folder => 4,
             TabStyle::Underline => 3,
             TabStyle::Cards => 2,
         }

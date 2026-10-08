@@ -1849,7 +1849,7 @@ impl App {
     fn draw_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
         match self.settings.tabs {
             TabStyle::Cards => self.draw_cards(frame, area),
-            TabStyle::Underline => self.draw_underlined(frame, area),
+            TabStyle::Underline | TabStyle::Folder => self.draw_underlined(frame, area),
         }
     }
 
@@ -1980,7 +1980,8 @@ impl App {
 
     /// Flat tabs on the page over a thin rule; the attached tab is bright and
     /// underlined in the accent, the rest muted. The tab cursor lifts its tab and
-    /// underlines it in the second accent.
+    /// underlines it in the second accent. Folder tabs on top mark the attached tab
+    /// with a bar over it instead, and break the rule under it.
     fn draw_underlined(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
         let spin = (now_ms() / SPIN_EVERY.as_millis() as u64) as usize;
@@ -1989,7 +1990,19 @@ impl App {
         let page = style::Style::new().bg(style::Color::Reset);
         // The rule runs along the strip's edge toward the session: under a strip on
         // top, beside a column. A tab is underlined where it meets the rule.
+        let folder = self.settings.tabs == TabStyle::Folder;
+        let mut bar = None;
         let (rule, text) = match self.settings.tab_side {
+            TabSide::Top if folder => {
+                let [top, text, rule] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                bar = Some(top);
+                (rule, text)
+            }
             TabSide::Top => {
                 let [text, rule] =
                     Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
@@ -2018,6 +2031,20 @@ impl App {
         }
         let underline = |frame: &mut ratatui::Frame, rect: Rect, color| {
             let buf = frame.buffer_mut();
+            if let Some(bar) = bar {
+                // A bar along the tab's top, and the rule open under it, cornered.
+                for x in rect.left()..rect.right() {
+                    buf[(x, bar.y)].set_symbol("▂").set_fg(color);
+                    buf[(x, rule.y)].set_symbol(" ");
+                }
+                if rect.x > area.x {
+                    buf[(rect.x - 1, rule.y)].set_symbol("┘").set_fg(t.border);
+                }
+                if rect.right() < area.right() {
+                    buf[(rect.right(), rule.y)].set_symbol("└").set_fg(t.border);
+                }
+                return;
+            }
             for at in rule.positions() {
                 let along = if rule.height == 1 {
                     (rect.left()..rect.right()).contains(&at.x)
@@ -2107,7 +2134,11 @@ impl App {
                 for y in text.top()..text.bottom() {
                     buf[(x, y)].set_symbol("│").set_fg(t.border);
                 }
-                buf[(x, rule.y)].set_symbol("┴").set_fg(t.border);
+                // Where an open tab's corner already meets it, the corner stays.
+                let at = &mut buf[(x, rule.y)];
+                if !matches!(at.symbol(), "┘" | "└") {
+                    at.set_symbol("┴").set_fg(t.border);
+                }
             }
         }
         if rule.width == 1 {
@@ -3401,6 +3432,20 @@ mod tests {
         let gap = first.right() as usize;
         assert_eq!(lines[0].chars().nth(gap), Some('│'), "{}", lines[0]);
         assert_eq!(rule[gap], '┴');
+
+        // Folder tabs: a bar over the attached tab and the rule open under it.
+        app.settings.tabs = TabStyle::Folder;
+        let lines = draw(&app);
+        let layout = app.tab_layout(app.split_body(Rect::new(0, 0, 100, 20)).1.unwrap());
+        let attached = layout.tabs[1].1;
+        let (bar, rule): (Vec<char>, Vec<char>) =
+            (lines[0].chars().collect(), lines[3].chars().collect());
+        let span = attached.x as usize..attached.right() as usize;
+        assert!(bar[span.clone()].iter().all(|&c| c == '▂'), "{}", lines[0]);
+        assert!(rule[span].iter().all(|&c| c == ' '), "{}", lines[3]);
+        assert_eq!(rule[attached.x as usize - 1], '┘');
+        assert_eq!(rule[attached.right() as usize], '└');
+        assert!(lines[1].contains("2 proj2") && lines[4].starts_with("inside session 2"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
