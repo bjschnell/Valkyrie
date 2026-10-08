@@ -2093,8 +2093,23 @@ impl App {
                 underline(frame, rect, t.accent);
             }
         }
-        // Down a column, a faint rule between tabs meets the edge's, so each tab
-        // reads as its own.
+        // A faint rule between tabs meets the edge's, so each tab reads as its own:
+        // a column down the gap after each tab on top, a row across it in a column.
+        if rule.height == 1 {
+            let buf = frame.buffer_mut();
+            let gaps = std::iter::once(layout.home.right().saturating_sub(1))
+                .chain(layout.tabs.iter().map(|&(_, r)| r.right()));
+            for x in gaps {
+                let mark = layout.more_after.is_some_and(|m| m.x == x);
+                if x >= layout.plus.x || mark {
+                    continue;
+                }
+                for y in text.top()..text.bottom() {
+                    buf[(x, y)].set_symbol("│").set_fg(t.border);
+                }
+                buf[(x, rule.y)].set_symbol("┴").set_fg(t.border);
+            }
+        }
         if rule.width == 1 {
             let join = if rule.x > text.x { "┤" } else { "├" };
             let buf = frame.buffer_mut();
@@ -3382,6 +3397,10 @@ mod tests {
             rule[first.x as usize], '─',
             "only the attached tab is underlined"
         );
+        // A divider down the gap after each tab, meeting the rule.
+        let gap = first.right() as usize;
+        assert_eq!(lines[0].chars().nth(gap), Some('│'), "{}", lines[0]);
+        assert_eq!(rule[gap], '┴');
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
