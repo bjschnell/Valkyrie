@@ -1,6 +1,7 @@
 //! The daemon: the only stateful component (DESIGN §4). Hosts sessions and serves the
 //! protocol over a unix socket.
 
+mod foreground;
 mod restore;
 mod session;
 

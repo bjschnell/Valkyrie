@@ -14,6 +14,7 @@
 //! reaches goes to `<ns>-<id>.events.jsonl` next to the transcript, so a recorded
 //! session replays to the same states (DESIGN §14.6).
 
+use crate::foreground;
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,13 @@ impl Pty {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// The foreground process group, as the shell's job control set it.
+    fn foreground(&self) -> Option<i32> {
+        // SAFETY: tcgetpgrp only reads the terminal's state.
+        let group = unsafe { libc::tcgetpgrp(self.0.as_raw_fd()) };
+        (group > 0).then_some(group)
     }
 
     /// An independent handle for a reader or writer thread.
@@ -245,6 +253,10 @@ struct State {
     exited_ms: Option<u64>,
     /// Images still shown, for clients that attach later (DESIGN §8.4).
     graphics: graphics::Log,
+    /// The terminal's foreground process group at the last look, and when the
+    /// processes in it were last checked for an agent.
+    fg_group: Option<i32>,
+    fg_checked_ms: u64,
 }
 
 impl State {
@@ -351,6 +363,8 @@ impl Session {
             conversation: None,
             exited_ms: None,
             graphics: graphics::Log::new(GRAPHICS_LIMIT),
+            fg_group: None,
+            fg_checked_ms: 0,
         };
         state.log(
             now_ms,
@@ -427,6 +441,8 @@ impl Session {
             // Exited under the old image: long enough ago to drop from the restore list.
             exited_ms: saved.exited.map(|_| 0),
             graphics,
+            fg_group: None,
+            fg_checked_ms: 0,
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -758,7 +774,7 @@ impl Session {
     /// the tracker's timers.
     pub fn tick(self: &Arc<Self>, now: u64) {
         let mut state = self.state.lock().unwrap();
-        let mut changed = false;
+        let mut changed = self.follow_foreground(&mut state, now);
         if let Some(quiet) = scan_kind(
             state.scan_due,
             now,
@@ -768,8 +784,9 @@ impl Session {
             // Only a quiet scan settles it: the screen a burst ends on must get one.
             state.scan_due = !quiet;
             state.last_scan_ms = now;
-            if self.adapter.name() != "generic" {
-                let verdict = self.adapter.scan(&state.screen.unwrapped_text());
+            let adapter = self.agent(&state);
+            if adapter.name() != "generic" {
+                let verdict = adapter.scan(&state.screen.unwrapped_text());
                 let watching = self.watching();
                 if quiet {
                     state.log(now, "scan", json!({"screen": screen_label(&verdict)}));
@@ -785,6 +802,57 @@ impl Session {
         if changed {
             self.after_change(&mut state, now);
         }
+    }
+
+    /// The session's agent: its own, or in a shell, the one in its foreground.
+    fn agent(&self, state: &State) -> &'static dyn Adapter {
+        if self.adapter.name() != "generic" {
+            return self.adapter;
+        }
+        valkyrie_agents::by_name(&state.tracker.status().agent)
+    }
+
+    /// A shell session takes on the agent its foreground runs (`claude` typed at the
+    /// prompt) and drops it when that exits. Returns whether the status changed.
+    fn follow_foreground(&self, state: &mut State, now: u64) -> bool {
+        if self.adapter.name() != "generic" || state.exited.is_some() {
+            return false;
+        }
+        let group = self.pty.foreground();
+        // A wrapper can exec the agent without a new group, so look again now and then.
+        if group == state.fg_group
+            && now.saturating_sub(state.fg_checked_ms) < FOREGROUND_RECHECK_MS
+        {
+            return false;
+        }
+        state.fg_group = group;
+        state.fg_checked_ms = now;
+        let agent = group.and_then(foreground::agent).unwrap_or("generic");
+        let status = state.tracker.status();
+        if status.agent == agent {
+            return false;
+        }
+        // A fresh tracker for the new agent; a bumped seq, so clients see the change.
+        let mut fresh = AgentStatus::new(agent, now);
+        fresh.seq = status.seq + 1;
+        let adapter = valkyrie_agents::by_name(agent);
+        state.tracker = Tracker::resume(fresh, adapter.hook_gaps(), false, now);
+        state.scan_due = true;
+        state.log(now, "foreground", json!({"agent": agent}));
+        true
+    }
+
+    /// What lists show: the name given at spawn, else the agent in a shell's
+    /// foreground over the shell's own name.
+    fn display_name(&self, state: &State) -> String {
+        let agent = self.agent(state).name();
+        if self.adapter.name() == "generic"
+            && agent != "generic"
+            && self.name == default_name(&self.command)
+        {
+            return agent.to_string();
+        }
+        self.name.clone()
     }
 
     /// A client attached: whatever it is showing is now seen.
@@ -970,7 +1038,7 @@ impl Session {
         let state = self.state.lock().unwrap();
         SessionInfo {
             id: self.id,
-            name: self.name.clone(),
+            name: self.display_name(&state),
             command: self.command.clone(),
             cwd: self.cwd.clone(),
             pid: self.pid,
@@ -1211,6 +1279,10 @@ fn pty_size(size: Size, cell: (u16, u16)) -> PtySize {
         pixel_height: size.rows.saturating_mul(cell.1),
     }
 }
+
+/// How often a shell session's foreground is searched for an agent while its group
+/// stays the same (a group change is checked every tick).
+const FOREGROUND_RECHECK_MS: u64 = 2000;
 
 fn default_name(command: &[String]) -> String {
     command

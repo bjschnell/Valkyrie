@@ -333,8 +333,17 @@ impl App {
                 self.restore(anchor);
                 if let Some(id) = self.view.as_ref().map(|v| v.id) {
                     let status = self.sessions_status(id);
+                    // A shell's name follows the agent in its foreground.
+                    let name = self
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.name.clone());
                     if let Some(view) = &mut self.view {
                         view.status = status;
+                        if let Some(name) = name {
+                            view.name = name;
+                        }
                     }
                 }
             }
