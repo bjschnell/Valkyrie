@@ -168,6 +168,50 @@ impl Registry {
         Ok(Reply::Decision { decision })
     }
 
+    /// What `id`'s agent should hear about the other agents in its repository, once:
+    /// empty when there's nothing new.
+    pub(crate) fn siblings(&self, id: valkyrie_proto::SessionId) -> Result<Reply> {
+        use crate::activity::{Sibling, tell};
+        use valkyrie_context::project;
+        let me = self.get(id)?;
+        let mine = me.info();
+        let root = project::root(&mine.cwd);
+        let my_checkout = project::checkout(&mine.cwd);
+        let others: Vec<_> = self
+            .listed()
+            .into_iter()
+            .filter(|s| s.info().id != id && !s.exited())
+            .filter_map(|s| {
+                let agent = s.agent_behind()?;
+                let info = s.info();
+                (project::root(&info.cwd) == root).then(|| {
+                    let checkout = project::checkout(&info.cwd);
+                    (
+                        info,
+                        agent,
+                        (checkout != my_checkout).then_some(checkout),
+                        s.activity(),
+                    )
+                })
+            })
+            .collect();
+        let siblings: Vec<Sibling> = others
+            .iter()
+            .map(|(info, agent, checkout, activity)| Sibling {
+                name: &info.name,
+                agent,
+                state: info.status.state.label(),
+                checkout: checkout.as_deref(),
+                activity,
+            })
+            .collect();
+        let now = crate::session::now_ms();
+        let text = tell(&root, &me.activity(), &siblings, now)
+            .filter(|text| me.tell(text))
+            .unwrap_or_default();
+        Ok(Reply::Text { text })
+    }
+
     /// The decisions of the project holding `cwd`, or of every project.
     pub(crate) fn decisions(&self, cwd: Option<PathBuf>) -> Reply {
         let store = self.context.lock().unwrap();

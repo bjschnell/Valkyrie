@@ -73,7 +73,7 @@ pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
         .iter()
         .map(|&e| {
             let mut list = vec![hook(command)];
-            if e == "SessionStart"
+            if matches!(e, "SessionStart" | "UserPromptSubmit")
                 && let Some(context) = context
             {
                 list.push(hook(context));
@@ -447,6 +447,10 @@ mod tests {
             start[1]["command"],
             r"'/opt/it'\''s/valk' context-hook claude 2>/dev/null || true"
         );
+        let prompt = settings["hooks"]["UserPromptSubmit"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(prompt[1]["command"], start[1]["command"]);
         assert_eq!(
             settings["hooks"]["Stop"][0]["hooks"]
                 .as_array()

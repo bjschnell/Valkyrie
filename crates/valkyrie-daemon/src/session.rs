@@ -266,6 +266,8 @@ struct State {
     /// The agent that started this session or typed into it (ADR-0007 §4): what
     /// runs here may be the agent's doing, so it can only propose decisions.
     driven_by: Option<String>,
+    /// What its agent has been doing, for the agents beside it.
+    activity: crate::activity::Activity,
     /// The agent's own transcript, for the web app's Chat view (DESIGN §8.7).
     chat: Option<PathBuf>,
     /// When the program exited (ms), if it did while this image ran.
@@ -384,6 +386,7 @@ impl Session {
             scan_due: false,
             conversation: None,
             driven_by: None,
+            activity: Default::default(),
             chat: None,
             exited_ms: None,
             graphics: graphics::Log::new(GRAPHICS_LIMIT),
@@ -466,6 +469,7 @@ impl Session {
             scan_due: false,
             conversation: saved.conversation,
             driven_by: saved.driven_by,
+            activity: Default::default(),
             chat: saved.chat,
             // Exited under the old image: long enough ago to drop from the restore list.
             exited_ms: saved.exited.map(|_| 0),
@@ -792,6 +796,9 @@ impl Session {
             json!({"agent": agent, "sent_us": sent_us, "payload": payload, "events": events,
                    "ignored": !ours}),
         );
+        if ours {
+            state.activity.note(&payload, now);
+        }
         // Only a session start names the conversation, and not mid-turn: Codex hooks
         // are global, so a `codex exec` the agent runs reports its own one-shot id.
         if ours
@@ -1129,6 +1136,15 @@ impl Session {
     /// The agent's own conversation id, once a hook named it.
     pub fn conversation(&self) -> Option<String> {
         self.state.lock().unwrap().conversation.clone()
+    }
+
+    pub fn activity(&self) -> crate::activity::Activity {
+        self.state.lock().unwrap().activity.clone()
+    }
+
+    /// Whether `text` is news to this session's agent (see `Activity::tell`).
+    pub fn tell(&self, text: &str) -> bool {
+        self.state.lock().unwrap().activity.tell(text)
     }
 
     /// Marks this session as an agent's doing; it stays marked.

@@ -1,6 +1,7 @@
 //! The daemon: the only stateful component (DESIGN §4). Hosts sessions and serves the
 //! protocol over a unix socket.
 
+mod activity;
 mod chat;
 mod context;
 mod extract;
@@ -825,6 +826,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }
+            ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
             ClientMsg::Vouch { req, what } => {
                 (req, registry.vouch(peer, &what).map(|()| Reply::Done))
             }

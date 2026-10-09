@@ -222,7 +222,8 @@ fn valk_command() -> String {
 }
 
 /// `valk context-hook <agent>`: Claude Code's and Codex's context hook. At session
-/// start it prints the project's decisions as added context. Like `valk hook` it
+/// start it prints the project's decisions as added context; with each prompt,
+/// what the other agents in the repository are doing, when that's news. Like `valk hook` it
 /// never fails and never prints anything else; outside a Valkyrie session it
 /// prints nothing.
 pub fn hook(agent: &str) {
@@ -259,7 +260,44 @@ pub fn hook(agent: &str) {
                 &valk_command(),
             )
         }
+        "UserPromptSubmit" => match siblings() {
+            Some(text) if !text.is_empty() => text,
+            _ => return,
+        },
         _ => return,
     };
     println!("{}", valkyrie_context::inject::hook_output(event, &text));
+}
+
+/// Asks the daemon what this session's agent should hear about the agents beside
+/// it. Blocking, and quick to give up: a prompt must never wait on Valkyrie.
+fn siblings() -> Option<String> {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+    let session = std::env::var("VALK_SESSION").ok()?.parse().ok()?;
+    let socket = std::env::var_os("VALK_SOCKET")?;
+    let mut stream = UnixStream::connect(socket).ok()?;
+    let limit = Some(Duration::from_millis(300));
+    stream.set_write_timeout(limit).ok()?;
+    stream.set_read_timeout(limit).ok()?;
+    let frame =
+        valkyrie_proto::codec::encode(&valkyrie_proto::ClientMsg::Siblings { req: 1, session })
+            .ok()?;
+    stream.write_all(&frame).ok()?;
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).ok()?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > 1 << 20 {
+        return None;
+    }
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).ok()?;
+    match serde_json::from_slice(&body).ok()? {
+        valkyrie_proto::ServerMsg::Ok {
+            reply: valkyrie_proto::Reply::Text { text },
+            ..
+        } => Some(text),
+        _ => None,
+    }
 }

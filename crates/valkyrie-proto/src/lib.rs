@@ -235,6 +235,13 @@ pub enum ClientMsg {
         req: ReqId,
         cwd: Option<PathBuf>,
     },
+    /// What a session's agent should hear about the other agents in its repository
+    /// (DESIGN §6.5), asked by its context hook on each prompt. Replies `Text`,
+    /// empty when there's nothing it hasn't been told.
+    Siblings {
+        req: ReqId,
+        session: SessionId,
+    },
     /// Asks whether the connecting process is a human's (ADR-0007 §4), before doing
     /// something only the user may, like pairing a phone. Replies `Done`, or an
     /// error naming `what`.

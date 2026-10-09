@@ -305,3 +305,129 @@ fn corrections_become_proposals() {
     assert!(valk(&["decisions", "auto", "on"]).starts_with("on"));
     drop(daemon);
 }
+
+/// DESIGN §6.5: an agent hears, with its next prompt, what the other agents in the
+/// same repository are doing, once, and which files they both edited.
+#[test]
+fn agents_hear_about_their_siblings() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-siblings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join(".git"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let repo_s = repo.display().to_string();
+    let hook = |payload: serde_json::Value| format!("echo '{payload}' | valk hook claude\n");
+    let edit = |file: &str| {
+        hook(
+            serde_json::json!({"hook_event_name":"PostToolUse","tool_name":"Edit","cwd":repo_s,
+                                "tool_input":{"file_path":format!("{repo_s}/{file}")}}),
+        )
+    };
+    let start =
+        hook(serde_json::json!({"hook_event_name":"SessionStart","source":"startup","cwd":repo_s}));
+    let ask = |name: &str| {
+        let payload =
+            serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"go on","cwd":repo_s});
+        format!(
+            "echo '{payload}' | valk context-hook claude > {}\n",
+            out.join(name).display()
+        )
+    };
+    // Two agents: Valkyrie knows them by program name, so each is `claude` in its
+    // own directory.
+    let script = |name: &str, body: String| {
+        let d = bin.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("claude");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}sleep 30\n")).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        path
+    };
+    let a = script(
+        "a",
+        format!(
+            "{start}{}{}",
+            hook(
+                serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"refactor the auth module","cwd":repo_s})
+            ),
+            edit("src/auth.rs") + &edit("src/db.rs"),
+        ),
+    );
+    let b = script(
+        "b",
+        format!(
+            "{start}{}sleep 1\n{}{}echo done > {}\n",
+            edit("src/auth.rs"),
+            ask("first"),
+            ask("second"),
+            out.join("b-done").display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let valk = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    valk(&[
+        "new",
+        "--name",
+        "auth-work",
+        "--cwd",
+        &repo_s,
+        "--",
+        a.to_str().unwrap(),
+    ]);
+    valk(&[
+        "new",
+        "--name",
+        "other",
+        "--cwd",
+        &repo_s,
+        "--",
+        b.to_str().unwrap(),
+    ]);
+    wait_for(&out.join("b-done"));
+    let first: serde_json::Value = serde_json::from_str(&wait_for(&out.join("first"))).unwrap();
+    assert_eq!(
+        first["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    let text = first["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("- auth-work (claude, "), "{text}");
+    assert!(
+        text.contains("asked “refactor the auth module”; editing src/db.rs, src/auth.rs"),
+        "{text}"
+    );
+    assert!(
+        text.contains("You have both edited: src/auth.rs (auth-work)"),
+        "{text}"
+    );
+    assert!(!text.contains("- other"), "{text}");
+    // Nothing new since: nothing said.
+    assert_eq!(std::fs::read_to_string(out.join("second")).unwrap(), "");
+    drop(daemon);
+}
