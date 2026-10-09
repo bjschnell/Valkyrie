@@ -24,8 +24,10 @@ export function keyBytes(key: Key, modes?: Modes): number[] {
 }
 
 /**
- * A message as typed: pasted (so newlines stay newlines instead of submitting each
- * line) when the program takes bracketed paste, then Enter.
+ * A message as typed, without its Enter: pasted (so newlines stay newlines instead
+ * of submitting each line) when the program takes bracketed paste. The Enter goes
+ * in a later write; Claude Code takes a long chunk of input as a paste, so an
+ * Enter arriving with the text becomes a newline and the message is never sent.
  */
 export function messageBytes(text: string, modes?: Modes): number[] {
   const body = text.replace(/\r\n?/g, "\n");
@@ -33,7 +35,7 @@ export function messageBytes(text: string, modes?: Modes): number[] {
     modes?.bracketed_paste && body.includes("\n")
       ? `\x1b[200~${body}\x1b[201~`
       : body.replace(/\n/g, "\r");
-  return [...enc.encode(typed), ...enc.encode("\r")];
+  return [...enc.encode(typed)];
 }
 
 export function textBytes(text: string): number[] {

@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
-import type { QueueItem, ServerMsg, SessionId, SessionInfo } from "./proto";
+import type { Modes, QueueItem, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { keyBytes, messageBytes, type Key } from "./lib/keys";
@@ -23,6 +23,8 @@ const TOKEN_KEY = "valk.token";
 const LIST_EVERY_MS = 2_000;
 /** Between keys of one answer, so the program reads them as separate presses. */
 const KEY_GAP_MS = 70;
+/** Between a message and its Enter: long enough that the two can't arrive as one read. */
+const ENTER_GAP_MS = 150;
 
 export interface Prompt {
   seq: number;
@@ -279,10 +281,17 @@ export function sendKey(key: Key): void {
   if (id !== null) input(id, keyBytes(key, get().screen?.modes));
 }
 
+/** Types a message, then presses Enter once the program has read it as typing. */
+function message(session: SessionId, text: string, modes?: Modes): boolean {
+  if (!input(session, messageBytes(text, modes))) return false;
+  setTimeout(() => input(session, keyBytes("enter", modes)), ENTER_GAP_MS);
+  return true;
+}
+
 export function sendMessage(text: string): boolean {
   const id = get().openId;
   if (id === null || !text.trim()) return false;
-  return input(id, messageBytes(text, get().screen?.modes));
+  return message(id, text, get().screen?.modes);
 }
 
 /** Picks a choice: moves the program's cursor to it, then Enter. */
@@ -345,7 +354,7 @@ export async function spawn(command: string[], cwd: string, name: string | null)
 export function sendTo(session: SessionId, text: string): boolean {
   if (!text.trim()) return false;
   const modes = get().openId === session ? get().screen?.modes : undefined;
-  return input(session, messageBytes(text, modes));
+  return message(session, text, modes);
 }
 
 /** Answers several prompts, one after another, each with its own choice. */
