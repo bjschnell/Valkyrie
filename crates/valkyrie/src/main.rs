@@ -96,6 +96,22 @@ enum Cmd {
         #[arg(long, value_name = "ID")]
         supersedes: Option<u32>,
     },
+    /// Hand a session's work to another agent: its goal and asks, where it left off
+    /// (summarized by a small model), the files it changed, the project's decisions.
+    /// Prints it, or with --to starts that agent on it.
+    Handoff {
+        session: SessionId,
+        /// Start this agent (claude or codex) in the same directory, with the
+        /// handoff as its first message.
+        #[arg(long, value_parser = ["claude", "codex"])]
+        to: Option<String>,
+        /// Attach to the new session (with --to).
+        #[arg(short, long, requires = "to")]
+        attach: bool,
+        /// Skip the model's summary; use the session's last reply.
+        #[arg(long)]
+        no_summary: bool,
+    },
     /// List this project's decisions, or review one.
     Decisions {
         /// Include rejected, superseded and retired ones.
@@ -384,6 +400,40 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 supersedes,
             };
             context::decide(&client, args).await
+        }
+        Some(Cmd::Handoff {
+            session,
+            to,
+            attach,
+            no_summary,
+        }) => {
+            if attach {
+                require_tty()?;
+            }
+            let (client, pushes) = connect(&socket).await?;
+            let (text, from) = context::handoff(&client, session, !no_summary).await?;
+            let Some(agent) = to else {
+                print!("{text}");
+                return Ok(());
+            };
+            let info = client
+                .spawn(SpawnSpec {
+                    command: vec![agent, text],
+                    cwd: Some(from.cwd),
+                    name: None,
+                    size: Size {
+                        cols: 120,
+                        rows: 40,
+                    },
+                    env: valkyrie_proto::login_env(),
+                })
+                .await?;
+            if attach {
+                valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+            } else {
+                println!("{}", info.id);
+                Ok(())
+            }
         }
         Some(Cmd::Decisions { all, action }) => {
             context::decisions(&connect(&socket).await?.0, all, action).await

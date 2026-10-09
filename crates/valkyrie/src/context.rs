@@ -301,3 +301,93 @@ fn siblings() -> Option<String> {
         _ => None,
     }
 }
+
+/// `valk handoff`: the resume of session `id` for another agent, and that session.
+pub async fn handoff(
+    client: &Client,
+    id: valkyrie_proto::SessionId,
+    summarize: bool,
+) -> Result<(String, valkyrie_proto::SessionInfo)> {
+    use valkyrie_context::{extract, handoff, model};
+    let info = client
+        .list()
+        .await?
+        .into_iter()
+        .find(|s| s.id == id)
+        .with_context(|| format!("no session {id}"))?;
+    let chat = info.chat.clone().with_context(|| {
+        format!(
+            "session {id} has no agent transcript Valkyrie knows of (it needs Claude Code or Codex, started with valk new)"
+        )
+    })?;
+    let jsonl =
+        std::fs::read_to_string(&chat).with_context(|| format!("read {}", chat.display()))?;
+    let messages = extract::messages(&jsonl);
+    let rel = |p: &str| {
+        Path::new(p)
+            .strip_prefix(&info.cwd)
+            .map(|r| r.display().to_string())
+            .unwrap_or_else(|_| p.to_owned())
+    };
+    let files: Vec<String> = handoff::files(&jsonl).iter().map(|p| rel(p)).collect();
+    let decisions = client.decisions(Some(info.cwd.clone())).await?;
+    let summary = if summarize && !messages.is_empty() {
+        let prompt = handoff::summary_prompt(&messages);
+        let dir = store_base();
+        let asked = tokio::task::spawn_blocking(move || {
+            valkyrie_proto::ensure_private_dir(&dir)?;
+            model::ask(
+                &model::command(handoff::SUMMARY_SYSTEM),
+                &prompt,
+                &dir,
+                std::time::Duration::from_secs(120),
+            )
+        })
+        .await?;
+        match asked {
+            Ok(text) if !text.trim().is_empty() => Some(text),
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!("no summary ({e:#}); using its last reply instead");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let text = handoff::render(
+        &handoff::Handoff {
+            from: format!(
+                "{} ({}, {})",
+                info.name,
+                info.status.agent,
+                info.status.state.label()
+            ),
+            cwd: info.cwd.display().to_string(),
+            git: git_where(&info.cwd),
+            messages: &messages,
+            files: &files,
+            decisions: &decisions,
+            summary,
+        },
+        handoff::BUDGET,
+    );
+    Ok((text, info))
+}
+
+/// `branch @ commit` of the checkout `dir` is in.
+fn git_where(dir: &Path) -> Option<String> {
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())?;
+    Some(match head_commit(dir) {
+        Some(commit) => format!("{branch} @ {commit}"),
+        None => branch,
+    })
+}

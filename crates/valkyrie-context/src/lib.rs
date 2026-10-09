@@ -4,7 +4,9 @@
 
 pub mod extract;
 mod file;
+pub mod handoff;
 pub mod inject;
+pub mod model;
 pub mod project;
 
 use anyhow::{Context, Result, bail};

@@ -21,27 +21,6 @@ const MODEL_TIMEOUT: Duration = Duration::from_secs(90);
 /// Lets the agent finish writing its reply to the transcript after `Stop`.
 const SETTLE: Duration = Duration::from_millis(500);
 
-/// No tools, no hooks, no MCP servers, no settings or CLAUDE.md, no saved session:
-/// the model only reads the prompt. Your own login, unlike `--bare`.
-const MODEL: &[&str] = &[
-    "claude",
-    "-p",
-    "--model",
-    "haiku",
-    "--tools",
-    "",
-    "--no-session-persistence",
-    "--disable-slash-commands",
-    "--strict-mcp-config",
-    "--setting-sources",
-    "",
-    "--settings",
-    r#"{"disableAllHooks":true}"#,
-    "--output-format",
-    "json",
-    "--system-prompt",
-];
-
 /// Whether catching is on: it is unless `valk decisions auto off` left this file.
 pub fn off_marker(context_dir: &Path) -> PathBuf {
     context_dir.join("auto-off")
@@ -49,15 +28,7 @@ pub fn off_marker(context_dir: &Path) -> PathBuf {
 
 /// Takes `Stop`s (session ids) and proposes what it finds, one at a time.
 pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedReceiver<SessionId>) {
-    let command: Vec<String> = match std::env::var("VALK_EXTRACTOR") {
-        // Tests put a stand-in for the model here.
-        Ok(cmd) if !cmd.trim().is_empty() => cmd.split_whitespace().map(str::to_owned).collect(),
-        _ => MODEL
-            .iter()
-            .map(|s| s.to_string())
-            .chain([extract::SYSTEM.to_owned()])
-            .collect(),
-    };
+    let command = valkyrie_context::model::command(extract::SYSTEM);
     let mut last: HashMap<SessionId, u64> = HashMap::new();
     let mut calls: VecDeque<Instant> = VecDeque::new();
     while let Some(id) = turns.recv().await {
@@ -127,7 +98,14 @@ async fn look(
         .unwrap_or_default();
     let prompt = extract::prompt(&name, &known, exchange);
     let yours = exchange.1.to_owned();
-    let reply = match ask(command, &prompt, &registry.host.context_dir).await {
+    let dir = registry.host.context_dir.clone();
+    let command = command.to_vec();
+    let asked = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::ensure_private_dir(&dir)?;
+        valkyrie_context::model::ask(&command, &prompt, &dir, MODEL_TIMEOUT)
+    })
+    .await;
+    let reply = match asked.map_err(anyhow::Error::from).and_then(|r| r) {
         Ok(reply) => reply,
         Err(e) => {
             tracing::warn!(session = id, "extraction failed: {e:#}");
@@ -186,38 +164,6 @@ async fn look(
         registry.refresh_proposals();
     }
     true
-}
-
-/// The model's answer: `result` of Claude's JSON output, else stdout as it is.
-async fn ask(command: &[String], prompt: &str, dir: &Path) -> anyhow::Result<String> {
-    use tokio::io::AsyncWriteExt;
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| anyhow::anyhow!("no command"))?;
-    valkyrie_proto::ensure_private_dir(dir)?;
-    let mut child = tokio::process::Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        // Not one of ours: no session, no hooks reaching the daemon.
-        .env_remove("VALK_SESSION")
-        .env_remove("VALK_SOCKET")
-        .env_remove("VALK_CONTEXT")
-        .env_remove("CLAUDECODE")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(prompt.as_bytes()).await?;
-    drop(stdin);
-    let out = tokio::time::timeout(MODEL_TIMEOUT, child.wait_with_output()).await??;
-    anyhow::ensure!(out.status.success(), "{program} exited {}", out.status);
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    Ok(serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| v["result"].as_str().map(str::to_owned))
-        .unwrap_or(text))
 }
 
 fn read_tail(path: &Path) -> String {

@@ -136,7 +136,11 @@ Audited 2026-10-06: the author's plugin is **Leader** (`~/repos/leader`, Python 
 - **Agents hear about each other (done 2026-10-09).** Each session's hooks record the files its agent edits (`PostToolUse`: `file_path`, `notebook_path`, `path`, or the files a patch names, as in Codex's `apply_patch`) and what you last asked it (`UserPromptSubmit`).
   - **When:** on every prompt, the context hook asks the daemon (`ClientMsg::Siblings`, 300 ms at most, silent on failure) what the agent should hear about the other agents in the same repository, worktrees included. That covers each one working, or active in the last 20 minutes: its name, agent, state, the worktree it's in, what you asked it, and the files it's editing. Files both agents edited are called out ("You have both edited: src/auth.rs").
   - **Once:** a note is sent only when it differs from the last one that agent got. A session start (`/clear`, compaction) resets that.
-- **Next:** `valk handoff` and MCP (§6.5), staleness (§6.4).
+- **`valk handoff ID [--to claude|codex [-a]]` (done 2026-10-09).** A resume of one session for another agent, read from its transcript, in about 8k characters:
+  - **Contents:** where it ran (directory, branch and commit), the goal (your first message), what you asked since, where it left off, the files it changed, and the project's active decisions.
+  - **Where it left off** is the same locked-down Haiku summarizing the transcript's newest ~30k characters, redacted, into at most 8 bullets. On a real 23 MB transcript that took 3.5 s and named the commits, what was pushed and what wasn't, and the next step. `--no-summary` uses the session's last reply instead.
+  - **`--to`** starts that agent in the same directory with the handoff as its first message.
+- **Next:** MCP (§6.5), staleness (§6.4).
 
 ### 6.1 Problem
 Repeatedly telling agents "check session X, we decided Y", and pasting large handoff markdowns.

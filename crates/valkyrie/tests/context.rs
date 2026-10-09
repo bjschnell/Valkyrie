@@ -1,5 +1,6 @@
-//! ADR-0007 §4 with the real binary: an agent in a session can only propose
-//! decisions, however it goes about it, and only a human can accept them.
+//! The context layer with the real binary (DESIGN §6, ADR-0007): an agent can only
+//! propose decisions, corrections become proposals, agents hear about each other,
+//! and handoffs.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -430,4 +431,133 @@ fn agents_hear_about_their_siblings() {
     // Nothing new since: nothing said.
     assert_eq!(std::fs::read_to_string(out.join("second")).unwrap(), "");
     drop(daemon);
+}
+
+/// DESIGN §6.5: `valk handoff` resumes a session from its transcript, with the
+/// model's summary, and `--to` starts an agent on it.
+#[test]
+fn handoff_resumes_a_session_for_another_agent() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-handoff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join(".git"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let exe = |path: &Path, body: String| {
+        std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    };
+    let transcript = out.join("t.jsonl");
+    let lines = [
+        serde_json::json!({"type":"user","message":{"content":"Add OAuth login"}}),
+        serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"text","text":"Callback route done."},
+            {"type":"tool_use","name":"Edit","input":{"file_path":format!("{}/src/auth.rs", repo.display())}}]}}),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(|l| l.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    // The session's agent: names its transcript, then waits. Started by --to, it
+    // saves the message it was started with (its last argument).
+    exe(
+        &bin.join("claude"),
+        format!(
+            "for a in \"$@\"; do last=$a; done\n\
+             case \"$last\" in \"#\"*) printf '%s' \"$last\" > {got};; esac\n\
+             echo '{{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"session_id\":\"x\",\"transcript_path\":\"{t}\"}}' | valk hook claude\n\
+             sleep 30\n",
+            got = out.join("got").display(),
+            t = transcript.display()
+        ),
+    );
+    let model = bin.join("model");
+    exe(
+        &model,
+        "cat > /dev/null\necho '- Callback done; next: logout.'\n".into(),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let valk = |args: &[&str], summary: bool| {
+        let mut cmd = Command::new(BIN);
+        cmd.args(args)
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION");
+        if summary {
+            cmd.env("VALK_EXTRACTOR", &model);
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let id = valk(
+        &[
+            "new",
+            "--name",
+            "web",
+            "--",
+            bin.join("claude").to_str().unwrap(),
+        ],
+        false,
+    );
+    let id = id.trim();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let plain = valk(&["handoff", id, "--no-summary"], false);
+    assert!(plain.starts_with("# Handoff from web (claude, "), "{plain}");
+    assert!(
+        plain.contains("## Goal (the first ask)\nAdd OAuth login"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("## Where it left off\nCallback route done."),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("## Files it changed\n- src/auth.rs"),
+        "{plain}"
+    );
+    let summarized = valk(&["handoff", id], true);
+    assert!(
+        summarized.contains("## Where it left off\n- Callback done; next: logout."),
+        "{summarized}"
+    );
+
+    valk(&["handoff", id, "--no-summary", "--to", "claude"], false);
+    let got = wait_for_any(&out.join("got"));
+    assert!(got.starts_with("# Handoff from web"), "{got}");
+    drop(daemon);
+}
+
+/// Waits for a file to exist and hold something.
+fn wait_for_any(path: &Path) -> String {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.is_empty()
+        {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("{} never written", path.display());
 }
