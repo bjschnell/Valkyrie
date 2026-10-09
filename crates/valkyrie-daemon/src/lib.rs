@@ -119,7 +119,11 @@ struct Registry {
     proposals: watch::Sender<Proposals>,
     /// Active decisions that may be out of date, and why (DESIGN §6.4), by project
     /// root and id; from `check_stale`.
-    stale: Mutex<HashMap<(PathBuf, u32), String>>,
+    stale: Mutex<HashMap<(PathBuf, u32), (String, u64)>>,
+    /// When each project was last checked, and the lock that keeps checks one at
+    /// a time.
+    stale_checked: Mutex<HashMap<PathBuf, (Instant, Option<String>)>>,
+    stale_check: tokio::sync::Mutex<()>,
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
@@ -371,6 +375,8 @@ fn new_registry(
         context: Mutex::new(valkyrie_context::Store::new(state_dir.join("context"))),
         proposals: watch::Sender::new(Arc::default()),
         stale: Mutex::default(),
+        stale_checked: Mutex::default(),
+        stale_check: tokio::sync::Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
     });
@@ -670,7 +676,7 @@ async fn watch_stale(registry: Arc<Registry>) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        registry.check_stale().await;
+        registry.check_stale(None, Duration::ZERO).await;
     }
 }
 
@@ -803,7 +809,8 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Decisions { req, cwd } => {
                 // Fresh flags for whoever asks; the background check is only every
                 // few minutes.
-                registry.check_stale().await;
+                let root = cwd.as_deref().map(valkyrie_context::project::root);
+                registry.check_stale(root, Duration::from_secs(30)).await;
                 (req, Ok(registry.decisions(cwd)))
             }
             ClientMsg::MarkSeen { req, session, seq } => (
@@ -851,6 +858,7 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 (req, result)
             }
             ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
+            ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
             ClientMsg::Vouch { req, what } => {
                 (req, registry.vouch(peer, &what).map(|()| Reply::Done))
             }

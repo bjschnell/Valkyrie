@@ -86,6 +86,12 @@ pub fn due(d: &Decision, now: u64) -> Option<String> {
     })
 }
 
+/// Whether `commit` names a commit, as `git rev-parse` prints one, and nothing else:
+/// it reaches `git diff`'s arguments, and files and clients can set it.
+pub fn valid_commit(commit: &str) -> bool {
+    (4..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Why an active decision's files suggest it may no longer hold: one deleted, or
 /// many lines changed since the commit it was confirmed at. Runs `git` in `root`.
 pub fn churn(root: &Path, d: &Decision) -> Option<String> {
@@ -95,9 +101,16 @@ pub fn churn(root: &Path, d: &Decision) -> Option<String> {
     if let Some(gone) = d.fresh.anchors.iter().find(|a| !root.join(a).exists()) {
         return Some(format!("{gone} no longer exists"));
     }
-    let commit = d.provenance.commit.as_deref()?;
+    let commit = d.provenance.commit.as_deref().filter(|c| valid_commit(c))?;
     let out = Command::new("git")
-        .args(["diff", "--numstat", commit, "HEAD", "--"])
+        .args([
+            "diff",
+            "--numstat",
+            "--end-of-options",
+            commit,
+            "HEAD",
+            "--",
+        ])
         .args(&d.fresh.anchors)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -182,6 +195,23 @@ mod tests {
             ["src/sub/auth.rs"]
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_hex_commits_reach_git() {
+        assert!(valid_commit("abc1234") && valid_commit(&"f".repeat(40)));
+        for bad in ["--output=/tmp/x", "HEAD", "abc", "abc1234 x", "", "ab-cd"] {
+            assert!(!valid_commit(bad), "{bad}");
+        }
+        let d = decision(
+            Freshness {
+                anchors: vec!["Cargo.toml".into()],
+                ..Freshness::default()
+            },
+            Some("--output=/tmp/valk-pwned"),
+        );
+        assert!(churn(Path::new(env!("CARGO_MANIFEST_DIR")), &d).is_none());
+        assert!(!Path::new("/tmp/valk-pwned").exists());
     }
 
     #[test]

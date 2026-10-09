@@ -157,9 +157,6 @@ pub struct NewDecision {
     pub propose: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<u32>,
-    /// `HEAD` where it was recorded, filled in by the client.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
     /// Review it again this many days after it's confirmed; `None`: chosen from
     /// what it says (30 days for versions and URLs, else never).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +165,46 @@ pub struct NewDecision {
     /// agent can only propose (ADR-0007 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<crate::SessionId>,
+}
+
+/// Which sessions' corrections are read for decisions (DESIGN §6.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoMode {
+    Off,
+    /// Claude Code sessions: the model is Claude, so nothing leaves for a provider
+    /// the session didn't already use.
+    #[default]
+    Claude,
+    /// Codex sessions too, whose conversations then also go to Anthropic.
+    All,
+}
+
+impl AutoMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Claude => "claude",
+            Self::All => "all",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "off" => Some(Self::Off),
+            "claude" | "on" => Some(Self::Claude),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn reads(self, agent: &str) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Claude => agent == "claude",
+            Self::All => matches!(agent, "claude" | "codex"),
+        }
+    }
 }
 
 /// What a human does to a decision.

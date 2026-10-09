@@ -46,6 +46,14 @@ fn claude_message(event: &Value) -> Option<Message> {
         "assistant" => false,
         _ => return None,
     };
+    // Not typed: skill bodies and caveats (`isMeta`), compaction summaries, and a
+    // subagent's own conversation.
+    if ["isMeta", "isCompactSummary", "isSidechain"]
+        .iter()
+        .any(|k| event[k] == true)
+    {
+        return None;
+    }
     // Another agent's hand-back, not you.
     if event["origin"]["kind"]
         .as_str()
@@ -135,28 +143,27 @@ pub fn worth_a_look(text: &str) -> bool {
         "please don't",
         "not ",
     ];
+    // Anywhere in the message: phrases that state a standing rule. Bare "should"
+    // or "always" would match most prompts and use up the hourly calls.
     const HAS: &[&str] = &[
         "we use",
         "we don't",
         "we do not",
         "we never",
         "we always",
-        "always ",
-        "never ",
-        "should ",
-        "shouldn't",
-        "must ",
-        "mustn't",
-        "prefer",
+        ", not ",
         "instead of",
         "rather than",
         "from now on",
-        "remember",
+        "going forward",
+        "remember to",
+        "remember that",
         "make sure",
-        "avoid ",
-        "don't ",
-        "do not ",
-        "stop ",
+        "please don't",
+        "please never",
+        "please always",
+        "that's wrong",
+        "that is wrong",
         "the convention",
         "the rule",
     ];
@@ -194,35 +201,59 @@ pub fn redact(text: &str) -> String {
 }
 
 fn redact_line(line: &str) -> String {
+    /// Names whose value follows: `password=x`, `token: x`, `Bearer x`,
+    /// "the password is x".
+    const NAMED: &[&str] = &[
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "bearer",
+        "authorization",
+    ];
+    /// Words between a name and its value.
+    const FILLER: &[&str] = &["is", "was", "=", ":", "to", "as", "of", "the", "my", "our"];
     let mut out = String::new();
     let mut secret_next = false;
-    for (i, word) in line.split_inclusive(char::is_whitespace).enumerate() {
+    for word in line.split_inclusive(char::is_whitespace) {
         let (token, space) = word.split_at(word.trim_end().len());
         let lower = token.to_lowercase();
-        let named = [
-            "password", "passwd", "secret", "token", "api_key", "apikey", "api-key",
-        ]
-        .iter()
-        .any(|n| lower.contains(n));
+        let named = NAMED.iter().any(|n| lower.contains(n));
         if let Some((name, value)) = token.split_once(['=', ':'])
             && named
             && !value.is_empty()
+            && !value.starts_with("//")
         {
             out.push_str(name);
             out.push_str(&token[name.len()..name.len() + 1]);
             out.push_str("[redacted]");
-        } else if (secret_next && i > 0) || looks_secret(token) {
-            out.push_str("[redacted]");
-        } else {
+            secret_next = false;
+        } else if secret_next && FILLER.contains(&lower.as_str()) {
             out.push_str(token);
+        } else if (secret_next && !token.is_empty()) || looks_secret(token) {
+            out.push_str("[redacted]");
+            secret_next = false;
+        } else {
+            out.push_str(&url_credentials(token));
+            secret_next = named && token.len() < 20;
         }
-        // `password: hunter2`, `token hunter2`
-        secret_next = named
-            && (token.ends_with(':') || token.ends_with('=') || !token.contains(['=', ':']))
-            && token.len() < 20;
         out.push_str(space);
     }
     out
+}
+
+/// `scheme://user:pass@host` loses `user:pass`.
+fn url_credentials(token: &str) -> String {
+    if let Some(at) = token.find("://")
+        && let Some(end) = token[at + 3..].find('@')
+        && token[at + 3..at + 3 + end].contains(':')
+    {
+        return format!("{}[redacted]{}", &token[..at + 3], &token[at + 3 + end..]);
+    }
+    token.to_owned()
 }
 
 fn looks_secret(token: &str) -> bool {
@@ -242,6 +273,10 @@ fn looks_secret(token: &str) -> bool {
         "npm_",
     ];
     if PREFIXES.iter().any(|p| token.starts_with(p)) && token.len() >= 16 {
+        return true;
+    }
+    // A JWT: three base64url parts, the first a JSON header.
+    if token.starts_with("eyJ") && token.split('.').count() == 3 && token.len() >= 30 {
         return true;
     }
     // Long, unbroken and mixed: a key or hash rather than a word or a path.
@@ -371,6 +406,8 @@ mod tests {
             json!({"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}),
             json!({"type":"user","message":{"content":"no, we use pnpm here"}}),
             json!({"type":"user","origin":{"kind":"agent"},"message":{"content":"hand-back"}}),
+            json!({"type":"user","isMeta":true,"message":{"content":"Base directory for this skill: you must…"}}),
+            json!({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued…"}}),
             json!({"type":"assistant","message":{"content":[{"type":"text","text":"Switching to pnpm."}]}}),
         ]);
         let m = messages(&format!("{{\"partial line\n{claude}"));
@@ -404,7 +441,12 @@ mod tests {
         ] {
             assert!(worth_a_look(yes), "{yes}");
         }
+        for yes in ["use pnpm, not npm", "that's wrong, it's async"] {
+            assert!(worth_a_look(yes), "{yes}");
+        }
         for no in [
+            "it should work now, try again",
+            "this always fails on CI, look at the logs",
             "continue",
             "looks good, thanks",
             "add a test for the parser",
@@ -436,6 +478,18 @@ mod tests {
             "{r}"
         );
         assert_eq!(redact("no, we use pnpm"), "no, we use pnpm");
+        let more = redact(
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlc2ln \
+             db postgres://app:s3cret@db:5432/x and the password is hunter2 ok",
+        );
+        assert!(
+            !more.contains("eyJhbGci") && !more.contains("s3cret") && !more.contains("hunter2"),
+            "{more}"
+        );
+        assert!(
+            more.contains("postgres://[redacted]@db:5432/x") && more.ends_with(" ok"),
+            "{more}"
+        );
     }
 
     #[test]

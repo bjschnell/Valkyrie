@@ -80,7 +80,7 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
             "by" => d.provenance.by = v.to_owned(),
             "session" => d.provenance.session = text(),
             "conversation" => d.provenance.conversation = text(),
-            "commit" => d.provenance.commit = text(),
+            "commit" => d.provenance.commit = text().filter(|c| crate::stale::valid_commit(c)),
             "cwd" => d.provenance.cwd = text().map(PathBuf::from),
             "confirmed" => d.fresh.confirmed = v.parse().unwrap_or(0),
             "review_every" => d.fresh.review_every = v.parse().ok(),

@@ -161,7 +161,7 @@ fn agents_only_propose_and_never_review() {
 
     // What an agent gets at its next session start: active ones only.
     human(&format!(
-        "echo '{{\"cwd\":\"{}\"}}' | VALK_SESSION=1 VALK_CONTEXT={} valk context-hook claude > {}",
+        "echo '{{\"hook_event_name\":\"SessionStart\",\"cwd\":\"{}\"}}' | VALK_SESSION=1 VALK_CONTEXT={} valk context-hook claude > {}",
         repo.display(),
         dir.join("state/valkyrie/context").display(),
         o("hook")
@@ -301,9 +301,22 @@ fn corrections_become_proposals() {
     );
     assert!(calls.contains("Agent: I'll run npm install."), "{calls}");
 
-    assert!(valk(&["decisions", "auto", "off"]).starts_with("off"));
-    assert!(valk(&["decisions", "auto"]).starts_with("off"));
-    assert!(valk(&["decisions", "auto", "on"]).starts_with("on"));
+    assert!(valk(&["decisions", "auto"]).starts_with("claude:"));
+    // Only the user changes it; this test may run under an agent, so it's either
+    // changed or refused as not the user's.
+    let out = Command::new(BIN)
+        .args(["decisions", "auto", "off"])
+        .current_dir(&repo)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("VALK_SOCKET", dir.join("run/v.sock"))
+        .env_remove("VALK_SESSION")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.starts_with("off:") || said.contains("is for the user"),
+        "{said}"
+    );
     drop(daemon);
 }
 
@@ -391,24 +404,32 @@ fn agents_hear_about_their_siblings() {
             .unwrap();
         assert!(out.status.success(), "{out:?}");
     };
-    valk(&[
-        "new",
-        "--name",
-        "auth-work",
-        "--cwd",
-        &repo_s,
-        "--",
-        a.to_str().unwrap(),
-    ]);
-    valk(&[
-        "new",
-        "--name",
-        "other",
-        "--cwd",
-        &repo_s,
-        "--",
-        b.to_str().unwrap(),
-    ]);
+    // Started as a human would (see agents_only_propose_and_never_review): a session
+    // an agent started doesn't have its prompts repeated.
+    let human_new = |name: &str, script: &Path| {
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec"])
+            .arg(format!(
+                "valk new --name {name} --cwd {repo_s} -- {} > /dev/null",
+                script.display()
+            ))
+            .arg("/dev/null")
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    valk(&["ls"]);
+    human_new("auth-work", &a);
+    std::thread::sleep(Duration::from_millis(300));
+    human_new("other", &b);
     wait_for(&out.join("b-done"));
     let first: serde_json::Value = serde_json::from_str(&wait_for(&out.join("first"))).unwrap();
     assert_eq!(
@@ -477,7 +498,7 @@ fn handoff_resumes_a_session_for_another_agent() {
         &bin.join("claude"),
         format!(
             "for a in \"$@\"; do last=$a; done\n\
-             case \"$last\" in \"#\"*) printf '%s' \"$last\" > {got};; esac\n\
+             case \"$last\" in Read*) printf '%s' \"$last\" > {got};; esac\n\
              echo '{{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"session_id\":\"x\",\"transcript_path\":\"{t}\"}}' | valk hook claude\n\
              sleep 30\n",
             got = out.join("got").display(),
@@ -544,7 +565,17 @@ fn handoff_resumes_a_session_for_another_agent() {
 
     valk(&["handoff", id, "--no-summary", "--to", "claude"], false);
     let got = wait_for_any(&out.join("got"));
-    assert!(got.starts_with("# Handoff from web"), "{got}");
+    let file = got
+        .strip_prefix("Read the handoff in ")
+        .and_then(|rest| rest.strip_suffix(" and carry on that work."))
+        .unwrap_or_else(|| panic!("{got}"));
+    let saved = std::fs::read_to_string(file).unwrap();
+    assert!(saved.starts_with("# Handoff from web"), "{saved}");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     drop(daemon);
 }
 
@@ -717,11 +748,8 @@ fn mcp_serves_and_proposes_decisions() {
             .to_owned()
     };
     assert!(text(2).starts_with("Proposed #1: Use pnpm"), "{}", text(2));
-    assert!(
-        text(3).contains("#1 [constraint] Use pnpm (proposed)"),
-        "{}",
-        text(3)
-    );
+    // A proposal isn't shown to agents until the user reviews it.
+    assert!(!text(3).contains("Use pnpm"), "{}", text(3));
     assert_eq!(replies[4]["result"]["isError"], true);
     assert_eq!(replies[5]["error"]["code"], -32601);
     drop(daemon);

@@ -1069,14 +1069,14 @@ async fn decisions_are_proposed_pushed_and_listed() {
         kind: DecisionKind::Constraint,
         propose: true,
         supersedes: None,
-        commit: Some("abc1234".into()),
         review_every: None,
         session: None,
     };
     let first = client.decide(new("First")).await.unwrap();
     assert_eq!(first.status, DecisionStatus::Proposed);
     assert_eq!(first.project, repo);
-    assert_eq!(first.provenance.commit.as_deref(), Some("abc1234"));
+    // Outside git (no HEAD), and never taken from the client.
+    assert_eq!(first.provenance.commit, None);
     let second = client.decide(new("Second")).await.unwrap();
     wait_proposals(&mut pushes, |p| p == [first.id, second.id]).await;
 

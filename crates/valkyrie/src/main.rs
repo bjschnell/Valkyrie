@@ -426,9 +426,16 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 print!("{text}");
                 return Ok(());
             };
+            // In a private file, not on the command line, where every local user
+            // could read it (ps) and the session lists would show it.
+            let file = context::save_handoff(&text, session)?;
+            let first = format!(
+                "Read the handoff in {} and carry on that work.",
+                file.display()
+            );
             let info = client
                 .spawn(SpawnSpec {
-                    command: vec![agent, text],
+                    command: vec![agent, first],
                     cwd: Some(from.cwd),
                     name: None,
                     size: Size {

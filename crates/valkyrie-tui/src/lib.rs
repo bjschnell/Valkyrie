@@ -89,6 +89,9 @@ struct App {
     sessions: Vec<SessionInfo>,
     /// Every project's decisions waiting on a human, oldest first, as last pushed.
     proposals: Vec<Decision>,
+    /// A flagged decision `d` was pressed on once: retiring has no undo, so it
+    /// takes a second `d`.
+    retire_armed: Option<(PathBuf, u32)>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
     view: Option<Attached>,
@@ -214,6 +217,7 @@ impl App {
             queue: Vec::new(),
             sessions: Vec::new(),
             proposals: Vec::new(),
+            retire_armed: None,
             selected: 0,
             view: None,
             status: String::new(),
@@ -1417,6 +1421,12 @@ impl App {
         let Some(d) = self.proposal() else { return };
         let (project, id, title, seen) = (d.project.clone(), d.id, d.title.clone(), d.updated);
         let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
+        let armed = self.retire_armed.take() == Some((project.clone(), id));
+        if flagged && !yes && !armed {
+            self.retire_armed = Some((project, id));
+            self.status = format!("d again to retire #{id}; agents stop getting it");
+            return;
+        }
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
             (false, false) => (ReviewAction::Reject, "rejected"),

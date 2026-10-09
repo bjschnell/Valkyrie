@@ -16,13 +16,14 @@ use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use context::{
-    Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance, ReviewAction,
+    AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
+    ReviewAction,
 };
 pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 11;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -240,6 +241,12 @@ pub enum ClientMsg {
     Decisions {
         req: ReqId,
         cwd: Option<PathBuf>,
+    },
+    /// Which sessions' corrections are read for decisions; `None` only asks.
+    /// Setting it is for the user only. Replies `Text` with the mode.
+    Auto {
+        req: ReqId,
+        mode: Option<AutoMode>,
     },
     /// What a session's agent should hear about the other agents in its repository
     /// (DESIGN §6.5), asked by its context hook on each prompt. Replies `Text`,

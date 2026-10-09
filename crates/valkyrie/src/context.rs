@@ -26,15 +26,17 @@ pub enum DecisionsCmd {
     Preview,
     /// Copy the active decisions into <repo>/.valkyrie/decisions/ for git.
     Export,
-    /// Whether Valkyrie proposes decisions from your corrections to agents (a small
-    /// model reads the exchange): on or off, or show which.
-    Auto { state: Option<OnOff> },
+    /// Which sessions' corrections to agents a small model reads, to propose the
+    /// rules in them: off, claude (the default) or all (Codex sessions too, whose
+    /// conversations then also go to Anthropic). Without one, shows which.
+    Auto {
+        #[arg(value_parser = parse_auto)]
+        mode: Option<valkyrie_proto::AutoMode>,
+    },
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-pub enum OnOff {
-    On,
-    Off,
+fn parse_auto(s: &str) -> Result<valkyrie_proto::AutoMode, String> {
+    valkyrie_proto::AutoMode::parse(s).ok_or_else(|| "off, claude or all".into())
 }
 
 pub fn parse_kind(s: &str) -> Result<DecisionKind, String> {
@@ -66,7 +68,6 @@ pub async fn decide(client: &Client, args: Decide) -> Result<()> {
     };
     let d = client
         .decide(NewDecision {
-            commit: head_commit(&cwd),
             cwd,
             title: args.title,
             body,
@@ -130,27 +131,20 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
             );
             Ok(())
         }
-        Some(DecisionsCmd::Auto { state }) => {
-            let marker = store_base().join("auto-off");
-            match state {
-                Some(OnOff::On) => match std::fs::remove_file(&marker) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                    _ => {}
-                },
-                Some(OnOff::Off) => {
-                    std::fs::create_dir_all(store_base())?;
-                    std::fs::write(&marker, "")?;
+        Some(DecisionsCmd::Auto { mode }) => {
+            let mode = client.auto(mode).await?;
+            println!(
+                "{mode}: {}",
+                match mode.as_str() {
+                    "off" => "corrections aren't read",
+                    "all" =>
+                        "corrections in Claude and Codex sessions are read by a small model \
+                              (claude -p --model haiku, no tools), which proposes the rules in them",
+                    _ =>
+                        "corrections in Claude sessions are read by a small model (claude -p \
+                          --model haiku, no tools), which proposes the rules in them",
                 }
-                None => {}
-            }
-            if marker.exists() {
-                println!("off: corrections aren't read");
-            } else {
-                println!(
-                    "on: when you correct an agent, a small model (claude -p --model haiku, \
-                     no tools) reads that exchange and proposes the rule in it for you to review"
-                );
-            }
+            );
             Ok(())
         }
         Some(DecisionsCmd::Export) => {
@@ -287,16 +281,17 @@ fn valk_command() -> String {
 pub fn hook(agent: &str) {
     let ours = matches!(agent, "claude" | "codex") && std::env::var_os("VALK_SESSION").is_some();
     let mut raw = Vec::new();
-    // Read even when it isn't ours, so the agent never hits EPIPE writing it.
-    if std::io::stdin()
-        .take(1 << 20)
-        .read_to_end(&mut raw)
-        .is_err()
-        || !ours
-    {
+    let read = std::io::stdin().take(1 << 20).read_to_end(&mut raw);
+    // Drain whatever is past the limit (a huge paste), so the agent never hits
+    // EPIPE writing it.
+    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    if read.is_err() || !ours {
         return;
     }
-    let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap_or_default();
+    // Answer only an event it names: a payload cut short or garbled gets nothing.
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return;
+    };
     let cwd = payload["cwd"]
         .as_str()
         .map(PathBuf::from)
@@ -304,9 +299,9 @@ pub fn hook(agent: &str) {
     let Some(cwd) = cwd else {
         return;
     };
-    let event = payload["hook_event_name"]
-        .as_str()
-        .unwrap_or("SessionStart");
+    let Some(event) = payload["hook_event_name"].as_str() else {
+        return;
+    };
     let text = match event {
         "SessionStart" => {
             let root = valkyrie_context::project::root(&cwd);
@@ -448,4 +443,23 @@ fn git_where(dir: &Path) -> Option<String> {
         Some(commit) => format!("{branch} @ {commit}"),
         None => branch,
     })
+}
+
+/// Saves a handoff where only its owner can read it, and says where.
+pub fn save_handoff(text: &str, from: valkyrie_proto::SessionId) -> Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = store_base().join("handoffs");
+    valkyrie_proto::ensure_private_dir(&store_base())?;
+    valkyrie_proto::ensure_private_dir(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let path = dir.join(format!("{stamp}-session-{from}.md"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
+    Ok(path)
 }

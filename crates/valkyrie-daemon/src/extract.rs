@@ -6,12 +6,12 @@
 
 use crate::Registry;
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use valkyrie_context::extract;
-use valkyrie_proto::{NewDecision, Provenance, SessionId};
+use valkyrie_proto::{AutoMode, NewDecision, Provenance, SessionId};
 
 /// How much of a transcript's end is read: a few exchanges.
 const TAIL: u64 = 256 * 1024;
@@ -21,16 +21,33 @@ const MODEL_TIMEOUT: Duration = Duration::from_secs(90);
 /// Lets the agent finish writing its reply to the transcript after `Stop`.
 const SETTLE: Duration = Duration::from_millis(500);
 
-/// Whether catching is on: it is unless `valk decisions auto off` left this file.
-pub fn off_marker(context_dir: &Path) -> PathBuf {
-    context_dir.join("auto-off")
+/// Most model calls per session per hour, so one chatty session can't use them all.
+const PER_SESSION_HOUR: usize = 6;
+
+/// Which sessions are read, kept in `<context>/auto` (`valk decisions auto`).
+/// Before it existed, `auto-off` meant off.
+pub fn mode(context_dir: &Path) -> AutoMode {
+    if let Ok(text) = std::fs::read_to_string(context_dir.join("auto")) {
+        return AutoMode::parse(&text).unwrap_or_default();
+    }
+    if context_dir.join("auto-off").exists() {
+        return AutoMode::Off;
+    }
+    AutoMode::default()
+}
+
+pub fn set_mode(context_dir: &Path, mode: AutoMode) -> anyhow::Result<()> {
+    valkyrie_proto::ensure_private_dir(context_dir)?;
+    std::fs::write(context_dir.join("auto"), format!("{}\n", mode.as_str()))?;
+    let _ = std::fs::remove_file(context_dir.join("auto-off"));
+    Ok(())
 }
 
 /// Takes `Stop`s (session ids) and proposes what it finds, one at a time.
 pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedReceiver<SessionId>) {
     let command = valkyrie_context::model::command(extract::SYSTEM);
     let mut last: HashMap<SessionId, u64> = HashMap::new();
-    let mut calls: VecDeque<Instant> = VecDeque::new();
+    let mut calls: VecDeque<(Instant, SessionId)> = VecDeque::new();
     while let Some(id) = turns.recv().await {
         tokio::time::sleep(SETTLE).await;
         // Several turns may have ended meanwhile; each is looked at once.
@@ -41,21 +58,23 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
             }
         }
         for id in ids {
-            if off_marker(&registry.host.context_dir).exists() {
+            let mode = mode(&registry.host.context_dir);
+            if mode == AutoMode::Off {
                 continue;
             }
             while calls
                 .front()
-                .is_some_and(|t| t.elapsed() > Duration::from_secs(3600))
+                .is_some_and(|(t, _)| t.elapsed() > Duration::from_secs(3600))
             {
                 calls.pop_front();
             }
-            if calls.len() >= PER_HOUR {
+            let theirs = calls.iter().filter(|(_, s)| *s == id).count();
+            if calls.len() >= PER_HOUR || theirs >= PER_SESSION_HOUR {
                 tracing::debug!(session = id, "extraction skipped: hourly limit");
                 continue;
             }
-            if look(&registry, id, &command, &mut last).await {
-                calls.push_back(Instant::now());
+            if look(&registry, id, mode, &command, &mut last).await {
+                calls.push_back((Instant::now(), id));
             }
         }
     }
@@ -65,6 +84,7 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
 async fn look(
     registry: &Registry,
     id: SessionId,
+    mode: AutoMode,
     command: &[String],
     last: &mut HashMap<SessionId, u64>,
 ) -> bool {
@@ -72,7 +92,7 @@ async fn look(
         return false;
     };
     let info = session.info();
-    if !matches!(info.status.agent.as_str(), "claude" | "codex") {
+    if !mode.reads(&info.status.agent) {
         return false;
     }
     let Some(chat) = info.chat.clone() else {
@@ -119,7 +139,11 @@ async fn look(
         if extract::already_known(&f.title, &known) {
             continue;
         }
-        let quote: String = yours.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Redacted like the prompt: it's stored, shown, and once accepted, injected.
+        let quote: String = extract::redact(&yours)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let quote = if quote.chars().count() > 200 {
             quote.chars().take(200).collect::<String>() + "…"
         } else {
@@ -132,7 +156,6 @@ async fn look(
             kind: f.kind,
             propose: true,
             supersedes: None,
-            commit: None,
             review_every: None,
             session: Some(id),
         };

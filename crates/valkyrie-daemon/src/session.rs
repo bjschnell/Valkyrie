@@ -1155,6 +1155,11 @@ impl Session {
         }
     }
 
+    /// Whether an agent started this session or typed into it.
+    pub fn driven(&self) -> bool {
+        self.state.lock().unwrap().driven_by.is_some()
+    }
+
     /// The agent behind this session: the one it runs (following the foreground),
     /// else one that started it or typed into it. `None`: a human's.
     pub fn agent_behind(&self) -> Option<String> {

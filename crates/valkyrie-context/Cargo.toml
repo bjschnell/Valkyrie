@@ -9,3 +9,4 @@ license.workspace = true
 valkyrie-proto.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+libc.workspace = true

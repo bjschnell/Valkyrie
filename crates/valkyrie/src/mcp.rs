@@ -73,7 +73,7 @@ fn tools() -> Value {
             "description": "Search this project's decisions (conventions, constraints, gotchas, known fixes) by words. Active ones by default.",
             "inputSchema": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Words to look for"},
-                "include_inactive": {"type": "boolean", "description": "Also proposed, rejected, retired and superseded ones"}
+                "include_inactive": {"type": "boolean", "description": "Also rejected, retired and superseded ones (proposals awaiting the user's review are never shown)"}
             }, "required": ["query"]}
         },
         {
@@ -119,7 +119,7 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
             // of decisions, so the agent can judge them all.
             let rest: Vec<String> = list
                 .iter()
-                .filter(|d| inactive || d.status == DecisionStatus::Active)
+                .filter(|d| shown(d, inactive))
                 .map(line)
                 .collect();
             Ok(if rest.is_empty() {
@@ -152,6 +152,10 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                 .iter()
                 .find(|d| d.id == id)
                 .ok_or_else(|| anyhow::anyhow!("no decision #{id}"))?;
+            // Unreviewed text (an agent's, or the extractor's) never reaches an agent.
+            if d.status == DecisionStatus::Proposed {
+                anyhow::bail!("#{id} is a proposal the user hasn't reviewed yet");
+            }
             let mut text = valkyrie_context::render(d);
             if let Some(why) = &d.fresh.review {
                 text.push_str(&format!("\nMay be out of date: {why}\n"));
@@ -173,7 +177,6 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                     kind,
                     propose: true,
                     supersedes: args["supersedes"].as_u64().map(|n| n as u32),
-                    commit: valkyrie_context::project::head(cwd),
                     review_every: None,
                     session: std::env::var("VALK_SESSION")
                         .ok()
@@ -220,6 +223,12 @@ fn line(d: &Decision) -> String {
     text
 }
 
+/// Active decisions, and with `inactive` the ones that ended (rejected, retired,
+/// superseded); never proposals, which nobody has reviewed.
+fn shown(d: &Decision, inactive: bool) -> bool {
+    d.status == DecisionStatus::Active || (inactive && d.status != DecisionStatus::Proposed)
+}
+
 /// Decisions with any of `query`'s words, most words matched first.
 fn search<'a>(list: &'a [Decision], query: &str, inactive: bool) -> Vec<&'a Decision> {
     let words: Vec<String> = query
@@ -230,7 +239,7 @@ fn search<'a>(list: &'a [Decision], query: &str, inactive: bool) -> Vec<&'a Deci
         .collect();
     let mut scored: Vec<(usize, &Decision)> = list
         .iter()
-        .filter(|d| inactive || d.status == DecisionStatus::Active)
+        .filter(|d| shown(d, inactive))
         .filter_map(|d| {
             let text = format!("{} {} {}", d.title, d.body, d.kind.as_str()).to_lowercase();
             let score = words.iter().filter(|w| text.contains(w.as_str())).count();
@@ -277,6 +286,8 @@ mod tests {
         assert_eq!(ids(search(&list, "pnpm installs tools", false)), [2, 1]);
         assert_eq!(ids(search(&list, "npm", false)), [2, 1]);
         assert_eq!(ids(search(&list, "npm", true)), [3, 2, 1]);
+        let proposed = [d(4, "Use npm everywhere", DecisionStatus::Proposed)];
+        assert!(search(&proposed, "npm", true).is_empty());
         assert!(search(&list, "kubernetes", true).is_empty());
     }
 }

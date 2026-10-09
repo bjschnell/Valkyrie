@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, ensure};
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 const LOCKED_DOWN: &[&str] = &[
     "claude",
     "-p",
+    "--safe-mode",
     "--model",
     "haiku",
     "--tools",
@@ -29,11 +31,16 @@ const LOCKED_DOWN: &[&str] = &[
     "--system-prompt",
 ];
 
-/// The command line for a call with `system` as its system prompt. `$VALK_EXTRACTOR`
-/// (whitespace-separated) replaces the model: tests put a stand-in there.
+/// The command line for a call with `system` as its system prompt. In a debug
+/// build, `$VALK_EXTRACTOR` (whitespace-separated) replaces the model: tests put a
+/// stand-in there. Never in a release build, where an agent that happened to start
+/// the daemon could otherwise route every exchange to a command of its choosing.
 pub fn command(system: &str) -> Vec<String> {
-    match std::env::var("VALK_EXTRACTOR") {
-        Ok(cmd) if !cmd.trim().is_empty() => cmd.split_whitespace().map(str::to_owned).collect(),
+    let stand_in = std::env::var("VALK_EXTRACTOR")
+        .ok()
+        .filter(|_| cfg!(debug_assertions));
+    match stand_in {
+        Some(cmd) if !cmd.trim().is_empty() => cmd.split_whitespace().map(str::to_owned).collect(),
         _ => LOCKED_DOWN
             .iter()
             .map(|s| s.to_string())
@@ -57,15 +64,23 @@ pub fn ask(command: &[String], prompt: &str, dir: &Path, timeout: Duration) -> R
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // Its own group, so a timeout kills whatever it started too.
+        .process_group(0)
         .spawn()
         .with_context(|| format!("run {program}"))?;
+    let group = child.id() as i32;
+    let kill_group = || {
+        // SAFETY: signals the group led by our own child.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    };
     let mut stdin = child.stdin.take().unwrap();
     let prompt = prompt.to_owned();
     let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
     let mut stdout = child.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || {
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = Vec::new();
-        stdout.read_to_end(&mut out).map(|_| out)
+        let _ = sent.send(stdout.read_to_end(&mut out).map(|_| out));
     });
     let start = Instant::now();
     let status = loop {
@@ -73,16 +88,24 @@ pub fn ask(command: &[String], prompt: &str, dir: &Path, timeout: Duration) -> R
             break status;
         }
         if start.elapsed() > timeout {
-            let _ = child.kill();
+            kill_group();
             let _ = child.wait();
             anyhow::bail!("{program} took over {}s", timeout.as_secs());
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    // Something it started may hold stdout open after it exits; don't wait on that.
+    let left = timeout
+        .saturating_sub(start.elapsed())
+        .max(Duration::from_secs(1));
+    let out = match read.recv_timeout(left) {
+        Ok(out) => out?,
+        Err(_) => {
+            kill_group();
+            anyhow::bail!("{program} left its output open");
+        }
+    };
     let _ = writer.join();
-    let out = reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("reader panicked"))??;
     ensure!(status.success(), "{program} exited {status}");
     let text = String::from_utf8_lossy(&out).into_owned();
     Ok(serde_json::from_str::<serde_json::Value>(&text)
@@ -115,5 +138,17 @@ mod tests {
         let start = Instant::now();
         assert!(ask(&sh("sleep 5"), "", &dir, Duration::from_millis(200)).is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
+        // Exits, but a child it left behind keeps stdout open.
+        let start = Instant::now();
+        assert!(
+            ask(
+                &sh("sleep 5 & echo hi"),
+                "",
+                &dir,
+                Duration::from_millis(300)
+            )
+            .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 }

@@ -108,6 +108,8 @@ impl Store {
             }
         }
         let by_human = provenance.by == "human";
+        let mut provenance = provenance;
+        provenance.commit = provenance.commit.filter(|c| stale::valid_commit(c));
         let text = format!("{title}\n{body}");
         let fresh = valkyrie_proto::Freshness {
             anchors: stale::anchors(&root, &new.cwd, &text),
@@ -152,6 +154,7 @@ impl Store {
         id: u32,
         action: &ReviewAction,
         seen: Option<u64>,
+        head: Option<String>,
         now: u64,
     ) -> Result<Decision> {
         use DecisionStatus::*;
@@ -206,12 +209,14 @@ impl Store {
                 .unwrap_or_else(|| root.to_path_buf());
             d.fresh.anchors = stale::anchors(root, &cwd, &format!("{}\n{}", d.title, d.body));
         }
-        // Confirmed as of now, and at this commit: its files' churn counts from here.
+        // Confirmed as of now, and at this commit (`head`, the project's `HEAD`): its
+        // files' churn counts from here. Files gone since aren't its anchors any more.
         if accepting || confirming {
             d.fresh.confirmed = now;
-            if let Some(head) = project::head(root) {
+            if let Some(head) = head.filter(|h| stale::valid_commit(h)) {
                 d.provenance.commit = Some(head);
             }
+            d.fresh.anchors.retain(|a| root.join(a).exists());
         }
         d.updated = now;
         self.write(root, &d, Some(path))?;
@@ -382,7 +387,6 @@ mod tests {
                 kind: DecisionKind::Decision,
                 propose: false,
                 supersedes: None,
-                commit: None,
                 review_every: None,
                 session: None,
             }
@@ -436,7 +440,7 @@ mod tests {
         // Still only proposed: the old one holds until a human accepts.
         assert_eq!(f.store.load(&f.repo)[0].status, DecisionStatus::Active);
         f.store
-            .review(&f.repo, proposal.id, &ReviewAction::Accept, None, 3)
+            .review(&f.repo, proposal.id, &ReviewAction::Accept, None, None, 3)
             .unwrap();
         let all = f.store.load(&f.repo);
         assert_eq!(all[0].status, DecisionStatus::Superseded);
@@ -450,7 +454,7 @@ mod tests {
         f.store
             .decide(&f.new_decision("P"), by("claude"), 1)
             .unwrap();
-        let r = |id, a: ReviewAction| f.store.review(&f.repo, id, &a, None, 2);
+        let r = |id, a: ReviewAction| f.store.review(&f.repo, id, &a, None, None, 2);
         assert!(r(1, ReviewAction::Retire).is_err());
         let edited = r(
             1,
@@ -528,7 +532,10 @@ mod tests {
             body: "Better".into(),
             kind: DecisionKind::Constraint,
         };
-        let d = f.store.review(&f.repo, 1, &revise, Some(1), 2).unwrap();
+        let d = f
+            .store
+            .review(&f.repo, 1, &revise, Some(1), None, 2)
+            .unwrap();
         assert_eq!(
             (d.title.as_str(), d.status),
             ("Final", DecisionStatus::Active)
@@ -536,11 +543,52 @@ mod tests {
         // Read before it changed: refused.
         assert!(
             f.store
-                .review(&f.repo, 1, &ReviewAction::Retire, Some(1), 3)
+                .review(&f.repo, 1, &ReviewAction::Retire, Some(1), None, 3)
                 .is_err()
         );
         // Already active (say, accepted elsewhere first): nothing is rewritten.
-        assert!(f.store.review(&f.repo, 1, &revise, None, 3).is_err());
+        assert!(f.store.review(&f.repo, 1, &revise, None, None, 3).is_err());
+    }
+
+    #[test]
+    fn confirming_drops_anchors_that_are_gone() {
+        let f = Fixture::new("gone");
+        std::fs::write(f.repo.join("keep.rs"), "").unwrap();
+        std::fs::write(f.repo.join("gone.rs"), "").unwrap();
+        let d = f
+            .store
+            .decide(&f.new_decision("About keep.rs and gone.rs"), by("human"), 1)
+            .unwrap();
+        assert_eq!(d.fresh.anchors, ["keep.rs", "gone.rs"]);
+        std::fs::remove_file(f.repo.join("gone.rs")).unwrap();
+        let d = f
+            .store
+            .review(
+                &f.repo,
+                1,
+                &ReviewAction::Confirm,
+                None,
+                Some("abc1234".into()),
+                2,
+            )
+            .unwrap();
+        assert_eq!(d.fresh.anchors, ["keep.rs"]);
+        assert_eq!(
+            (d.fresh.confirmed, d.provenance.commit.as_deref()),
+            (2, Some("abc1234"))
+        );
+        // A commit that isn't one is never stored.
+        let mut sneaky = f.new_decision("x");
+        sneaky.cwd = f.repo.clone();
+        let p = Provenance {
+            by: "human".into(),
+            commit: Some("--output=/x".into()),
+            ..Provenance::default()
+        };
+        assert_eq!(
+            f.store.decide(&sneaky, p, 3).unwrap().provenance.commit,
+            None
+        );
     }
 
     #[test]

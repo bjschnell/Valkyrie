@@ -356,6 +356,14 @@ impl Client {
         }
     }
 
+    /// Which sessions' corrections are read; with `mode`, sets it first.
+    pub async fn auto(&self, mode: Option<crate::AutoMode>) -> Result<String> {
+        match self.request(|req| ClientMsg::Auto { req, mode }).await? {
+            Reply::Text { text } => Ok(text),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Fails unless this process is a human's (see `ClientMsg::Vouch`).
     pub async fn vouch(&self, what: &str) -> Result<()> {
         let what = what.to_owned();

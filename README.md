@@ -123,7 +123,7 @@ propose decisions with `valk decide`, but a proposal applies only after you acce
 it: on the phone, on the TUI home screen, or with `valk decisions accept <id>`.
 An agent can't accept its own. When you correct an agent ("no, we use pnpm"), a
 small model (Haiku, on your own Claude login, no tools) reads that exchange and
-proposes the rule in it; `valk decisions auto off` stops that. With each prompt,
+proposes the rule in it (Claude sessions by default; `valk decisions auto all|off`). With each prompt,
 an agent also hears what the other agents in the same repo are doing (what you
 asked them, the files they're editing, and any file you've both touched), so two
 agents don't silently edit the same file. Every worktree of a repo shares its decisions,

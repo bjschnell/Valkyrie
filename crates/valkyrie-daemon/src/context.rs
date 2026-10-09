@@ -45,6 +45,16 @@ impl Caller {
     }
 }
 
+/// Why `d` is flagged, if it is and hasn't changed since: a flag found before a
+/// review (confirmed, edited) doesn't outlive it.
+fn flag(
+    stale: &HashMap<(PathBuf, u32), (String, u64)>,
+    d: &valkyrie_proto::Decision,
+) -> Option<String> {
+    let (why, updated) = stale.get(&(d.project.clone(), d.id))?;
+    (*updated == d.updated).then(|| why.clone())
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -112,7 +122,7 @@ impl Registry {
         flagged.dedup();
         for root in flagged {
             items.extend(store.load(&root).into_iter().filter_map(|mut d| {
-                d.fresh.review = stale.get(&(root.clone(), d.id)).cloned();
+                d.fresh.review = flag(&stale, &d);
                 (d.status == valkyrie_proto::DecisionStatus::Active && d.fresh.review.is_some())
                     .then_some(d)
             }));
@@ -133,7 +143,8 @@ impl Registry {
             by: caller.agent.clone().unwrap_or_else(|| "human".into()),
             session: caller.session.as_ref().map(|s| s.info().name),
             conversation: caller.session.as_ref().and_then(|s| s.conversation()),
-            commit: new.commit.clone(),
+            // Worked out here, never taken from the client: it reaches `git diff`.
+            commit: valkyrie_context::project::head(&new.cwd),
             cwd: Some(new.cwd.clone()),
         };
         let decision = self
@@ -171,11 +182,13 @@ impl Registry {
         peer: Option<Peer>,
     ) -> Result<Reply> {
         self.vouch(peer, "reviewing decisions")?;
+        // Before taking the lock: it runs `git`.
+        let head = valkyrie_context::project::head(project);
         let decision =
             self.context
                 .lock()
                 .unwrap()
-                .review(project, id, action, seen, now_secs())?;
+                .review(project, id, action, seen, head, now_secs())?;
         if matches!(
             action,
             ReviewAction::Confirm | ReviewAction::Retire | ReviewAction::Edit { .. }
@@ -219,6 +232,7 @@ impl Registry {
                         info,
                         agent,
                         (checkout != my_checkout).then_some(checkout),
+                        s.driven(),
                         s.activity(),
                     )
                 })
@@ -226,19 +240,36 @@ impl Registry {
             .collect();
         let siblings: Vec<Sibling> = others
             .iter()
-            .map(|(info, agent, checkout, activity)| Sibling {
+            .map(|(info, agent, checkout, driven, activity)| Sibling {
                 name: &info.name,
                 agent,
                 state: info.status.state.label(),
                 checkout: checkout.as_deref(),
+                driven: *driven,
                 activity,
             })
             .collect();
         let now = crate::session::now_ms();
-        let text = tell(&root, &me.activity(), &siblings, now)
+        let text = tell(&root, &my_checkout, &me.activity(), &siblings, now)
             .filter(|text| me.tell(text))
             .unwrap_or_default();
         Ok(Reply::Text { text })
+    }
+
+    /// Which sessions' corrections are read (DESIGN §6.3); only a human changes it.
+    pub(crate) fn auto(
+        &self,
+        mode: Option<valkyrie_proto::AutoMode>,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        let dir = &self.host.context_dir;
+        if let Some(mode) = mode {
+            self.vouch(peer, "changing what Valkyrie reads")?;
+            crate::extract::set_mode(dir, mode)?;
+        }
+        Ok(Reply::Text {
+            text: crate::extract::mode(dir).as_str().to_owned(),
+        })
     }
 
     /// The decisions of the project holding `cwd`, or of every project.
@@ -256,7 +287,7 @@ impl Registry {
         let decisions = decisions
             .into_iter()
             .map(|mut d| {
-                d.fresh.review = stale.get(&(d.project.clone(), d.id)).cloned();
+                d.fresh.review = flag(&stale, &d);
                 d
             })
             .collect();
@@ -265,11 +296,42 @@ impl Registry {
 
     /// Works out which active decisions may be out of date (DESIGN §6.4), every
     /// project at once; `git` runs off the async threads.
-    pub(crate) async fn check_stale(&self) {
-        let roots = self.context.lock().unwrap().projects();
+    pub(crate) async fn check_stale(&self, only: Option<PathBuf>, fresh: std::time::Duration) {
+        // One check at a time: the timer, the CLI and MCP calls would only repeat it.
+        let _one = self.stale_check.lock().await;
+        let roots: Vec<PathBuf> = match only {
+            Some(root) => vec![root],
+            None => self.context.lock().unwrap().projects(),
+        };
+        // Checked lately, at the same `HEAD`: nothing can have changed but the clock.
+        let heads = tokio::task::spawn_blocking(move || {
+            roots
+                .into_iter()
+                .map(|r| {
+                    let head = valkyrie_context::project::head(&r);
+                    (r, head)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        let roots: Vec<(PathBuf, Option<String>)> = {
+            let checked = self.stale_checked.lock().unwrap();
+            heads
+                .into_iter()
+                .filter(|(r, head)| {
+                    checked
+                        .get(r)
+                        .is_none_or(|(at, was)| at.elapsed() >= fresh || was != head)
+                })
+                .collect()
+        };
+        if roots.is_empty() {
+            return;
+        }
         let active: Vec<_> = roots
             .iter()
-            .flat_map(|root| self.context.lock().unwrap().load(root))
+            .flat_map(|(root, _)| self.context.lock().unwrap().load(root))
             .filter(|d| d.status == valkyrie_proto::DecisionStatus::Active)
             .collect();
         let found = tokio::task::spawn_blocking(move || {
@@ -278,13 +340,21 @@ impl Registry {
                 .into_iter()
                 .filter_map(|d| {
                     let why = valkyrie_context::stale::review(&d.project, &d, now)?;
-                    Some(((d.project.clone(), d.id), why))
+                    Some(((d.project.clone(), d.id), (why, d.updated)))
                 })
-                .collect::<HashMap<_, _>>()
+                .collect::<Vec<_>>()
         })
         .await
         .unwrap_or_default();
-        *self.stale.lock().unwrap() = found;
+        {
+            let mut stale = self.stale.lock().unwrap();
+            stale.retain(|(root, _), _| !roots.iter().any(|(r, _)| r == root));
+            stale.extend(found);
+            let mut checked = self.stale_checked.lock().unwrap();
+            for (root, head) in roots {
+                checked.insert(root, (std::time::Instant::now(), head));
+            }
+        }
         self.refresh_proposals();
     }
 }

@@ -166,8 +166,13 @@ pub fn remove_hooks(mut doc: Value, commands: &[&str]) -> Value {
     doc
 }
 
+/// Valkyrie's own entries from another install: the pre-rename `overseer`, or a
+/// `valk` that has moved since. Replaced, so a moved binary doesn't leave hooks
+/// running twice.
 fn is_pre_rename(command: &str) -> bool {
     command.ends_with("/overseer' hook codex 2>/dev/null || true")
+        || command.ends_with("/valk' hook codex 2>/dev/null || true")
+        || command.ends_with("/valk' context-hook codex 2>/dev/null || true")
 }
 
 #[cfg(test)]
@@ -268,6 +273,18 @@ mod tests {
         let pre = "'/r/target/release/overseer' hook codex 2>/dev/null || true";
         let upgraded = install_hooks(install_hooks(foreign.clone(), pre, ctx), cmd, ctx);
         assert_eq!(upgraded, once);
+        // A valk that moved: its old entries go.
+        let moved = install_hooks(
+            foreign.clone(),
+            "'/old/valk' hook codex 2>/dev/null || true",
+            "'/old/valk' context-hook codex 2>/dev/null || true",
+        );
+        let new_cmd = "'/new/valk' hook codex 2>/dev/null || true";
+        let new_ctx = "'/new/valk' context-hook codex 2>/dev/null || true";
+        assert_eq!(
+            install_hooks(moved, new_cmd, new_ctx),
+            install_hooks(foreign.clone(), new_cmd, new_ctx)
+        );
         assert_eq!(
             install_hooks(Value::Null, cmd, ctx)["hooks"]
                 .as_object()

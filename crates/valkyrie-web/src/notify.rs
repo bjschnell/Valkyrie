@@ -118,6 +118,9 @@ impl Watch {
             .iter()
             .map(|d| (d.project.clone(), d.id, d.updated))
             .collect();
+        // Reviewed meanwhile: no longer news. First, so a new one arriving in the
+        // same push starts its own grace.
+        self.decisions_new.retain(|(key, _)| keys.contains(key));
         for d in items {
             let key = (d.project.clone(), d.id, d.updated);
             if self.decisions_known.contains(&key) || !self.decisions_started || visible {
@@ -128,8 +131,6 @@ impl Watch {
             }
             self.decisions_new.push((key, d.title.clone()));
         }
-        // Reviewed meanwhile: no longer news.
-        self.decisions_new.retain(|(key, _)| keys.contains(key));
         self.decisions_known = keys;
         self.decisions_started = true;
     }
