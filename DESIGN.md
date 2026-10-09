@@ -421,6 +421,20 @@ herdr splits a tab into panes; Valkyrie had one session per tab. Now a tab can h
   - No zoom (one pane full-screen for a while) and no keyboard resize yet. Focus moves in layout order, not by direction.
   - A tab's name and rename are its focused pane's.
 
+### 8.10 `valk setup web`: the web app as a service (2026-10-08)
+`valk web` ran in a terminal, and closing the terminal took the phone's connection with it. Writing a systemd unit by hand is a step most people shouldn't need, and macOS has its own way. Now one command does it on either.
+
+- **`valk setup web`** installs `valk web` as a service that starts at login and comes back if it fails: a systemd user unit (`~/.config/systemd/user/valk-web.service`) on Linux, a launchd agent (`~/Library/LaunchAgents/dev.valkyrie.web.plist`, logs in `<state dir>/web.log`) on macOS. Running it again rewrites the file and restarts the service, so an upgraded binary or new `--listen`/`--url` takes effect. `--dry-run` prints the file; `--remove` stops it and deletes it.
+- **The service runs the `valk` on PATH** when that is this same binary (`~/.local/bin/valk`, often a symlink into a build), so rebuilding changes what it runs without a new setup. `--exe` picks another.
+- **It keeps the shell's environment** (`PATH`, `SHELL`, `LANG`, `LC_ALL`, `XDG_STATE_HOME`) and passes the daemon socket explicitly. A service starts with a bare environment, and when no daemon is running (at boot), `valk web` starts one, which hands its environment to every session.
+- **The daemon outlives the service.** A daemon `valk web` started is in the service's cgroup, so the unit has `KillMode=process`: restarting or removing it ends only `valk web`, never the daemon and its sessions. launchd gets `AbandonProcessGroup` for the same reason (the daemon is also `setsid`).
+- **Tailscale, done for you.** When the address is a tailnet name, setup runs `tailscale serve --bg <port>` unless it already forwards there. On Linux that needs `tailscale set --operator=$USER` once, and setup says so when it fails. The CLI is found on PATH or inside the macOS app.
+- **HTTPS certificates.** A tailnet without them takes the connection and drops it, so the phone shows nothing and the only trace is in tailscaled's log. `tailscale status --json` lists no `CertDomains` then; `valk web` and the setup now say to turn on HTTPS certificates in the admin console.
+- **It refuses a busy port** (a `valk web` left in a terminal) instead of installing a service that fails over and over. Then it waits for the server to answer and prints a pairing QR code.
+- On Linux it mentions `loginctl enable-linger` when lingering is off: without it the service stops at logout.
+- **Windows** says it isn't supported: the daemon is Unix-only (PTYs, a unix socket), so there's no `valk web` to keep running yet. A Windows port would add a Task Scheduler or service entry here.
+- **Verified.** Unit tests render the unit (quoting, `%` escapes) and the plist (XML escapes), and parse `tailscale status` and `serve status`. Live, against real systemd with a throwaway daemon, port and unit name: install answered on the port and printed a QR code; running it again restarted the service and the daemon kept its pid and its session; a busy port was refused; `--remove` stopped and deleted the unit, and the session survived. macOS is untested on a Mac: the launchd code compiles and runs its tests on Linux, but `launchctl` itself wasn't exercised.
+
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
 - Web: Rust-compiled WASM vs TypeScript (Svelte/Solid) is an open choice. Lean TS for PWA speed of iteration unless a shared protocol crate to WASM gives real wins.

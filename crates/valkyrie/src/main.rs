@@ -1,5 +1,6 @@
 mod bench;
 mod hook;
+mod service;
 mod tools;
 
 use anyhow::{Context, Result, bail};
@@ -136,6 +137,29 @@ enum SetupCmd {
         /// The valk binary the hooks run (default: this one).
         #[arg(long)]
         exe: Option<PathBuf>,
+    },
+    /// Keep `valk web` running in the background: a systemd user service on Linux,
+    /// a launchd agent on macOS. Also puts it behind `tailscale serve`, then shows
+    /// a pairing QR code.
+    Web {
+        /// Where it listens.
+        #[arg(long, default_value = "127.0.0.1:8790")]
+        listen: std::net::SocketAddr,
+        /// The address phones open (default: this machine's tailnet name).
+        #[arg(long)]
+        url: Option<String>,
+        /// The valk binary the service runs (default: this one, by its PATH name).
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        /// Print the service file instead of installing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Stop the service and remove it instead.
+        #[arg(long)]
+        remove: bool,
+        /// The service's name (tests run one beside the real one).
+        #[arg(long, hide = true, default_value = service::DEFAULT_NAME)]
+        name: String,
     },
 }
 
@@ -314,6 +338,28 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => std::env::current_exe()?,
             };
             hook::setup_codex(&exe, &hook::codex_hooks_path(), remove, dry_run)
+        }
+        Some(Cmd::Setup(SetupCmd::Web {
+            listen,
+            url,
+            exe,
+            dry_run,
+            remove,
+            name,
+        })) => {
+            let exe = match exe {
+                Some(exe) => std::path::absolute(exe)?,
+                None => service::default_exe()?,
+            };
+            service::run(service::Setup {
+                name,
+                exe,
+                socket: std::path::absolute(&socket)?,
+                listen,
+                url,
+                dry_run,
+                remove,
+            })
         }
         Some(Cmd::Render {
             file,

@@ -9,6 +9,7 @@ pub mod notify;
 pub mod places;
 pub mod push;
 pub mod review;
+pub mod tailscale;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -79,10 +80,15 @@ pub async fn run(opts: Options) -> Result<()> {
             opts.listen
         );
     } else if url.starts_with("https://") {
-        println!(
-            "  reach it from your tailnet with: tailscale serve --bg {}",
-            opts.listen.port()
-        );
+        if !tailscale::serving(opts.listen.port()) {
+            println!(
+                "  reach it from your tailnet with: tailscale serve --bg {}",
+                opts.listen.port()
+            );
+        }
+        if tailscale::tailnet().is_some_and(|t| !t.certs) {
+            println!("  {}", tailscale::CERTS_HELP);
+        }
     }
     print_pairing(&store, &url)?;
     let push = match store.vapid_secret().and_then(|key| push::Sender::new(&key)) {
@@ -139,18 +145,8 @@ pub fn print_pairing(store: &auth::Store, url: &str) -> Result<()> {
 /// The tailnet HTTPS name if Tailscale runs here, else the listen address.
 pub fn public_url(given: Option<String>, listen: SocketAddr) -> String {
     given
-        .or_else(tailnet_url)
+        .or_else(|| tailscale::tailnet().map(|t| t.url))
         .unwrap_or_else(|| format!("http://{listen}"))
-}
-
-fn tailnet_url() -> Option<String> {
-    let out = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
-    let status: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let name = status["Self"]["DNSName"].as_str()?.trim_end_matches('.');
-    (!name.is_empty()).then(|| format!("https://{name}"))
 }
 
 #[derive(Deserialize)]

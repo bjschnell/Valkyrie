@@ -95,11 +95,10 @@ one run.
 ### From your phone
 
 ```sh
-tailscale serve --bg 8790          # HTTPS, reachable only from your tailnet
-valk new --name web -- valk web    # keep the web server running as a session
+valk setup web    # runs valk web as a service, behind tailscale serve
 ```
 
-Scan the QR code it prints. Each code works once, for ten minutes. `valk web pair`
+It needs HTTPS certificates turned on in the Tailscale admin console. Scan the QR code it prints. Each code works once, for ten minutes. `valk web pair`
 prints another, `valk web devices` lists paired devices, and `valk web revoke <name>`
 unpairs one. The server listens only on localhost, and the daemon never listens on a
 network.

@@ -135,14 +135,21 @@ Then run `wsl --shutdown` once for it to take effect.
 
 ## Phone and web
 
-`valk web` serves the web app on `127.0.0.1:8790` and prints a QR code that pairs
-your phone. To reach it from your phone, put it on your tailnet (HTTPS, reachable
-only by your devices):
+The web app reaches your phone over Tailscale. Turn on HTTPS certificates once in the
+Tailscale admin console (DNS → HTTPS Certificates); without them the page won't open.
+Then:
 
 ```sh
-tailscale serve --bg 8790
-valk web            # keep it running, e.g. as a session: valk new --name web -- valk web
+valk setup web
 ```
+
+That runs `valk web` in the background as a service (systemd on Linux, launchd on
+macOS) that starts again at login, puts it on your tailnet with `tailscale serve`
+(HTTPS, reachable only by your devices), and prints a QR code that pairs your phone.
+Run it again after upgrading to restart the service; `valk setup web --remove` takes it
+away. On Linux, `tailscale serve` needs `sudo tailscale set --operator=$USER` once, and
+`loginctl enable-linger` keeps the service running while you're logged out. To run it by
+hand instead: `tailscale serve --bg 8790` and `valk web`.
 
 Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
 prints another. `valk web devices` lists paired devices, and `valk web revoke <name>`
