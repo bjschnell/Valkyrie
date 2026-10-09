@@ -76,7 +76,9 @@ Claude Code needs no setup, because its hooks are added per session.
 | | `n` · `r` · `x` · `,` | new tab · rename · close · settings |
 
 The mouse works too: click a tab, drag it to reorder, right-click it for a menu,
-right-click a pane to split it, and drag a divider to resize.
+right-click a pane to split it, and drag a divider to resize. Click a link in a
+session to open it in your browser (Ctrl+click over a program that takes the mouse,
+such as vim). Over SSH the link is copied to your clipboard instead.
 
 ### Settings
 

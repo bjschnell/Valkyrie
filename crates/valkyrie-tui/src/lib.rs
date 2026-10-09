@@ -4,6 +4,7 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod links;
 mod mouse;
 mod panes;
 mod ping;
@@ -1218,7 +1219,12 @@ impl App {
                     return;
                 }
                 let Some(sel) = view.selection.filter(|s| !s.is_empty()) else {
+                    // A click, not a drag: on a link, it opens.
                     view.selection = None;
+                    let (id, url) = (view.id, links::url_at(view.shown(), view.cols, at.0, at.1));
+                    if let Some(url) = url {
+                        self.open_link(id, &url);
+                    }
                     return;
                 };
                 let text = sel.text(view.shown(), view.cols);
@@ -1232,6 +1238,18 @@ impl App {
                 }
             }
             MouseKind::RightPress | MouseKind::Other => {}
+        }
+    }
+
+    /// Opens `url` from pane `id`, and says so in its bar.
+    fn open_link(&mut self, id: SessionId, url: &str) {
+        let said = match links::open(url) {
+            Ok(links::Opened::Browser) => format!("opened {url}"),
+            Ok(links::Opened::Copied) => format!("copied {url} (no browser over SSH)"),
+            Err(e) => format!("couldn't open {url}: {e}"),
+        };
+        if let Some(pane) = self.pane_mut(id) {
+            pane.notice(said);
         }
     }
 
@@ -3659,6 +3677,57 @@ mod tests {
                 .unwrap();
             assert_eq!(strip.backend().buffer()[(99, 2)].bg, bg, "themed: {themed}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A click on a link opens it; a drag across one only selects. Ctrl+click opens
+    /// it over a program that takes the mouse.
+    #[tokio::test]
+    async fn clicking_a_link_opens_it() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = vec![info(1)];
+        let mut view = Attached::new(1, "proj1".into(), None);
+        let mut screen = update(true, vec![row(0, "see https://example.com/x now")]);
+        screen.size = Size { cols: 80, rows: 10 };
+        view.apply(screen);
+        app.view = Some(view);
+        let main = app.split_body(Rect::new(0, 0, 100, 20)).0;
+        let (x, y) = (main.x + 8, main.y);
+        let opened = || links::OPENED.with(|o| std::mem::take(&mut *o.borrow_mut()));
+
+        app.on_mouse(Mouse::at(MouseKind::Press, x, y)).await;
+        app.on_mouse(Mouse::at(MouseKind::Release, x, y)).await;
+        assert_eq!(opened(), ["https://example.com/x"]);
+        assert!(app.view.as_ref().unwrap().selection.is_none());
+
+        app.on_mouse(Mouse::at(MouseKind::Press, x, y)).await;
+        app.on_mouse(Mouse::at(MouseKind::Drag, x + 3, y)).await;
+        app.on_mouse(Mouse::at(MouseKind::Release, x + 3, y)).await;
+        assert!(opened().is_empty(), "a drag selects");
+
+        app.on_mouse(Mouse::at(MouseKind::Press, main.x + 1, y))
+            .await;
+        app.on_mouse(Mouse::at(MouseKind::Release, main.x + 1, y))
+            .await;
+        assert!(opened().is_empty(), "not on the link");
+
+        app.view.as_mut().unwrap().modes.mouse_click = true;
+        app.on_mouse(Mouse::at(MouseKind::Press, x, y)).await;
+        app.on_mouse(Mouse::at(MouseKind::Release, x, y)).await;
+        assert!(opened().is_empty(), "the program's click");
+        let ctrl = Mouse {
+            code: 16,
+            ..Mouse::at(MouseKind::Press, x, y)
+        };
+        app.on_mouse(ctrl).await;
+        assert_eq!(opened(), ["https://example.com/x"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

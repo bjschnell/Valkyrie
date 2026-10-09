@@ -3,6 +3,7 @@
 //! `App::view` is the focused pane, which gets the keyboard and the bar; the others
 //! are in `App::others`.
 
+use crate::links;
 use crate::mouse::{self, Mouse, MouseKind};
 use crate::{App, Attached, MENU_WIDTH, Menu, MenuKind, reset_terminal_modes, write_modes};
 use ratatui::layout::{Position, Rect};
@@ -476,6 +477,14 @@ impl App {
             ..m
         };
         let pane = self.pane(target)?;
+        // Ctrl+click opens a link even over a program that takes the mouse.
+        if m.kind == MouseKind::Press
+            && m.code & 16 != 0
+            && let Some(url) = links::url_at(pane.shown(), pane.cols, local.x, local.y)
+        {
+            self.open_link(target, &url);
+            return None;
+        }
         if pane.modes.wants_mouse() {
             if let Some(bytes) = mouse::encode(&m, local.x, local.y, pane.modes) {
                 let _ = self.client.input(target, bytes);

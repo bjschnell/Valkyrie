@@ -3,8 +3,9 @@
 //! that asked for the mouse gets each report over its pane, moved into its own cells
 //! and encoded as it asked (`encode`). Otherwise the wheel scrolls back, a drag
 //! selects, and the selection is copied to the outer terminal's clipboard (OSC 52, so
-//! it works over SSH). Shift still gives the terminal's own selection in most
-//! terminals.
+//! it works over SSH), and a click on a link opens it (`links`); Ctrl+click opens
+//! one even over a program that wants the mouse. Shift still gives the terminal's
+//! own selection in most terminals.
 
 use base64::Engine;
 use std::io::Write;
@@ -316,7 +317,7 @@ impl Selection {
 }
 
 /// A row as one string per cell; a wide character's second cell is empty.
-fn row_cells(row: Option<&Row>) -> Vec<String> {
+pub(crate) fn row_cells(row: Option<&Row>) -> Vec<String> {
     let mut cells: Vec<String> = Vec::new();
     for span in row.map(|r| r.spans.as_slice()).unwrap_or_default() {
         while cells.len() < span.x as usize {
