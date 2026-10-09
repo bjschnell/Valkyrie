@@ -16,6 +16,9 @@ pub const CHURN_LINES: u64 = 150;
 /// tokens with a slash or an extension, found below `root` (or `cwd`).
 pub fn anchors(root: &Path, cwd: &Path, text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let Ok(root) = valkyrie_proto::canonical(root) else {
+        return out;
+    };
     for token in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}".contains(c)) {
         let token = token.trim_end_matches(['.', '!', '?']);
         let looks_like_path = token.contains('/')
@@ -33,13 +36,17 @@ pub fn anchors(root: &Path, cwd: &Path, text: &str) -> Vec<String> {
             .chain(path.is_absolute().then(|| path.to_path_buf()))
             .find(|p| p.exists());
         let Some(found) = found else { continue };
-        let Ok(found) = std::fs::canonicalize(&found) else {
+        let Ok(found) = valkyrie_proto::canonical(&found) else {
             continue;
         };
-        let Ok(rel) = found.strip_prefix(root) else {
+        let Ok(rel) = found.strip_prefix(&root) else {
             continue;
         };
         let rel = rel.display().to_string();
+        // Decision files can be exported to a repo shared across platforms, and
+        // Git pathspecs use forward slashes on Windows too.
+        #[cfg(windows)]
+        let rel = rel.replace('\\', "/");
         if !rel.is_empty() && !out.contains(&rel) {
             out.push(rel);
         }
