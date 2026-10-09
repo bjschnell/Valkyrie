@@ -185,6 +185,20 @@ fi
     [IO.File]::WriteAllText((Join-Path $fragments 'valkyrie.json'), ($fragment | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
     Say "added a 'Valkyrie' profile to Windows Terminal"
 
+    # A `valk` command for Windows shells, which runs the one inside WSL.
+    $binDir = Join-Path $env:LOCALAPPDATA 'Programs\Valkyrie'
+    New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+    $shim = Join-Path $binDir 'valk.cmd'
+    $shimText = "@echo off`r`nrem Runs valk inside WSL; written by install.ps1.`r`n" +
+        "wsl.exe -d $distro --cd ~ --exec bash -lc ""exec valk \""`$@\"""" valk %*`r`n"
+    [IO.File]::WriteAllText($shim, $shimText, (New-Object Text.UTF8Encoding $false))
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not (($userPath -split ';') -contains $binDir)) {
+        [Environment]::SetEnvironmentVariable('Path', (@($userPath, $binDir) | Where-Object { $_ }) -join ';', 'User')
+    }
+    if (-not (($env:Path -split ';') -contains $binDir)) { $env:Path += ";$binDir" }
+    Say "added a 'valk' command for PowerShell and cmd"
+
     # 4. Keep WSL running with no window open, so agents keep working.
     $wslconfig = Join-Path $env:USERPROFILE '.wslconfig'
     $config = ''
@@ -205,9 +219,12 @@ fi
         }
     }
 
-    Say 'done. Open Windows Terminal and pick the Valkyrie profile.'
+    Say "done. Type 'valk' in a new terminal, or pick the Valkyrie profile in Windows"
+    Say 'Terminal. Terminals that were already open need a restart to see either.'
     if (Get-Command wt.exe -ErrorAction SilentlyContinue) {
-        if (Ask 'Open it now?') { & wt.exe -p Valkyrie }
+        # Not `wt -p Valkyrie`: a running Terminal hasn't read the new profile,
+        # and falls back to the default one.
+        if (Ask 'Open it now?') { & wt.exe new-tab --title Valkyrie $shim }
     } else {
         Warn 'Windows Terminal is not installed: winget install Microsoft.WindowsTerminal'
     }

@@ -92,7 +92,12 @@ It:
 3. offers to install Claude Code inside WSL if it isn't there.
 4. adds a **Valkyrie** profile to Windows Terminal, as a fragment, so your
    `settings.json` is untouched. It runs `wsl.exe -d Ubuntu --cd ~ --exec bash -lc valk`.
-5. offers to keep WSL running with no window open (below).
+5. adds a `valk` command for PowerShell and cmd (`%LocalAppData%\Programs\Valkyrie`,
+   on your user PATH) that runs the one inside WSL.
+6. offers to keep WSL running with no window open (below).
+
+Windows Terminal reads new profiles, and new terminals pick up PATH, only when they
+start. If it was open while you installed, restart it to see the profile and `valk`.
 
 Rerun the same line to update. Clone repos into the Linux filesystem (`~/repos`), not
 `/mnt/c`: it's much faster, and file watching works. Behind a corporate proxy, set
