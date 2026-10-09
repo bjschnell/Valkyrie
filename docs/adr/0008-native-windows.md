@@ -41,10 +41,11 @@ while a new one is installed. The WSL installer remains as `install-wsl.ps1`.
 The Linux workspace tests pass with local socket and PTY access. Windows Rust code
 and tests pass a cross-target type check and Clippy from Linux, using clang-cl and
 stub CRT headers for ring. This does not produce or run a linked Windows executable.
-The Windows CI job builds with MSVC and runs named-pipe, ConPTY, shell-directory,
-exit-code, duplicate-daemon, and npm-launcher tests. It also parses both PowerShell
-installers. Windows runtime and installer behavior must pass that job and a manual
-Windows Terminal check before release.
+The Windows CI job builds with MSVC. Named-pipe and ConPTY integration tests have
+passed on Windows, covering shell directories, exit codes, termination, duplicate
+daemons, and npm launcher arguments. CI also parses both PowerShell installers.
+Release publication requires both platform jobs to pass. Interactive Windows
+Terminal input and Task Scheduler setup still need a manual Windows check.
 
 Windows ARM64 native builds and 32-bit process directory inspection are outside this
 implementation. Windows ARM64 can continue using the WSL installer. Job assignment

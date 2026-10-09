@@ -310,14 +310,10 @@ mod tests {
             json!({"command": "echo '*** Update File: x.rs'"}),
             5,
         );
-        let files: Vec<_> = a
-            .edited_since(0)
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
+        let files = a.edited_since(0);
         assert_eq!(
             files,
-            ["/r/src/a.rs", "/r/d.rs", "/r/src/c.rs", "/r/src/b.rs"]
+            ["/r/src/a.rs", "/r/d.rs", "/r/src/c.rs", "/r/src/b.rs"].map(PathBuf::from)
         );
         a.note(
             &json!({"hook_event_name":"UserPromptSubmit","prompt":"\n  fix the login bug\nmore"}),

@@ -66,11 +66,9 @@ mod tests {
 
     #[test]
     fn a_hook_names_its_transcript() {
-        let p = json!({"transcript_path": "/home/u/.claude/projects/-x/abc.jsonl"});
-        assert_eq!(
-            from_hook(&p),
-            Some(PathBuf::from("/home/u/.claude/projects/-x/abc.jsonl"))
-        );
+        let path = std::env::temp_dir().join("claude/projects/-x/abc.jsonl");
+        let p = json!({"transcript_path": path});
+        assert_eq!(from_hook(&p), Some(path));
         assert_eq!(
             from_hook(&json!({"transcript_path": "rel/abc.jsonl"})),
             None

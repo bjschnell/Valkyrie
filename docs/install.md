@@ -104,10 +104,10 @@ cargo build --locked --release -p valkyrie
 .\target\release\valk.exe
 ```
 
-The Windows runtime has been cross-checked from Linux. The Windows CI job runs the
-named-pipe and ConPTY integration tests; a Windows release should be published only
-after that job passes. Local cross-compilation does not validate console input or
-process lifetime behavior on a real Windows machine.
+The named-pipe and ConPTY integration tests have run on Windows CI, including
+input/output, exit codes, process termination, directory tracking, and npm launcher
+arguments. Releases require the Windows and Linux CI checks to pass. Interactive
+Windows Terminal input and Task Scheduler setup still need a manual check.
 
 ## Windows (WSL2)
 

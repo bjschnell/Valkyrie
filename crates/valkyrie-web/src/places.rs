@@ -33,16 +33,11 @@ pub struct Places {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    valkyrie_proto::home_dir()
 }
 
 pub fn shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".into())
+    valkyrie_proto::default_shell()
 }
 
 pub fn place(path: &Path, home: &Path) -> Place {
@@ -56,7 +51,12 @@ pub fn place(path: &Path, home: &Path) -> Place {
 fn label(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => {
+            let rest = rest.display().to_string();
+            #[cfg(windows)]
+            let rest = rest.replace('\\', "/");
+            format!("~/{rest}")
+        }
         Err(_) => path.display().to_string(),
     }
 }
@@ -111,8 +111,8 @@ pub struct Listing {
 
 /// The folders in `path` (`~` and `~/…` allowed), hidden ones last.
 pub fn list(path: &str, home: &Path) -> std::io::Result<Listing> {
-    let path = expand(path, home).canonicalize()?;
-    let home = &home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let path = valkyrie_proto::canonical(&expand(path, home))?;
+    let home = &valkyrie_proto::canonical(home).unwrap_or_else(|_| home.to_path_buf());
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&path)?
         .flatten()
         .map(|e| e.path())

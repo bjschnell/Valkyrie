@@ -4188,6 +4188,11 @@ mod tests {
         let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
+        // Match the layout used below without depending on a host console.
+        app.fixed_size = Some(Size {
+            cols: 100,
+            rows: 20,
+        });
         app.settings = Settings::default();
         app.sessions = vec![info(1)];
         let mut view = Attached::new(1, "proj1".into(), None);
