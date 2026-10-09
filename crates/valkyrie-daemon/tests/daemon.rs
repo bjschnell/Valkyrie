@@ -305,7 +305,10 @@ async fn input_to_a_program_not_reading_stdin_does_not_stall_the_daemon() {
         client.input(stuck, vec![b'x'; 64 * 1024]).unwrap();
     }
     let text = tokio::time::timeout(
-        Duration::from_secs(2),
+        // Debug JSON decoding of the 4 MiB input backlog takes longer on shared
+        // CI runners. A blocked PTY writer would wait for the 30-second sleep,
+        // so this still detects a worker stalled by synchronous input writes.
+        Duration::from_secs(10),
         wait_dump(&client, live, |t| t.contains("ok")),
     )
     .await
