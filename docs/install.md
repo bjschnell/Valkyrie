@@ -11,7 +11,7 @@ There are two ways in:
   with `valk upgrade`, and every session keeps running.
 
 Valkyrie needs a Unix: PTYs, unix sockets, and process inspection. On Windows it runs
-inside WSL2.
+inside WSL2, and `install.ps1` sets that up ([Windows](#windows-wsl2)).
 
 ## Linux
 
@@ -66,58 +66,55 @@ To cut a release, from a checkout: `git tag v0.0.2 && git push origin v0.0.2`. T
 ## Windows (WSL2)
 
 Valkyrie runs inside the WSL Linux VM, and you use it from Windows Terminal. Your
-agents (Claude Code, Codex) and the repos you work on live in WSL too.
+agents (Claude Code, Codex) and the repos you work on live in WSL too. A Windows-side
+`claude` isn't visible to Valkyrie.
 
-1. **Install WSL2** from an administrator PowerShell, then reboot:
-   ```powershell
-   wsl --install -d Ubuntu
-   ```
-   On a managed laptop this may need IT. `wsl --status` shows whether it's already
-   enabled.
-2. **Tools inside Ubuntu:**
-   ```sh
-   sudo apt update && sudo apt install -y build-essential git curl pulseaudio-utils
-   ```
-   `build-essential` is only needed to build from a checkout. `pulseaudio-utils` gives
-   `paplay`. WSLg forwards it to Windows audio, so pings make a sound.
-3. **Install valk.** Either take the [prebuilt binary](#prebuilt-binary-no-checkout),
-   which keeps the source off the machine:
-   ```sh
-   sudo apt install -y gh && gh auth login
-   gh release download -R bjschnell/Valkyrie -p install-release.sh -O - | bash
-   ```
-   or **clone into the Linux filesystem** (`~/repos`), not `/mnt/c`: it's much faster,
-   and file watching works. The repo is private, so authenticate first, with
-   `gh auth login` or an SSH key inside WSL.
-   ```sh
-   git clone https://github.com/bjschnell/Valkyrie.git ~/repos/valkyrie
-   cd ~/repos/valkyrie && ./install.sh
-   ```
-   Behind a corporate proxy, set `HTTPS_PROXY` before running it, so cargo can reach
-   crates.io.
-4. **Install your agents inside WSL** using their Linux instructions. A Windows-side
-   `claude` isn't visible to Valkyrie.
-5. **A Windows Terminal profile** that opens straight into Valkyrie. Go to Settings →
-   Add a new profile, and set:
-   - Command line: `wsl.exe -d Ubuntu --exec bash -lc valk`. The login shell puts
-     `~/.local/bin` (prebuilt) or `~/.cargo/bin` (from a checkout) on PATH.
-   - Font: Cascadia Mono, JetBrains Mono or another font with the `⌂ ● ⠋` glyphs.
-   - Starting directory doesn't matter; sessions keep their own.
+**The installer** does all of it from PowerShell. With the GitHub CLI logged in
+(`winget install GitHub.cli`, open a new window, `gh auth login`):
 
-   Windows Terminal binds neither `Ctrl-\` nor `Ctrl-]` by default. If either does
-   nothing, look for a conflicting action under Settings → Actions.
+```powershell
+gh release download -R bjschnell/Valkyrie -p install.ps1 -O - | Out-String | iex
+```
+
+Or download `install.ps1` from the release page in your browser and run
+`powershell -ExecutionPolicy Bypass -File install.ps1`. Then it signs in inside WSL
+instead, with a code to paste into github.com.
+
+It:
+1. installs WSL2 and Ubuntu if you have no distro (Windows asks for permission, and
+   may want a restart; then run the same line again), or uses your default one.
+   `VALK_WSL_DISTRO` picks another.
+2. inside it, installs `curl`, `gh` and `pulseaudio-utils` (for pings) if they're
+   missing, reuses your Windows GitHub login, and runs `install-release.sh`.
+3. offers to install Claude Code inside WSL if it isn't there.
+4. adds a **Valkyrie** profile to Windows Terminal, as a fragment, so your
+   `settings.json` is untouched. It runs `wsl.exe -d Ubuntu --cd ~ --exec bash -lc valk`.
+5. offers to keep WSL running with no window open (below).
+
+Rerun the same line to update. Clone repos into the Linux filesystem (`~/repos`), not
+`/mnt/c`: it's much faster, and file watching works. Behind a corporate proxy, set
+`HTTPS_PROXY` inside WSL. Windows Terminal binds neither `Ctrl-\` nor `Ctrl-]` by
+default. If either does nothing, look for a conflicting action under Settings → Actions.
 
 **WSL shuts its VM down** a little while after the last WSL window closes, and that
 stops the daemon. Sessions come back on the next `valk` (the restore list resumes
-Claude and Codex conversations), but running work stops. To keep agents working with
-no window open, raise the idle timeout in `%UserProfile%\.wslconfig`:
+Claude and Codex conversations), but running work stops. The installer offers to
+raise the idle timeout in `%UserProfile%\.wslconfig`:
 
 ```ini
 [wsl2]
 vmIdleTimeout=-1
 ```
 
-Then run `wsl --shutdown` once for it to take effect.
+It takes effect the next time WSL starts, or after `wsl --shutdown`.
+
+**By hand**, the installer's steps are: `wsl --install -d Ubuntu` from an
+administrator PowerShell and reboot; inside Ubuntu,
+`sudo apt install -y curl gh pulseaudio-utils`, `gh auth login`, and the
+[prebuilt binary](#prebuilt-binary-no-checkout) line (or `./install.sh` from a
+checkout in `~/repos`, which also needs `build-essential`); then a Windows Terminal
+profile with the command line above and a font with the `⌂ ● ⠋` glyphs, such as
+Cascadia Mono.
 
 ## After installing
 

@@ -32,7 +32,7 @@ jobs:
         run: |
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
-          gh release upload "$TAG" install-release.sh --clobber
+          gh release upload "$TAG" install-release.sh install.ps1 --clobber
 
   build:
     needs: release

@@ -45,8 +45,8 @@ cd ~/repos/valkyrie && ./install.sh
 This needs a C toolchain. `install.sh` installs Rust with rustup if you don't have
 it.
 
-Valkyrie needs a Unix. On Windows it runs inside WSL2. [docs/install.md](docs/install.md)
-covers each platform, a Windows Terminal profile, and keeping WSL awake.
+Valkyrie needs a Unix. On Windows it runs inside WSL2, and one PowerShell line sets
+it up. [docs/install.md](docs/install.md) covers each platform.
 
 ## Use
 

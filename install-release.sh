@@ -17,7 +17,8 @@ case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) target=x86_64-unknown-linux-musl ;;
     Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-musl ;;
     Darwin-arm64) target=aarch64-apple-darwin ;;
-    *) die "no prebuilt valk for $(uname -sm). On Windows, run this inside WSL2 (docs/install.md)." ;;
+    MINGW* | MSYS* | CYGWIN*) die "on Windows, run install.ps1 from PowerShell instead: it sets up WSL2 (docs/install.md)." ;;
+    *) die "no prebuilt valk for $(uname -sm). On Windows, use install.ps1 (docs/install.md)." ;;
 esac
 
 # The repo is private, so downloads go through an authenticated gh.
