@@ -36,8 +36,9 @@ use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{
-    AgentState, AgentStatus, Color, CursorShape, Modes, Pane, QueueItem, Row, ScreenUpdate,
-    ScrollAnchor, ServerMsg, SessionId, SessionInfo, Side, Size, SpawnSpec, Style,
+    AgentState, AgentStatus, Color, CursorShape, Decision, Modes, Pane, QueueItem, ReviewAction,
+    Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId, SessionInfo, Side, Size, SpawnSpec,
+    Style,
 };
 
 /// Ctrl-] — detach from the attached session.
@@ -86,7 +87,9 @@ struct App {
     /// The ranked attention queue, as last pushed by the daemon.
     queue: Vec<QueueItem>,
     sessions: Vec<SessionInfo>,
-    /// One selection over the queue rows followed by the session rows.
+    /// Every project's decisions waiting on a human, oldest first, as last pushed.
+    proposals: Vec<Decision>,
+    /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
     view: Option<Attached>,
     status: String,
@@ -210,6 +213,7 @@ impl App {
             boot: None,
             queue: Vec::new(),
             sessions: Vec::new(),
+            proposals: Vec::new(),
             selected: 0,
             view: None,
             status: String::new(),
@@ -1337,23 +1341,52 @@ impl App {
     }
 
     fn rows(&self) -> usize {
-        self.queue.len() + self.sessions.len()
+        self.proposals.len() + self.queue.len() + self.sessions.len()
     }
 
-    /// Which section the cursor is in and on which session, so it can follow that
-    /// session when rows above it come or go (else `x` would kill the wrong one).
-    fn anchor(&self) -> (bool, Option<SessionId>) {
-        (self.selected < self.queue.len(), self.selection().0)
+    /// The selection's row in the queue, if it is there.
+    fn queue_index(&self) -> Option<usize> {
+        let row = self.selected.checked_sub(self.proposals.len())?;
+        (row < self.queue.len()).then_some(row)
     }
 
-    fn restore(&mut self, (in_queue, id): (bool, Option<SessionId>)) {
-        let found = if in_queue {
-            self.queue.iter().position(|q| Some(q.session) == id)
-        } else {
-            self.sessions
+    /// The selection's row in the sessions, if it is there.
+    fn session_index(&self) -> Option<usize> {
+        self.selected
+            .checked_sub(self.proposals.len() + self.queue.len())
+    }
+
+    /// The proposal under the cursor.
+    fn proposal(&self) -> Option<&Decision> {
+        self.proposals.get(self.selected)
+    }
+
+    /// What the cursor is on, so it can follow that item when rows above it come or
+    /// go (else `x` would kill the wrong session, `a` accept the wrong decision).
+    fn anchor(&self) -> Anchor {
+        match (self.proposal(), self.queue_index()) {
+            (Some(d), _) => Anchor::Proposal(d.project.clone(), d.id),
+            (None, Some(_)) => Anchor::Queue(self.selection().0),
+            (None, None) => Anchor::Session(self.selection().0),
+        }
+    }
+
+    fn restore(&mut self, anchor: Anchor) {
+        let found = match anchor {
+            Anchor::Proposal(project, id) => self
+                .proposals
+                .iter()
+                .position(|d| d.project == project && d.id == id),
+            Anchor::Queue(id) => self
+                .queue
+                .iter()
+                .position(|q| Some(q.session) == id)
+                .map(|i| self.proposals.len() + i),
+            Anchor::Session(id) => self
+                .sessions
                 .iter()
                 .position(|s| Some(s.id) == id)
-                .map(|i| self.queue.len() + i)
+                .map(|i| self.proposals.len() + self.queue.len() + i),
         };
         if let Some(i) = found {
             self.selected = i;
@@ -1366,16 +1399,29 @@ impl App {
     }
 
     /// The session under the cursor, and the queue item if the cursor is in the queue.
+    /// Neither on a proposal.
     fn selection(&self) -> (Option<SessionId>, Option<&QueueItem>) {
-        match self.queue.get(self.selected) {
-            Some(item) => (Some(item.session), Some(item)),
-            None => (
-                self.sessions
-                    .get(self.selected - self.queue.len())
-                    .map(|s| s.id),
-                None,
-            ),
+        if let Some(row) = self.queue_index() {
+            let item = &self.queue[row];
+            return (Some(item.session), Some(item));
         }
+        let session = self.session_index().and_then(|i| self.sessions.get(i));
+        (session.map(|s| s.id), None)
+    }
+
+    /// Accepts or rejects the proposal under the cursor. The daemon pushes the
+    /// shorter list, and the cursor lands on the next one.
+    async fn review(&mut self, action: ReviewAction) {
+        let Some(d) = self.proposal() else { return };
+        let (project, id, title) = (d.project.clone(), d.id, d.title.clone());
+        let done = match action {
+            ReviewAction::Accept => "accepted",
+            _ => "rejected",
+        };
+        self.status = match self.client.review(project, id, action).await {
+            Ok(_) => format!("{done} #{id} {title}"),
+            Err(e) => format!("review failed: {e:#}"),
+        };
     }
 
     async fn on_home_key(&mut self, key: HomeKey) {
@@ -1428,8 +1474,13 @@ impl App {
             HomeKey::Enter => {
                 if let Some(id) = selected {
                     self.attach(id).await;
+                } else if let Some(d) = self.proposal() {
+                    // The whole of it is in the preview, when there is room for one.
+                    self.status = proposal_text(d);
                 }
             }
+            HomeKey::Accept => self.review(ReviewAction::Accept).await,
+            HomeKey::Reject => self.review(ReviewAction::Reject).await,
             HomeKey::Kill => {
                 if let Some(id) = selected {
                     if let Err(e) = self.client.kill(id).await {
@@ -1450,8 +1501,14 @@ impl App {
         }
     }
 
-    /// Returns whether the queue changed.
+    /// Returns whether the queue or the proposals changed.
     fn on_push(&mut self, msg: ServerMsg) -> Result<bool> {
+        if let ServerMsg::Proposals { items } = msg {
+            let anchor = self.anchor();
+            self.proposals = items;
+            self.restore(anchor);
+            return Ok(true);
+        }
         if let ServerMsg::Queue { items } = msg {
             let viewing = self.pane_ids();
             self.pinger.on_queue(&items, &viewing, Instant::now());
@@ -1644,6 +1701,8 @@ fn toast_spans(ping: &Ping, t: &Theme) -> Vec<ratatui::text::Span<'static>> {
 const SPIN_EVERY: Duration = Duration::from_millis(100);
 /// Wide enough for the lists plus a preview of the selected session.
 const PREVIEW_MIN_WIDTH: u16 = 130;
+/// The most proposals shown at once; more scroll.
+const PROPOSAL_ROWS: usize = 6;
 
 impl App {
     fn draw_home(&self, frame: &mut ratatui::Frame, body: Rect, bar: Rect) {
@@ -1658,7 +1717,12 @@ impl App {
         let [header, main] =
             Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
         frame.render_widget(
-            Paragraph::new(header_line(&self.queue, &self.sessions, t)),
+            Paragraph::new(header_line(
+                &self.queue,
+                &self.sessions,
+                self.proposals.len(),
+                t,
+            )),
             header,
         );
 
@@ -1669,19 +1733,50 @@ impl App {
         } else {
             (main, None)
         };
+        // Only while there is something to review, and never more than a few rows:
+        // past those it scrolls with the cursor.
+        let proposals_height = match self.proposals.len() {
+            0 => 0,
+            n => (n.min(PROPOSAL_ROWS) as u16 + 2).min(lists.height / 3),
+        };
         let queue_height = (self.queue.len().max(2) as u16 + 2)
-            .min(lists.height / 2)
+            .min(lists.height.saturating_sub(proposals_height) / 2)
             .max(4);
-        let [queue_area, sessions_area] =
-            Layout::vertical([Constraint::Length(queue_height), Constraint::Fill(1)]).areas(lists);
+        let [proposals_area, queue_area, sessions_area] = Layout::vertical([
+            Constraint::Length(proposals_height),
+            Constraint::Length(queue_height),
+            Constraint::Fill(1),
+        ])
+        .areas(lists);
 
-        let in_queue = self.selected < self.queue.len();
+        let in_proposals = self.proposal().is_some();
+        if proposals_height > 0 {
+            let title = Line::from(vec![
+                " ◇ ".fg(t.accent2).bold(),
+                "decisions to review ".fg(t.fg).bold(),
+                format!("{} ", self.proposals.len()).fg(t.muted),
+            ]);
+            let rows = self.proposals.iter().map(|d| proposal_row(d, t));
+            let mut state =
+                TableState::default().with_selected(in_proposals.then_some(self.selected));
+            frame.render_stateful_widget(
+                proposal_table(rows, t).block(panel(title, t, in_proposals)),
+                proposals_area,
+                &mut state,
+            );
+        }
+
+        let in_queue = self.queue_index().is_some();
         let queue_title = Line::from(vec![
             " ● ".fg(t.needs).bold(),
             "needs you ".fg(t.fg).bold(),
             format!("{} ", self.queue.len()).fg(t.muted),
         ]);
-        let queue_block = panel(queue_title, t, in_queue || self.sessions.is_empty());
+        let queue_block = panel(
+            queue_title,
+            t,
+            in_queue || (self.sessions.is_empty() && !in_proposals),
+        );
         if self.queue.is_empty() {
             let inner = queue_block.inner(queue_area);
             frame.render_widget(queue_block, queue_area);
@@ -1700,7 +1795,7 @@ impl App {
             frame.render_widget(Paragraph::new(calm), mid);
         } else {
             let rows = self.queue.iter().map(|q| queue_row(q, now, spin, t));
-            let mut state = TableState::default().with_selected(in_queue.then_some(self.selected));
+            let mut state = TableState::default().with_selected(self.queue_index());
             frame.render_stateful_widget(table(rows, t).block(queue_block), queue_area, &mut state);
         }
 
@@ -1710,10 +1805,10 @@ impl App {
             format!("{} ", self.sessions.len()).fg(t.muted),
         ]);
         let rows = self.sessions.iter().map(|s| session_row(s, now, spin, t));
-        let mut state = TableState::default()
-            .with_selected((!in_queue).then(|| self.selected - self.queue.len()));
+        let in_sessions = self.session_index().is_some();
+        let mut state = TableState::default().with_selected(self.session_index());
         frame.render_stateful_widget(
-            table(rows, t).block(panel(sessions_title, t, !in_queue)),
+            table(rows, t).block(panel(sessions_title, t, in_sessions)),
             sessions_area,
             &mut state,
         );
@@ -1724,7 +1819,7 @@ impl App {
 
         let mut footer = match &self.renaming {
             Some((id, typed)) => rename_line(*id, typed, t),
-            None => footer_line(&self.status, self.settings.sound, t),
+            None => footer_line(&self.status, self.settings.sound, in_proposals, t),
         };
         if let Some(toast) = self.toast() {
             footer.spans.splice(0..0, toast_spans(toast, t));
@@ -1738,6 +1833,28 @@ impl App {
     /// The selected session: its full summary, then the bottom of its screen.
     fn draw_preview(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
+        if let Some(d) = self.proposal() {
+            let title = Line::from(vec![
+                " ◇ ".fg(t.accent2).bold(),
+                d.title.clone().fg(t.fg).bold(),
+                format!(" #{} ", d.id).fg(t.muted),
+            ]);
+            let mut lines = vec![Line::from(
+                format!(
+                    "{}  ·  {} · {}",
+                    d.kind.as_str(),
+                    d.provenance.by,
+                    short_path(&d.project)
+                )
+                .fg(t.muted),
+            )];
+            lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
+            let body = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(panel(title, t, false));
+            frame.render_widget(body, area);
+            return;
+        }
         let (selected, _) = self.selection();
         let session = selected.and_then(|id| self.sessions.iter().find(|s| s.id == id));
         let Some(session) = session else {
@@ -2629,6 +2746,51 @@ fn name_cell(id: SessionId, name: &str, t: &Theme) -> Cell<'static> {
     ]))
 }
 
+/// `#id  kind  title`, then who proposed it and in which project, muted.
+fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
+    let project = d.project.file_name().map_or_else(
+        || d.project.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    TableRow::new([
+        Cell::from(format!("#{}", d.id).fg(t.muted)),
+        Cell::from(d.kind.as_str().fg(t.accent2)),
+        Cell::from(d.title.clone().fg(t.fg).bold()),
+        Cell::from(format!("{} · {project}", d.provenance.by).fg(t.muted)),
+    ])
+}
+
+fn proposal_table<'a>(rows: impl IntoIterator<Item = TableRow<'a>>, t: &Theme) -> Table<'a> {
+    Table::new(
+        rows,
+        [
+            Constraint::Length(5),
+            Constraint::Length(10),
+            Constraint::Fill(3),
+            Constraint::Fill(1),
+        ],
+    )
+    .column_spacing(1)
+    .row_highlight_style(style::Style::new().bg(t.selection))
+    .highlight_symbol(Line::from("▌".fg(t.accent)))
+    .highlight_spacing(HighlightSpacing::Always)
+}
+
+/// A proposal's body on one line (its title when it has none), with the session it
+/// came from.
+fn proposal_text(d: &Decision) -> String {
+    let body = d.body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut text = if body.is_empty() {
+        d.title.clone()
+    } else {
+        body
+    };
+    if let Some(session) = &d.provenance.session {
+        text.push_str(&format!(" (from {session})"));
+    }
+    text
+}
+
 fn queue_row(q: &QueueItem, now: u64, spin: usize, t: &Theme) -> TableRow<'static> {
     let s = &q.status;
     TableRow::new([
@@ -2668,7 +2830,12 @@ fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'s
 }
 
 /// ` ◆ VALKYRIE  agent control` on the left, colored counts on the right.
-fn header_line(queue: &[QueueItem], sessions: &[SessionInfo], t: &Theme) -> Line<'static> {
+fn header_line(
+    queue: &[QueueItem],
+    sessions: &[SessionInfo],
+    proposals: usize,
+    t: &Theme,
+) -> Line<'static> {
     let mut spans = vec![
         " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
         " agent control ".fg(t.muted),
@@ -2677,6 +2844,15 @@ fn header_line(queue: &[QueueItem], sessions: &[SessionInfo], t: &Theme) -> Line
         let color = t.state(state);
         spans.push(" ".into());
         spans.push(format!(" {n} {} ", state.label()).fg(t.bg).bg(color).bold());
+    }
+    if proposals > 0 {
+        spans.push(" ".into());
+        spans.push(
+            format!(" {proposals} to review ")
+                .fg(t.bg)
+                .bg(t.accent2)
+                .bold(),
+        );
     }
     if spans.len() == 2 {
         spans.push(" ✓ all quiet ".fg(t.done));
@@ -2699,25 +2875,33 @@ fn rename_line(id: SessionId, typed: &str, t: &Theme) -> Line<'static> {
     Line::from(spans).style(style::Style::new().bg(t.panel))
 }
 
-/// The status message, then key hints as chips.
-fn footer_line(status: &str, sound: bool, t: &Theme) -> Line<'static> {
+/// The status message, then key hints as chips: a proposal's own keys while the
+/// cursor is on one.
+fn footer_line(status: &str, sound: bool, proposal: bool, t: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
         spans.push("│".fg(t.border));
     }
-    for (key, what) in [
-        ("↩", "attach"),
-        ("⇥", "top"),
-        ("s/S", "seen"),
+    let context: &[(&str, &str)] = if proposal {
+        &[("a", "accept"), ("d", "reject"), ("↩", "read")]
+    } else {
+        &[
+            ("↩", "attach"),
+            ("⇥", "top"),
+            ("s/S", "seen"),
+            ("x", "kill"),
+            ("R", "rename"),
+        ]
+    };
+    let general = [
         ("n", "new"),
-        ("x", "kill"),
-        ("R", "rename"),
         ("t", "theme"),
         (",", "settings"),
         ("m", if sound { "sound" } else { "muted" }),
         ("q", "quit"),
-    ] {
+    ];
+    for &(key, what) in context.iter().chain(&general) {
         spans.push(" ".into());
         spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
         spans.push(format!(" {what}").fg(t.muted));
@@ -3051,6 +3235,15 @@ fn stdin_bytes() -> mpsc::Receiver<Vec<u8>> {
     rx
 }
 
+/// Where the home screen's cursor is, by item rather than row (`App::anchor`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Anchor {
+    /// A decision, by project and id.
+    Proposal(PathBuf, u32),
+    Queue(Option<SessionId>),
+    Session(Option<SessionId>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HomeKey {
     Up,
@@ -3070,6 +3263,10 @@ enum HomeKey {
     /// Ping sounds on/off.
     Sound,
     Rename,
+    /// Accept the selected proposal.
+    Accept,
+    /// Reject the selected proposal.
+    Reject,
     Quit,
 }
 
@@ -3112,6 +3309,8 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
             b',' => keys.push(HomeKey::Settings),
             b'm' => keys.push(HomeKey::Sound),
             b'R' => keys.push(HomeKey::Rename),
+            b'a' => keys.push(HomeKey::Accept),
+            b'd' => keys.push(HomeKey::Reject),
             b'q' | 0x03 => keys.push(HomeKey::Quit),
             _ => {}
         }
@@ -3147,6 +3346,7 @@ mod tests {
         assert_eq!(home_keys(b"\x1b[<0;5;3mj"), [HomeKey::Down]);
         // Nor is the terminal's answer to an image command.
         assert_eq!(home_keys(b"\x1b_Gi=1;EINVAL:q\x1b\\j"), [HomeKey::Down]);
+        assert_eq!(home_keys(b"ad"), [HomeKey::Accept, HomeKey::Reject]);
     }
 
     /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)
@@ -3233,6 +3433,181 @@ mod tests {
             cwd: "/".into(),
             status: AgentStatus::default(),
         }
+    }
+
+    fn proposed(project: &str, id: u32, title: &str) -> Decision {
+        Decision {
+            id,
+            project: project.into(),
+            title: title.into(),
+            body: String::new(),
+            kind: valkyrie_proto::DecisionKind::Decision,
+            status: valkyrie_proto::DecisionStatus::Proposed,
+            created: 0,
+            updated: 0,
+            supersedes: None,
+            superseded_by: None,
+            provenance: valkyrie_proto::Provenance {
+                by: "claude".into(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// An App over a socket nobody answers: enough for state and drawing.
+    async fn idle_app(dir: &std::path::Path) -> (App, tokio::net::UnixListener) {
+        let _ = std::fs::remove_dir_all(dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(dir).unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        // Not whatever this machine's settings.toml says.
+        app.settings = Settings::default();
+        (app, listener)
+    }
+
+    /// One selection runs over the proposals, then the queue, then the sessions,
+    /// and stays on the same proposal as the list changes.
+    #[tokio::test]
+    async fn selection_runs_over_proposals_queue_and_sessions() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-prop-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1), info(2)];
+        app.queue = vec![queued(2)];
+        app.selected = 1; // session 1, under the queue's row
+        assert!(
+            app.on_push(ServerMsg::Proposals {
+                items: vec![proposed("/r/a", 1, "one"), proposed("/r/b", 1, "two")],
+            })
+            .unwrap()
+        );
+        // The rows above moved the cursor down with its session.
+        assert_eq!((app.selected, app.selection().0), (3, Some(1)));
+
+        let walk: Vec<_> = (0..app.rows())
+            .map(|i| {
+                app.selected = i;
+                (
+                    app.proposal().map(|d| d.title.clone()),
+                    app.queue_index(),
+                    app.selection().0,
+                )
+            })
+            .collect();
+        assert_eq!(
+            walk,
+            [
+                (Some("one".into()), None, None),
+                (Some("two".into()), None, None),
+                (None, Some(0), Some(2)),
+                (None, None, Some(1)),
+                (None, None, Some(2)),
+            ]
+        );
+
+        // On "two" (/r/b #1, not /r/a #1): a new one ahead keeps it there...
+        app.selected = 1;
+        app.on_push(ServerMsg::Proposals {
+            items: vec![
+                proposed("/r/c", 3, "new"),
+                proposed("/r/a", 1, "one"),
+                proposed("/r/b", 1, "two"),
+            ],
+        })
+        .unwrap();
+        assert_eq!(app.proposal().unwrap().title, "two");
+        // ...and once it is reviewed, the cursor stays where it was: on the next row.
+        app.on_push(ServerMsg::Proposals {
+            items: vec![proposed("/r/c", 3, "new"), proposed("/r/a", 1, "one")],
+        })
+        .unwrap();
+        assert_eq!((app.selected, app.queue_index()), (2, Some(0)));
+        // The last one gone: a session the cursor was on stays under it.
+        app.selected = 3;
+        app.on_push(ServerMsg::Proposals { items: vec![] }).unwrap();
+        assert_eq!((app.selected, app.selection().0), (1, Some(1)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The proposals list sits above the queue, with its keys in the bar and the
+    /// selected one's body in the preview.
+    #[tokio::test]
+    async fn home_screen_lists_proposals_to_review() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-review-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1)];
+        let mut d = proposed("/home/u/repos/api", 7, "Use sqlx, not diesel");
+        d.kind = valkyrie_proto::DecisionKind::Constraint;
+        d.body = "Async all the way down.\nDiesel blocks.".into();
+        app.on_push(ServerMsg::Proposals {
+            items: (0..9)
+                .map(|i| proposed("/r/x", 10 + i, "more"))
+                .chain([d])
+                .collect(),
+        })
+        .unwrap();
+        let render = |app: &App| {
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+
+        // At the top: the first rows only, and the count of them all.
+        app.selected = 0;
+        let text = render(&app);
+        for want in [
+            "10 to review",
+            "decisions to review 10",
+            "#10",
+            "claude · x",
+            "accept",
+        ] {
+            assert!(text.contains(want), "lacks {want:?}");
+        }
+        assert!(!text.contains("sqlx"));
+
+        // The last one: the list scrolls to it, and the preview reads it.
+        app.selected = 9;
+        let text = render(&app);
+        for want in [
+            "#7",
+            "constraint",
+            "Use sqlx, not diesel",
+            "claude · api",
+            "Diesel blocks.",
+        ] {
+            assert!(text.contains(want), "lacks {want:?}");
+        }
+
+        // On a session, its own keys again.
+        app.selected = 10;
+        let text = render(&app);
+        assert!(text.contains("attach") && !text.contains("accept"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn proposal_text_is_one_line() {
+        let mut d = proposed("/r", 1, "title");
+        assert_eq!(proposal_text(&d), "title");
+        d.body = "first\n\n  second ".into();
+        d.provenance.session = Some("api".into());
+        assert_eq!(proposal_text(&d), "first second (from api)");
     }
 
     #[tokio::test]

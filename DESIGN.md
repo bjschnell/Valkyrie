@@ -122,6 +122,12 @@ Audited 2026-10-06: the author's plugin is **Leader** (`~/repos/leader`, Python 
 
 ## 6. Project context layer (core differentiator)
 
+**First slice (done 2026-10-08, [ADR-0007](docs/adr/0007-context-store.md)).** Storage is decided: the state dir, one markdown file per decision, export to `.valkyrie/decisions/` on request. A project is a repository, so every worktree shares its main checkout's decisions. The daemon is the only writer.
+- **Capture:** `valk decide [-k kind] TITLE [WHY]`. From a human it is active at once (or `--propose`). From an agent's session it is only `proposed`. The daemon decides which by the connecting process's peer pid and its ancestry, not by `$VALK_SESSION`, so an agent that unsets it still only proposes. An agent can't review either.
+- **Review:** proposals are pushed with the queue (`ServerMsg::Proposals`, protocol 10). The phone shows them as cards above the inbox (Accept, Reject, Edit and accept). The TUI lists them above the queue. `valk decisions accept|reject|retire ID` works too. Accepting a decision that `--supersedes` another retires the old one as `superseded`.
+- **Injection:** Claude's per-session `--settings` gets a second `SessionStart` hook, `valk context-hook claude`, which returns `additionalContext`: the active decisions, constraints first and then newest, cut at 6,000 characters, plus one line on how to propose. It fires on startup, resume, `/clear` and compaction. The hook reads the files directly and never fails.
+- **Next:** Codex injection, extraction (§6.3, locked-down `claude -p --model haiku`, decided 2026-10-08), corrections as proposals ("no, we use X"), sibling-session awareness (what other agents in the same repo are editing right now), staleness (§6.4), MCP and `valk handoff` (§6.5).
+
 ### 6.1 Problem
 Repeatedly telling agents "check session X, we decided Y", and pasting large handoff markdowns.
 
@@ -463,11 +469,11 @@ M5 — Supervisor agent + policy engine.
 - ~~VT crate~~ → alacritty_terminal ([ADR-0001](docs/adr/0001-vt-engine.md)).
 - ~~tmux vs owned PTY~~ → owned PTY; M0 exit criteria met ([ADR-0002](docs/adr/0002-no-tmux.md)).
 - ~~PTY-native-with-hooks vs ACP-structured~~ → PTY-native with hooks for M1 ([ADR-0005](docs/adr/0005-state-signals.md)); ACP stays an opt-in idea for the phone UX.
-- Repo-local vs daemon-local decision storage.
+- ~~Repo-local vs daemon-local decision storage~~ → state dir, export on request ([ADR-0007](docs/adr/0007-context-store.md)).
 - ~~Web listener default~~ → off; opt-in via config (§8).
 - Web client: TS vs Rust/WASM.
 - License (MIT vs Apache-2.0 vs dual).
-- Summarizer/extractor model strategy: local-only default vs bring-your-own API key.
+- ~~Summarizer/extractor model strategy~~ → locked-down `claude -p --model haiku` on the user's own login (2026-10-08).
 - Name.
 
 ## 13. M0 spec (complete 2026-10-06)

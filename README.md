@@ -103,6 +103,24 @@ prints another, `valk web devices` lists paired devices, and `valk web revoke <n
 unpairs one. The server listens only on localhost, and the daemon never listens on a
 network.
 
+### Project decisions
+
+Tell Valkyrie something once, and every agent in the repo starts with it:
+
+```sh
+valk decide -k constraint "Never pkill by pattern" "It killed tool shells; kill exact pids."
+valk decisions            # this repo's decisions (--all: retired ones too)
+valk decisions preview    # what an agent gets at session start
+valk decisions export     # copy them into .valkyrie/decisions/ for git
+```
+
+Claude sessions get the active decisions when they start, after `/clear` and
+after compaction. Nothing is written to CLAUDE.md. Agents are told they can
+propose decisions with `valk decide`, but a proposal applies only after you accept
+it: on the phone, on the TUI home screen, or with `valk decisions accept <id>`.
+An agent can't accept its own. Every worktree of a repo shares its decisions,
+which are kept in `~/.local/state/valkyrie/context` (ADR-0007).
+
 ## How it's built
 
 A Rust workspace:
@@ -114,6 +132,7 @@ A Rust workspace:
 | `valkyrie-term` | per-session screen model on `alacritty_terminal` |
 | `valkyrie-agents` | agent adapters, state tracking, queue ranking (pure logic) |
 | `valkyrie-proto` | wire protocol: messages, framing, async client |
+| `valkyrie-context` | project decisions: store, project roots, the injected block |
 | `valkyrie-tui` | the terminal client (ratatui) |
 | `valkyrie-web` | serves the web app and bridges it to the daemon |
 
@@ -133,8 +152,9 @@ history, and [docs/adr](docs/adr) holds the architecture decisions.
 
 Early and in daily use by its author. Built so far: the daemon, TUI, attention queue,
 splits, upgrades, restore after a restart, and the phone app. Still to come, per
-DESIGN.md: the project context layer (decisions that carry across sessions and
-agents) and a supervisor agent.
+DESIGN.md: the rest of the project context layer (extraction from transcripts,
+staleness, MCP, handoff, Codex injection) and a supervisor agent. Its first slice is
+in: decisions, review, and injection into Claude.
 
 ## License
 
