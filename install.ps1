@@ -53,9 +53,9 @@
     }
     if (-not ($distros | Where-Object { $_.Name -eq $distro })) {
         Say "installing WSL2 and $distro. Windows may ask for permission."
-        Say "When $distro asks, choose a Linux username and password. If it then"
-        Say "leaves you at a Linux prompt, type 'exit' to carry on here."
-        & wsl.exe --install -d $distro
+        # --no-launch: launching runs the distro's first-run setup, which ends in
+        # a Linux shell that this script would sit waiting behind.
+        & wsl.exe --install -d $distro --no-launch
         if (-not (Get-Distros | Where-Object { $_.Name -eq $distro })) {
             Say "restart Windows if it asked you to, then run this installer again."
             return
@@ -66,9 +66,31 @@
         Fail "$distro runs on WSL 1; valk needs WSL 2. Convert it with: wsl --set-version $distro 2"
         return
     }
-    if ((Wsl -d $distro --exec id -u) -eq '0') {
-        Fail "$distro has no Linux user yet. Open '$distro' from the Start menu once to create one, then run this again."
-        return
+    # The first-run setup didn't run (see --no-launch), so create the user
+    # here. A new Ubuntu already starts as uid 1000 before that user exists,
+    # so check for the account, not just for root.
+    function Test-LinuxUser { [bool](Wsl -d $distro --exec sh -c 'u=$(id -u); test $u -ne 0 && getent passwd $u') }
+    if (-not (Test-LinuxUser)) {
+        Say "create your Linux user in $distro. It needn't match your Windows name;"
+        Say "its password is what sudo asks for."
+        $suggest = $env:USERNAME.ToLower() -replace '[^a-z0-9_-]', ''
+        do {
+            $name = Read-Host "Linux username [$suggest]"
+            if (-not $name) { $name = $suggest }
+        } until ($name -cmatch '^[a-z_][a-z0-9_-]{0,31}$')
+        # uid 1000 is the one a new distro starts as; take another if it's used.
+        & wsl.exe -d $distro -u root --exec sh -c 'if getent passwd 1000 >/dev/null; then useradd -m -s /bin/bash -G sudo $1; else useradd -m -u 1000 -s /bin/bash -G sudo $1; fi' sh $name
+        for ($i = 0; $i -lt 3; $i++) {
+            & wsl.exe -d $distro -u root --exec passwd $name
+            if ($LASTEXITCODE -eq 0) { break }
+        }
+        # Older distros start as root: make this user the default.
+        & wsl.exe -d $distro -u root --exec sh -c 'printf ''\n[user]\ndefault=%s\n'' $1 >> /etc/wsl.conf' sh $name
+        & wsl.exe --terminate $distro | Out-Null
+        if (-not (Test-LinuxUser)) {
+            Fail "couldn't set up a Linux user in $distro (see above). Run this again to retry."
+            return
+        }
     }
     Say "using WSL distro $distro"
 
@@ -100,21 +122,29 @@ if [ ${#need[@]} -gt 0 ]; then
     sudo apt-get install -y -qq "${need[@]}" >/dev/null
 fi
 
-if ! gh auth status >/dev/null 2>&1; then
-    if [ -n "${VALK_GH_TOKEN:-}" ]; then
+# The repo is private: GitHub calls it "not found" to an account that can't
+# see it, so check access rather than just being logged in.
+repo=bjschnell/Valkyrie
+can_see() { gh api "repos/$repo" --silent >/dev/null 2>&1; }
+if ! can_see; then
+    if [ -n "${VALK_GH_TOKEN:-}" ] && GH_TOKEN="$VALK_GH_TOKEN" can_see; then
         say "signing gh in with your Windows GitHub login"
         printf '%s\n' "$VALK_GH_TOKEN" | gh auth login --with-token
     else
-        say "sign in to GitHub: the repo is private"
+        if [ -n "${VALK_GH_TOKEN:-}" ]; then
+            say "your Windows GitHub login ($(GH_TOKEN="$VALK_GH_TOKEN" gh api user -q .login 2>/dev/null)) can't see $repo"
+        fi
+        say "sign in to GitHub with an account that can see $repo"
         gh auth login --hostname github.com --git-protocol https --web
     fi
+    can_see || die "$(gh api user -q .login 2>/dev/null || echo 'this account') can't see $repo. Ask for access, or sign in with another account: gh auth login"
 fi
 
 # Ubuntu's ~/.profile adds ~/.local/bin only if it existed at login.
 export PATH="$HOME/.local/bin:$PATH"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-gh release download ${VALK_VERSION:+"$VALK_VERSION"} -R bjschnell/Valkyrie \
+gh release download ${VALK_VERSION:+"$VALK_VERSION"} -R "$repo" \
     -p install-release.sh -D "$tmp"
 bash "$tmp/install-release.sh"
 

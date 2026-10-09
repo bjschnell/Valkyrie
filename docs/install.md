@@ -82,10 +82,13 @@ instead, with a code to paste into github.com.
 
 It:
 1. installs WSL2 and Ubuntu if you have no distro (Windows asks for permission, and
-   may want a restart; then run the same line again), or uses your default one.
-   `VALK_WSL_DISTRO` picks another.
+   may want a restart; then run the same line again), and asks for a Linux username
+   and password. Otherwise it uses your default distro; `VALK_WSL_DISTRO` picks
+   another.
 2. inside it, installs `curl`, `gh` and `pulseaudio-utils` (for pings) if they're
-   missing, reuses your Windows GitHub login, and runs `install-release.sh`.
+   missing, and runs `install-release.sh`. If gh in WSL can't see the repo, it signs
+   in with your Windows GitHub login when that one can, and otherwise asks you to
+   sign in with an account that can.
 3. offers to install Claude Code inside WSL if it isn't there.
 4. adds a **Valkyrie** profile to Windows Terminal, as a fragment, so your
    `settings.json` is untouched. It runs `wsl.exe -d Ubuntu --cd ~ --exec bash -lc valk`.
