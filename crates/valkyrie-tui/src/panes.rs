@@ -593,7 +593,7 @@ impl App {
                     };
                     buf[(x, y)]
                         .set_symbol(symbol)
-                        .set_style(style::Style::new().fg(color).bg(t.bg));
+                        .set_style(style::Style::new().fg(color).bg(self.page_bg()));
                 }
             }
         }

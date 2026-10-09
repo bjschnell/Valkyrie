@@ -2160,12 +2160,22 @@ impl App {
     /// underlined in the accent, the rest muted. The tab cursor lifts its tab and
     /// underlines it in the second accent. Folder tabs on top mark the attached tab
     /// with a bar over it instead, and break the rule under it.
+    /// Behind a session: the theme's background when sessions take its colors,
+    /// else the terminal's own.
+    fn page_bg(&self) -> style::Color {
+        if self.settings.themed_sessions {
+            self.settings.theme.bg
+        } else {
+            style::Color::Reset
+        }
+    }
+
     fn draw_underlined(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
         let spin = (now_ms() / SPIN_EVERY.as_millis() as u64) as usize;
         let layout = self.tab_layout(area);
         // The session's own background, so the tabs sit on the same page.
-        let page = style::Style::new().bg(style::Color::Reset);
+        let page = style::Style::new().bg(self.page_bg());
         // The rule runs along the strip's edge toward the session: under a strip on
         // top, beside a column. A tab is underlined where it meets the rule.
         let folder = self.settings.tabs == TabStyle::Folder;
@@ -3635,6 +3645,20 @@ mod tests {
         assert_eq!(rule[attached.x as usize - 1], '┘');
         assert_eq!(rule[attached.right() as usize], '└');
         assert!(lines[1].contains("2 proj2") && lines[4].starts_with("inside session 2"));
+
+        // The strip sits on the session's background: the theme's, or with
+        // session_colors = terminal, the terminal's.
+        for (themed, bg) in [(true, app.settings.theme.bg), (false, style::Color::Reset)] {
+            app.settings.themed_sessions = themed;
+            let mut strip = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            strip
+                .draw(|frame| {
+                    let tabs = app.split_body(frame.area()).1.unwrap();
+                    app.draw_tabs(frame, tabs);
+                })
+                .unwrap();
+            assert_eq!(strip.backend().buffer()[(99, 2)].bg, bg, "themed: {themed}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
