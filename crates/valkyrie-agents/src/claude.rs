@@ -42,10 +42,11 @@ impl Adapter for Claude {
     }
 
     fn prepare(&self, command: &mut Vec<String>, hook_exe: &Path) {
-        let settings = hook_settings(&format!(
-            "{} hook claude 2>/dev/null || true",
-            shell_quote(hook_exe)
-        ));
+        let exe = shell_quote(hook_exe);
+        let settings = hook_settings(
+            &format!("{exe} hook claude 2>/dev/null || true"),
+            Some(&format!("{exe} context-hook claude 2>/dev/null || true")),
+        );
         command.splice(1..1, ["--settings".to_string(), settings.to_string()]);
     }
 
@@ -63,12 +64,22 @@ impl Adapter for Claude {
     }
 }
 
-pub(crate) fn hook_settings(command: &str) -> Value {
-    let entry =
-        json!([{ "hooks": [{ "type": "command", "command": command, "timeout": HOOK_TIMEOUT }] }]);
+/// `command` observes every event; `context`, at session start, prints the
+/// project's decisions as added context (ADR-0007).
+pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
+    let hook =
+        |command: &str| json!({ "type": "command", "command": command, "timeout": HOOK_TIMEOUT });
     let hooks: serde_json::Map<String, Value> = EVENTS
         .iter()
-        .map(|e| (e.to_string(), entry.clone()))
+        .map(|&e| {
+            let mut list = vec![hook(command)];
+            if e == "SessionStart"
+                && let Some(context) = context
+            {
+                list.push(hook(context));
+            }
+            (e.to_string(), json!([{ "hooks": list }]))
+        })
         .collect();
     json!({ "hooks": hooks })
 }
@@ -428,6 +439,21 @@ mod tests {
                 r"'/opt/it'\''s/valk' hook claude 2>/dev/null || true"
             );
         }
+        let start = settings["hooks"]["SessionStart"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(start.len(), 2);
+        assert_eq!(
+            start[1]["command"],
+            r"'/opt/it'\''s/valk' context-hook claude 2>/dev/null || true"
+        );
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

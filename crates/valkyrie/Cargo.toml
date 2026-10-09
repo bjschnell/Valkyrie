@@ -16,6 +16,7 @@ valkyrie-daemon.workspace = true
 valkyrie-tui.workspace = true
 valkyrie-agents.workspace = true
 valkyrie-web.workspace = true
+valkyrie-context.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

@@ -3229,6 +3229,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "valkyrie-agents",
+ "valkyrie-context",
  "valkyrie-daemon",
  "valkyrie-proto",
  "valkyrie-term",
@@ -3246,6 +3247,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "valkyrie-context"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "valkyrie-proto",
+]
+
+[[package]]
 name = "valkyrie-daemon"
 version = "0.0.1"
 dependencies = [
@@ -3257,6 +3266,7 @@ dependencies = [
  "tokio",
  "tracing",
  "valkyrie-agents",
+ "valkyrie-context",
  "valkyrie-proto",
  "valkyrie-term",
 ]

@@ -1,0 +1,10 @@
+[package]
+name = "valkyrie-context"
+description = "Valkyrie project context layer: decision store, project roots, injection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+valkyrie-proto.workspace = true
+anyhow.workspace = true

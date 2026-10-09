@@ -54,7 +54,20 @@ fn agent_of(argv: &[String]) -> Option<&'static str> {
 }
 
 pub use sys::cwd;
-use sys::{children, cmdline, group_of};
+use sys::{children, cmdline, group_of, parent};
+
+/// `pid` and the processes above it, nearest first, up to `MAX_PROCS`.
+pub fn ancestry(pid: i32) -> Vec<i32> {
+    let mut chain = vec![pid];
+    while chain.len() < MAX_PROCS
+        && let Some(up) = parent(*chain.last().unwrap())
+        && up > 1
+        && !chain.contains(&up)
+    {
+        chain.push(up);
+    }
+    chain
+}
 
 /// Linux: everything is in `/proc`.
 #[cfg(target_os = "linux")]
@@ -100,6 +113,13 @@ mod sys {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let rest = &stat[stat.rfind(')')? + 1..];
         rest.split_whitespace().nth(2)?.parse().ok()
+    }
+
+    /// Field 4 of `/proc/<pid>/stat`.
+    pub fn parent(pid: i32) -> Option<i32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = &stat[stat.rfind(')')? + 1..];
+        rest.split_whitespace().nth(1)?.parse().ok()
     }
 }
 
@@ -194,6 +214,23 @@ mod sys {
         let group = unsafe { libc::getpgid(pid) };
         (group > 0).then_some(group)
     }
+
+    pub fn parent(pid: i32) -> Option<i32> {
+        // SAFETY: zeroed is a valid proc_bsdinfo; proc_pidinfo fills at most the
+        // size given.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (n == size).then_some(info.pbi_ppid as i32)
+    }
 }
 
 /// Elsewhere: no agent detection; sessions keep their spawn directory.
@@ -211,11 +248,27 @@ mod sys {
     pub fn group_of(_: i32) -> Option<i32> {
         None
     }
+    pub fn parent(_: i32) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn ancestry_starts_here_and_climbs_to_the_parent() {
+        let me = std::process::id() as i32;
+        let chain = ancestry(me);
+        assert_eq!(chain[0], me);
+        // SAFETY: getppid cannot fail.
+        let parent = unsafe { libc::getppid() };
+        if parent > 1 {
+            assert_eq!(chain.get(1), Some(&parent));
+        }
+    }
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()

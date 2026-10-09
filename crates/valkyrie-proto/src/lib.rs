@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod client;
 pub mod codec;
+pub mod context;
 pub mod layout;
 pub mod screen;
 
@@ -14,11 +15,12 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
+pub use context::{Decision, DecisionKind, DecisionStatus, NewDecision, Provenance, ReviewAction};
 pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 9;
+pub const PROTOCOL: u32 = 10;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -214,6 +216,25 @@ pub enum ClientMsg {
         req: ReqId,
         exe: PathBuf,
     },
+    /// Record a project decision (ADR-0007). Replies `Decision`. From a session
+    /// running an agent it is only ever proposed.
+    Decide {
+        req: ReqId,
+        decision: NewDecision,
+    },
+    /// Accept, reject, retire or reword a decision. Replies `Decision`.
+    Review {
+        req: ReqId,
+        project: PathBuf,
+        id: u32,
+        action: ReviewAction,
+    },
+    /// The decisions of the project holding `cwd`, or of every project. Replies
+    /// `Decisions`.
+    Decisions {
+        req: ReqId,
+        cwd: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +259,11 @@ pub enum ServerMsg {
     /// The whole ranked queue, pushed whenever it changes.
     Queue {
         items: Vec<QueueItem>,
+    },
+    /// Every project's decisions waiting on review, oldest first; pushed to queue
+    /// watchers after the first `Queue` and whenever they change (ADR-0007).
+    Proposals {
+        items: Vec<Decision>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.
@@ -281,6 +307,12 @@ pub enum Reply {
     },
     Text {
         text: String,
+    },
+    Decision {
+        decision: Decision,
+    },
+    Decisions {
+        decisions: Vec<Decision>,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

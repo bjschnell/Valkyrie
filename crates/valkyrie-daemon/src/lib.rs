@@ -2,6 +2,7 @@
 //! protocol over a unix socket.
 
 mod chat;
+mod context;
 mod foreground;
 mod restore;
 mod session;
@@ -25,7 +26,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use valkyrie_proto::codec::{read_frame, write_frame};
-use valkyrie_proto::{ClientMsg, Pane, QueueItem, Reply, ReqId, ServerMsg, SessionId, Side};
+use valkyrie_proto::{
+    ClientMsg, Decision, Pane, QueueItem, Reply, ReqId, ServerMsg, SessionId, Side,
+};
 
 /// Format of the state handed across an upgrade exec (ADR-0006). An upgrade is only
 /// attempted when the new binary reports the same number.
@@ -77,6 +80,7 @@ struct UpgradeRequest {
 }
 
 type Queue = Arc<Vec<QueueItem>>;
+type Proposals = Arc<Vec<Decision>>;
 
 struct Registry {
     sessions: Mutex<BTreeMap<SessionId, Arc<Session>>>,
@@ -106,6 +110,11 @@ struct Registry {
     /// Tabs split into panes (DESIGN §8.9). Panes whose session left the lists are
     /// pruned by `layouts`.
     layouts: Mutex<Vec<Pane>>,
+    /// Project decisions (ADR-0007). The lock makes the daemon their only writer,
+    /// one change at a time, so ids can't collide.
+    context: Mutex<valkyrie_context::Store>,
+    /// Every project's decisions waiting on review, pushed with the queue.
+    proposals: watch::Sender<Proposals>,
 }
 
 impl Registry {
@@ -337,6 +346,7 @@ fn new_registry(
             changed: Arc::new(Notify::new()),
             stop: Mutex::new(Arc::new(StopPipe::new()?)),
             cell_px: Mutex::default(),
+            context_dir: state_dir.join("context"),
         },
         queue: watch::Sender::new(Arc::default()),
         generation,
@@ -349,7 +359,10 @@ fn new_registry(
         unrestored: Mutex::default(),
         restore_now: Notify::new(),
         layouts: Mutex::default(),
+        context: Mutex::new(valkyrie_context::Store::new(state_dir.join("context"))),
+        proposals: watch::Sender::new(Arc::default()),
     });
+    registry.refresh_proposals();
     Ok((registry, rx))
 }
 
@@ -661,6 +674,8 @@ impl Attachment {
 }
 
 async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
+    // Who is asking, for requests an agent may not make (ADR-0007 §4).
+    let peer = stream.peer_cred().ok().and_then(|c| c.pid());
     let (mut rd, mut wr) = stream.into_split();
     let (out, mut out_rx) = mpsc::channel::<Arc<ServerMsg>>(OUT_CAPACITY);
     let writer = tokio::spawn(async move {
@@ -732,10 +747,19 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 reply(&out, req, Ok(Reply::Done)).await;
                 if queue_watch.is_none() {
                     let rx = registry.queue.subscribe();
-                    queue_watch = Some(tokio::spawn(forward_queue(rx, out.clone())));
+                    let proposals = registry.proposals.subscribe();
+                    queue_watch = Some(tokio::spawn(forward_queue(rx, proposals, out.clone())));
                 }
                 continue;
             }
+            ClientMsg::Decide { req, decision } => (req, registry.decide(decision, peer)),
+            ClientMsg::Review {
+                req,
+                project,
+                id,
+                action,
+            } => (req, registry.review(&project, id, &action, peer)),
+            ClientMsg::Decisions { req, cwd } => (req, Ok(registry.decisions(cwd))),
             ClientMsg::MarkSeen { req, session, seq } => (
                 req,
                 registry.get(session).map(|s| {
@@ -976,19 +1000,35 @@ fn spawn_with(
     Ok(Reply::Session { info })
 }
 
-/// Pushes the queue to one connection: the current one, then every change. Only the
-/// latest queue matters, so a slow client simply skips intermediate ones.
-async fn forward_queue(mut rx: watch::Receiver<Queue>, out: Out) {
+/// Pushes the queue to one connection: the current one, then every change, and the
+/// decisions waiting on review likewise. Only the latest of each matters, so a slow
+/// client simply skips intermediate ones.
+async fn forward_queue(
+    mut rx: watch::Receiver<Queue>,
+    mut proposals: watch::Receiver<Proposals>,
+    out: Out,
+) {
+    let send = async |msg| out.send(Arc::new(msg)).await.is_ok();
+    let items = (**rx.borrow_and_update()).clone();
+    if !send(ServerMsg::Queue { items }).await {
+        return;
+    }
+    let items = (**proposals.borrow_and_update()).clone();
+    if !send(ServerMsg::Proposals { items }).await {
+        return;
+    }
     loop {
-        let items = (**rx.borrow_and_update()).clone();
-        if out
-            .send(Arc::new(ServerMsg::Queue { items }))
-            .await
-            .is_err()
-        {
-            return;
-        }
-        if rx.changed().await.is_err() {
+        let msg = tokio::select! {
+            changed = rx.changed() => match changed {
+                Ok(()) => ServerMsg::Queue { items: (**rx.borrow_and_update()).clone() },
+                Err(_) => return,
+            },
+            changed = proposals.changed() => match changed {
+                Ok(()) => ServerMsg::Proposals { items: (**proposals.borrow_and_update()).clone() },
+                Err(_) => return,
+            },
+        };
+        if !send(msg).await {
             return;
         }
     }

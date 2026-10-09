@@ -9,6 +9,7 @@ license.workspace = true
 valkyrie-proto.workspace = true
 valkyrie-term.workspace = true
 valkyrie-agents.workspace = true
+valkyrie-context.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 portable-pty.workspace = true
@@ -18,6 +19,7 @@ libc.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+valkyrie-context.workspace = true
 valkyrie-agents.workspace = true
 serde.workspace = true
 serde_json.workspace = true

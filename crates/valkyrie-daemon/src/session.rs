@@ -67,6 +67,9 @@ pub struct Host {
     pub stop: Mutex<Arc<StopPipe>>,
     /// The last cell size in pixels a client reported; new sessions start with it.
     pub cell_px: Mutex<Option<(u16, u16)>>,
+    /// The decision store (ADR-0007), exported so `valk context hook` reads this
+    /// daemon's.
+    pub context_dir: PathBuf,
 }
 
 /// Readers poll this alongside their PTY and return, before reading another byte,
@@ -347,6 +350,7 @@ impl Session {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("VALK_SESSION", id.to_string());
         cmd.env("VALK_SOCKET", &host.socket);
+        cmd.env("VALK_CONTEXT", &host.context_dir);
 
         let child = pair
             .slave
@@ -1112,6 +1116,11 @@ impl Session {
     /// it is kept even if the daemon stops before the agent's first hook.
     pub fn set_conversation(&self, id: Option<String>) {
         self.state.lock().unwrap().conversation = id;
+    }
+
+    /// The agent's own conversation id, once a hook named it.
+    pub fn conversation(&self) -> Option<String> {
+        self.state.lock().unwrap().conversation.clone()
     }
 
     /// This session's line in the restore list (DESIGN §8.3): while it runs, and for

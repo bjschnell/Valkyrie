@@ -1023,3 +1023,77 @@ async fn splits_come_back_after_a_restart() {
         let _ = client.kill(s.id).await;
     }
 }
+
+// ---- M2: project decisions (ADR-0007) ----
+
+use valkyrie_proto::{DecisionKind, DecisionStatus, NewDecision, ReviewAction};
+
+/// Waits for a `Proposals` push satisfying `pred`, skipping other pushes.
+async fn wait_proposals(pushes: &mut Pushes, pred: impl Fn(&[u32]) -> bool) -> Vec<u32> {
+    let mut last = Vec::new();
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(3), pushes.recv()).await {
+            Ok(Some(ServerMsg::Proposals { items })) => {
+                let ids: Vec<u32> = items.iter().map(|d| d.id).collect();
+                if pred(&ids) {
+                    return ids;
+                }
+                last = ids;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("connection closed"),
+            Err(_) => break,
+        }
+    }
+    panic!("proposals never matched; last: {last:?}");
+}
+
+#[tokio::test]
+async fn decisions_are_proposed_pushed_and_reviewed() {
+    let (client, mut pushes, dir) = start().await;
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let repo = std::fs::canonicalize(repo).unwrap();
+    client.watch_queue().await.unwrap();
+    wait_proposals(&mut pushes, |p| p.is_empty()).await;
+
+    let new = |title: &str, propose| NewDecision {
+        cwd: repo.join("src"),
+        title: title.into(),
+        body: "why".into(),
+        kind: DecisionKind::Constraint,
+        propose,
+        supersedes: None,
+        commit: Some("abc1234".into()),
+        session: None,
+    };
+    // From outside every session: a human, so it's active at once.
+    let direct = client.decide(new("Direct", false)).await.unwrap();
+    assert_eq!(direct.status, DecisionStatus::Active);
+    assert_eq!(direct.project, repo);
+    assert_eq!(direct.provenance.by, "human");
+    let asked = client.decide(new("Asked", true)).await.unwrap();
+    assert_eq!(asked.status, DecisionStatus::Proposed);
+    wait_proposals(&mut pushes, |p| p == [asked.id]).await;
+
+    let accepted = client
+        .review(repo.clone(), asked.id, ReviewAction::Accept)
+        .await
+        .unwrap();
+    assert_eq!(accepted.status, DecisionStatus::Active);
+    wait_proposals(&mut pushes, |p| p.is_empty()).await;
+    assert!(
+        client
+            .review(repo.clone(), asked.id, ReviewAction::Accept)
+            .await
+            .is_err()
+    );
+
+    let listed = client.decisions(Some(repo.join("src"))).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(client.decisions(None).await.unwrap().len(), 2);
+    // The files are where the store says, for the hook to read.
+    let store = valkyrie_context::Store::new(dir.join("state/context"));
+    assert_eq!(store.load(&repo).len(), 2);
+}

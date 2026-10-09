@@ -15,6 +15,7 @@ valkyrie-daemon = { path = "crates/valkyrie-daemon" }
 valkyrie-tui = { path = "crates/valkyrie-tui" }
 valkyrie-agents = { path = "crates/valkyrie-agents" }
 valkyrie-web = { path = "crates/valkyrie-web" }
+valkyrie-context = { path = "crates/valkyrie-context" }
 alacritty_terminal = "0.26"
 portable-pty = "0.9"
 ratatui = "0.30"

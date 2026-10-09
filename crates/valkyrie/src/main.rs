@@ -1,4 +1,5 @@
 mod bench;
+mod context;
 mod hook;
 mod service;
 mod tools;
@@ -75,6 +76,34 @@ enum Cmd {
     /// prints nothing, always exits 0, and does nothing outside a Valkyrie session.
     #[command(hide = true)]
     Hook { agent: String },
+    /// Print the project's decisions for an agent's session start (ADR-0007). Agents
+    /// run this; like `hook`, it never fails.
+    #[command(hide = true, name = "context-hook")]
+    ContextHook { agent: String },
+    /// Record a project decision that every agent in this repo gets from now on. Run
+    /// by an agent, it is only proposed, for you to accept.
+    Decide {
+        /// One line.
+        title: String,
+        /// A sentence or two of why; `-` reads it from stdin.
+        body: Option<String>,
+        #[arg(short, long, default_value = "decision", value_parser = context::parse_kind)]
+        kind: valkyrie_proto::DecisionKind,
+        /// Ask for review instead of making it active at once.
+        #[arg(long)]
+        propose: bool,
+        /// The decision this one replaces, once accepted.
+        #[arg(long, value_name = "ID")]
+        supersedes: Option<u32>,
+    },
+    /// List this project's decisions, or review one.
+    Decisions {
+        /// Include rejected, superseded and retired ones.
+        #[arg(long)]
+        all: bool,
+        #[command(subcommand)]
+        action: Option<context::DecisionsCmd>,
+    },
     /// Install agent integrations.
     #[command(subcommand)]
     Setup(SetupCmd),
@@ -168,7 +197,7 @@ fn main() -> Result<()> {
         Ok(cli) => cli,
         // A hook must never print or exit nonzero (exit 2 blocks the agent), even
         // when its arguments or environment don't parse.
-        Err(_) if std::env::args().any(|a| a == "hook") => return Ok(()),
+        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
         Err(e) => e.exit(),
     };
     let socket = cli
@@ -177,6 +206,10 @@ fn main() -> Result<()> {
     // Hooks run on every agent event: skip the async runtime and never fail.
     if let Some(Cmd::Hook { agent }) = &cli.cmd {
         hook::run(agent, &socket);
+        return Ok(());
+    }
+    if let Some(Cmd::ContextHook { agent }) = &cli.cmd {
+        context::hook(agent);
         return Ok(());
     }
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
@@ -327,7 +360,29 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             // Input is fire-and-forget; a round trip guarantees it was flushed before exit.
             client.list().await.map(drop)
         }
-        Some(Cmd::Hook { .. }) => unreachable!("handled before the runtime starts"),
+        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. }) => {
+            unreachable!("handled before the runtime starts")
+        }
+        Some(Cmd::Decide {
+            title,
+            body,
+            kind,
+            propose,
+            supersedes,
+        }) => {
+            let client = connect(&socket).await?.0;
+            let args = context::Decide {
+                title,
+                body,
+                kind,
+                propose,
+                supersedes,
+            };
+            context::decide(&client, args).await
+        }
+        Some(Cmd::Decisions { all, action }) => {
+            context::decisions(&connect(&socket).await?.0, all, action).await
+        }
         Some(Cmd::Setup(SetupCmd::Codex {
             dry_run,
             remove,

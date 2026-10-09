@@ -324,6 +324,47 @@ impl Client {
             .map(drop)
     }
 
+    pub async fn decide(&self, decision: crate::NewDecision) -> Result<crate::Decision> {
+        match self
+            .request(|req| ClientMsg::Decide { req, decision })
+            .await?
+        {
+            Reply::Decision { decision } => Ok(decision),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn review(
+        &self,
+        project: PathBuf,
+        id: u32,
+        action: crate::ReviewAction,
+    ) -> Result<crate::Decision> {
+        match self
+            .request(|req| ClientMsg::Review {
+                req,
+                project,
+                id,
+                action,
+            })
+            .await?
+        {
+            Reply::Decision { decision } => Ok(decision),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The decisions of the project holding `cwd`, or of every project.
+    pub async fn decisions(&self, cwd: Option<PathBuf>) -> Result<Vec<crate::Decision>> {
+        match self
+            .request(|req| ClientMsg::Decisions { req, cwd })
+            .await?
+        {
+            Reply::Decisions { decisions } => Ok(decisions),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Fire-and-forget: the terminal's cell size in pixels (see `ClientMsg::CellPixels`).
     pub fn cell_pixels(&self, session: Option<SessionId>, width: u16, height: u16) -> Result<()> {
         self.out
