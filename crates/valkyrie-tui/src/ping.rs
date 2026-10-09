@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use valkyrie_proto::{AgentState, QueueItem, SessionId};
@@ -17,6 +18,7 @@ use valkyrie_proto::{AgentState, QueueItem, SessionId};
 const SOUND_GAP: Duration = Duration::from_secs(1);
 /// A player still running after this is stuck (herdr's hung for 15 s on a dead
 /// audio server) and gets killed.
+#[cfg(unix)]
 const PLAYER_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +187,22 @@ pub fn play(kind: Kind) {
     let Some(file) = sound_file(&valkyrie_proto::state_dir().join("sounds"), kind) else {
         return;
     };
+    // Windows plays a WAV itself.
+    #[cfg(windows)]
+    std::thread::spawn(move || {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_FILENAME, SND_NODEFAULT};
+        let wide: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
+        // SAFETY: a NUL-terminated path; synchronous, on this thread of its own.
+        unsafe {
+            PlaySoundW(
+                wide.as_ptr(),
+                std::ptr::null_mut(),
+                SND_FILENAME | SND_NODEFAULT,
+            )
+        };
+    });
+    #[cfg(unix)]
     std::thread::spawn(move || {
         // macOS ships afplay; Linux has one of the others.
         for player in ["pw-play", "paplay", "aplay", "afplay"] {

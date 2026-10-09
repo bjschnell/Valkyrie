@@ -16,9 +16,13 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
   # The release first, so each build uploads to it directly: no Actions
   # artifacts, which count against the account's storage quota.
   release:
+    needs: validate
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -32,7 +36,6 @@ jobs:
         run: |
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
-          gh release upload "$TAG" install-release.sh install.ps1 --clobber
 
   build:
     needs: release
@@ -47,6 +50,8 @@ jobs:
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -56,6 +61,7 @@ jobs:
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --locked --release -p valkyrie --target ${{ matrix.target }}
       - name: publish
+        if: runner.os != 'Windows'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}
@@ -64,3 +70,25 @@ jobs:
           tar -czf "$NAME" -C target/${{ matrix.target }}/release valk
           shasum -a 256 "$NAME" > "$NAME.sha256"
           gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber
+      - name: publish Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          NAME: valk-${{ matrix.target }}.zip
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/valk.exe -DestinationPath $env:NAME
+          $hash = (Get-FileHash $env:NAME -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:NAME" | Set-Content "$env:NAME.sha256" -Encoding ascii
+          gh release upload $env:TAG $env:NAME "$env:NAME.sha256" --clobber
+
+  installers:
+    needs: [release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$TAG" install-release.sh install.ps1 install-wsl.ps1 --clobber

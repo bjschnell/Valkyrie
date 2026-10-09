@@ -345,7 +345,7 @@ impl App {
         let Some(at) = self.view.as_ref().map(|v| v.id) else {
             return;
         };
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = valkyrie_proto::default_shell();
         // About half the pane; attaching sets the real size.
         let size = self
             .pane(at)

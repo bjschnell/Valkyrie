@@ -22,7 +22,7 @@ pub fn claude(pid: i32) -> Option<PathBuf> {
 fn claude_home() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+        .or_else(|| Some(valkyrie_proto::home_dir().join(".claude")))
 }
 
 fn claude_in(home: &Path, pid: i32) -> Option<PathBuf> {

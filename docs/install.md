@@ -10,8 +10,9 @@ There are two ways in:
   Rerun it to update: if a daemon is running, the script hands it to the new binary
   with `valk upgrade`, and every session keeps running.
 
-Valkyrie needs a Unix: PTYs, unix sockets, and process inspection. On Windows it runs
-inside WSL2, and `install.ps1` sets that up ([Windows](#windows-wsl2)).
+Windows x64 runs natively using ConPTY and a local named pipe. The PowerShell
+installer needs no administrator access. WSL2 is also available, using the separate
+`install-wsl.ps1` installer.
 
 ## Linux
 
@@ -44,7 +45,7 @@ cd ~/repos/valkyrie && ./install.sh
 ## Prebuilt binary (no checkout)
 
 Each `v*` tag builds `valk` for Linux x86_64 and arm64 (static, musl: it runs on any
-distro and any WSL, whatever its glibc) and macOS arm64, and attaches the builds, each
+distro and any WSL, whatever its glibc), macOS arm64, and Windows x64, and attaches the builds, each
 with a `.sha256`, to a GitHub release with `install-release.sh`. The binary carries the
 web app too, so it is the only file you need.
 
@@ -62,6 +63,52 @@ login once it exists, so open a new shell after the first install.
 To cut a release, from a checkout: `git tag v0.0.2 && git push origin v0.0.2`. The
 `release` workflow builds and publishes it in a few minutes.
 
+## Windows (native)
+
+Use Windows x64 with Windows 10 version 1809 or newer, or Windows 11, and Windows
+Terminal. Install Claude Code or Codex on Windows and work in Windows directories.
+Claude hooks use Git Bash, so install Git for Windows when using Claude Code.
+Standard npm launchers for Claude and Codex are supported. Other `.cmd` or `.bat`
+programs should be started from a shell tab.
+
+```powershell
+irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
+```
+
+The installer downloads the Windows release, verifies its SHA-256 checksum, installs
+it under `%LOCALAPPDATA%\Programs\Valkyrie`, and adds a native `valk` command to
+your user PATH and a Windows Terminal profile. `VALK_VERSION` selects a release tag;
+`VALK_BIN_DIR` selects another install directory. Reopen Windows Terminal to see the
+profile. No Rust, WSL, or administrator access is needed.
+
+Rerun the line to update. Each install uses a new version directory, so a running
+binary can stay open while its replacement is downloaded. The `valk.cmd` launcher
+runs that native executable. Older version directories are retained; remove them
+once no TUI, web service, or daemon uses them. If you use `valk setup web`, rerun it
+after updating so the scheduled task uses the new executable.
+
+Closing the TUI leaves sessions running in the background. Windows upgrades restart
+the daemon: Claude and Codex conversations resume, and shell sessions reopen in their
+last directories, but running commands stop. This differs from Unix's live upgrade
+handoff. Logging out or rebooting also stops running programs.
+
+State and transcripts live under `%LOCALAPPDATA%\Valkyrie`, and settings under
+`%APPDATA%\Valkyrie`. Shell tabs use PowerShell 7 when it is on PATH, otherwise
+Windows PowerShell; `SHELL` overrides the choice. Links open in your Windows browser,
+and pings play through the Windows sound API.
+
+From source, install Rust and the Visual Studio C++ build tools, then run:
+
+```powershell
+cargo build --locked --release -p valkyrie
+.\target\release\valk.exe
+```
+
+The Windows runtime has been cross-checked from Linux. The Windows CI job runs the
+named-pipe and ConPTY integration tests; a Windows release should be published only
+after that job passes. Local cross-compilation does not validate console input or
+process lifetime behavior on a real Windows machine.
+
 ## Windows (WSL2)
 
 Valkyrie runs inside the WSL Linux VM, and you use it from Windows Terminal. Your
@@ -71,7 +118,7 @@ agents (Claude Code, Codex) and the repos you work on live in WSL too. A Windows
 **The installer** does all of it from PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-wsl.ps1 | iex
 ```
 
 It:
@@ -126,7 +173,8 @@ Cascadia Mono.
 - `,` opens the settings: the theme, whether sessions take the theme's colors or
   your terminal's, the tab style (`underline`, `folder` or `cards`), which side the
   tabs are on (`top`, `left`, `right`), and sound. They are kept in
-  `~/.config/valkyrie/settings.toml`, which you can also edit by hand. `VALK_THEME`,
+  `~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
+  which you can also edit by hand. `VALK_THEME`,
   `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it
   for one run.
 
@@ -141,7 +189,7 @@ valk setup web
 ```
 
 That runs `valk web` in the background as a service (systemd on Linux, launchd on
-macOS) that starts again at login, puts it on your tailnet with `tailscale serve`
+macOS, Task Scheduler on Windows) that starts again at login, puts it on your tailnet with `tailscale serve`
 (HTTPS, reachable only by your devices), and prints a QR code that pairs your phone.
 Run it again after upgrading to restart the service; `valk setup web --remove` takes it
 away. On Linux, `tailscale serve` needs `sudo tailscale set --operator=$USER` once, and

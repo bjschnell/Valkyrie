@@ -2,8 +2,6 @@
 //! after a reboot (DESIGN §8.3). An agent resumes its own conversation; its options
 //! are kept, and the prompt it started with is dropped so nothing is sent twice.
 
-use std::path::Path;
-
 /// Options and positional arguments of `args` (after the program name).
 struct Split {
     options: Vec<String>,
@@ -223,9 +221,21 @@ const SUBCOMMANDS: &[&str] = &[
 
 /// An interactive shell comes back as it was started, in the same directory.
 pub fn shell(command: &[String]) -> Option<Vec<String>> {
-    let program = Path::new(command.first()?).file_name()?.to_str()?;
+    let program = crate::program_name(command.first()?)?;
     let shells = [
-        "sh", "bash", "zsh", "fish", "nu", "dash", "ksh", "tcsh", "elvish", "xonsh",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "nu",
+        "dash",
+        "ksh",
+        "tcsh",
+        "elvish",
+        "xonsh",
+        "pwsh",
+        "powershell",
+        "cmd",
     ];
     // Only flags known to keep a shell interactive: `bash -c 'make deploy'`,
     // `bash -lc …` and `fish --command=…` are commands, not shells to restore.
@@ -243,6 +253,10 @@ pub fn shell(command: &[String]) -> Option<Vec<String>> {
         "-P",
         "-N",
         "--no-config",
+        // PowerShell's.
+        "-NoLogo",
+        "-NoProfile",
+        "-NoExit",
     ];
     let interactive = command[1..]
         .iter()

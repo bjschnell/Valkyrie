@@ -19,8 +19,8 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
-    pub(crate) fn of(stream: &tokio::net::UnixStream) -> Option<Peer> {
-        let pid = stream.peer_cred().ok()?.pid()?;
+    pub(crate) fn of(stream: &valkyrie_proto::ipc::Stream) -> Option<Peer> {
+        let pid = valkyrie_proto::ipc::peer_pid(stream)?;
         Some(Peer {
             pid,
             started: foreground::started(pid),

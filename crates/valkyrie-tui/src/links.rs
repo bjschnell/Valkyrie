@@ -139,6 +139,8 @@ pub fn open(url: &str) -> std::io::Result<Opened> {
     }
     let mut command = if cfg!(target_os = "macos") {
         Command::new("open")
+    } else if cfg!(windows) {
+        Command::new("explorer.exe")
     } else if is_wsl() {
         // wslu's opener if it's there, else Windows' own (it takes a URL, and
         // with no shell between, `&` and the like are safe).

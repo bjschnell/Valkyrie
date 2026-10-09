@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, ensure};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -53,7 +54,8 @@ pub fn command(system: &str) -> Vec<String> {
 /// of Claude's JSON output, else stdout as it is. Killed past `timeout`.
 pub fn ask(command: &[String], prompt: &str, dir: &Path, timeout: Duration) -> Result<String> {
     let (program, args) = command.split_first().context("no model command")?;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(dir)
         // Not one of Valkyrie's sessions: no hooks reaching the daemon.
@@ -63,16 +65,13 @@ pub fn ask(command: &[String], prompt: &str, dir: &Path, timeout: Duration) -> R
         .env_remove("CLAUDECODE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        // Its own group, so a timeout kills whatever it started too.
-        .process_group(0)
-        .spawn()
-        .with_context(|| format!("run {program}"))?;
+        .stderr(Stdio::null());
+    // Its own group, so a timeout kills whatever it started too.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().with_context(|| format!("run {program}"))?;
     let group = child.id() as i32;
-    let kill_group = || {
-        // SAFETY: signals the group led by our own child.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
-    };
+    let kill_group = || kill_tree(group);
     let mut stdin = child.stdin.take().unwrap();
     let prompt = prompt.to_owned();
     let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
@@ -114,7 +113,25 @@ pub fn ask(command: &[String], prompt: &str, dir: &Path, timeout: Duration) -> R
         .unwrap_or(text))
 }
 
-#[cfg(test)]
+/// Kills `pid` and whatever it started.
+#[cfg(unix)]
+fn kill_tree(group: i32) {
+    // SAFETY: signals the group led by our own child.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
+}
+
+/// Kills `pid` and whatever it started.
+#[cfg(windows)]
+fn kill_tree(pid: i32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

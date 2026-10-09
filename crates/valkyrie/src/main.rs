@@ -7,8 +7,6 @@ mod tools;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -256,7 +254,10 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             let exe = std::env::current_exe()?;
             let state = valkyrie_proto::state_dir();
             match resume_fd {
+                #[cfg(unix)]
                 Some(fd) => valkyrie_daemon::resume(fd, &state, &exe).await,
+                #[cfg(windows)]
+                Some(_) => bail!("Windows upgrades restart the daemon; there is no handoff"),
                 None => valkyrie_daemon::run(&socket, &state, &exe).await,
             }
         }
@@ -292,7 +293,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     rows: 40,
                 });
             let cwd = Some(match cwd {
-                Some(dir) => std::fs::canonicalize(dir)?,
+                Some(dir) => valkyrie_proto::canonical(&dir)?,
                 None => std::env::current_dir()?,
             });
             // Before the spawn: an image program asks for the cell size at startup.
@@ -526,7 +527,7 @@ fn require_tty() -> Result<()> {
 /// Deliberately skips the protocol check: the old daemon may speak an older one, and
 /// `Hello` and `Upgrade` keep their shape across versions for exactly this.
 async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
-    let exe = std::fs::canonicalize(match exe {
+    let exe = valkyrie_proto::canonical(&match exe {
         Some(exe) => exe,
         None => std::env::current_exe()?,
     })?;
@@ -548,24 +549,48 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
         if let Ok((client, _)) = Client::connect(socket).await
             && let Ok(now) = client.hello_info().await
         {
-            anyhow::ensure!(
-                now.boot == before.boot,
-                "a different daemon answered: the old one went away instead of handing off; see {}",
-                valkyrie_proto::state_dir().join("daemon.log").display()
-            );
-            anyhow::ensure!(
-                now.generation > before.generation,
-                "the daemon is still the old one (generation {}); see {}",
-                now.generation,
-                valkyrie_proto::state_dir().join("daemon.log").display()
-            );
-            let (protocol, after) = (now.protocol, now.generation);
-            let kept = client.list().await?.len();
-            println!(
-                "daemon now runs {} (protocol {protocol}, generation {after}); {kept}/{sessions} sessions kept",
-                exe.display()
-            );
-            return Ok(());
+            let log = valkyrie_proto::state_dir().join("daemon.log");
+            // Windows has no exec to hand off through: the daemon restarts, and its
+            // sessions come back from the restore list.
+            #[cfg(windows)]
+            {
+                anyhow::ensure!(
+                    now.boot != before.boot,
+                    "the daemon is still the old one; see {}",
+                    log.display()
+                );
+                // Restored ones arrive one by one; give them a moment.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let back = client.list().await?.len();
+                println!(
+                    "daemon restarted on {} (protocol {}); {back}/{sessions} sessions \
+                     back, agents in their conversations, shells in their directories",
+                    exe.display(),
+                    now.protocol
+                );
+                return Ok(());
+            }
+            #[cfg(unix)]
+            {
+                anyhow::ensure!(
+                    now.boot == before.boot,
+                    "a different daemon answered: the old one went away instead of handing off; see {}",
+                    log.display()
+                );
+                anyhow::ensure!(
+                    now.generation > before.generation,
+                    "the daemon is still the old one (generation {}); see {}",
+                    now.generation,
+                    log.display()
+                );
+                let (protocol, after) = (now.protocol, now.generation);
+                let kept = client.list().await?.len();
+                println!(
+                    "daemon now runs {} (protocol {protocol}, generation {after}); {kept}/{sessions} sessions kept",
+                    exe.display()
+                );
+                return Ok(());
+            }
         }
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
@@ -598,14 +623,17 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
     if let Ok(conn) = Client::connect(socket).await {
         return Ok(conn);
     }
-    let len = socket.as_os_str().len();
-    if len > valkyrie_proto::MAX_SOCKET_PATH {
-        bail!(
-            "socket path {} is {len} bytes, over the {} a unix socket allows; \
-             pick a shorter one with --socket or VALK_SOCKET",
-            socket.display(),
-            valkyrie_proto::MAX_SOCKET_PATH
-        );
+    #[cfg(unix)]
+    {
+        let len = socket.as_os_str().len();
+        if len > valkyrie_proto::MAX_SOCKET_PATH {
+            bail!(
+                "socket path {} is {len} bytes, over the {} a unix socket allows; \
+                 pick a shorter one with --socket or VALK_SOCKET",
+                socket.display(),
+                valkyrie_proto::MAX_SOCKET_PATH
+            );
+        }
     }
     for old in valkyrie_proto::legacy_socket_paths() {
         // Checked first: connecting creates the socket's directory.
@@ -622,31 +650,11 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
     let log_dir = valkyrie_proto::state_dir();
     std::fs::create_dir_all(&log_dir)?;
     // The log records full command lines, so keep it private like the transcripts.
-    let log = std::fs::OpenOptions::new()
+    let log = valkyrie_proto::private_file()
         .create(true)
         .append(true)
-        .mode(0o600)
         .open(log_dir.join("daemon.log"))?;
-    let mut daemon = std::process::Command::new(std::env::current_exe()?);
-    daemon
-        .arg("--socket")
-        .arg(socket)
-        .arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    // Its own session, like herdr's server: closing the terminal or SSH connection
-    // that started it must not take the sessions down with it.
-    // SAFETY: setsid is async-signal-safe.
-    unsafe {
-        daemon.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    daemon.spawn().context("start daemon")?;
+    spawn_daemon(socket, &log).context("start daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         if let Ok(conn) = Client::connect(socket).await {
@@ -657,6 +665,60 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
         "daemon did not start; see {}",
         log_dir.join("daemon.log").display()
     )
+}
+
+/// Starts `valk daemon` in the background, logging to `log`. Its own session, like
+/// herdr's server: closing the terminal or SSH connection that started it must not
+/// take the sessions down with it.
+#[cfg(unix)]
+fn spawn_daemon(socket: &Path, log: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let mut daemon = daemon_command(socket, log)?;
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        daemon.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    daemon.spawn().map(drop)
+}
+
+/// Starts `valk daemon` in the background, logging to `log`: no console (closing
+/// the terminal must not end it), and out of the starter's job if it may leave,
+/// so a task or terminal ending its job doesn't take the sessions along.
+#[cfg(windows)]
+fn spawn_daemon(socket: &Path, log: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+    };
+    let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    match daemon_command(socket, log)?
+        .creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB)
+        .spawn()
+    {
+        Ok(_) => Ok(()),
+        // A job that doesn't allow it: stay in it.
+        Err(_) => daemon_command(socket, log)?
+            .creation_flags(flags)
+            .spawn()
+            .map(drop),
+    }
+}
+
+fn daemon_command(socket: &Path, log: &std::fs::File) -> std::io::Result<std::process::Command> {
+    let mut daemon = std::process::Command::new(std::env::current_exe()?);
+    daemon
+        .arg("--socket")
+        .arg(socket)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log.try_clone()?);
+    Ok(daemon)
 }
 
 fn unescape(s: &str) -> Result<Vec<u8>> {

@@ -1,4 +1,5 @@
 //! The real binary: `valk hook` contract (ADR-0005) and `valk setup codex`.
+#![cfg(unix)]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -20,11 +20,12 @@ pub fn agent(pgrp: i32) -> Option<(&'static str, i32)> {
         if let Some(agent) = cmdline(pid).and_then(|argv| agent_of(&argv)) {
             return Some((agent, pid));
         }
-        // Background jobs a wrapper started are in other groups.
+        // Background jobs a wrapper started are in other groups. Windows has no
+        // groups: `pgrp` is the session's program, and all below it count.
         queue.extend(
             children(pid)
                 .into_iter()
-                .filter(|&child| group_of(child) == Some(pgrp)),
+                .filter(|&child| cfg!(windows) || group_of(child) == Some(pgrp)),
         );
     }
     None
@@ -48,7 +49,16 @@ fn agent_of(argv: &[String]) -> Option<&'static str> {
         return Some(agent);
     }
     match program.as_str() {
-        "node" | "bun" | "deno" => known(&stem(argv.get(1)?)?),
+        "node" | "bun" | "deno" => {
+            let script = argv.get(1)?;
+            // npm's Windows shim runs the package's `cli.js`, not a `claude` link.
+            let package = Path::new(script).parent().and_then(|p| p.file_name());
+            if stem(script).as_deref() == Some("cli") && package.is_some_and(|p| p == "claude-code")
+            {
+                return known("claude");
+            }
+            known(&stem(script)?)
+        }
         _ => None,
     }
 }
@@ -75,7 +85,7 @@ fn bridge_argv(argv: &[String]) -> bool {
     let Some((program, args)) = argv.split_first() else {
         return false;
     };
-    if Path::new(program).file_name() != Some("valk".as_ref()) {
+    if valkyrie_agents::program_name(program) != Some("valk") {
         return false;
     }
     let mut args = args.iter();
@@ -96,6 +106,7 @@ fn bridge_argv(argv: &[String]) -> bool {
 }
 
 /// A terminal device as (major, minor), comparable across how each OS encodes it.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn dev_key(major: u32, minor: u32) -> u64 {
     (u64::from(major) << 32) | u64::from(minor)
 }
@@ -311,8 +322,328 @@ mod sys {
     }
 }
 
+/// Windows: a Toolhelp snapshot for the process tree, and each process's own
+/// memory (its PEB) for its command line and directory.
+#[cfg(windows)]
+mod sys {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use windows_sys::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessBasicInformation, ProcessCommandLineInformation,
+    };
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, FILETIME, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree, UNICODE_STRING,
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_VM_READ,
+    };
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    struct Proc {
+        pid: u32,
+        parent: u32,
+        exe: String,
+    }
+
+    /// Every process, from a snapshot at most this old: one look at a session's
+    /// tree takes several.
+    const SNAPSHOT_FOR: Duration = Duration::from_millis(200);
+
+    fn procs() -> Arc<Vec<Proc>> {
+        static LAST: Mutex<Option<(Instant, Arc<Vec<Proc>>)>> = Mutex::new(None);
+        let mut last = LAST.lock().unwrap();
+        if let Some((at, procs)) = &*last
+            && at.elapsed() < SNAPSHOT_FOR
+        {
+            return procs.clone();
+        }
+        let procs = Arc::new(snapshot());
+        *last = Some((Instant::now(), procs.clone()));
+        procs
+    }
+
+    fn snapshot() -> Vec<Proc> {
+        let mut out = Vec::new();
+        // SAFETY: a snapshot handle we close, and an entry sized as the API wants.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut entry);
+            while ok != 0 {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                out.push(Proc {
+                    pid: entry.th32ProcessID,
+                    parent: entry.th32ParentProcessID,
+                    exe: String::from_utf16_lossy(&entry.szExeFile[..len]),
+                });
+                ok = Process32NextW(snap, &mut entry);
+            }
+            CloseHandle(snap);
+        }
+        out
+    }
+
+    /// An open process handle, closed on drop.
+    struct Process(HANDLE);
+
+    impl Process {
+        fn open(pid: i32, access: u32) -> Option<Process> {
+            // SAFETY: plain call; a null handle means failure.
+            let handle = unsafe { OpenProcess(access, 0, u32::try_from(pid).ok()?) };
+            (!handle.is_null()).then_some(Process(handle))
+        }
+
+        /// A `T` at `address` in the process's memory.
+        fn read<T: Copy>(&self, address: usize) -> Option<T> {
+            let mut value = std::mem::MaybeUninit::<T>::uninit();
+            let mut got = 0;
+            // SAFETY: reads into a buffer of exactly size_of::<T>().
+            let ok = unsafe {
+                ReadProcessMemory(
+                    self.0,
+                    address as *const _,
+                    value.as_mut_ptr().cast(),
+                    size_of::<T>(),
+                    &mut got,
+                )
+            };
+            // SAFETY: fully written when the call read all of it.
+            (ok != 0 && got == size_of::<T>()).then(|| unsafe { value.assume_init() })
+        }
+    }
+
+    impl Drop for Process {
+        fn drop(&mut self) {
+            // SAFETY: we opened it.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// `PROCESS_BASIC_INFORMATION`, whose windows-sys type needs another feature.
+    #[repr(C)]
+    struct BasicInfo {
+        exit_status: i32,
+        peb: usize,
+        affinity: usize,
+        priority: i32,
+        pid: usize,
+        parent: usize,
+    }
+
+    /// The process's current directory, from its PEB: `ProcessParameters` at 0x20,
+    /// whose `CurrentDirectory.DosPath` is a UNICODE_STRING at 0x38 (64-bit layout,
+    /// which this build and the processes it reads share).
+    #[cfg(target_pointer_width = "64")]
+    pub fn cwd(pid: i32) -> Option<PathBuf> {
+        let process = Process::open(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)?;
+        // SAFETY: zeroed is a valid BasicInfo, which the call fills.
+        let mut info: BasicInfo = unsafe { std::mem::zeroed() };
+        let mut len = 0;
+        // SAFETY: the buffer holds the size given.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process.0,
+                ProcessBasicInformation,
+                (&raw mut info).cast(),
+                size_of::<BasicInfo>() as u32,
+                &mut len,
+            )
+        };
+        if status != 0 || info.peb == 0 {
+            return None;
+        }
+        let params: usize = process.read(info.peb + 0x20)?;
+        let length: u16 = process.read(params + 0x38)?;
+        let buffer: usize = process.read(params + 0x38 + 8)?;
+        if length == 0 || !length.is_multiple_of(2) || buffer == 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; length as usize / 2];
+        let mut got = 0;
+        // SAFETY: reads into a buffer of exactly `length` bytes.
+        let ok = unsafe {
+            ReadProcessMemory(
+                process.0,
+                buffer as *const _,
+                wide.as_mut_ptr().cast(),
+                length as usize,
+                &mut got,
+            )
+        };
+        if ok == 0 || got != length as usize {
+            return None;
+        }
+        let mut dir = String::from_utf16(&wide).ok()?;
+        // `C:\repo\`, except a drive's root.
+        if dir.len() > 3 && dir.ends_with('\\') {
+            dir.pop();
+        }
+        Some(PathBuf::from(dir))
+    }
+
+    #[cfg(not(target_pointer_width = "64"))]
+    pub fn cwd(_: i32) -> Option<PathBuf> {
+        None
+    }
+
+    /// The first `n` arguments, split as the C runtime would.
+    pub fn cmdline_n(pid: i32, n: usize) -> Option<Vec<String>> {
+        let process = Process::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        let mut buf = vec![0u64; 512];
+        loop {
+            let mut len = 0u32;
+            // SAFETY: the buffer holds the size given; it starts with a
+            // UNICODE_STRING pointing into itself.
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    process.0,
+                    ProcessCommandLineInformation,
+                    buf.as_mut_ptr().cast(),
+                    (buf.len() * 8) as u32,
+                    &mut len,
+                )
+            };
+            if status == 0 {
+                break;
+            }
+            // STATUS_INFO_LENGTH_MISMATCH: `len` says how much it needs.
+            if (len as usize) <= buf.len() * 8 || len > 1 << 20 {
+                return None;
+            }
+            buf = vec![0u64; (len as usize).div_ceil(8)];
+        }
+        // SAFETY: the call above filled a UNICODE_STRING whose buffer lies in `buf`.
+        let line: Vec<u16> = unsafe {
+            let s = &*(buf.as_ptr() as *const UNICODE_STRING);
+            if s.Buffer.is_null() {
+                return None;
+            }
+            std::slice::from_raw_parts(s.Buffer, s.Length as usize / 2).to_vec()
+        };
+        split_args(&line, n)
+    }
+
+    fn split_args(line: &[u16], n: usize) -> Option<Vec<String>> {
+        let line: Vec<u16> = line.iter().copied().chain([0]).collect();
+        let mut argc = 0;
+        // SAFETY: a NUL-terminated string; the result is freed below.
+        let argv = unsafe { CommandLineToArgvW(line.as_ptr(), &mut argc) };
+        if argv.is_null() {
+            return None;
+        }
+        let args = (0..argc.max(0) as usize)
+            .take(n)
+            .map(|i| {
+                // SAFETY: CommandLineToArgvW gave `argc` NUL-terminated strings.
+                unsafe {
+                    let arg = *argv.add(i);
+                    let len = (0..).take_while(|&j| *arg.add(j) != 0).count();
+                    String::from_utf16_lossy(std::slice::from_raw_parts(arg, len))
+                }
+            })
+            .collect();
+        // SAFETY: allocated by CommandLineToArgvW.
+        unsafe { LocalFree(argv as HLOCAL) };
+        Some(args)
+    }
+
+    pub fn children(pid: i32) -> Vec<i32> {
+        procs()
+            .iter()
+            .filter(|p| p.parent as i32 == pid && p.pid as i32 != pid)
+            .map(|p| p.pid as i32)
+            .collect()
+    }
+
+    /// No process groups on Windows (`agent` takes every descendant).
+    pub fn group_of(_: i32) -> Option<i32> {
+        None
+    }
+
+    /// The process that started `pid`, if it is still that one: Windows keeps a
+    /// dead parent's pid, which a newer process may have since.
+    pub fn parent(pid: i32) -> Option<i32> {
+        let up = procs().iter().find(|p| p.pid as i32 == pid)?.parent as i32;
+        (up > 0 && started(up)? <= started(pid)?).then_some(up)
+    }
+
+    /// Windows has no controlling terminal. Its nearest stand-in: `pid` runs under a
+    /// terminal or the desktop, by an unbroken line of parents, so someone started
+    /// it by hand. Sessions run under the daemon, which `caller` finds first.
+    pub fn tty(pid: i32) -> Option<u64> {
+        const HOSTS: &[&str] = &[
+            "windowsterminal.exe",
+            "openconsole.exe",
+            "conhost.exe",
+            "explorer.exe",
+            "sshd.exe",
+            "wezterm-gui.exe",
+            "alacritty.exe",
+            "mintty.exe",
+            "conemu64.exe",
+            "tabby.exe",
+            "code.exe",
+            "cursor.exe",
+        ];
+        let procs = procs();
+        let exe = |pid: i32| {
+            procs
+                .iter()
+                .find(|p| p.pid as i32 == pid)
+                .map(|p| p.exe.to_ascii_lowercase())
+        };
+        super::ancestry(pid)
+            .into_iter()
+            .skip(1)
+            .any(|up| exe(up).is_some_and(|e| HOSTS.contains(&e.as_str())))
+            .then_some(0)
+    }
+
+    /// When the process started (100 ns since 1601): with the pid, it names one
+    /// process, even after the pid is reused.
+    pub fn started(pid: i32) -> Option<u64> {
+        let process = Process::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        // SAFETY: valid out pointers.
+        let ok = unsafe {
+            GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user)
+        };
+        (ok != 0)
+            .then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn splits_a_command_line_as_the_runtime_does() {
+            let line: Vec<u16> = r#""C:\Program Files\node.exe" C:\x\codex.js --yolo"#
+                .encode_utf16()
+                .collect();
+            assert_eq!(
+                super::split_args(&line, 2).unwrap(),
+                [r"C:\Program Files\node.exe", r"C:\x\codex.js"]
+            );
+        }
+    }
+}
+
 /// Elsewhere: no agent detection; sessions keep their spawn directory.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod sys {
     pub fn cwd(_: i32) -> Option<std::path::PathBuf> {
         None
@@ -391,12 +722,21 @@ mod tests {
             ])),
             Some("codex")
         );
+        assert_eq!(
+            agent_of(&argv(&[
+                "node",
+                "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ])),
+            Some("claude")
+        );
+        assert_eq!(agent_of(&argv(&["node", "/srv/app/cli.js"])), None);
         assert_eq!(agent_of(&argv(&["vim", "claude.md"])), None);
         assert_eq!(agent_of(&argv(&["fish"])), None);
         assert_eq!(agent_of(&[]), None);
     }
 
     /// A wrapper script in the foreground, the agent its child: found below it.
+    #[cfg(unix)]
     #[test]
     fn finds_an_agent_under_a_wrapper() {
         use std::os::unix::process::CommandExt;

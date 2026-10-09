@@ -6,28 +6,34 @@ mod chat;
 mod context;
 mod extract;
 mod foreground;
+mod pty;
 mod restore;
 mod session;
 
 pub use restore::path as restore_path;
 
 use anyhow::{Context, Result};
+use pty::StopPipe;
 use serde::{Deserialize, Serialize};
-use session::{Host, SavedSession, Session, StopPipe};
+use session::{Host, SavedSession, Session};
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::io::{Read, Seek, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use valkyrie_proto::codec::{read_frame, write_frame};
+use valkyrie_proto::ipc::{Listener, Stream};
 use valkyrie_proto::{
     ClientMsg, Decision, Pane, QueueItem, Reply, ReqId, ServerMsg, SessionId, Side,
 };
@@ -42,6 +48,7 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 /// wait in the listen backlog for the next image.
 const ACCEPTED_GRACE: Duration = Duration::from_millis(50);
 /// How long a handoff waits for killed sessions to die after SIGKILL.
+#[cfg(unix)]
 const KILL_WAIT: Duration = Duration::from_millis(500);
 
 /// Everything the next daemon image needs, written to a memfd it inherits.
@@ -53,7 +60,7 @@ struct Handoff {
     boot: u64,
     next_id: u32,
     socket: PathBuf,
-    listener: RawFd,
+    listener: i32,
     sessions: Vec<SavedSession>,
     /// Killed programs not reaped yet; the next image reaps them.
     orphans: Vec<u32>,
@@ -260,14 +267,7 @@ pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path) -> Result<()>
     let socket = &std::path::absolute(socket)?;
     let dir = socket.parent().context("socket path has no parent")?;
     valkyrie_proto::ensure_private_dir(dir)?;
-    if socket.exists() {
-        if UnixStream::connect(socket).await.is_ok() {
-            anyhow::bail!("a daemon is already listening on {}", socket.display());
-        }
-        std::fs::remove_file(socket)?;
-    }
-    let listener =
-        UnixListener::bind(socket).with_context(|| format!("bind {}", socket.display()))?;
+    let listener = bind(socket).await?;
     tracing::info!("listening on {}", socket.display());
     let boot = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -282,8 +282,45 @@ pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path) -> Result<()>
     serve_forever(listener, registry, upgrades).await
 }
 
+#[cfg(unix)]
+async fn bind(socket: &Path) -> Result<Listener> {
+    if socket.exists() {
+        if valkyrie_proto::ipc::connect(socket).await.is_ok() {
+            anyhow::bail!("a daemon is already listening on {}", socket.display());
+        }
+        std::fs::remove_file(socket)?;
+    }
+    Listener::bind(socket).with_context(|| format!("bind {}", socket.display()))
+}
+
+/// A pipe name stays taken until its last handle closes, so after an upgrade
+/// (`restart`) the new daemon waits for the old one to be gone.
+#[cfg(windows)]
+async fn bind(socket: &Path) -> Result<Listener> {
+    let deadline = Instant::now() + RESTART_WAIT;
+    loop {
+        match Listener::bind(socket) {
+            Ok(listener) => return Ok(listener),
+            Err(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                if valkyrie_proto::ipc::connect(socket).await.is_ok() {
+                    anyhow::bail!("a daemon is already listening on {}", socket.display());
+                }
+                return Err(e).with_context(|| format!("bind {}", socket.display()));
+            }
+        }
+    }
+}
+
+/// How long a new daemon waits for the pipe an old one is giving up.
+#[cfg(windows)]
+const RESTART_WAIT: Duration = Duration::from_secs(5);
+
 /// The new image after an upgrade exec: adopt the listener and every session from
 /// the handoff memfd `fd`, then serve as usual (ADR-0006).
+#[cfg(unix)]
 pub async fn resume(fd: RawFd, state_dir: &Path, hook_exe: &Path) -> Result<()> {
     // SAFETY: the previous image passed this memfd to us and nothing else owns it.
     let mut memfd = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
@@ -299,7 +336,7 @@ pub async fn resume(fd: RawFd, state_dir: &Path, hook_exe: &Path) -> Result<()> 
     let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(handoff.listener) };
     set_cloexec(listener.as_raw_fd(), true);
     listener.set_nonblocking(true)?;
-    let listener = UnixListener::from_std(listener)?;
+    let listener = Listener::from_std(listener)?;
     let generation = handoff.generation + 1;
     let (registry, upgrades) = new_registry(
         handoff.socket.clone(),
@@ -385,7 +422,7 @@ fn new_registry(
 }
 
 async fn serve_forever(
-    listener: UnixListener,
+    #[cfg_attr(unix, allow(unused_mut))] mut listener: Listener,
     registry: Arc<Registry>,
     mut upgrades: mpsc::Receiver<UpgradeRequest>,
 ) -> Result<()> {
@@ -414,7 +451,10 @@ async fn serve_forever(
             // the listen backlog for whichever image comes out of it.
             Some(request) = upgrades.recv() => {
                 tokio::time::sleep(ACCEPTED_GRACE).await;
+                #[cfg(unix)]
                 let error = hand_off(&registry, &listener, &request.exe);
+                #[cfg(windows)]
+                let error = restart(&registry, &request.exe);
                 tracing::error!("upgrade failed, carrying on: {error:#}");
                 let _ = request.done.send(Err(error));
                 continue;
@@ -431,7 +471,8 @@ async fn serve_forever(
 
 /// Freezes every session, saves it to a memfd and execs `exe` with the PTYs and the
 /// listener inherited (ADR-0006). Only returns if that failed, after unfreezing.
-fn hand_off(registry: &Registry, listener: &UnixListener, exe: &Path) -> anyhow::Error {
+#[cfg(unix)]
+fn hand_off(registry: &Registry, listener: &Listener, exe: &Path) -> anyhow::Error {
     registry.frozen.store(true, Ordering::SeqCst);
     let gate = registry.gate.write().unwrap();
     // Held until the exec, so no session is added or removed under the snapshot.
@@ -469,6 +510,7 @@ fn hand_off(registry: &Registry, listener: &UnixListener, exe: &Path) -> anyhow:
 /// Killed sessions get their SIGKILL now instead of after the grace period (that
 /// timer would die with this image). Returns the pids still unreaped after a short
 /// wait, for the next image to reap.
+#[cfg(unix)]
 fn finish_kills(registry: &Registry) -> Vec<u32> {
     let dying: Vec<Arc<Session>> = registry
         .dying
@@ -507,7 +549,7 @@ fn handoff_file(_dir: &Path) -> Result<std::fs::File> {
     Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn handoff_file(dir: &Path) -> Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = dir.join(format!("handoff-{}", std::process::id()));
@@ -527,9 +569,10 @@ fn handoff_file(dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
+#[cfg(unix)]
 fn exec_successor(
     registry: &Registry,
-    listener: &UnixListener,
+    listener: &Listener,
     exe: &Path,
     sessions: &[Arc<Session>],
     orphans: Vec<u32>,
@@ -572,6 +615,7 @@ fn exec_successor(
     Err(error).with_context(|| format!("exec {}", exe.display()))
 }
 
+#[cfg(unix)]
 fn snapshot(
     registry: &Registry,
     listener: RawFd,
@@ -591,6 +635,7 @@ fn snapshot(
     }
 }
 
+#[cfg(unix)]
 fn set_cloexec(fd: RawFd, on: bool) {
     let flag = if on { libc::FD_CLOEXEC } else { 0 };
     // SAFETY: plain fcntl on an fd this process owns.
@@ -605,11 +650,28 @@ async fn preflight(registry: &Registry, exe: &Path) -> Result<()> {
         "{} is not an absolute path",
         exe.display()
     );
-    let mut sample = snapshot(registry, -1, &registry.all(), Vec::new());
-    // Only the format matters here; queued keystrokes (maybe a pasted secret) stay put.
-    for saved in &mut sample.sessions {
-        saved.input.clear();
-    }
+    #[cfg(unix)]
+    let sample = {
+        let mut sample = snapshot(registry, -1, &registry.all(), Vec::new());
+        // Only the format matters; queued keystrokes (maybe a pasted secret) stay put.
+        for saved in &mut sample.sessions {
+            saved.input.clear();
+        }
+        sample
+    };
+    // Sessions don't cross a restart: only whether it runs and answers matters.
+    #[cfg(windows)]
+    let sample = Handoff {
+        version: HANDOFF_VERSION,
+        generation: registry.generation,
+        boot: registry.boot,
+        next_id: registry.next_id.load(Ordering::SeqCst),
+        socket: registry.host.socket.clone(),
+        listener: -1,
+        sessions: Vec::new(),
+        orphans: Vec::new(),
+        layouts: Vec::new(),
+    };
     let sample = serde_json::to_vec(&sample)?;
     let mut child = tokio::process::Command::new(exe)
         .args(["daemon", "--handoff-check"])
@@ -639,6 +701,54 @@ async fn preflight(registry: &Registry, exe: &Path) -> Result<()> {
         if version.is_empty() { "none" } else { &version }
     );
     Ok(())
+}
+
+/// Windows' upgrade (it has no exec to hand the sessions across): saves the restore
+/// list, starts `exe` as the next daemon and exits, which ends every session's job.
+/// The new daemon brings them back from the list, agents in their conversations
+/// (DESIGN §8.3). Only returns if `exe` could not be started, after unfreezing.
+#[cfg(windows)]
+fn restart(registry: &Registry, exe: &Path) -> anyhow::Error {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+    };
+    registry.frozen.store(true, Ordering::SeqCst);
+    let gate = registry.gate.write().unwrap();
+    let started = (|| -> Result<()> {
+        restore::save_now(registry)?;
+        let state = registry
+            .host
+            .transcript_dir
+            .parent()
+            .context("no state dir")?;
+        let log = valkyrie_proto::private_file()
+            .create(true)
+            .append(true)
+            .open(state.join("daemon.log"))?;
+        std::process::Command::new(exe)
+            .arg("--socket")
+            .arg(&registry.host.socket)
+            .arg("daemon")
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            .spawn()
+            .with_context(|| format!("start {}", exe.display()))?;
+        Ok(())
+    })();
+    match started {
+        Ok(()) => {
+            tracing::info!("restarting as {}", exe.display());
+            std::process::exit(0);
+        }
+        Err(error) => {
+            drop(gate);
+            registry.frozen.store(false, Ordering::SeqCst);
+            error
+        }
+    }
 }
 
 async fn upgrade(registry: &Registry, exe: PathBuf) -> Result<Reply> {
@@ -708,14 +818,14 @@ impl Attachment {
     }
 }
 
-async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
+async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // Who is asking, for requests an agent may not make (ADR-0007 §4).
     let peer = context::Peer::of(&stream);
     // Whether this connection is an agent's (`Some(Some(agent))`), worked out the
     // first time it starts or types into a session: those sessions then count as
     // the agent's doing, so it can't launder a decision through them.
     let mut driver: Option<Option<String>> = None;
-    let (mut rd, mut wr) = stream.into_split();
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let (out, mut out_rx) = mpsc::channel::<Arc<ServerMsg>>(OUT_CAPACITY);
     let writer = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {

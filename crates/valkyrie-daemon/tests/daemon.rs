@@ -1,4 +1,5 @@
 //! End-to-end: real daemon on a temp socket, real PTYs, the public client.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};

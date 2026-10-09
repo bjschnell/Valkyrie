@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 
 type Pending = Arc<Mutex<HashMap<ReqId, oneshot::Sender<ServerMsg>>>>;
@@ -83,8 +82,8 @@ impl Client {
         if let Some(dir) = path.parent() {
             crate::ensure_private_dir(dir)?;
         }
-        let stream = UnixStream::connect(path).await?;
-        let (mut rd, mut wr) = stream.into_split();
+        let stream = crate::ipc::connect(path).await?;
+        let (mut rd, mut wr) = tokio::io::split(stream);
         let (out, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
         let (push_tx, push_rx) = mpsc::unbounded_channel();
         let lag = Arc::new(Lag::default());

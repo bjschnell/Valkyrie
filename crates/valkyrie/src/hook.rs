@@ -7,7 +7,6 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use valkyrie_proto::ClientMsg;
@@ -61,10 +60,8 @@ fn forward(agent: &str, socket: &Path) -> Result<()> {
         valkyrie_proto::ensure_private_dir(dir)?;
     }
     // The daemon reads the whole frame before it sees EOF, so nothing to wait for.
-    let mut stream =
-        UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
-    stream.set_write_timeout(Some(SEND_TIMEOUT))?;
-    stream.write_all(&frame)?;
+    valkyrie_proto::ipc::exchange(socket, &frame, false, SEND_TIMEOUT)
+        .with_context(|| format!("connect {}", socket.display()))?;
     Ok(())
 }
 
@@ -102,25 +99,30 @@ fn cap_strings(value: &mut Value) {
 /// change between runs. The redirect and `|| true` keep even a stale or missing
 /// binary at that path from printing or blocking the agent.
 pub fn codex_command(exe: &Path) -> String {
-    format!(
-        "'{}' hook codex 2>/dev/null || true",
-        exe.to_string_lossy().replace('\'', r"'\''")
-    )
+    format!("{} hook codex 2>/dev/null || true", quote(exe))
 }
 
 /// The context hook's command line (ADR-0007), as stable as `codex_command`.
 pub fn codex_context_command(exe: &Path) -> String {
-    format!(
-        "'{}' context-hook codex 2>/dev/null || true",
-        exe.to_string_lossy().replace('\'', r"'\''")
-    )
+    format!("{} context-hook codex 2>/dev/null || true", quote(exe))
+}
+
+/// `exe` single-quoted for a POSIX shell; with forward slashes on Windows, where
+/// hooks run in Git Bash.
+fn quote(exe: &Path) -> String {
+    let exe = exe.to_string_lossy();
+    let exe = if cfg!(windows) {
+        exe.replace('\\', "/")
+    } else {
+        exe.into_owned()
+    };
+    format!("'{}'", exe.replace('\'', r"'\''"))
 }
 
 pub fn codex_hooks_path() -> PathBuf {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
-        .unwrap_or_else(|| PathBuf::from(".codex"));
+        .unwrap_or_else(|| valkyrie_proto::home_dir().join(".codex"));
     home.join("hooks.json")
 }
 

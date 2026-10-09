@@ -111,12 +111,24 @@ pub(crate) fn flatten(screen: &str) -> String {
 
 /// The adapter for a command line, by program name.
 pub fn adapter_for(command: &[String]) -> &'static dyn Adapter {
-    let program = command
-        .first()
-        .and_then(|p| Path::new(p).file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    by_name(program)
+    by_name(command.first().and_then(|p| program_name(p)).unwrap_or(""))
+}
+
+/// A program's name as typed: its file name, less the `.exe`, `.cmd`, `.bat` or
+/// `.com` Windows adds (`C:\…\claude.exe` is `claude`).
+pub fn program_name(path: &str) -> Option<&str> {
+    let name = Path::new(path).file_name()?.to_str()?;
+    let windows = [".exe", ".cmd", ".bat", ".com"];
+    Some(
+        windows
+            .iter()
+            .find_map(|ext| {
+                let cut = name.len().checked_sub(ext.len())?;
+                (name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(ext))
+                    .then(|| &name[..cut])
+            })
+            .unwrap_or(name),
+    )
 }
 
 /// An interactive shell (`fish`, `bash --norc`), not a command one runs (`sh -c …`).

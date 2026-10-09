@@ -8,6 +8,7 @@ pub mod agent;
 pub mod client;
 pub mod codec;
 pub mod context;
+pub mod ipc;
 pub mod layout;
 pub mod screen;
 
@@ -372,39 +373,51 @@ pub fn default_socket_path() -> PathBuf {
 
 /// Where older daemons listened, to point upgraders at a stray one: the pre-rename
 /// `<state dir>/../overseer`, and the `$XDG_RUNTIME_DIR` and `/tmp` sockets used
-/// before 2026-10-07.
+/// before 2026-10-07. None on Windows, which came later.
 pub fn legacy_socket_paths() -> Vec<PathBuf> {
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
-    let mut paths = vec![
-        state_dir()
-            .with_file_name("overseer")
-            .join("run")
-            .join(format!("{}.sock", hostname())),
-    ];
-    paths.extend(
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(|dir| PathBuf::from(dir).join("overseer/overseer.sock")),
-    );
-    paths.push(PathBuf::from(format!("/tmp/overseer-{uid}/overseer.sock")));
-    paths
+    #[cfg(windows)]
+    return Vec::new();
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let mut paths = vec![
+            state_dir()
+                .with_file_name("overseer")
+                .join("run")
+                .join(format!("{}.sock", hostname())),
+        ];
+        paths.extend(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map(|dir| PathBuf::from(dir).join("overseer/overseer.sock")),
+        );
+        paths.push(PathBuf::from(format!("/tmp/overseer-{uid}/overseer.sock")));
+        paths
+    }
 }
 
 /// Longest path a unix socket address holds (`sun_path` with its NUL: 108 bytes on
-/// Linux, 104 on macOS and the BSDs).
+/// Linux, 104 on macOS and the BSDs). Windows names its pipe after a hash of the
+/// path, so any length does.
 #[cfg(target_os = "linux")]
 pub const MAX_SOCKET_PATH: usize = 107;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub const MAX_SOCKET_PATH: usize = 103;
 
 /// This machine's name, safe as a file name.
 pub fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: the buffer is valid for its length; gethostname NUL-terminates or
-    // truncates within it.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let name: String = String::from_utf8_lossy(&buf[..if ok { end } else { 0 }])
+    #[cfg(unix)]
+    let raw = {
+        let mut buf = [0u8; 256];
+        // SAFETY: the buffer is valid for its length; gethostname NUL-terminates or
+        // truncates within it.
+        let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..if ok { end } else { 0 }]).into_owned()
+    };
+    #[cfg(windows)]
+    let raw = std::env::var("COMPUTERNAME").unwrap_or_default();
+    let name: String = raw
         .chars()
         .map(|c| match c {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
@@ -421,6 +434,7 @@ pub fn hostname() -> String {
 /// Creates the socket's directory if needed and refuses to use it unless it is a real
 /// directory (not a symlink) owned by us with no group/other access. Whoever controls
 /// that directory controls which daemon our keystrokes go to.
+#[cfg(unix)]
 pub fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     if let Some(parent) = dir.parent() {
@@ -443,25 +457,130 @@ pub fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `$XDG_STATE_HOME/valkyrie`, falling back to `~/.local/state/valkyrie`.
+/// On Windows the directory sits in the user's own profile, which only they can
+/// open, and the daemon's pipe checks who serves it (`ipc`): this only refuses a
+/// symlink or junction.
+#[cfg(windows)]
+pub fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    std::fs::create_dir_all(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        anyhow::bail!(
+            "refusing to use {}: must be a plain directory",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Options to create a file only its owner can read (0600); on Windows the user's
+/// profile already keeps others out.
+pub fn private_file() -> std::fs::OpenOptions {
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+}
+
+/// `create_dir_all`, making any new directory private (0700).
+pub fn private_dir_all(dir: &Path) -> std::io::Result<()> {
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
+/// `$XDG_STATE_HOME/valkyrie`, falling back to `~/.local/state/valkyrie`; on
+/// Windows `%LOCALAPPDATA%\Valkyrie`.
 pub fn state_dir() -> PathBuf {
-    // Relative values are invalid per the XDG spec, and would make the socket path
-    // depend on the working directory.
-    let absolute = |var| {
-        std::env::var_os(var)
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-    };
-    if let Some(dir) = absolute("XDG_STATE_HOME") {
+    if let Some(dir) = absolute_var("XDG_STATE_HOME") {
         return dir.join("valkyrie");
     }
-    absolute("HOME")
-        .or_else(passwd_home)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".local/state/valkyrie")
+    #[cfg(windows)]
+    if let Some(dir) = absolute_var("LOCALAPPDATA") {
+        return dir.join("Valkyrie");
+    }
+    home_dir().join(".local/state/valkyrie")
+}
+
+/// `$XDG_CONFIG_HOME/valkyrie`, falling back to `~/.config/valkyrie`; on Windows
+/// `%APPDATA%\Valkyrie`.
+pub fn config_dir() -> PathBuf {
+    if let Some(dir) = absolute_var("XDG_CONFIG_HOME") {
+        return dir.join("valkyrie");
+    }
+    #[cfg(windows)]
+    if let Some(dir) = absolute_var("APPDATA") {
+        return dir.join("Valkyrie");
+    }
+    home_dir().join(".config/valkyrie")
+}
+
+/// The user's home: `$HOME`, else (on Windows) `%USERPROFILE%`, else the password
+/// database's.
+pub fn home_dir() -> PathBuf {
+    let found = absolute_var("HOME");
+    #[cfg(windows)]
+    let found = found.or_else(|| absolute_var("USERPROFILE"));
+    #[cfg(unix)]
+    let found = found.or_else(passwd_home);
+    found.unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Relative values are invalid per the XDG spec, and would make the socket path
+/// depend on the working directory.
+fn absolute_var(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+/// The shell a new shell session runs: `$SHELL`, else on Windows PowerShell 7 if
+/// it's installed, else Windows PowerShell; elsewhere `/bin/sh`.
+pub fn default_shell() -> String {
+    if let Ok(shell) = std::env::var("SHELL")
+        && !shell.is_empty()
+    {
+        return shell;
+    }
+    #[cfg(windows)]
+    {
+        let pwsh = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file())
+        });
+        if pwsh { "pwsh.exe" } else { "powershell.exe" }.into()
+    }
+    #[cfg(unix)]
+    "/bin/sh".into()
+}
+
+/// `std::fs::canonicalize`, without the `\\?\` prefix Windows puts on the result
+/// where the plain path means the same: many programs can't start in a `\\?\` path.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let path = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{rest}")));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+            && rest.len() < 260
+        {
+            return Ok(PathBuf::from(rest));
+        }
+    }
+    Ok(path)
 }
 
 /// The home directory from the password database, for when `$HOME` is unset.
+#[cfg(unix)]
 fn passwd_home() -> Option<PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
@@ -490,8 +609,10 @@ fn passwd_home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     #[test]
     fn private_dir_is_created_0700_and_loose_or_symlinked_dirs_are_refused() {
         let base = std::env::temp_dir().join(format!("valkyrie-dir-test-{}", std::process::id()));

@@ -25,7 +25,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::net::UnixStream;
 use valkyrie_proto::ClientMsg;
 use valkyrie_proto::codec::{read_frame, write_frame};
 
@@ -462,10 +461,10 @@ impl Drop for Presence {
 /// session's agent transcript (DESIGN §8.7).
 async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
     let socket = presence.app.socket.clone();
-    let stream = UnixStream::connect(&socket)
+    let stream = valkyrie_proto::ipc::connect(&socket)
         .await
         .with_context(|| format!("connect {}", socket.display()))?;
-    let (mut from_daemon, mut to_daemon) = stream.into_split();
+    let (mut from_daemon, mut to_daemon) = tokio::io::split(stream);
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(16);

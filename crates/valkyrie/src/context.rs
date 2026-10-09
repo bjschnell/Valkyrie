@@ -259,12 +259,13 @@ fn store_base() -> PathBuf {
 /// How an agent should run Valkyrie: `valk` when that is this binary on `$PATH`,
 /// else this binary's full path.
 fn valk_command() -> String {
-    let Ok(me) = std::env::current_exe().and_then(std::fs::canonicalize) else {
+    let Ok(me) = std::env::current_exe().and_then(|me| valkyrie_proto::canonical(&me)) else {
         return "valk".into();
     };
+    let name = format!("valk{}", std::env::consts::EXE_SUFFIX);
     let on_path = std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path)
-            .any(|dir| std::fs::canonicalize(dir.join("valk")).is_ok_and(|p| p == me))
+            .any(|dir| valkyrie_proto::canonical(&dir.join(&name)).is_ok_and(|p| p == me))
     });
     if on_path {
         "valk".into()
@@ -325,27 +326,19 @@ pub fn hook(agent: &str) {
 /// Asks the daemon what this session's agent should hear about the agents beside
 /// it. Blocking, and quick to give up: a prompt must never wait on Valkyrie.
 fn siblings() -> Option<String> {
-    use std::io::Write;
-    use std::os::unix::net::UnixStream;
     use std::time::Duration;
     let session = std::env::var("VALK_SESSION").ok()?.parse().ok()?;
     let socket = std::env::var_os("VALK_SOCKET")?;
-    let mut stream = UnixStream::connect(socket).ok()?;
-    let limit = Some(Duration::from_millis(300));
-    stream.set_write_timeout(limit).ok()?;
-    stream.set_read_timeout(limit).ok()?;
     let frame =
         valkyrie_proto::codec::encode(&valkyrie_proto::ClientMsg::Siblings { req: 1, session })
             .ok()?;
-    stream.write_all(&frame).ok()?;
-    let mut len = [0u8; 4];
-    stream.read_exact(&mut len).ok()?;
-    let len = u32::from_be_bytes(len) as usize;
-    if len > 1 << 20 {
-        return None;
-    }
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).ok()?;
+    let body = valkyrie_proto::ipc::exchange(
+        std::path::Path::new(&socket),
+        &frame,
+        true,
+        Duration::from_millis(300),
+    )
+    .ok()?;
     match serde_json::from_slice(&body).ok()? {
         valkyrie_proto::ServerMsg::Ok {
             reply: valkyrie_proto::Reply::Text { text },
@@ -447,7 +440,6 @@ fn git_where(dir: &Path) -> Option<String> {
 
 /// Saves a handoff where only its owner can read it, and says where.
 pub fn save_handoff(text: &str, from: valkyrie_proto::SessionId) -> Result<PathBuf> {
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = store_base().join("handoffs");
     valkyrie_proto::ensure_private_dir(&store_base())?;
     valkyrie_proto::ensure_private_dir(&dir)?;
@@ -455,10 +447,9 @@ pub fn save_handoff(text: &str, from: valkyrie_proto::SessionId) -> Result<PathB
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     let path = dir.join(format!("{stamp}-session-{from}.md"));
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = valkyrie_proto::private_file()
         .write(true)
         .create_new(true)
-        .mode(0o600)
         .open(&path)?;
     std::io::Write::write_all(&mut file, text.as_bytes())?;
     Ok(path)

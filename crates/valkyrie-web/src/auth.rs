@@ -192,14 +192,12 @@ impl Store {
 
     fn write<T: Serialize>(&self, file: &str, value: &T) -> Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let path = self.dir.join(file);
         let tmp = self.dir.join(format!(".{file}.tmp"));
-        let mut out = std::fs::OpenOptions::new()
+        let mut out = valkyrie_proto::private_file()
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
             .open(&tmp)
             .with_context(|| format!("write {}", tmp.display()))?;
         out.write_all(&serde_json::to_vec_pretty(value)?)?;

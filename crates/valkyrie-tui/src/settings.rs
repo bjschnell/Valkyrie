@@ -304,15 +304,10 @@ impl Settings {
     }
 }
 
-/// `settings.toml` under `$XDG_CONFIG_HOME/valkyrie`, else `~/.config/valkyrie`,
-/// else (no home) the state directory.
+/// `settings.toml` under `$XDG_CONFIG_HOME/valkyrie`, else `~/.config/valkyrie`
+/// (`%APPDATA%\Valkyrie` on Windows).
 pub fn path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map_or_else(valkyrie_proto::state_dir, |config| config.join("valkyrie"))
-        .join("settings.toml")
+    valkyrie_proto::config_dir().join("settings.toml")
 }
 
 fn names<'a>(all: impl Iterator<Item = &'a str>) -> String {

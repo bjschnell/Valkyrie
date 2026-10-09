@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,16 +67,12 @@ fn read(path: &Path) -> Result<List> {
 /// Atomically, readable only by the user: it holds command lines.
 fn write(path: &Path, json: &str) -> Result<()> {
     let dir = path.parent().context("restore list has no directory")?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
+    valkyrie_proto::private_dir_all(dir)?;
     let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = valkyrie_proto::private_file()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
         .open(&tmp)?;
     file.write_all(json.as_bytes())?;
     file.sync_all()?;
@@ -147,6 +142,13 @@ pub async fn keep(registry: Arc<Registry>, path: PathBuf) {
             _ = registry.restore_now.notified() => {}
         }
     }
+}
+
+/// Writes the list now, for a daemon about to restart (Windows' upgrade).
+#[cfg(windows)]
+pub fn save_now(registry: &Registry) -> Result<()> {
+    let json = render(registry).context("restore list not rendered")?;
+    write(&registry.restore_file, &json)
 }
 
 /// Spawns what the last daemon left on the list. Returns how many came back.

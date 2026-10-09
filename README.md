@@ -9,7 +9,8 @@ and why. Use it from the terminal (`valk`) or from your phone.
   and `working`, read from agent hooks and the screen itself. A chime plays when
   something new needs you.
 - **Sessions that outlive the TUI.** A daemon owns every PTY. Close the TUI, SSH in
-  from elsewhere, or `valk upgrade` to a new build, and every session keeps running.
+  from elsewhere, and every session keeps running. Unix upgrades keep running
+  sessions; Windows upgrades restart them and resume agent conversations.
   After a reboot, Claude and Codex conversations resume.
 - **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right, as
   underline, folder or card tabs. Split a tab into panes up, down, left or right.
@@ -24,8 +25,8 @@ and why. Use it from the terminal (`valk`) or from your phone.
 
 ### Windows
 
-In PowerShell. It sets up WSL2 and Ubuntu if needed, installs `valk` inside it, and
-adds a `valk` command and a Windows Terminal profile:
+In PowerShell on Windows x64 (Windows 10 version 1809 or newer). It installs native
+`valk`, adds it to your user PATH, and adds a Windows Terminal profile:
 
 ```powershell
 irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
@@ -52,8 +53,8 @@ cd ~/repos/valkyrie && ./install.sh
 This needs a C toolchain. `install.sh` installs Rust with rustup if you don't have
 it.
 
-Valkyrie needs a Unix, so on Windows it runs inside WSL2.
-[docs/install.md](docs/install.md) covers each platform.
+On Windows, use agents installed on Windows and your Windows repos. WSL2 remains
+available through `install-wsl.ps1`. [docs/install.md](docs/install.md) covers each platform.
 
 ## Use
 
@@ -95,7 +96,8 @@ colors (`theme`) or your terminal's (`terminal`), tab style (`underline`, `folde
 `cards`), tab side (`top`, `left`, `right`), and sound. With `theme`, a session's
 background, default text and 16 ANSI colors come from the theme; colors a program
 picks exactly (256-color or RGB) stay as it drew them. Settings are kept in
-`~/.config/valkyrie/settings.toml`, which you can also edit by hand. `VALK_THEME`,
+`~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
+which you can also edit by hand. `VALK_THEME`,
 `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for
 one run.
 

@@ -85,7 +85,15 @@ pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
 }
 
 pub(crate) fn shell_quote(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+    let path = path.to_string_lossy();
+    // Claude Code on Windows runs hooks in Git Bash; `C:/…` reads the same there
+    // and in any other shell it might use, where `C:\…` may not.
+    let path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.into_owned()
+    };
+    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 fn normalize(p: &Value) -> Option<AgentEvent> {

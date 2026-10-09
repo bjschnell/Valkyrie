@@ -3235,6 +3235,7 @@ dependencies = [
  "valkyrie-term",
  "valkyrie-tui",
  "valkyrie-web",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3271,6 +3272,7 @@ dependencies = [
  "valkyrie-context",
  "valkyrie-proto",
  "valkyrie-term",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3282,6 +3284,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3304,6 +3307,7 @@ dependencies = [
  "tokio",
  "unicode-width",
  "valkyrie-proto",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

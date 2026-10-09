@@ -1,6 +1,6 @@
 //! `valk setup web`: `valk web` as a background service the OS keeps running, so
 //! the web app outlives the terminal that started it (DESIGN §8.10). A systemd user
-//! unit on Linux, a launchd agent on macOS. Phones pair afterwards with
+//! unit on Linux, a launchd agent on macOS, a Task Scheduler task on Windows. Phones pair afterwards with
 //! `valk web pair`, which the setup runs once at the end.
 
 use anyhow::{Context, Result, bail};
@@ -10,11 +10,13 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use valkyrie_web::tailscale;
 
-/// The service's name: the systemd unit, or the launchd label.
+/// The service's name: the systemd unit, the launchd label, or the task.
 #[cfg(target_os = "linux")]
 pub const DEFAULT_NAME: &str = "valk-web";
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 pub const DEFAULT_NAME: &str = "dev.valkyrie.web";
+#[cfg(windows)]
+pub const DEFAULT_NAME: &str = "Valkyrie web";
 
 /// The environment the service runs with, copied from the shell that sets it up.
 /// Services start with a bare one, and the daemon (which `valk web` starts when none
@@ -60,11 +62,12 @@ impl Setup {
 /// (often a symlink into a build) stays put while the build it points at changes.
 pub fn default_exe() -> Result<PathBuf> {
     let me = std::env::current_exe()?;
-    let real = std::fs::canonicalize(&me)?;
+    let real = valkyrie_proto::canonical(&me)?;
+    let name = format!("valk{}", std::env::consts::EXE_SUFFIX);
     let on_path = std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
-            .map(|dir| dir.join("valk"))
-            .find(|p| std::fs::canonicalize(p).is_ok_and(|p| p == real))
+            .map(|dir| dir.join(&name))
+            .find(|p| valkyrie_proto::canonical(p).is_ok_and(|p| p == real))
     });
     Ok(on_path.unwrap_or(me))
 }
@@ -89,7 +92,7 @@ pub fn run(setup: Setup) -> Result<()> {
         return Ok(());
     }
 
-    let text = platform.render(&setup);
+    let text = platform.render(&setup)?;
     if setup.dry_run {
         println!("# {}\n{text}", file.display());
         return Ok(());
@@ -105,7 +108,8 @@ pub fn run(setup: Setup) -> Result<()> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    std::fs::write(&file, text).with_context(|| format!("write {}", file.display()))?;
+    std::fs::write(&file, platform.encode(&text))
+        .with_context(|| format!("write {}", file.display()))?;
     platform.start(&setup.name, &file)?;
     println!("installed {}: {}", setup.name, file.display());
     if !wait_for(setup.listen, Duration::from_secs(10)) {
@@ -179,14 +183,13 @@ fn succeeds(program: &str, args: &[&str]) -> bool {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    valkyrie_proto::home_dir()
 }
 
 enum Platform {
     Systemd,
     Launchd,
+    TaskScheduler,
 }
 
 impl Platform {
@@ -195,11 +198,26 @@ impl Platform {
             Ok(Self::Systemd)
         } else if cfg!(target_os = "macos") {
             Ok(Self::Launchd)
+        } else if cfg!(windows) {
+            Ok(Self::TaskScheduler)
         } else {
             bail!(
-                "`valk setup web` knows systemd (Linux) and launchd (macOS); on this \
-                 system, run `valk web` from your own service manager"
+                "`valk setup web` knows systemd (Linux), launchd (macOS) and Task \
+                 Scheduler (Windows); on this system, run `valk web` from your own \
+                 service manager"
             )
+        }
+    }
+
+    /// The file's bytes: Task Scheduler reads its XML as UTF-16.
+    fn encode(&self, text: &str) -> Vec<u8> {
+        match self {
+            Self::TaskScheduler => [0xfeffu16]
+                .into_iter()
+                .chain(text.encode_utf16())
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            _ => text.as_bytes().to_vec(),
         }
     }
 
@@ -214,25 +232,28 @@ impl Platform {
             Self::Launchd => home()
                 .join("Library/LaunchAgents")
                 .join(format!("{name}.plist")),
+            // The task lives in Task Scheduler; this is the definition it came from.
+            Self::TaskScheduler => valkyrie_proto::state_dir().join(format!("{name}.xml")),
         })
     }
 
-    fn render(&self, setup: &Setup) -> String {
-        match self {
+    fn render(&self, setup: &Setup) -> Result<String> {
+        let log = valkyrie_proto::state_dir().join("web.log");
+        Ok(match self {
             Self::Systemd => systemd_unit(&setup.command(), &setup.env()),
-            Self::Launchd => launchd_plist(
-                &setup.name,
-                &setup.command(),
-                &setup.env(),
-                &valkyrie_proto::state_dir().join("web.log"),
-            ),
-        }
+            Self::Launchd => launchd_plist(&setup.name, &setup.command(), &setup.env(), &log),
+            Self::TaskScheduler => task_xml(&setup.command(), &setup.env(), &log, &windows_user())?,
+        })
     }
 
     fn running(&self, name: &str) -> bool {
         match self {
             Self::Systemd => succeeds("systemctl", &["--user", "is-active", "--quiet", name]),
             Self::Launchd => succeeds("launchctl", &["print", &launchd_target(name)]),
+            Self::TaskScheduler => Command::new("schtasks")
+                .args(["/Query", "/TN", name, "/FO", "CSV", "/NH"])
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Running")),
         }
     }
 
@@ -251,6 +272,12 @@ impl Platform {
                     &["bootstrap", &launchd_domain(), &file.display().to_string()],
                 )
             }
+            Self::TaskScheduler => {
+                let _ = manage("schtasks", &["/End", "/TN", name]);
+                let file = file.display().to_string();
+                manage("schtasks", &["/Create", "/TN", name, "/XML", &file, "/F"])?;
+                manage("schtasks", &["/Run", "/TN", name])
+            }
         }
     }
 
@@ -262,6 +289,10 @@ impl Platform {
             }
             Self::Launchd => {
                 let _ = manage("launchctl", &["bootout", &launchd_target(name)]);
+            }
+            Self::TaskScheduler => {
+                let _ = manage("schtasks", &["/End", "/TN", name]);
+                let _ = manage("schtasks", &["/Delete", "/TN", name, "/F"]);
             }
         }
     }
@@ -277,6 +308,10 @@ impl Platform {
             Self::Systemd => format!("journalctl --user -u {name} -f"),
             Self::Launchd => format!(
                 "tail -f {}",
+                valkyrie_proto::state_dir().join("web.log").display()
+            ),
+            Self::TaskScheduler => format!(
+                "Get-Content -Wait '{}'",
                 valkyrie_proto::state_dir().join("web.log").display()
             ),
         }
@@ -302,8 +337,102 @@ impl Platform {
 }
 
 fn launchd_domain() -> String {
+    #[cfg(unix)]
     // SAFETY: getuid cannot fail.
-    format!("gui/{}", unsafe { libc::getuid() })
+    let uid = unsafe { libc::getuid() };
+    #[cfg(windows)]
+    let uid = 0;
+    format!("gui/{uid}")
+}
+
+/// `DOMAIN\user`, whom the task's logon trigger is for.
+fn windows_user() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+        _ => user,
+    }
+}
+
+/// A Task Scheduler task: starts at `user`'s logon and comes back if it fails.
+/// A console program started by a task opens a window, so it runs in a headless
+/// console host, through `cmd` for the log. Windows has no `KillMode=process`:
+/// ending the task ends its job, and with it a daemon `valk web` started that
+/// could not break away from it.
+fn task_xml(
+    command: &[String],
+    env: &[(String, String)],
+    log: &Path,
+    user: &str,
+) -> Result<String> {
+    let words = command
+        .iter()
+        .map(|word| cmd_quote(word))
+        .collect::<Result<Vec<_>>>()?;
+    let log = cmd_quote(&log.display().to_string())?;
+    let environment = env
+        .iter()
+        .map(|(key, value)| {
+            anyhow::ensure!(
+                KEPT_ENV.contains(&key.as_str()),
+                "unsupported service environment variable {key}"
+            );
+            Ok(format!("set {} && ", cmd_quote(&format!("{key}={value}"))?))
+        })
+        .collect::<Result<String>>()?;
+    let line = format!("{environment}{} >> {log} 2>&1", words.join(" "));
+    let arguments = format!("--headless cmd.exe /d /v:off /s /c \"{line}\"");
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<!-- Made by `valk setup web`; `valk setup web --remove` takes it away. -->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Valkyrie web app (valk web)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <Hidden>true</Hidden>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>conhost.exe</Command>
+      <Arguments>{arguments}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        user = xml(user),
+        arguments = xml(&arguments),
+    ))
+}
+
+/// One word for `cmd /s /c "…"`, in double quotes so `&`, `|` and the like are
+/// plain text. Nothing in quotes escapes `"` or `%` from cmd, so those are refused.
+fn cmd_quote(word: &str) -> Result<String> {
+    if word.contains(['"', '%', '\r', '\n', '\0']) {
+        bail!("can't pass {word:?} through cmd.exe; pick one without \" or %");
+    }
+    Ok(format!("\"{word}\""))
 }
 
 fn launchd_target(name: &str) -> String {
@@ -450,6 +579,30 @@ mod tests {
         assert_eq!(systemd_quote("a b"), "\"a b\"");
         assert_eq!(systemd_quote("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(systemd_quote(""), "\"\"");
+    }
+
+    #[test]
+    fn writes_a_task_that_runs_headless_and_logs() {
+        let mut s = setup();
+        s.exe = r"C:\Users\u\AppData\Local\Programs\Valkyrie\valk.exe".into();
+        s.url = Some("https://a.ts.net/?x=1&y=2".into());
+        let log = Path::new(r"C:\Users\u\AppData\Local\Valkyrie\web.log");
+        let task = task_xml(&s.command(), &[], log, r"PC\u").unwrap();
+        assert!(task.contains("<UserId>PC\\u</UserId>"));
+        assert!(task.contains(
+            "<Arguments>--headless cmd.exe /d /v:off /s /c &quot;&quot;C:\\Users\\u\\AppData\\Local\\Programs\\Valkyrie\\valk.exe&quot; &quot;--socket&quot;"
+        ));
+        assert!(task.contains("&quot;https://a.ts.net/?x=1&amp;y=2&quot;"));
+        assert!(task.contains(
+            " &gt;&gt; &quot;C:\\Users\\u\\AppData\\Local\\Valkyrie\\web.log&quot; 2&gt;&amp;1&quot;</Arguments>"
+        ));
+        assert!(cmd_quote("50%").is_err());
+        assert!(cmd_quote("line\nbreak").is_err());
+        let env = [("PATH".into(), r"C:\Program Files\nodejs;C:\Windows".into())];
+        let task = task_xml(&s.command(), &env, log, r"PC\u").unwrap();
+        assert!(
+            task.contains(r"set &quot;PATH=C:\Program Files\nodejs;C:\Windows&quot; &amp;&amp; ")
+        );
     }
 
     #[test]

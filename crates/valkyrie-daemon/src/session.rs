@@ -14,21 +14,24 @@
 //! reaches goes to `<ns>-<id>.events.jsonl` next to the transcript, so a recorded
 //! session replays to the same states (DESIGN §14.6).
 
+use crate::pty::{Pty, StopPipe, pty_size};
 use crate::{chat, foreground};
 use anyhow::{Context, Result};
-use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, native_pty_system};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, broadcast};
 use valkyrie_agents::{Adapter, AgentEvent, Screen, Tracker};
 use valkyrie_proto::AgentStatus;
@@ -42,6 +45,7 @@ pub type Feed = broadcast::Receiver<Arc<ServerMsg>>;
 
 const FEED_CAPACITY: usize = 1024;
 /// How long `kill` waits after SIGHUP before escalating to SIGKILL.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Screen heuristics run once output has been quiet this long, never per chunk.
 const SCAN_QUIET_MS: u64 = 150;
@@ -72,62 +76,6 @@ pub struct Host {
     pub context_dir: PathBuf,
 }
 
-/// Readers poll this alongside their PTY and return, before reading another byte,
-/// once it is set: unread output stays in the kernel for the next daemon image.
-pub struct StopPipe {
-    read: OwnedFd,
-    write: OwnedFd,
-}
-
-impl StopPipe {
-    pub fn new() -> std::io::Result<Self> {
-        // Close-on-exec, on every platform.
-        let (read, write) = std::io::pipe()?;
-        Ok(Self {
-            read: read.into(),
-            write: write.into(),
-        })
-    }
-
-    /// Level-triggered and never drained, so every poller sees it, now and later.
-    pub fn set(&self) {
-        // SAFETY: writes one byte from a valid buffer to our own pipe.
-        unsafe { libc::write(self.write.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
-    }
-}
-
-/// The PTY master, held as a plain fd so it can survive an exec (ADR-0006).
-struct Pty(OwnedFd);
-
-impl Pty {
-    /// `cell` in pixels fills the winsize pixel fields, which image programs read.
-    fn resize(&self, size: Size, cell: (u16, u16)) -> std::io::Result<()> {
-        let ws = libc::winsize {
-            ws_row: size.rows,
-            ws_col: size.cols,
-            ws_xpixel: size.cols.saturating_mul(cell.0),
-            ws_ypixel: size.rows.saturating_mul(cell.1),
-        };
-        // SAFETY: TIOCSWINSZ reads a winsize from a valid pointer.
-        if unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCSWINSZ, &ws) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    /// The foreground process group, as the shell's job control set it.
-    fn foreground(&self) -> Option<i32> {
-        // SAFETY: tcgetpgrp only reads the terminal's state.
-        let group = unsafe { libc::tcgetpgrp(self.0.as_raw_fd()) };
-        (group > 0).then_some(group)
-    }
-
-    /// An independent handle for a reader or writer thread.
-    fn file(&self) -> std::io::Result<File> {
-        Ok(File::from(self.0.try_clone()?))
-    }
-}
-
 /// Input waiting for the PTY. The writer takes from the front; when a handoff stops
 /// it mid-buffer, the unwritten rest goes back to the front, and the whole queue
 /// crosses the exec in `SavedSession::input`.
@@ -141,6 +89,7 @@ struct InputQueue {
 struct InputState {
     bufs: VecDeque<Vec<u8>>,
     /// Stop taking input (handoff); cleared if the handoff fails.
+    #[cfg(unix)]
     halt: bool,
     /// The session is gone; the writer ends once the queue is empty.
     closed: bool,
@@ -165,6 +114,7 @@ impl InputQueue {
 /// only the pid crossed the exec) `waitpid` on that pid.
 enum Reap {
     Child(Box<dyn Child + Send + Sync>),
+    #[cfg(unix)]
     Pid(u32),
 }
 
@@ -178,7 +128,7 @@ pub struct SavedSession {
     pub pid: Option<u32>,
     created_unix: u64,
     /// The PTY master, inherited across the exec.
-    pub fd: RawFd,
+    pub fd: i32,
     transcript: PathBuf,
     events: PathBuf,
     offset: u64,
@@ -226,7 +176,10 @@ pub struct Session {
     state: Mutex<State>,
     input: Arc<InputQueue>,
     pty: Pty,
+    // For a handoff, which Windows doesn't do.
+    #[cfg_attr(windows, allow(dead_code))]
     transcript: PathBuf,
+    #[cfg_attr(windows, allow(dead_code))]
     events: PathBuf,
     reader: Mutex<Option<JoinHandle<()>>>,
     writer: Mutex<Option<JoinHandle<()>>>,
@@ -319,16 +272,12 @@ impl Session {
 
         // Opened before spawning so a failure here cannot orphan the child. Ids restart
         // with the daemon, so the nanosecond timestamp keeps transcripts distinct.
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&host.transcript_dir)?;
+        valkyrie_proto::private_dir_all(&host.transcript_dir)?;
         let stem = host.transcript_dir.join(format!("{}-{id}", now.as_nanos()));
         let private = |ext: &str| {
-            OpenOptions::new()
+            valkyrie_proto::private_file()
                 .create_new(true)
                 .write(true)
-                .mode(0o600)
                 .open(stem.with_extension(ext))
         };
         let transcript = private("raw")?;
@@ -358,16 +307,22 @@ impl Session {
         cmd.env("VALK_SESSION", id.to_string());
         cmd.env("VALK_SOCKET", &host.socket);
         cmd.env("VALK_CONTEXT", &host.context_dir);
+        #[cfg(windows)]
+        crate::pty::resolve_agent_shim(&mut cmd, adapter.name())?;
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .with_context(|| format!("spawn {program}"))?;
         drop(pair.slave);
-        let fd = pair.master.as_raw_fd().context("pty master has no fd")?;
-        // SAFETY: the master is open until `pair.master` drops, after this dup.
-        let pty = Pty(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?);
-        drop(pair.master);
+        let pty = match Pty::new(pair.master, &*child) {
+            Ok(pty) => pty,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
 
         let now_ms = now.as_millis() as u64;
         let mut screen = VtScreen::new(size);
@@ -426,6 +381,7 @@ impl Session {
     /// Takes over a session saved by the previous daemon image (ADR-0006): the PTY
     /// fd came across the exec, the screen is rebuilt from the transcript, and the
     /// program is still our child, so `waitpid` keeps working.
+    #[cfg(unix)]
     pub fn adopt(saved: SavedSession, host: &Host, generation: u32) -> Result<Arc<Session>> {
         // SAFETY: the previous image passed this fd to us and nothing else owns it.
         let fd = unsafe { OwnedFd::from_raw_fd(saved.fd) };
@@ -553,12 +509,13 @@ impl Session {
         self.start_io(transcript, host.stop.lock().unwrap().clone())
     }
 
+    #[cfg(unix)]
     fn start_io(self: &Arc<Self>, transcript: File, stop: Arc<StopPipe>) -> Result<()> {
         // Non-blocking (the reader and writer share one open file description), so
         // a stopped writer is never stuck inside write(); both poll first.
         // SAFETY: plain fcntl on our own fd.
         unsafe {
-            let fd = self.pty.0.as_raw_fd();
+            let fd = self.pty.fd();
             libc::fcntl(
                 fd,
                 libc::F_SETFL,
@@ -582,8 +539,26 @@ impl Session {
         Ok(())
     }
 
+    /// Plain blocking reads and writes: nothing stops them but the session ending.
+    #[cfg(windows)]
+    fn start_io(self: &Arc<Self>, transcript: File, _stop: Arc<StopPipe>) -> Result<()> {
+        let (writer, queue, id) = (self.pty.writer()?, self.input.clone(), self.id);
+        let handle = std::thread::Builder::new()
+            .name(format!("pty-w-{id}"))
+            .spawn(move || write_loop(id, writer, queue))?;
+        *self.writer.lock().unwrap() = Some(handle);
+        let reader = self.pty.reader()?;
+        let session = self.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("pty-r-{id}"))
+            .spawn(move || session.pump(reader, transcript))?;
+        *self.reader.lock().unwrap() = Some(handle);
+        Ok(())
+    }
+
     /// Waits until the reader and writer have returned, after `StopPipe::set`. Unread
     /// output stays in the kernel; unwritten input stays in the queue.
+    #[cfg(unix)]
     pub fn stop_io(&self) {
         self.input.set(|state| state.halt = true);
         for thread in [&self.reader, &self.writer] {
@@ -594,6 +569,7 @@ impl Session {
     }
 
     /// Restarts the reader and writer after a handoff that failed to exec.
+    #[cfg(unix)]
     pub fn resume_io(self: &Arc<Self>, stop: Arc<StopPipe>) -> Result<()> {
         self.input.set(|state| state.halt = false);
         let transcript = append_private(&self.transcript)?;
@@ -605,6 +581,7 @@ impl Session {
     }
 
     /// SIGKILL now, for a killed session that must not outlive a handoff unreaped.
+    #[cfg(unix)]
     pub fn force_kill(&self) {
         if let Some(pid) = self.pid {
             self.signal_group(pid, libc::SIGKILL);
@@ -616,6 +593,7 @@ impl Session {
     }
 
     /// Everything the next daemon image needs; call with the reader stopped.
+    #[cfg(unix)]
     pub fn save(&self) -> SavedSession {
         let state = self.state.lock().unwrap();
         SavedSession {
@@ -626,7 +604,7 @@ impl Session {
             cwd: self.cwd.clone(),
             pid: self.pid,
             created_unix: self.created_unix,
-            fd: self.pty.0.as_raw_fd(),
+            fd: self.pty.fd(),
             transcript: self.transcript.clone(),
             events: self.events.clone(),
             offset: state.offset,
@@ -649,14 +627,16 @@ impl Session {
         }
     }
 
+    #[cfg(unix)]
     pub fn pty_fd(&self) -> RawFd {
-        self.pty.0.as_raw_fd()
+        self.pty.fd()
     }
 
     fn watching(&self) -> bool {
         self.clients.load(Ordering::Relaxed) > 0
     }
 
+    #[cfg(unix)]
     fn pump(self: Arc<Self>, mut reader: File, mut transcript: File, stop: Arc<StopPipe>) {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -698,68 +678,90 @@ impl Session {
                 }
                 Err(_) => break,
             };
-            let bytes = &buf[..n];
-            if let Err(e) = transcript.write_all(bytes) {
-                tracing::warn!(session = self.id, "transcript write failed: {e}");
-            }
-            let now = now_ms();
-            let mut state = self.state.lock().unwrap();
-            let signals = state.screen.feed(bytes);
-            if let Some(update) = state.screen.take_diff() {
-                let _ = self.feed.send(Arc::new(ServerMsg::Screen {
-                    session: self.id,
-                    update,
-                }));
-            }
-            state.offset += n as u64;
-            state.last_output_ms = now;
-            state.scan_due = true;
-            if now.saturating_sub(state.last_mark_ms) >= MARK_EVERY_MS {
-                state.last_mark_ms = now;
-                state.log(now, "out", json!({}));
-            }
-            let mut changed = state.tracker.output(now);
-            let mut replies = Vec::new();
-            for signal in signals {
-                match signal {
-                    Signal::Reply(reply) => replies.push(reply),
-                    Signal::Bell => {
-                        state.log(now, "bell", json!({}));
-                        changed |= state.tracker.apply(&AgentEvent::Bell, now, self.watching());
-                    }
-                    Signal::Title(_) => {}
-                    Signal::Graphics(cmd) => {
-                        let kept = state.graphics.record(cmd);
-                        let _ = self.feed.send(Arc::new(ServerMsg::Graphics {
-                            session: self.id,
-                            x: kept.x,
-                            y: kept.y,
-                            data: kept.data.to_string(),
-                        }));
-                    }
-                    Signal::Clipboard(text) => {
-                        state.log(now, "copy", json!({"chars": text.chars().count()}));
-                        let _ = self.feed.send(Arc::new(ServerMsg::Clipboard {
-                            session: self.id,
-                            text,
-                        }));
-                    }
-                }
-            }
-            if changed {
-                self.after_change(&mut state, now);
-            }
-            drop(state);
-            for reply in replies {
-                self.write_input(reply);
-            }
+            self.output(&buf[..n], &mut transcript);
         }
         tracing::debug!(session = self.id, "pty closed");
+    }
+
+    #[cfg(windows)]
+    fn pump(self: Arc<Self>, mut reader: Box<dyn Read + Send>, mut transcript: File) {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            self.output(&buf[..n], &mut transcript);
+        }
+        tracing::debug!(session = self.id, "pty closed");
+    }
+
+    /// Output from the program: to the transcript, the screen, the clients and the
+    /// tracker.
+    fn output(self: &Arc<Self>, bytes: &[u8], transcript: &mut File) {
+        let n = bytes.len();
+        if let Err(e) = transcript.write_all(bytes) {
+            tracing::warn!(session = self.id, "transcript write failed: {e}");
+        }
+        let now = now_ms();
+        let mut state = self.state.lock().unwrap();
+        let signals = state.screen.feed(bytes);
+        if let Some(update) = state.screen.take_diff() {
+            let _ = self.feed.send(Arc::new(ServerMsg::Screen {
+                session: self.id,
+                update,
+            }));
+        }
+        state.offset += n as u64;
+        state.last_output_ms = now;
+        state.scan_due = true;
+        if now.saturating_sub(state.last_mark_ms) >= MARK_EVERY_MS {
+            state.last_mark_ms = now;
+            state.log(now, "out", json!({}));
+        }
+        let mut changed = state.tracker.output(now);
+        let mut replies = Vec::new();
+        for signal in signals {
+            match signal {
+                Signal::Reply(reply) => replies.push(reply),
+                Signal::Bell => {
+                    state.log(now, "bell", json!({}));
+                    changed |= state.tracker.apply(&AgentEvent::Bell, now, self.watching());
+                }
+                Signal::Title(_) => {}
+                Signal::Graphics(cmd) => {
+                    let kept = state.graphics.record(cmd);
+                    let _ = self.feed.send(Arc::new(ServerMsg::Graphics {
+                        session: self.id,
+                        x: kept.x,
+                        y: kept.y,
+                        data: kept.data.to_string(),
+                    }));
+                }
+                Signal::Clipboard(text) => {
+                    state.log(now, "copy", json!({"chars": text.chars().count()}));
+                    let _ = self.feed.send(Arc::new(ServerMsg::Clipboard {
+                        session: self.id,
+                        text,
+                    }));
+                }
+            }
+        }
+        if changed {
+            self.after_change(&mut state, now);
+        }
+        drop(state);
+        for reply in replies {
+            self.write_input(reply);
+        }
     }
 
     fn wait_exit(self: Arc<Self>, reap: Reap) {
         let code = match reap {
             Reap::Child(mut child) => child.wait().ok().map(|s| s.exit_code() as i32),
+            #[cfg(unix)]
             Reap::Pid(pid) => wait_pid(pid),
         };
         tracing::info!(session = self.id, ?code, "exited");
@@ -777,6 +779,12 @@ impl Session {
             .apply(&AgentEvent::Exited { code }, now, self.watching())
         {
             self.after_change(&mut state, now);
+        }
+        drop(state);
+        #[cfg(windows)]
+        {
+            self.input.set(|state| state.closed = true);
+            self.pty.close();
         }
     }
 
@@ -1086,6 +1094,7 @@ impl Session {
 
     /// SIGHUP the program's whole process group (it is a session leader, so this
     /// includes background jobs), then SIGKILL after a grace period. Returns at once.
+    #[cfg(unix)]
     pub fn kill(self: &Arc<Self>) {
         let Some(pid) = self.pid else { return };
         if !self.signal_group(pid, libc::SIGHUP) {
@@ -1100,6 +1109,7 @@ impl Session {
 
     /// Signals only while the leader is unreaped, so a recycled pgid is never hit.
     /// Returns whether a signal was sent.
+    #[cfg(unix)]
     fn signal_group(&self, pid: u32, sig: libc::c_int) -> bool {
         let state = self.state.lock().unwrap();
         if state.exited.is_some() {
@@ -1107,6 +1117,15 @@ impl Session {
         }
         // SAFETY: plain syscall; the group exists because its leader is not yet reaped.
         unsafe { libc::killpg(pid as libc::pid_t, sig) == 0 }
+    }
+
+    /// Ends the program's job: it and everything it started. Windows has no
+    /// hangup to send first.
+    #[cfg(windows)]
+    pub fn kill(self: &Arc<Self>) {
+        if !self.exited() {
+            self.pty.kill();
+        }
     }
 
     pub fn text(&self) -> String {
@@ -1172,7 +1191,15 @@ impl Session {
     }
 
     /// The PTY's terminal device (`foreground::dev_key`), the controlling terminal of
+    /// whatever runs in it. Windows has no such thing.
+    #[cfg(windows)]
+    pub fn tty(&self) -> Option<u64> {
+        None
+    }
+
+    /// The PTY's terminal device (`foreground::dev_key`), the controlling terminal of
     /// whatever runs in it.
+    #[cfg(unix)]
     pub fn tty(&self) -> Option<u64> {
         use std::os::unix::fs::MetadataExt;
         let mut name = [0 as libc::c_char; 128];
@@ -1308,6 +1335,7 @@ fn parse_shortstat(text: &str) -> Option<String> {
     )
 }
 
+#[cfg(unix)]
 fn write_loop(id: SessionId, mut writer: File, queue: Arc<InputQueue>, stop: Arc<StopPipe>) {
     let mut failed = false;
     loop {
@@ -1368,16 +1396,43 @@ fn write_loop(id: SessionId, mut writer: File, queue: Arc<InputQueue>, stop: Arc
     }
 }
 
+/// Drains the input queue into the ConPTY; a program that stops reading blocks
+/// only this thread.
+#[cfg(windows)]
+fn write_loop(id: SessionId, mut writer: Box<dyn Write + Send>, queue: Arc<InputQueue>) {
+    let mut failed = false;
+    loop {
+        let buf = {
+            let mut state = queue.state.lock().unwrap();
+            loop {
+                if let Some(buf) = state.bufs.pop_front() {
+                    break buf;
+                }
+                if state.closed {
+                    return;
+                }
+                state = queue.ready.wait(state).unwrap();
+            }
+        };
+        // After a failure keep draining, so the queue doesn't grow forever.
+        if !failed && let Err(e) = writer.write_all(&buf).and_then(|()| writer.flush()) {
+            tracing::debug!(session = id, "pty write failed, dropping input: {e}");
+            failed = true;
+        }
+    }
+}
+
 /// Opens a transcript or event log to append, recreating it (0600) if it was deleted.
+#[cfg(unix)]
 fn append_private(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
+    valkyrie_proto::private_file()
         .create(true)
         .append(true)
-        .mode(0o600)
         .open(path)
 }
 
 /// Reaps a program that could not be adopted, so it doesn't stay a zombie.
+#[cfg(unix)]
 pub fn reap_orphan(pid: u32) {
     std::thread::spawn(move || {
         let code = wait_pid(pid);
@@ -1387,6 +1442,7 @@ pub fn reap_orphan(pid: u32) {
 
 /// Reaps `pid` with the exit code portable-pty would report (1 when killed by a
 /// signal). `None` if it is not our child any more (reaped just before the exec).
+#[cfg(unix)]
 fn wait_pid(pid: u32) -> Option<i32> {
     let mut status = 0;
     loop {
@@ -1410,6 +1466,7 @@ fn wait_pid(pid: u32) -> Option<i32> {
 /// the resizes from the event log at the offsets they happened. Replies to terminal
 /// queries are discarded; the program got the real ones long ago.
 /// The screen, and the images it shows, rebuilt from the transcript.
+#[cfg_attr(windows, allow(dead_code))]
 fn rebuild_screen(
     transcript: &Path,
     events: &Path,
@@ -1462,15 +1519,6 @@ fn rebuild_screen(
     }
     let _ = screen.take_diff();
     Ok((screen, graphics))
-}
-
-fn pty_size(size: Size, cell: (u16, u16)) -> PtySize {
-    PtySize {
-        rows: size.rows,
-        cols: size.cols,
-        pixel_width: size.cols.saturating_mul(cell.0),
-        pixel_height: size.rows.saturating_mul(cell.1),
-    }
 }
 
 /// How often a shell session's foreground is searched for an agent while its group

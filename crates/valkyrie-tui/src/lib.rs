@@ -31,7 +31,6 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use theme::{Theme, state_icon};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, Pushes};
@@ -62,6 +61,8 @@ pub async fn run(
     // Raw mode, the alternate screen and ratatui's panic hook; then the same
     // terminal behind `Quiet`.
     drop(ratatui::try_init()?);
+    #[cfg(windows)]
+    vt_input();
     let mut terminal = Terminal::new(quiet::Quiet::new(CrosstermBackend::new(std::io::stdout())))
         .inspect_err(|_| ratatui::restore())?;
     // ratatui's own hook (installed by init) restores raw mode and the screen; chain
@@ -250,7 +251,7 @@ impl App {
         attach_to: Option<SessionId>,
     ) -> Result<()> {
         let mut stdin = stdin_bytes();
-        let mut winch = signal(SignalKind::window_change())?;
+        let mut winch = Resizes::new()?;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         // Only redraws, for the working spinner; runs while one is on screen.
         let mut anim = tokio::time::interval(SPIN_EVERY);
@@ -783,7 +784,7 @@ impl App {
 
     /// Starts `$SHELL` (in `cwd`, else the daemon's default) and attaches to it.
     async fn new_shell(&mut self, cwd: Option<PathBuf>) {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = valkyrie_proto::default_shell();
         let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
         let spec = SpawnSpec {
             command: vec![shell],
@@ -2580,13 +2581,7 @@ impl App {
     fn draw_settings(&self, frame: &mut ratatui::Frame, cursor: usize) {
         let t = self.settings.theme;
         let file = &self.settings_file;
-        let file = match std::env::var_os("HOME") {
-            Some(home) => match file.strip_prefix(&home) {
-                Ok(rest) => format!("~/{}", rest.display()),
-                Err(_) => file.display().to_string(),
-            },
-            None => file.display().to_string(),
-        };
+        let file = short_path(file);
         let width = (file.width() as u16 + 6).max(40);
         let height = Field::ALL.len() as u16 + 5;
         let area = frame.area();
@@ -3039,14 +3034,15 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
 
 /// `~/repos/x` for paths under `$HOME`.
 fn short_path(path: &std::path::Path) -> String {
-    match std::env::var_os("HOME").map(PathBuf::from) {
-        Some(home) if path.starts_with(&home) && home.as_os_str().len() > 1 => {
-            format!("~/{}", path.strip_prefix(&home).unwrap().display())
-                .trim_end_matches('/')
-                .to_string()
+    let home = valkyrie_proto::home_dir();
+    if path.starts_with(&home) && home.as_os_str().len() > 1 {
+        let rest = path.strip_prefix(&home).unwrap();
+        if rest.as_os_str().is_empty() {
+            return "~".into();
         }
-        _ => path.display().to_string(),
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
     }
+    path.display().to_string()
 }
 
 /// How many sessions are in each state worth a glance, most urgent first.
@@ -3266,6 +3262,81 @@ fn next_key(bytes: &[u8]) -> &[u8] {
         [0x1b, b'O', _, ..] => &bytes[..3],
         [] => bytes,
         _ => &bytes[..1],
+    }
+}
+
+/// Window size changes: SIGWINCH on unix. Windows sends none to a program reading
+/// VT input, so there the size is looked at a few times a second.
+struct Resizes {
+    #[cfg(unix)]
+    signal: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    every: tokio::time::Interval,
+    #[cfg(windows)]
+    last: Option<(u16, u16)>,
+}
+
+impl Resizes {
+    fn new() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                signal: signal(SignalKind::window_change())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            let mut every = tokio::time::interval(Duration::from_millis(200));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            Ok(Self {
+                every,
+                last: ratatui::crossterm::terminal::size().ok(),
+            })
+        }
+    }
+
+    async fn recv(&mut self) -> Option<()> {
+        #[cfg(unix)]
+        return self.signal.recv().await;
+        #[cfg(windows)]
+        loop {
+            self.every.tick().await;
+            let now = ratatui::crossterm::terminal::size().ok();
+            if now != self.last {
+                self.last = now;
+                return Some(());
+            }
+        }
+    }
+}
+
+/// Keys as the VT sequences a unix terminal sends (Windows Terminal and conhost
+/// translate them), so input passes through to sessions the same way. Raw mode
+/// is crossterm's; this adds VT input, and VT output for the escapes written
+/// directly.
+#[cfg(windows)]
+fn vt_input() {
+    use windows_sys::Win32::System::Console::{
+        DISABLE_NEWLINE_AUTO_RETURN, ENABLE_VIRTUAL_TERMINAL_INPUT,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetConsoleMode,
+    };
+    // SAFETY: console mode calls on our own standard handles.
+    unsafe {
+        for (handle, add) in [
+            (STD_INPUT_HANDLE, ENABLE_VIRTUAL_TERMINAL_INPUT),
+            (
+                STD_OUTPUT_HANDLE,
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN,
+            ),
+        ] {
+            let handle = GetStdHandle(handle);
+            let mut mode = 0;
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                SetConsoleMode(handle, mode | add);
+            }
+        }
     }
 }
 
@@ -3506,11 +3577,11 @@ mod tests {
     }
 
     /// An App over a socket nobody answers: enough for state and drawing.
-    async fn idle_app(dir: &std::path::Path) -> (App, tokio::net::UnixListener) {
+    async fn idle_app(dir: &std::path::Path) -> (App, valkyrie_proto::ipc::Listener) {
         let _ = std::fs::remove_dir_all(dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(dir).unwrap();
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says.
@@ -3668,7 +3739,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says.
@@ -3701,7 +3772,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says.
@@ -3808,7 +3879,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says.
@@ -4008,7 +4079,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says.
@@ -4114,7 +4185,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         app.settings = Settings::default();
@@ -4168,7 +4239,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         app.settings = Settings::default();
@@ -4284,7 +4355,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         app.settings = Settings::default();
@@ -4330,7 +4401,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says.
@@ -4361,7 +4432,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
         let (client, _) = Client::connect(&socket).await.unwrap();
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says: the two-row cards.
