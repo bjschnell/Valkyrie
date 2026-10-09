@@ -1,7 +1,7 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 9;
+export const PROTOCOL = 10;
 
 export type SessionId = number;
 export type Size = { cols: number; rows: number };
@@ -50,6 +50,40 @@ export interface QueueItem {
   cwd: string;
   status: AgentStatus;
 }
+
+/** A project decision (ADR-0007). */
+export type DecisionKind = "decision" | "constraint" | "pattern" | "gotcha" | "fix";
+export const DECISION_KINDS: DecisionKind[] = ["decision", "constraint", "pattern", "gotcha", "fix"];
+export type DecisionStatus = "proposed" | "active" | "rejected" | "superseded" | "retired";
+
+export interface Decision {
+  id: number;
+  /** The project's root directory. */
+  project: string;
+  title: string;
+  body: string;
+  kind: DecisionKind;
+  status: DecisionStatus;
+  /** Seconds since the epoch. */
+  created: number;
+  updated: number;
+  supersedes?: number;
+  superseded_by?: number;
+  provenance: {
+    /** `human`, or the agent that proposed it. */
+    by: string;
+    session?: string;
+    conversation?: string;
+    commit?: string;
+    cwd?: string;
+  };
+}
+
+export type ReviewAction =
+  | { a: "accept" }
+  | { a: "reject" }
+  | { a: "retire" }
+  | { a: "edit"; title: string; body: string; kind: DecisionKind };
 
 export type Color = "default" | { indexed: number } | { rgb: [number, number, number] };
 
@@ -114,7 +148,9 @@ export type Request =
   | { t: "mark_seen"; session: SessionId; seq: number }
   | { t: "rename"; session: SessionId; name: string | null }
   | { t: "move"; session: SessionId; to: number }
-  | { t: "spawn"; spec: SpawnSpec };
+  | { t: "spawn"; spec: SpawnSpec }
+  | { t: "review"; project: string; id: number; action: ReviewAction }
+  | { t: "decisions"; cwd: string | null };
 
 /** Fire-and-forget messages. */
 export type Notice =
@@ -130,7 +166,9 @@ export type Reply =
   | { t: "hello"; protocol: number; generation: number; boot: number }
   | { t: "session"; info: SessionInfo }
   | { t: "sessions"; sessions: SessionInfo[] }
-  | { t: "text"; text: string };
+  | { t: "text"; text: string }
+  | { t: "decision"; decision: Decision }
+  | { t: "decisions"; decisions: Decision[] };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
@@ -138,6 +176,8 @@ export type ServerMsg =
   | { t: "screen"; session: SessionId; update: ScreenUpdate }
   | { t: "exited"; session: SessionId; code: number | null }
   | { t: "queue"; items: QueueItem[] }
+  /** Every project's decisions waiting on review, oldest first. */
+  | { t: "proposals"; items: Decision[] }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

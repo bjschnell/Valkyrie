@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
-import type { Modes, QueueItem, ServerMsg, SessionId, SessionInfo } from "./proto";
+import type { Decision, Modes, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { keyBytes, messageBytes, type Key } from "./lib/keys";
@@ -38,6 +38,8 @@ interface State {
   status: Status;
   sessions: SessionInfo[];
   queue: QueueItem[];
+  /** Decisions agents proposed, waiting on the human (ADR-0007). */
+  proposals: Decision[];
   /** The session on screen, its screen, and its exit once it has one. */
   openId: SessionId | null;
   screen: Screen | null;
@@ -60,6 +62,7 @@ export const useApp = create<State>(() => ({
   status: "connecting",
   sessions: [],
   queue: [],
+  proposals: [],
   openId: null,
   screen: null,
   exited: null,
@@ -128,6 +131,9 @@ function onPush(msg: ServerMsg): void {
       setBadge(msg.items.length);
       void refreshPrompts(msg.items);
       void refresh();
+      break;
+    case "proposals":
+      set({ proposals: msg.items });
       break;
     case "screen":
       if (msg.session === get().openId) set({ screen: apply(get().screen, msg.update) });
@@ -331,6 +337,27 @@ export async function rename(id: SessionId, name: string | null): Promise<void> 
 export async function kill(id: SessionId): Promise<void> {
   await conn?.request({ t: "kill", session: id }).catch((e) => toast(String(e.message)));
   void refresh();
+}
+
+const REVIEWED: Record<ReviewAction["a"], string> = {
+  accept: "Accepted",
+  reject: "Rejected",
+  retire: "Retired",
+  edit: "Saved",
+};
+
+/** Accepts, rejects or rewords a proposed decision; the daemon pushes the new list. */
+export async function review(d: Decision, action: ReviewAction): Promise<boolean> {
+  try {
+    if (!conn) throw new Error("not connected");
+    await conn.request({ t: "review", project: d.project, id: d.id, action });
+    navigator.vibrate?.(10);
+    toast(`${REVIEWED[action.a]} #${d.id} ✓`);
+    return true;
+  } catch (e) {
+    toast(`Couldn't: ${(e as Error).message}`);
+    return false;
+  }
 }
 
 /** The choices on the open session's screen right now. */

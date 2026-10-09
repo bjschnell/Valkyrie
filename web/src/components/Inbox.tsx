@@ -5,6 +5,7 @@ import { age } from "../lib/time";
 import { answer, answerAll, markSeen, useApp } from "../store";
 import { Chevron, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
+import { Proposals } from "./Decisions";
 import { NotifyButton, NotifyHint } from "./Notify";
 
 const go = (id: number) => {
@@ -67,6 +68,7 @@ export function Inbox() {
       <main className="inbox">
         <NotifyHint />
         <AllowAll />
+        <Proposals />
         <section>
           <h2 className="section-title">
             Needs you <span className="count">{queue.length}</span>
