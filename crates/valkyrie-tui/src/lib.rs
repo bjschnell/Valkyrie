@@ -3828,7 +3828,7 @@ mod tests {
         app.queue = vec![queued(3)];
         let mut view = Attached::new(2, "proj2".into(), None);
         view.apply(update(true, vec![row(0, "inside session 2")]));
-        view.title = Some("xdx@Thor:~/repos/proj2".into());
+        view.title = Some("user@host:~/repos/proj2".into());
         app.view = Some(view);
         app.settings.tabs = TabStyle::Cards;
 
@@ -3899,7 +3899,7 @@ mod tests {
         let layout = app.tab_layout(tabs);
         let attached = layout.tabs[1].1;
         assert_eq!(lines[0].chars().nth(attached.x as usize), Some('▌'));
-        assert!(!lines[23].contains("xdx@Thor"), "{}", lines[23]);
+        assert!(!lines[23].contains("user@host"), "{}", lines[23]);
 
         let (first, third) = (layout.tabs[0].1, layout.tabs[2].1);
         assert_eq!(app.tab_hit(tabs, first.x + 2, 1), Some(TabHit::Session(1)));

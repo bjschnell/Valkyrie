@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs `valk` from a GitHub release, with no checkout: Linux, WSL2 on
-# Windows, macOS. Each release carries this script, so on a new machine:
-#   gh release download -R bjschnell/Valkyrie -p install-release.sh -O - | bash
+# Windows, macOS. On a new machine:
+#   curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 # Rerun it to update; a running daemon is handed to the new binary.
 # VALK_VERSION picks a tag (default: the latest), VALK_BIN_DIR the directory.
 set -euo pipefail
@@ -21,16 +21,20 @@ case "$(uname -s)-$(uname -m)" in
     *) die "no prebuilt valk for $(uname -sm). On Windows, use install.ps1 (docs/install.md)." ;;
 esac
 
-# The repo is private, so downloads go through an authenticated gh.
-command -v gh >/dev/null 2>&1 || die "install the GitHub CLI first (https://cli.github.com), then: gh auth login"
-gh auth status >/dev/null 2>&1 || die "log in to GitHub first: gh auth login"
+command -v curl >/dev/null 2>&1 || die "install curl first, e.g. sudo apt install -y curl"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 say "downloading valk ${version:-(latest)} for $target"
-gh release download ${version:+"$version"} -R "$repo" -D "$tmp" \
-    -p "valk-$target.tar.gz" -p "valk-$target.tar.gz.sha256"
+if [ -n "$version" ]; then
+    base="https://github.com/$repo/releases/download/$version"
+else
+    base="https://github.com/$repo/releases/latest/download"
+fi
+for f in "valk-$target.tar.gz" "valk-$target.tar.gz.sha256"; do
+    curl -fsSL --retry 3 -o "$tmp/$f" "$base/$f" || die "couldn't download $base/$f"
+done
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 (cd "$tmp" && sha256 -c --quiet "valk-$target.tar.gz.sha256") \
     || die "checksum mismatch for valk-$target.tar.gz"

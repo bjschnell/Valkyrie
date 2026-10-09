@@ -4,7 +4,7 @@
 //! Neither format is a documented interface, so both are read defensively: a line
 //! that doesn't parse, or that isn't understood, is skipped.
 //!
-//! Ported from Alice's mappers (kawaii `adapter/alice_pwa/agent_sessions.py`).
+//! Ported from Alice's mappers.
 
 use anyhow::Result;
 use serde::Serialize;

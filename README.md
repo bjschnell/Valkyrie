@@ -22,14 +22,21 @@ and why. Use it from the terminal (`valk`) or from your phone.
 
 ## Install
 
+### Windows
+
+In PowerShell. It sets up WSL2 and Ubuntu if needed, installs `valk` inside it, and
+adds a `valk` command and a Windows Terminal profile:
+
+```powershell
+irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
+```
+
 ### Prebuilt binary (Linux, WSL2, macOS arm64)
 
-One static binary that carries the web app. The repo is private, so you need the
-GitHub CLI logged in:
+One static binary that carries the web app:
 
 ```sh
-gh auth login
-gh release download -R bjschnell/Valkyrie -p install-release.sh -O - | bash
+curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 ```
 
 This installs `valk` to `~/.local/bin`. Rerun the same line to update. A running
@@ -45,8 +52,8 @@ cd ~/repos/valkyrie && ./install.sh
 This needs a C toolchain. `install.sh` installs Rust with rustup if you don't have
 it.
 
-Valkyrie needs a Unix. On Windows it runs inside WSL2, and one PowerShell line sets
-it up. [docs/install.md](docs/install.md) covers each platform.
+Valkyrie needs a Unix, so on Windows it runs inside WSL2.
+[docs/install.md](docs/install.md) covers each platform.
 
 ## Use
 
@@ -166,4 +173,5 @@ in: decisions, review, and injection into Claude.
 
 ## License
 
-`Cargo.toml` declares MIT OR Apache-2.0. The license files aren't in the repo yet.
+[AGPL-3.0](LICENSE). You can use, change and share Valkyrie freely. If you run a
+modified version as a service for others, you must offer them its source.

@@ -1,20 +1,17 @@
 # Installs Valkyrie on Windows: valk runs inside WSL2, and you use it from a
-# Windows Terminal profile. From PowerShell, with the GitHub CLI logged in:
-#   gh release download -R bjschnell/Valkyrie -p install.ps1 -O - | Out-String | iex
-# or download install.ps1 from the release page and run:
-#   powershell -ExecutionPolicy Bypass -File install.ps1
+# Windows Terminal profile or a `valk` command. From PowerShell:
+#   irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
 # It sets up WSL2 and Ubuntu if they're missing, installs valk inside it,
 # offers Claude Code, and adds a "Valkyrie" Windows Terminal profile. Rerun it
 # to update; a running daemon is handed to the new binary.
 # VALK_WSL_DISTRO picks the distro (default: your default one, or Ubuntu),
 # VALK_VERSION a release tag (default: the latest).
 #
-# Keep this file ASCII: piped through `Out-String | iex`, it's decoded with the
-# console's code page. And no `exit`: under iex it would close the window.
+# Keep this file ASCII, so no code page can garble it on the way into iex.
+# And no `exit`: under iex it would close the window.
 
 & {
     $ErrorActionPreference = 'Stop'
-    $repo = 'bjschnell/Valkyrie'
     $env:WSL_UTF8 = '1' # wsl.exe prints UTF-16 otherwise
 
     function Say($msg) { Write-Host '==> ' -ForegroundColor Magenta -NoNewline; Write-Host $msg }
@@ -94,17 +91,9 @@
     }
     Say "using WSL distro $distro"
 
-    # 2. valk inside it. A GitHub login on the Windows side is reused, so you
-    # sign in once; WSLENV carries the token and version across.
-    $token = $null
-    if (Get-Command gh.exe -ErrorAction SilentlyContinue) {
-        $ErrorActionPreference = 'Continue'
-        $token = (& gh.exe auth token 2>$null | Out-String).Trim()
-        $ErrorActionPreference = 'Stop'
-    }
-    $env:VALK_GH_TOKEN = $token
+    # 2. valk inside it. WSLENV carries VALK_VERSION across.
     $wslenv = $env:WSLENV # put back afterwards: under iex this is the user's session
-    $env:WSLENV = (@('VALK_GH_TOKEN/u', 'VALK_VERSION/u', $env:WSLENV) | Where-Object { $_ }) -join ':'
+    $env:WSLENV = (@('VALK_VERSION/u', $env:WSLENV) | Where-Object { $_ }) -join ':'
 
     $setup = @'
 set -euo pipefail
@@ -113,7 +102,6 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 need=()
 command -v curl >/dev/null || need+=(curl)
-command -v gh >/dev/null || need+=(gh)
 command -v paplay >/dev/null || need+=(pulseaudio-utils) # pings, through WSLg
 if [ ${#need[@]} -gt 0 ]; then
     command -v apt-get >/dev/null || die "install these first: ${need[*]}"
@@ -122,30 +110,16 @@ if [ ${#need[@]} -gt 0 ]; then
     sudo apt-get install -y -qq "${need[@]}" >/dev/null
 fi
 
-# The repo is private: GitHub calls it "not found" to an account that can't
-# see it, so check access rather than just being logged in.
-repo=bjschnell/Valkyrie
-can_see() { gh api "repos/$repo" --silent >/dev/null 2>&1; }
-if ! can_see; then
-    if [ -n "${VALK_GH_TOKEN:-}" ] && GH_TOKEN="$VALK_GH_TOKEN" can_see; then
-        say "signing gh in with your Windows GitHub login"
-        printf '%s\n' "$VALK_GH_TOKEN" | gh auth login --with-token
-    else
-        if [ -n "${VALK_GH_TOKEN:-}" ]; then
-            say "your Windows GitHub login ($(GH_TOKEN="$VALK_GH_TOKEN" gh api user -q .login 2>/dev/null)) can't see $repo"
-        fi
-        say "sign in to GitHub with an account that can see $repo"
-        gh auth login --hostname github.com --git-protocol https --web
-    fi
-    can_see || die "$(gh api user -q .login 2>/dev/null || echo 'this account') can't see $repo. Ask for access, or sign in with another account: gh auth login"
-fi
-
 # Ubuntu's ~/.profile adds ~/.local/bin only if it existed at login.
 export PATH="$HOME/.local/bin:$PATH"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-gh release download ${VALK_VERSION:+"$VALK_VERSION"} -R "$repo" \
-    -p install-release.sh -D "$tmp"
+if [ -n "${VALK_VERSION:-}" ]; then
+    url="https://github.com/bjschnell/Valkyrie/releases/download/$VALK_VERSION/install-release.sh"
+else
+    url="https://github.com/bjschnell/Valkyrie/releases/latest/download/install-release.sh"
+fi
+curl -fsSL --retry 3 -o "$tmp/install-release.sh" "$url" || die "couldn't download $url"
 bash "$tmp/install-release.sh"
 
 if [ -t 0 ] && ! command -v claude >/dev/null; then
@@ -158,7 +132,7 @@ if [ -t 0 ] && ! command -v claude >/dev/null; then
 fi
 '@
     # Run it from a file: piping a script in would take away the terminal
-    # that sudo and gh's login prompt read from. Not in %TEMP%, which can be
+    # that sudo's password prompt reads from. Not in %TEMP%, which can be
     # an 8.3 short path that /mnt/c doesn't resolve.
     $file = Join-Path $env:LOCALAPPDATA 'valk-install.sh'
     [IO.File]::WriteAllText($file, ($setup -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
@@ -166,7 +140,6 @@ fi
     & wsl.exe -d $distro --cd '~' --exec bash -l $linuxFile
     $ok = $LASTEXITCODE -eq 0
     Remove-Item $file -ErrorAction SilentlyContinue
-    $env:VALK_GH_TOKEN = $null
     $env:WSLENV = $wslenv
     if (-not $ok) { Fail "installing valk inside $distro failed (see above)"; return }
 

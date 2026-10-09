@@ -1,5 +1,5 @@
 //! Claude Code. Hooks are registered per session with `--settings` (ADR-0005); the
-//! event mapping follows Leader's live findings (`~/repos/leader/docs/findings.md`).
+//! event mapping follows Leader's live findings.
 
 use crate::summary::{describe_tool, one_line, pick_summary_line, question};
 use crate::{Adapter, AgentEvent, Screen};

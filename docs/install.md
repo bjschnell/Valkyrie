@@ -48,11 +48,10 @@ distro and any WSL, whatever its glibc) and macOS arm64, and attaches the builds
 with a `.sha256`, to a GitHub release with `install-release.sh`. The binary carries the
 web app too, so it is the only file you need.
 
-The repo is private, so you need the GitHub CLI logged in (`gh auth login`). That
-grants read access to the repo, but nothing is cloned:
+Nothing is cloned:
 
 ```sh
-gh release download -R bjschnell/Valkyrie -p install-release.sh -O - | bash
+curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 ```
 
 It installs to `~/.local/bin` (set `VALK_BIN_DIR` for another directory, `VALK_VERSION`
@@ -69,26 +68,19 @@ Valkyrie runs inside the WSL Linux VM, and you use it from Windows Terminal. You
 agents (Claude Code, Codex) and the repos you work on live in WSL too. A Windows-side
 `claude` isn't visible to Valkyrie.
 
-**The installer** does all of it from PowerShell. With the GitHub CLI logged in
-(`winget install GitHub.cli`, open a new window, `gh auth login`):
+**The installer** does all of it from PowerShell:
 
 ```powershell
-gh release download -R bjschnell/Valkyrie -p install.ps1 -O - | Out-String | iex
+irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
 ```
-
-Or download `install.ps1` from the release page in your browser and run
-`powershell -ExecutionPolicy Bypass -File install.ps1`. Then it signs in inside WSL
-instead, with a code to paste into github.com.
 
 It:
 1. installs WSL2 and Ubuntu if you have no distro (Windows asks for permission, and
    may want a restart; then run the same line again), and asks for a Linux username
    and password. Otherwise it uses your default distro; `VALK_WSL_DISTRO` picks
    another.
-2. inside it, installs `curl`, `gh` and `pulseaudio-utils` (for pings) if they're
-   missing, and runs `install-release.sh`. If gh in WSL can't see the repo, it signs
-   in with your Windows GitHub login when that one can, and otherwise asks you to
-   sign in with an account that can.
+2. inside it, installs `curl` and `pulseaudio-utils` (for pings) if they're missing,
+   and runs `install-release.sh`.
 3. offers to install Claude Code inside WSL if it isn't there.
 4. adds a **Valkyrie** profile to Windows Terminal, as a fragment, so your
    `settings.json` is untouched. It runs `wsl.exe -d Ubuntu --cd ~ --exec bash -lc valk`.
@@ -118,7 +110,7 @@ It takes effect the next time WSL starts, or after `wsl --shutdown`.
 
 **By hand**, the installer's steps are: `wsl --install -d Ubuntu` from an
 administrator PowerShell and reboot; inside Ubuntu,
-`sudo apt install -y curl gh pulseaudio-utils`, `gh auth login`, and the
+`sudo apt install -y curl pulseaudio-utils` and the
 [prebuilt binary](#prebuilt-binary-no-checkout) line (or `./install.sh` from a
 checkout in `~/repos`, which also needs `build-essential`); then a Windows Terminal
 profile with the command line above and a font with the `⌂ ● ⠋` glyphs, such as
