@@ -215,7 +215,9 @@ fn redact_line(line: &str) -> String {
         "authorization",
     ];
     /// Words between a name and its value.
-    const FILLER: &[&str] = &["is", "was", "=", ":", "to", "as", "of", "the", "my", "our"];
+    const FILLER: &[&str] = &[
+        "is", "was", "=", ":", "to", "as", "of", "the", "my", "our", "bearer", "basic",
+    ];
     let mut out = String::new();
     let mut secret_next = false;
     for word in line.split_inclusive(char::is_whitespace) {
@@ -237,7 +239,7 @@ fn redact_line(line: &str) -> String {
             out.push_str("[redacted]");
             secret_next = false;
         } else {
-            out.push_str(&url_credentials(token));
+            out.push_str(&url_secrets(token, NAMED));
             secret_next = named && token.len() < 20;
         }
         out.push_str(space);
@@ -245,15 +247,36 @@ fn redact_line(line: &str) -> String {
     out
 }
 
-/// `scheme://user:pass@host` loses `user:pass`.
-fn url_credentials(token: &str) -> String {
-    if let Some(at) = token.find("://")
-        && let Some(end) = token[at + 3..].find('@')
-        && token[at + 3..at + 3 + end].contains(':')
+/// A URL loses its credentials (`scheme://user:pass@host`) and the values of
+/// secret-named query parameters (`?token=x`, `&api_key=x`).
+fn url_secrets(token: &str, named: &[&str]) -> String {
+    let Some(scheme) = token.find("://") else {
+        return token.to_owned();
+    };
+    let mut url = token.to_owned();
+    let after = scheme + 3;
+    let host_end = url[after..]
+        .find(['/', '?', '#'])
+        .unwrap_or(url.len() - after);
+    if let Some(at) = url[after..after + host_end].rfind('@')
+        && url[after..after + at].contains(':')
     {
-        return format!("{}[redacted]{}", &token[..at + 3], &token[at + 3 + end..]);
+        url.replace_range(after..after + at, "[redacted]");
     }
-    token.to_owned()
+    let Some(query) = url.find('?') else {
+        return url;
+    };
+    let (head, params) = url.split_at(query + 1);
+    let params: Vec<String> = params
+        .split('&')
+        .map(|p| match p.split_once('=') {
+            Some((k, _)) if named.iter().any(|n| k.to_lowercase().contains(n)) => {
+                format!("{k}=[redacted]")
+            }
+            _ => p.to_owned(),
+        })
+        .collect();
+    format!("{head}{}", params.join("&"))
 }
 
 fn looks_secret(token: &str) -> bool {
@@ -408,6 +431,7 @@ mod tests {
             json!({"type":"user","origin":{"kind":"agent"},"message":{"content":"hand-back"}}),
             json!({"type":"user","isMeta":true,"message":{"content":"Base directory for this skill: you must…"}}),
             json!({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued…"}}),
+            json!({"type":"user","isSidechain":true,"message":{"content":"no, a subagent's own prompt"}}),
             json!({"type":"assistant","message":{"content":[{"type":"text","text":"Switching to pnpm."}]}}),
         ]);
         let m = messages(&format!("{{\"partial line\n{claude}"));
@@ -489,6 +513,22 @@ mod tests {
         assert!(
             more.contains("postgres://[redacted]@db:5432/x") && more.ends_with(" ok"),
             "{more}"
+        );
+        assert_eq!(
+            redact("see https://api.example.com/v1?token=abc123&page=2 for it"),
+            "see https://api.example.com/v1?token=[redacted]&page=2 for it"
+        );
+        assert_eq!(
+            redact("curl https://x.io/a?api_key=sk_live_zzz9 now"),
+            "curl https://x.io/a?api_key=[redacted] now"
+        );
+        assert_eq!(
+            redact("Authorization: Bearer shortone"),
+            "Authorization: Bearer [redacted]"
+        );
+        assert_eq!(
+            redact("https://example.com/docs?page=2"),
+            "https://example.com/docs?page=2"
         );
     }
 
