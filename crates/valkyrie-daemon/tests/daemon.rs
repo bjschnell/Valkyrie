@@ -1083,7 +1083,12 @@ async fn decisions_are_proposed_pushed_and_listed() {
     // Whoever asks, a review either goes through (and the push follows) or is
     // refused as not the user's.
     match client
-        .review(repo.clone(), first.id, ReviewAction::Reject)
+        .review(
+            repo.clone(),
+            first.id,
+            ReviewAction::Reject,
+            Some(first.updated),
+        )
         .await
     {
         Ok(d) => {

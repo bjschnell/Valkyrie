@@ -230,6 +230,10 @@ pub enum ClientMsg {
         project: PathBuf,
         id: u32,
         action: ReviewAction,
+        /// The decision's `updated` as the reviewer saw it: refused if it changed
+        /// since, so what's accepted is what was read.
+        #[serde(default)]
+        seen: Option<u64>,
     },
     /// The decisions of the project holding `cwd`, or of every project. Replies
     /// `Decisions`.

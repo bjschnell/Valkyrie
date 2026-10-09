@@ -352,7 +352,7 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
 export async function review(d: Decision, action: ReviewAction): Promise<boolean> {
   try {
     if (!conn) throw new Error("not connected");
-    await conn.request({ t: "review", project: d.project, id: d.id, action });
+    await conn.request({ t: "review", project: d.project, id: d.id, action, seen: d.updated });
     navigator.vibrate?.(10);
     toast(`${REVIEWED[action.a]} #${d.id} ✓`);
     return true;

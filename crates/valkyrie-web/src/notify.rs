@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use valkyrie_proto::client::Client;
-use valkyrie_proto::{AgentState, AskKind, QueueItem, ServerMsg, SessionId};
+use valkyrie_proto::{AgentState, AskKind, Decision, QueueItem, ServerMsg, SessionId};
 
 /// How long without a keypress before you count as away.
 const AWAY_MS: u64 = 90_000;
@@ -73,6 +73,12 @@ pub struct Watch {
     pending: HashMap<SessionId, Pending>,
     queue_len: usize,
     started: bool,
+    /// Decisions waiting on review, by (project, id, updated): each is news once.
+    decisions_known: std::collections::HashSet<(std::path::PathBuf, u32, u64)>,
+    /// New ones since the last push about them, and when the first arrived.
+    decisions_new: Vec<((std::path::PathBuf, u32, u64), String)>,
+    decisions_since: u64,
+    decisions_started: bool,
 }
 
 impl Watch {
@@ -105,8 +111,31 @@ impl Watch {
         self.started = true;
     }
 
+    /// The decisions waiting on review (ADR-0007): new ones are pending, as
+    /// sessions are, so you hear about them once you're away.
+    pub fn proposals(&mut self, items: &[Decision], visible: bool, now_ms: u64) {
+        let keys: std::collections::HashSet<_> = items
+            .iter()
+            .map(|d| (d.project.clone(), d.id, d.updated))
+            .collect();
+        for d in items {
+            let key = (d.project.clone(), d.id, d.updated);
+            if self.decisions_known.contains(&key) || !self.decisions_started || visible {
+                continue;
+            }
+            if self.decisions_new.is_empty() {
+                self.decisions_since = now_ms;
+            }
+            self.decisions_new.push((key, d.title.clone()));
+        }
+        // Reviewed meanwhile: no longer news.
+        self.decisions_new.retain(|(key, _)| keys.contains(key));
+        self.decisions_known = keys;
+        self.decisions_started = true;
+    }
+
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.decisions_new.is_empty()
     }
 
     /// What to push now. `last_input_ms`: the latest keypress into any session.
@@ -114,6 +143,7 @@ impl Watch {
         if visible {
             // On screen in the app's inbox: seen.
             self.pending.clear();
+            self.decisions_new.clear();
             return Vec::new();
         }
         if now_ms.saturating_sub(last_input_ms) < AWAY_MS {
@@ -131,6 +161,26 @@ impl Watch {
             .map(|p| note(&p.item, self.queue_len))
             .collect();
         notes.sort_by_key(|n| n.session);
+        if !self.decisions_new.is_empty() && now_ms.saturating_sub(self.decisions_since) >= GRACE_MS
+        {
+            let titles: Vec<String> = std::mem::take(&mut self.decisions_new)
+                .into_iter()
+                .map(|(_, title)| title)
+                .collect();
+            notes.push(Note {
+                title: match titles.len() {
+                    1 => "A decision to review".into(),
+                    n => format!("{n} decisions to review"),
+                },
+                body: titles.join(" · "),
+                session: None,
+                seq: 0,
+                tag: "decisions".into(),
+                badge: self.queue_len,
+                urgency: Urgency::Normal,
+                from_screen: false,
+            });
+        }
         notes
     }
 }
@@ -213,6 +263,9 @@ async fn watch_daemon(app: &Arc<App>, watch: &mut Watch) -> Result<()> {
         tokio::select! {
             msg = pushes.recv() => match msg {
                 Some(ServerMsg::Queue { items }) => watch.queue(&items, app.visible(), now_ms()),
+                Some(ServerMsg::Proposals { items }) => {
+                    watch.proposals(&items, app.visible(), now_ms())
+                }
                 Some(_) => {}
                 None => anyhow::bail!("daemon connection closed"),
             },
@@ -323,6 +376,60 @@ mod tests {
     }
 
     const AWAY: u64 = 1_000_000; // last keypress long before `now`
+
+    fn decision(id: u32, title: &str) -> Decision {
+        Decision {
+            id,
+            project: "/r".into(),
+            title: title.into(),
+            body: String::new(),
+            kind: Default::default(),
+            status: Default::default(),
+            created: 0,
+            updated: 1,
+            supersedes: None,
+            superseded_by: None,
+            provenance: Default::default(),
+            fresh: Default::default(),
+        }
+    }
+
+    #[test]
+    fn new_decisions_push_once_together_when_you_are_away() {
+        let mut w = Watch::default();
+        w.proposals(&[decision(1, "Old one")], false, 0);
+        w.proposals(
+            &[decision(1, "Old one"), decision(2, "Use pnpm")],
+            false,
+            AWAY,
+        );
+        w.proposals(
+            &[
+                decision(1, "Old one"),
+                decision(2, "Use pnpm"),
+                decision(3, "No pkill -f"),
+            ],
+            false,
+            AWAY + 1,
+        );
+        assert!(w.has_pending());
+        assert!(w.due(AWAY + 1_000, 0, false).is_empty(), "within the grace");
+        let notes = w.due(AWAY + GRACE_MS, 0, false);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "2 decisions to review");
+        assert_eq!(notes[0].body, "Use pnpm · No pkill -f");
+        assert_eq!(notes[0].session, None);
+        assert!(w.due(AWAY + 2 * GRACE_MS, 0, false).is_empty(), "once");
+        // Reviewed before the push: nothing to say.
+        w.proposals(&[decision(4, "Another"), decision(5, "Kept")], false, AWAY);
+        w.proposals(&[decision(5, "Kept")], false, AWAY + 1);
+        let notes = w.due(AWAY + GRACE_MS * 3, 0, false);
+        assert_eq!(notes[0].title, "A decision to review");
+        assert_eq!(notes[0].body, "Kept");
+        w.proposals(&[decision(6, "Gone")], false, AWAY);
+        w.proposals(&[], false, AWAY + 1);
+        assert!(w.due(AWAY + GRACE_MS * 3, 0, false).is_empty());
+    }
 
     #[test]
     fn a_prompt_pushes_once_when_you_are_away() {

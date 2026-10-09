@@ -339,6 +339,7 @@ impl Client {
         project: PathBuf,
         id: u32,
         action: crate::ReviewAction,
+        seen: Option<u64>,
     ) -> Result<crate::Decision> {
         match self
             .request(|req| ClientMsg::Review {
@@ -346,6 +347,7 @@ impl Client {
                 project,
                 id,
                 action,
+                seen,
             })
             .await?
         {

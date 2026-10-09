@@ -93,7 +93,7 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
     let cwd = std::env::current_dir()?;
     let root = valkyrie_context::project::root(&cwd);
     let review = async |id, action| -> Result<()> {
-        let d = client.review(root.clone(), id, action).await?;
+        let d = client.review(root.clone(), id, action, None).await?;
         println!("#{} {}: {}", d.id, d.status.as_str(), d.title);
         Ok(())
     };

@@ -798,7 +798,8 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 project,
                 id,
                 action,
-            } => (req, registry.review(&project, id, &action, peer)),
+                seen,
+            } => (req, registry.review(&project, id, &action, seen, peer)),
             ClientMsg::Decisions { req, cwd } => {
                 // Fresh flags for whoever asks; the background check is only every
                 // few minutes.

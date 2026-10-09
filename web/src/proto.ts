@@ -160,7 +160,7 @@ export type Request =
   | { t: "rename"; session: SessionId; name: string | null }
   | { t: "move"; session: SessionId; to: number }
   | { t: "spawn"; spec: SpawnSpec }
-  | { t: "review"; project: string; id: number; action: ReviewAction }
+  | { t: "review"; project: string; id: number; action: ReviewAction; seen: number }
   | { t: "decisions"; cwd: string | null };
 
 /** Fire-and-forget messages. */

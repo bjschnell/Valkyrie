@@ -151,6 +151,7 @@ impl Store {
         root: &Path,
         id: u32,
         action: &ReviewAction,
+        seen: Option<u64>,
         now: u64,
     ) -> Result<Decision> {
         use DecisionStatus::*;
@@ -158,6 +159,9 @@ impl Store {
         let Some((path, d)) = files.get(&id) else {
             bail!("no decision #{id} in {}", root.display());
         };
+        if seen.is_some_and(|seen| seen != d.updated) {
+            bail!("#{id} changed since you read it; look at it again");
+        }
         let mut d = d.clone();
         let mut accepting = false;
         let mut confirming = false;
@@ -432,7 +436,7 @@ mod tests {
         // Still only proposed: the old one holds until a human accepts.
         assert_eq!(f.store.load(&f.repo)[0].status, DecisionStatus::Active);
         f.store
-            .review(&f.repo, proposal.id, &ReviewAction::Accept, 3)
+            .review(&f.repo, proposal.id, &ReviewAction::Accept, None, 3)
             .unwrap();
         let all = f.store.load(&f.repo);
         assert_eq!(all[0].status, DecisionStatus::Superseded);
@@ -446,7 +450,7 @@ mod tests {
         f.store
             .decide(&f.new_decision("P"), by("claude"), 1)
             .unwrap();
-        let r = |id, a: ReviewAction| f.store.review(&f.repo, id, &a, 2);
+        let r = |id, a: ReviewAction| f.store.review(&f.repo, id, &a, None, 2);
         assert!(r(1, ReviewAction::Retire).is_err());
         let edited = r(
             1,
@@ -524,13 +528,19 @@ mod tests {
             body: "Better".into(),
             kind: DecisionKind::Constraint,
         };
-        let d = f.store.review(&f.repo, 1, &revise, 2).unwrap();
+        let d = f.store.review(&f.repo, 1, &revise, Some(1), 2).unwrap();
         assert_eq!(
             (d.title.as_str(), d.status),
             ("Final", DecisionStatus::Active)
         );
+        // Read before it changed: refused.
+        assert!(
+            f.store
+                .review(&f.repo, 1, &ReviewAction::Retire, Some(1), 3)
+                .is_err()
+        );
         // Already active (say, accepted elsewhere first): nothing is rewritten.
-        assert!(f.store.review(&f.repo, 1, &revise, 3).is_err());
+        assert!(f.store.review(&f.repo, 1, &revise, None, 3).is_err());
     }
 
     #[test]

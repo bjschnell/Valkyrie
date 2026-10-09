@@ -1415,7 +1415,7 @@ impl App {
     /// decision flagged as maybe out of date still holds, or retire it.
     async fn review(&mut self, yes: bool) {
         let Some(d) = self.proposal() else { return };
-        let (project, id, title) = (d.project.clone(), d.id, d.title.clone());
+        let (project, id, title, seen) = (d.project.clone(), d.id, d.title.clone(), d.updated);
         let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
@@ -1423,7 +1423,7 @@ impl App {
             (true, true) => (ReviewAction::Confirm, "still holds:"),
             (true, false) => (ReviewAction::Retire, "retired"),
         };
-        self.status = match self.client.review(project, id, action).await {
+        self.status = match self.client.review(project, id, action, Some(seen)).await {
             Ok(_) => format!("{done} #{id} {title}"),
             Err(e) => format!("review failed: {e:#}"),
         };

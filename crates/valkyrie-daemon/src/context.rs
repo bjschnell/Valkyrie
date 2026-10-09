@@ -167,14 +167,15 @@ impl Registry {
         project: &Path,
         id: u32,
         action: &ReviewAction,
+        seen: Option<u64>,
         peer: Option<Peer>,
     ) -> Result<Reply> {
         self.vouch(peer, "reviewing decisions")?;
-        let decision = self
-            .context
-            .lock()
-            .unwrap()
-            .review(project, id, action, now_secs())?;
+        let decision =
+            self.context
+                .lock()
+                .unwrap()
+                .review(project, id, action, seen, now_secs())?;
         if matches!(
             action,
             ReviewAction::Confirm | ReviewAction::Retire | ReviewAction::Edit { .. }
