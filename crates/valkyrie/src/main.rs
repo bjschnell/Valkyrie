@@ -1,6 +1,7 @@
 mod bench;
 mod context;
 mod hook;
+mod mcp;
 mod service;
 mod tools;
 
@@ -116,6 +117,9 @@ enum Cmd {
         #[arg(long)]
         no_summary: bool,
     },
+    /// Serve this project's decisions to an agent over MCP (stdio):
+    /// `claude mcp add valkyrie -- valk mcp`.
+    Mcp,
     /// List this project's decisions, or review one.
     Decisions {
         /// Include rejected, superseded and retired ones.
@@ -441,6 +445,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Ok(())
             }
         }
+        Some(Cmd::Mcp) => mcp::serve(connect(&socket).await?.0).await,
         Some(Cmd::Decisions { all, action }) => {
             context::decisions(&connect(&socket).await?.0, all, action).await
         }

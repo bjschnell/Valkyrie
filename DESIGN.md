@@ -146,7 +146,9 @@ Audited 2026-10-06: the author's plugin is **Leader** (`~/repos/leader`, Python 
   - **Flags:** every 10 minutes, and whenever `valk decisions` asks, the daemon flags an active decision when one of its anchors was deleted, or when `git diff --numstat <that commit> HEAD` on them comes to 150 lines or more. It also flags one that's due by date: decisions naming a version or URL get `review_every: 30` days, and `valk decide --review-in N` sets any interval.
   - **Review:** flagged decisions join the review list (`Proposals`) with the reason. The phone shows "Still holds" and "Retire", the TUI shows `a`/`d`, and the CLI has `valk decisions confirm|retire`. Agents keep getting them meanwhile, and ones due by date are marked "due for re-checking".
   - **Health:** `valk decisions health` counts what's active, proposed (and over a week old), rejected and retired, and says what waits on you.
-- **Next:** MCP (§6.5).
+- **MCP (done 2026-10-09):** `valk mcp` is an MCP server on stdio with `search_decisions`, `list_decisions`, `get_decision`, `propose_decision` (a proposal, as from `valk decide`) and `project_health`. Search matches words. When nothing matches it lists every decision, since a project holds tens and an agent can judge synonyms ("package manager" against "pnpm"). Verified with Claude Code as the client. It isn't added to sessions by default, because every tool costs context: `claude mcp add valkyrie -- valk mcp`.
+- **Also (2026-10-09):** new decisions to review are pushed to the phone (one notification for all of them, once you're away), and a review carries the `updated` time the reviewer saw, so a decision changed in between is refused.
+- **Next:** nothing planned in §6 beyond tuning: watch which corrections the extractor proposes and how often agents act on sibling notes.
 
 ### 6.1 Problem
 Repeatedly telling agents "check session X, we decided Y", and pasting large handoff markdowns.

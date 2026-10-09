@@ -113,6 +113,8 @@ valk decisions            # this repo's decisions (--all: retired ones too)
 valk decisions preview    # what an agent gets at session start
 valk decisions export     # copy them into .valkyrie/decisions/ for git
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
+valk decisions health     # what waits on you; decisions that may be out of date
+claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 ```
 
 Claude sessions get the active decisions when they start, after `/clear` and

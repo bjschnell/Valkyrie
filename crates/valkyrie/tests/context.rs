@@ -660,3 +660,69 @@ fn decisions_about_rewritten_files_are_flagged() {
     assert!(cleared.contains("healthy"), "{cleared}");
     drop(daemon);
 }
+
+/// DESIGN §6.5: `valk mcp` speaks MCP over stdio, and what an agent proposes
+/// through it waits on review.
+#[test]
+fn mcp_serves_and_proposes_decisions() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("valkyrie-mcp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let mut child = Command::new(BIN)
+        .arg("mcp")
+        .current_dir(&repo)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("VALK_SOCKET", dir.join("run/v.sock"))
+        .env_remove("VALK_SESSION")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"propose_decision","arguments":{"title":"Use pnpm","body":"npm breaks the lockfile.","kind":"constraint"}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_decisions","arguments":{"query":"pnpm","include_inactive":true}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_decision","arguments":{"id":9}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"nope"}"#,
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for r in requests {
+        writeln!(stdin, "{r}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let replies: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 6, "{replies:?}");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "valkyrie");
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    let text = |i: usize| {
+        replies[i]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(text(2).starts_with("Proposed #1: Use pnpm"), "{}", text(2));
+    assert!(
+        text(3).contains("#1 [constraint] Use pnpm (proposed)"),
+        "{}",
+        text(3)
+    );
+    assert_eq!(replies[4]["result"]["isError"], true);
+    assert_eq!(replies[5]["error"]["code"], -32601);
+    drop(daemon);
+}
