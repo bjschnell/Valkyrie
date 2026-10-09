@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DECISION_KINDS, type Decision, type DecisionKind } from "../proto";
+import { DECISION_KINDS, type Decision, type DecisionKind, type ReviewAction } from "../proto";
 import { age } from "../lib/time";
 import { review, useApp } from "../store";
 
@@ -41,6 +41,7 @@ function ProposalCard({ d }: { d: Decision }) {
     .filter(Boolean)
     .join(" · ");
 
+  if (d.fresh?.review) return <StaleCard d={d} />;
   return (
     <div className="card-slot">
       <article className="card decision-card">
@@ -73,6 +74,39 @@ function ProposalCard({ d }: { d: Decision }) {
             </div>
           </>
         )}
+      </article>
+    </div>
+  );
+}
+
+/** An active decision that may be out of date: its files changed a lot, or it's
+ * about something that changes. Agents still get it until it's retired. */
+function StaleCard({ d }: { d: Decision }) {
+  const [busy, setBusy] = useState(false);
+  const act = async (action: ReviewAction) => {
+    setBusy(true);
+    await review(d, action);
+    setBusy(false);
+  };
+  return (
+    <div className="card-slot">
+      <article className="card decision-card stale">
+        <div className="card-head">
+          <span className="kind-chip kind-gotcha">still true?</span>
+          <span className="card-name">#{d.id}</span>
+          <span className="card-prog">{base(d.project)}</span>
+        </div>
+        <p className="decision-title">{d.title}</p>
+        {d.body && <p className="decision-body">{d.body}</p>}
+        <div className="decision-by">{d.fresh?.review}</div>
+        <div className="card-actions">
+          <button className="ghost no" disabled={busy} onClick={() => void act({ a: "retire" })}>
+            Retire
+          </button>
+          <button className="primary" disabled={busy} onClick={() => void act({ a: "confirm" })}>
+            Still holds
+          </button>
+        </div>
       </article>
     </div>
   );

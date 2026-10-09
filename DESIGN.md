@@ -140,7 +140,13 @@ Audited 2026-10-06: the author's plugin is **Leader** (`~/repos/leader`, Python 
   - **Contents:** where it ran (directory, branch and commit), the goal (your first message), what you asked since, where it left off, the files it changed, and the project's active decisions.
   - **Where it left off** is the same locked-down Haiku summarizing the transcript's newest ~30k characters, redacted, into at most 8 bullets. On a real 23 MB transcript that took 3.5 s and named the commits, what was pushed and what wasn't, and the next step. `--no-summary` uses the session's last reply instead.
   - **`--to`** starts that agent in the same directory with the handoff as its first message.
-- **Next:** MCP (§6.5), staleness (§6.4).
+- **Staleness (done 2026-10-09, §6.4).**
+  - **Anchors:** a decision's anchors are the files its text names that exist in the repo (`src/auth.rs`, `Cargo.toml`), found when it's recorded or reworded.
+  - **Confirmation:** accepting or confirming it records the time and `HEAD`.
+  - **Flags:** every 10 minutes, and whenever `valk decisions` asks, the daemon flags an active decision when one of its anchors was deleted, or when `git diff --numstat <that commit> HEAD` on them comes to 150 lines or more. It also flags one that's due by date: decisions naming a version or URL get `review_every: 30` days, and `valk decide --review-in N` sets any interval.
+  - **Review:** flagged decisions join the review list (`Proposals`) with the reason. The phone shows "Still holds" and "Retire", the TUI shows `a`/`d`, and the CLI has `valk decisions confirm|retire`. Agents keep getting them meanwhile, and ones due by date are marked "due for re-checking".
+  - **Health:** `valk decisions health` counts what's active, proposed (and over a week old), rejected and retired, and says what waits on you.
+- **Next:** MCP (§6.5).
 
 ### 6.1 Problem
 Repeatedly telling agents "check session X, we decided Y", and pasting large handoff markdowns.

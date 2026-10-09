@@ -118,6 +118,28 @@ pub struct Decision {
     pub superseded_by: Option<u32>,
     #[serde(default)]
     pub provenance: Provenance,
+    #[serde(default)]
+    pub fresh: Freshness,
+}
+
+/// Whether a decision may be out of date (DESIGN §6.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Freshness {
+    /// When a human last said it holds (seconds); 0: when it was made active.
+    #[serde(default)]
+    pub confirmed: u64,
+    /// Days after `confirmed` that it's due for review again, for decisions about
+    /// things that change (versions, endpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_every: Option<u32>,
+    /// Files it's about, relative to the project root: if they change a lot, it may
+    /// no longer hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<String>,
+    /// Why it should be looked at again, when it should; worked out by the daemon,
+    /// never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
 }
 
 /// A decision as asked for by `valk decide`, the TUI or the web app.
@@ -138,6 +160,10 @@ pub struct NewDecision {
     /// `HEAD` where it was recorded, filled in by the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// Review it again this many days after it's confirmed; `None`: chosen from
+    /// what it says (30 days for versions and URLs, else never).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_every: Option<u32>,
     /// The session it was recorded from (`$VALK_SESSION`). A session running an
     /// agent can only propose (ADR-0007 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +177,8 @@ pub enum ReviewAction {
     Accept,
     Reject,
     Retire,
+    /// It still holds: an active decision flagged for review is confirmed as of now.
+    Confirm,
     /// Change the wording (and kind) without changing the status.
     Edit {
         title: String,

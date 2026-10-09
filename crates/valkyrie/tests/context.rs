@@ -561,3 +561,102 @@ fn wait_for_any(path: &Path) -> String {
     }
     panic!("{} never written", path.display());
 }
+
+/// DESIGN §6.4: a decision about a file that's since been rewritten is flagged for
+/// review, and saying it still holds clears that.
+#[test]
+fn decisions_about_rewritten_files_are_flagged() {
+    if Command::new("script").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join("src"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("src/auth.rs"), "fn a() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "one"]);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    // A human, as in agents_only_propose_and_never_review.
+    let human = |line: &str| {
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{line}");
+    };
+    let o = |name: &str| out.join(name).display().to_string();
+    human(&format!(
+        "valk decide -k pattern 'Keep src/auth.rs free of IO' 'Pure logic only.' > {} 2>&1",
+        o("decide")
+    ));
+    assert!(wait_for(&out.join("decide")).contains("#1 recorded"));
+    human(&format!("valk decisions show 1 > {} 2>&1", o("show")));
+    assert!(
+        wait_for(&out.join("show")).contains("anchors: src/auth.rs"),
+        "{}",
+        wait_for(&out.join("show"))
+    );
+    human(&format!("valk decisions health > {} 2>&1", o("before")));
+    assert!(
+        wait_for(&out.join("before")).contains("healthy"),
+        "{}",
+        wait_for(&out.join("before"))
+    );
+
+    std::fs::write(repo.join("src/auth.rs"), "fn b() {}\n".repeat(300)).unwrap();
+    git(&["commit", "-qam", "rewrite"]);
+    human(&format!("valk decisions health > {} 2>&1", o("after")));
+    let after = wait_for(&out.join("after"));
+    assert!(
+        after.contains(
+            "#1 may be out of date: src/auth.rs changed a lot since it was confirmed (+300/-1)"
+        ),
+        "{after}"
+    );
+    human(&format!(
+        "valk decisions confirm 1 > {} 2>&1 && valk decisions health > {} 2>&1",
+        o("confirm"),
+        o("cleared")
+    ));
+    let cleared = wait_for(&out.join("cleared"));
+    assert!(cleared.contains("healthy"), "{cleared}");
+    drop(daemon);
+}

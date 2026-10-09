@@ -214,6 +214,7 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             provenance: Provenance::default(),
+            fresh: Default::default(),
         }];
         let files = ["/r/src/auth.rs".to_string()];
         let h = Handoff {

@@ -15,6 +15,11 @@ pub enum DecisionsCmd {
     Reject { id: u32 },
     /// Retire an active decision that no longer holds.
     Retire { id: u32 },
+    /// Say an active decision still holds (one flagged as maybe out of date).
+    Confirm { id: u32 },
+    /// How this project's decisions are doing: what waits on you, what may be
+    /// out of date.
+    Health,
     /// Show one decision in full, with where it came from.
     Show { id: u32 },
     /// Print the block agents get at session start.
@@ -45,6 +50,7 @@ pub struct Decide {
     pub kind: DecisionKind,
     pub propose: bool,
     pub supersedes: Option<u32>,
+    pub review_in: Option<u32>,
 }
 
 pub async fn decide(client: &Client, args: Decide) -> Result<()> {
@@ -67,6 +73,7 @@ pub async fn decide(client: &Client, args: Decide) -> Result<()> {
             kind: args.kind,
             propose: args.propose,
             supersedes: args.supersedes,
+            review_every: args.review_in,
             session: std::env::var("VALK_SESSION")
                 .ok()
                 .and_then(|s| s.parse().ok()),
@@ -94,6 +101,12 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
         Some(DecisionsCmd::Accept { id }) => review(id, ReviewAction::Accept).await,
         Some(DecisionsCmd::Reject { id }) => review(id, ReviewAction::Reject).await,
         Some(DecisionsCmd::Retire { id }) => review(id, ReviewAction::Retire).await,
+        Some(DecisionsCmd::Confirm { id }) => review(id, ReviewAction::Confirm).await,
+        Some(DecisionsCmd::Health) => {
+            let list = client.decisions(Some(cwd)).await?;
+            print_health(&root, &list);
+            Ok(())
+        }
         Some(DecisionsCmd::Show { id }) => {
             let list = client.decisions(Some(cwd)).await?;
             let d = list
@@ -170,9 +183,10 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
         return;
     }
     for d in shown {
-        let status = match d.status {
-            DecisionStatus::Active => String::new(),
-            other => format!(" ({})", other.as_str()),
+        let status = match (&d.fresh.review, d.status) {
+            (Some(why), _) => format!(" (may be out of date: {why})"),
+            (None, DecisionStatus::Active) => String::new(),
+            (None, other) => format!(" ({})", other.as_str()),
         };
         println!(
             "{:>4}  {:<10} {}{status}",
@@ -181,6 +195,50 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
             d.title
         );
     }
+}
+
+fn print_health(root: &Path, list: &[Decision]) {
+    let count = |s: DecisionStatus| list.iter().filter(|d| d.status == s).count();
+    let flagged: Vec<&Decision> = list.iter().filter(|d| d.fresh.review.is_some()).collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let old = list
+        .iter()
+        .filter(|d| {
+            d.status == DecisionStatus::Proposed && now.saturating_sub(d.created) > 7 * 86_400
+        })
+        .count();
+    println!("{}", root.display());
+    println!(
+        "  {} active, {} proposed{}, {} rejected, {} retired or superseded",
+        count(DecisionStatus::Active),
+        count(DecisionStatus::Proposed),
+        if old > 0 {
+            format!(" ({old} over a week old)")
+        } else {
+            String::new()
+        },
+        count(DecisionStatus::Rejected),
+        count(DecisionStatus::Retired) + count(DecisionStatus::Superseded),
+    );
+    for d in &flagged {
+        println!(
+            "  #{} may be out of date: {}",
+            d.id,
+            d.fresh.review.as_deref().unwrap_or("")
+        );
+    }
+    let waiting = count(DecisionStatus::Proposed) + flagged.len();
+    println!(
+        "  {}",
+        if waiting == 0 {
+            "healthy: nothing waits on you".to_owned()
+        } else {
+            format!("{waiting} wait on you: valk decisions, the TUI or your phone")
+        }
+    );
 }
 
 /// `HEAD` of the checkout `dir` is in, short; `None` outside git.

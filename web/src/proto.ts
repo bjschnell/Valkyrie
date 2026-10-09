@@ -77,12 +77,21 @@ export interface Decision {
     commit?: string;
     cwd?: string;
   };
+  fresh?: {
+    confirmed?: number;
+    review_every?: number;
+    anchors?: string[];
+    /** Why an active decision may be out of date (DESIGN §6.4). */
+    review?: string;
+  };
 }
 
 export type ReviewAction =
   | { a: "accept" }
   | { a: "reject" }
   | { a: "retire" }
+  /** An active decision flagged for review still holds. */
+  | { a: "confirm" }
   | { a: "edit"; title: string; body: string; kind: DecisionKind }
   /** Reword a proposal and accept it; refused once it isn't a proposal any more. */
   | { a: "revise"; title: string; body: string; kind: DecisionKind };

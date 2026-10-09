@@ -343,6 +343,7 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   accept: "Accepted",
   reject: "Rejected",
   retire: "Retired",
+  confirm: "Confirmed",
   edit: "Saved",
   revise: "Accepted",
 };

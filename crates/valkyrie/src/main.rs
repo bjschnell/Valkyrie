@@ -95,6 +95,10 @@ enum Cmd {
         /// The decision this one replaces, once accepted.
         #[arg(long, value_name = "ID")]
         supersedes: Option<u32>,
+        /// Ask to review it again this many days after each confirmation (default:
+        /// 30 when it names a version or URL, else never).
+        #[arg(long, value_name = "DAYS")]
+        review_in: Option<u32>,
     },
     /// Hand a session's work to another agent: its goal and asks, where it left off
     /// (summarized by a small model), the files it changed, the project's decisions.
@@ -390,6 +394,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             kind,
             propose,
             supersedes,
+            review_in,
         }) => {
             let client = connect(&socket).await?.0;
             let args = context::Decide {
@@ -398,6 +403,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 kind,
                 propose,
                 supersedes,
+                review_in,
             };
             context::decide(&client, args).await
         }

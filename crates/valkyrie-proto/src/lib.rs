@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
-pub use context::{Decision, DecisionKind, DecisionStatus, NewDecision, Provenance, ReviewAction};
+pub use context::{
+    Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance, ReviewAction,
+};
 pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
@@ -323,7 +325,7 @@ pub enum Reply {
         text: String,
     },
     Decision {
-        decision: Decision,
+        decision: Box<Decision>,
     },
     Decisions {
         decisions: Vec<Decision>,

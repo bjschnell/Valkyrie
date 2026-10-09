@@ -101,8 +101,23 @@ impl Registry {
         Caller { agent, session }
     }
 
+    /// What's waiting on review: proposals, then active decisions flagged as
+    /// possibly out of date.
     pub(crate) fn refresh_proposals(&self) {
-        let items = self.context.lock().unwrap().proposals();
+        let store = self.context.lock().unwrap();
+        let mut items = store.proposals();
+        let stale = self.stale.lock().unwrap();
+        let mut flagged: Vec<_> = stale.keys().map(|(root, _)| root.clone()).collect();
+        flagged.sort();
+        flagged.dedup();
+        for root in flagged {
+            items.extend(store.load(&root).into_iter().filter_map(|mut d| {
+                d.fresh.review = stale.get(&(root.clone(), d.id)).cloned();
+                (d.status == valkyrie_proto::DecisionStatus::Active && d.fresh.review.is_some())
+                    .then_some(d)
+            }));
+        }
+        drop((stale, store));
         self.proposals.send_if_modified(|current| {
             let changed = **current != items;
             if changed {
@@ -134,7 +149,9 @@ impl Registry {
             "decision recorded"
         );
         self.refresh_proposals();
-        Ok(Reply::Decision { decision })
+        Ok(Reply::Decision {
+            decision: Box::new(decision),
+        })
     }
 
     /// Only a human may act on decisions, or vouch for a new phone.
@@ -158,6 +175,15 @@ impl Registry {
             .lock()
             .unwrap()
             .review(project, id, action, now_secs())?;
+        if matches!(
+            action,
+            ReviewAction::Confirm | ReviewAction::Retire | ReviewAction::Edit { .. }
+        ) {
+            self.stale
+                .lock()
+                .unwrap()
+                .remove(&(project.to_path_buf(), id));
+        }
         tracing::info!(
             id,
             project = %project.display(),
@@ -165,7 +191,9 @@ impl Registry {
             "decision reviewed"
         );
         self.refresh_proposals();
-        Ok(Reply::Decision { decision })
+        Ok(Reply::Decision {
+            decision: Box::new(decision),
+        })
     }
 
     /// What `id`'s agent should hear about the other agents in its repository, once:
@@ -223,6 +251,39 @@ impl Registry {
                 .flat_map(|root| store.load(root))
                 .collect(),
         };
+        let stale = self.stale.lock().unwrap();
+        let decisions = decisions
+            .into_iter()
+            .map(|mut d| {
+                d.fresh.review = stale.get(&(d.project.clone(), d.id)).cloned();
+                d
+            })
+            .collect();
         Reply::Decisions { decisions }
+    }
+
+    /// Works out which active decisions may be out of date (DESIGN §6.4), every
+    /// project at once; `git` runs off the async threads.
+    pub(crate) async fn check_stale(&self) {
+        let roots = self.context.lock().unwrap().projects();
+        let active: Vec<_> = roots
+            .iter()
+            .flat_map(|root| self.context.lock().unwrap().load(root))
+            .filter(|d| d.status == valkyrie_proto::DecisionStatus::Active)
+            .collect();
+        let found = tokio::task::spawn_blocking(move || {
+            let now = now_secs();
+            active
+                .into_iter()
+                .filter_map(|d| {
+                    let why = valkyrie_context::stale::review(&d.project, &d, now)?;
+                    Some(((d.project.clone(), d.id), why))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .await
+        .unwrap_or_default();
+        *self.stale.lock().unwrap() = found;
+        self.refresh_proposals();
     }
 }

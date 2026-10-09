@@ -133,6 +133,7 @@ async fn look(
             propose: true,
             supersedes: None,
             commit: None,
+            review_every: None,
             session: Some(id),
         };
         let provenance = Provenance {

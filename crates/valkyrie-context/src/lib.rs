@@ -8,6 +8,7 @@ pub mod handoff;
 pub mod inject;
 pub mod model;
 pub mod project;
+pub mod stale;
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -107,6 +108,14 @@ impl Store {
             }
         }
         let by_human = provenance.by == "human";
+        let text = format!("{title}\n{body}");
+        let fresh = valkyrie_proto::Freshness {
+            anchors: stale::anchors(&root, &new.cwd, &text),
+            review_every: new
+                .review_every
+                .or_else(|| stale::volatile(&text).then_some(stale::VOLATILE_DAYS)),
+            ..Default::default()
+        };
         let decision = Decision {
             id: self.next_id(&root),
             project: root.clone(),
@@ -122,6 +131,7 @@ impl Store {
             updated: now,
             supersedes: new.supersedes,
             superseded_by: None,
+            fresh,
             provenance,
         };
         self.mark_project(&root)?;
@@ -150,18 +160,23 @@ impl Store {
         };
         let mut d = d.clone();
         let mut accepting = false;
+        let mut confirming = false;
+        let mut reworded = false;
         match (action, d.status) {
             (ReviewAction::Accept, Proposed) => accepting = true,
             (ReviewAction::Reject, Proposed) => d.status = Rejected,
             (ReviewAction::Retire, Active) => d.status = Retired,
+            (ReviewAction::Confirm, Active) => confirming = true,
             (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
                 (d.title, d.body) = clean(title, body)?;
                 d.kind = *kind;
+                reworded = true;
             }
             (ReviewAction::Revise { title, body, kind }, Proposed) => {
                 (d.title, d.body) = clean(title, body)?;
                 d.kind = *kind;
                 accepting = true;
+                reworded = true;
             }
             (action, status) => bail!(
                 "can't {} #{id}: it is {}",
@@ -169,6 +184,7 @@ impl Store {
                     ReviewAction::Accept => "accept",
                     ReviewAction::Reject => "reject",
                     ReviewAction::Retire => "retire",
+                    ReviewAction::Confirm => "confirm",
                     ReviewAction::Edit { .. } => "edit",
                     ReviewAction::Revise { .. } => "revise",
                 },
@@ -177,6 +193,21 @@ impl Store {
         }
         if accepting {
             d.status = Active;
+        }
+        if reworded {
+            let cwd = d
+                .provenance
+                .cwd
+                .clone()
+                .unwrap_or_else(|| root.to_path_buf());
+            d.fresh.anchors = stale::anchors(root, &cwd, &format!("{}\n{}", d.title, d.body));
+        }
+        // Confirmed as of now, and at this commit: its files' churn counts from here.
+        if accepting || confirming {
+            d.fresh.confirmed = now;
+            if let Some(head) = project::head(root) {
+                d.provenance.commit = Some(head);
+            }
         }
         d.updated = now;
         self.write(root, &d, Some(path))?;
@@ -348,6 +379,7 @@ mod tests {
                 propose: false,
                 supersedes: None,
                 commit: None,
+                review_every: None,
                 session: None,
             }
         }

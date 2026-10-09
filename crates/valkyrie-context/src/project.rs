@@ -31,6 +31,19 @@ pub fn checkout(dir: &Path) -> PathBuf {
         .map_or_else(|| dir.clone(), Path::to_path_buf)
 }
 
+/// `HEAD` of the checkout at `dir`, short; `None` outside git.
+pub fn head(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let sha = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    (out.status.success() && !sha.is_empty()).then_some(sha)
+}
+
 fn main_worktree(git_file: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(git_file).ok()?;
     let gitdir = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();

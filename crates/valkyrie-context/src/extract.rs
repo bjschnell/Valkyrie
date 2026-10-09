@@ -477,6 +477,7 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             provenance: Provenance::default(),
+            fresh: Default::default(),
         }
     }
 

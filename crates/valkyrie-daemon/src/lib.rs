@@ -14,7 +14,7 @@ pub use restore::path as restore_path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use session::{Host, SavedSession, Session, StopPipe};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::CString;
 use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -117,6 +117,9 @@ struct Registry {
     context: Mutex<valkyrie_context::Store>,
     /// Every project's decisions waiting on review, pushed with the queue.
     proposals: watch::Sender<Proposals>,
+    /// Active decisions that may be out of date, and why (DESIGN §6.4), by project
+    /// root and id; from `check_stale`.
+    stale: Mutex<HashMap<(PathBuf, u32), String>>,
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
@@ -367,6 +370,7 @@ fn new_registry(
         layouts: Mutex::default(),
         context: Mutex::new(valkyrie_context::Store::new(state_dir.join("context"))),
         proposals: watch::Sender::new(Arc::default()),
+        stale: Mutex::default(),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
     });
@@ -383,6 +387,7 @@ async fn serve_forever(
     if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
         tokio::spawn(extract::run(registry.clone(), turns));
     }
+    tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(tick(registry.clone()));
     tokio::spawn(restore::keep(
         registry.clone(),
@@ -656,6 +661,19 @@ async fn publish_queue(registry: Arc<Registry>) {
     }
 }
 
+/// How often decisions are checked for staleness: their files change with commits,
+/// not by the second.
+const STALE_EVERY: Duration = Duration::from_secs(600);
+
+async fn watch_stale(registry: Arc<Registry>) {
+    let mut interval = tokio::time::interval(STALE_EVERY);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        registry.check_stale().await;
+    }
+}
+
 async fn tick(registry: Arc<Registry>) {
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -781,7 +799,12 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 id,
                 action,
             } => (req, registry.review(&project, id, &action, peer)),
-            ClientMsg::Decisions { req, cwd } => (req, Ok(registry.decisions(cwd))),
+            ClientMsg::Decisions { req, cwd } => {
+                // Fresh flags for whoever asks; the background check is only every
+                // few minutes.
+                registry.check_stale().await;
+                (req, Ok(registry.decisions(cwd)))
+            }
             ClientMsg::MarkSeen { req, session, seq } => (
                 req,
                 registry.get(session).map(|s| {

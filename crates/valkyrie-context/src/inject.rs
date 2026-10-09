@@ -33,6 +33,10 @@ fn rank(kind: DecisionKind) -> u8 {
 /// start collecting them.
 pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> String {
     let propose = how_to_propose(valk);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let mut active: Vec<&Decision> = decisions
         .iter()
         .filter(|d| d.status == DecisionStatus::Active)
@@ -61,7 +65,7 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
         let footer_room = propose.len() + 120;
         let mut shown = 0;
         for d in &active {
-            let line = entry(d);
+            let line = entry(d, now);
             if out.len() + line.len() + footer_room > budget {
                 break;
             }
@@ -81,8 +85,11 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
     out
 }
 
-fn entry(d: &Decision) -> String {
+fn entry(d: &Decision, now: u64) -> String {
     let mut line = format!("- #{} [{}] {}", d.id, d.kind.as_str(), d.title);
+    if crate::stale::due(d, now).is_some() {
+        line.push_str(" (due for re-checking: it may be out of date)");
+    }
     let body = crate::file::one_line(&d.body);
     if !body.is_empty() {
         line.push_str(": ");
@@ -145,6 +152,7 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             provenance: Provenance::default(),
+            fresh: Default::default(),
         }
     }
 

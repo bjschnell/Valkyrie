@@ -28,6 +28,11 @@ pub fn render(d: &Decision) -> String {
     field("commit", d.provenance.commit.as_deref().unwrap_or(""));
     let cwd = d.provenance.cwd.as_ref().map(|p| p.to_string_lossy());
     field("cwd", cwd.as_deref().unwrap_or(""));
+    if d.fresh.confirmed > 0 {
+        field("confirmed", &d.fresh.confirmed.to_string());
+    }
+    field("review_every", &opt(d.fresh.review_every));
+    field("anchors", &d.fresh.anchors.join(", "));
     out.push_str("---\n");
     out.push_str(&format!("# {}\n", one_line(&d.title)));
     let body = d.body.trim();
@@ -56,6 +61,7 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
         supersedes: None,
         superseded_by: None,
         provenance: Provenance::default(),
+        fresh: Default::default(),
     };
     for line in front.lines() {
         let Some((k, v)) = line.split_once(':') else {
@@ -76,6 +82,16 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
             "conversation" => d.provenance.conversation = text(),
             "commit" => d.provenance.commit = text(),
             "cwd" => d.provenance.cwd = text().map(PathBuf::from),
+            "confirmed" => d.fresh.confirmed = v.parse().unwrap_or(0),
+            "review_every" => d.fresh.review_every = v.parse().ok(),
+            "anchors" => {
+                d.fresh.anchors = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }
             _ => {}
         }
     }
@@ -140,6 +156,12 @@ mod tests {
                 conversation: Some("abc-123".into()),
                 commit: Some("deadbeef".into()),
                 cwd: Some(PathBuf::from("/r/sub")),
+            },
+            fresh: valkyrie_proto::Freshness {
+                confirmed: 300,
+                review_every: Some(30),
+                anchors: vec!["src/a.rs".into(), "Cargo.toml".into()],
+                review: None,
             },
         }
     }

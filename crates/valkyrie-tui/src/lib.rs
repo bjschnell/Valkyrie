@@ -1411,12 +1411,17 @@ impl App {
 
     /// Accepts or rejects the proposal under the cursor. The daemon pushes the
     /// shorter list, and the cursor lands on the next one.
-    async fn review(&mut self, action: ReviewAction) {
+    /// `a`/`d` on the selected row: accept or reject a proposal, or say an active
+    /// decision flagged as maybe out of date still holds, or retire it.
+    async fn review(&mut self, yes: bool) {
         let Some(d) = self.proposal() else { return };
         let (project, id, title) = (d.project.clone(), d.id, d.title.clone());
-        let done = match action {
-            ReviewAction::Accept => "accepted",
-            _ => "rejected",
+        let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
+        let (action, done) = match (flagged, yes) {
+            (false, true) => (ReviewAction::Accept, "accepted"),
+            (false, false) => (ReviewAction::Reject, "rejected"),
+            (true, true) => (ReviewAction::Confirm, "still holds:"),
+            (true, false) => (ReviewAction::Retire, "retired"),
         };
         self.status = match self.client.review(project, id, action).await {
             Ok(_) => format!("{done} #{id} {title}"),
@@ -1479,8 +1484,8 @@ impl App {
                     self.status = proposal_text(d);
                 }
             }
-            HomeKey::Accept => self.review(ReviewAction::Accept).await,
-            HomeKey::Reject => self.review(ReviewAction::Reject).await,
+            HomeKey::Accept => self.review(true).await,
+            HomeKey::Reject => self.review(false).await,
             HomeKey::Kill => {
                 if let Some(id) = selected {
                     if let Err(e) = self.client.kill(id).await {
@@ -1822,7 +1827,13 @@ impl App {
 
         let mut footer = match &self.renaming {
             Some((id, typed)) => rename_line(*id, typed, t),
-            None => footer_line(&self.status, self.settings.sound, in_proposals, t),
+            None => footer_line(
+                &self.status,
+                self.settings.sound,
+                in_proposals,
+                self.proposal().is_some_and(|d| d.fresh.review.is_some()),
+                t,
+            ),
         };
         if let Some(toast) = self.toast() {
             footer.spans.splice(0..0, toast_spans(toast, t));
@@ -2764,9 +2775,15 @@ fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
         || d.project.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
+    // An active decision here is one that may be out of date.
+    let kind = if d.fresh.review.is_some() {
+        "review?".fg(t.interrupted)
+    } else {
+        d.kind.as_str().fg(t.accent2)
+    };
     TableRow::new([
         Cell::from(format!("#{}", d.id).fg(t.muted)),
-        Cell::from(d.kind.as_str().fg(t.accent2)),
+        Cell::from(kind),
         Cell::from(d.title.clone().fg(t.fg).bold()),
         Cell::from(format!("{} · {project}", proposer(d)).fg(t.muted)),
     ])
@@ -2791,6 +2808,9 @@ fn proposal_table<'a>(rows: impl IntoIterator<Item = TableRow<'a>>, t: &Theme) -
 /// A proposal's body on one line (its title when it has none), with the session it
 /// came from.
 fn proposal_text(d: &Decision) -> String {
+    if let Some(why) = &d.fresh.review {
+        return format!("may be out of date: {why}");
+    }
     let body = d.body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut text = if body.is_empty() {
         d.title.clone()
@@ -2889,13 +2909,21 @@ fn rename_line(id: SessionId, typed: &str, t: &Theme) -> Line<'static> {
 
 /// The status message, then key hints as chips: a proposal's own keys while the
 /// cursor is on one.
-fn footer_line(status: &str, sound: bool, proposal: bool, t: &Theme) -> Line<'static> {
+fn footer_line(
+    status: &str,
+    sound: bool,
+    proposal: bool,
+    flagged: bool,
+    t: &Theme,
+) -> Line<'static> {
     let mut spans = Vec::new();
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
         spans.push("│".fg(t.border));
     }
-    let context: &[(&str, &str)] = if proposal {
+    let context: &[(&str, &str)] = if flagged {
+        &[("a", "still holds"), ("d", "retire"), ("↩", "why")]
+    } else if proposal {
         &[("a", "accept"), ("d", "reject"), ("↩", "read")]
     } else {
         &[
@@ -3463,6 +3491,7 @@ mod tests {
                 by: "claude".into(),
                 ..Default::default()
             },
+            fresh: Default::default(),
         }
     }
 

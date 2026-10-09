@@ -329,7 +329,7 @@ impl Client {
             .request(|req| ClientMsg::Decide { req, decision })
             .await?
         {
-            Reply::Decision { decision } => Ok(decision),
+            Reply::Decision { decision } => Ok(*decision),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -349,7 +349,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Decision { decision } => Ok(decision),
+            Reply::Decision { decision } => Ok(*decision),
             other => bail!("unexpected reply: {other:?}"),
         }
     }

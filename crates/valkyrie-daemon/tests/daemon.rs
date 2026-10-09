@@ -1070,6 +1070,7 @@ async fn decisions_are_proposed_pushed_and_listed() {
         propose: true,
         supersedes: None,
         commit: Some("abc1234".into()),
+        review_every: None,
         session: None,
     };
     let first = client.decide(new("First")).await.unwrap();
