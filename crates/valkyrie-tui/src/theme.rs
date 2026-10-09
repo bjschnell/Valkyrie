@@ -1,5 +1,6 @@
-//! Color themes for Valkyrie's own chrome (home screen, bars). A hosted program's
-//! screen is always drawn in its own colors.
+//! Color themes for Valkyrie's own chrome (home screen, bars) and, unless turned
+//! off, for sessions: a program's default colors and its 16 ANSI colors come from
+//! the theme. Colors it names exactly (256-color or RGB) are drawn as they are.
 
 use ratatui::style::Color;
 use valkyrie_proto::AgentState;
@@ -27,6 +28,9 @@ pub struct Theme {
     pub working: Color,
     pub interrupted: Color,
     pub idle: Color,
+    /// The 16 ANSI colors a session's programs draw with: black, red, green,
+    /// yellow, blue, magenta, cyan, white, then their bright versions.
+    pub ansi: [Color; 16],
 }
 
 const fn hex(rgb: u32) -> Color {
@@ -52,6 +56,24 @@ pub const DRACULA: Theme = Theme {
     working: hex(0x8be9fd),
     interrupted: hex(0xffb86c),
     idle: hex(0x6272a4),
+    ansi: [
+        hex(0x21222c),
+        hex(0xff5555),
+        hex(0x50fa7b),
+        hex(0xf1fa8c),
+        hex(0xbd93f9),
+        hex(0xff79c6),
+        hex(0x8be9fd),
+        hex(0xf8f8f2),
+        hex(0x6272a4),
+        hex(0xff6e6e),
+        hex(0x69ff94),
+        hex(0xffffa5),
+        hex(0xd6acff),
+        hex(0xff92df),
+        hex(0xa4ffff),
+        hex(0xffffff),
+    ],
 };
 
 /// Neon on deep navy.
@@ -73,6 +95,24 @@ pub const CYBERPUNK: Theme = Theme {
     working: hex(0x05d9e8),
     interrupted: hex(0xff9e00),
     idle: hex(0x5a5f8a),
+    ansi: [
+        hex(0x1b1e3d),
+        hex(0xff003c),
+        hex(0x00ff9f),
+        hex(0xf9f002),
+        hex(0x4f6bff),
+        hex(0xff2a6d),
+        hex(0x05d9e8),
+        hex(0xd0d4f5),
+        hex(0x6a6f9e),
+        hex(0xff4d6d),
+        hex(0x5affc0),
+        hex(0xfff76b),
+        hex(0x7f9cff),
+        hex(0xff6ea0),
+        hex(0x6af0f8),
+        hex(0xffffff),
+    ],
 };
 
 /// Pure black with pastel neon: mint, hot pink, lavender.
@@ -94,6 +134,24 @@ pub const BLACKOUT: Theme = Theme {
     working: hex(0x9ae6ff),
     interrupted: hex(0xffc39e),
     idle: hex(0x5a5666),
+    ansi: [
+        hex(0x1a1a1f),
+        hex(0xff8a9e),
+        hex(0x8dffbf),
+        hex(0xfff3a0),
+        hex(0xa0b8ff),
+        hex(0xff8fd0),
+        hex(0x9ae6ff),
+        hex(0xe6e3ee),
+        hex(0x6f6a7d),
+        hex(0xffadbb),
+        hex(0xb5ffd6),
+        hex(0xfff8c4),
+        hex(0xc9a7ff),
+        hex(0xffb3e0),
+        hex(0xc2f1ff),
+        hex(0xffffff),
+    ],
 };
 
 /// Catppuccin Mocha (catppuccin.com).
@@ -115,6 +173,24 @@ pub const CATPPUCCIN: Theme = Theme {
     working: hex(0x89dceb),
     interrupted: hex(0xfab387),
     idle: hex(0x6c7086),
+    ansi: [
+        hex(0x45475a),
+        hex(0xf38ba8),
+        hex(0xa6e3a1),
+        hex(0xf9e2af),
+        hex(0x89b4fa),
+        hex(0xf5c2e7),
+        hex(0x94e2d5),
+        hex(0xbac2de),
+        hex(0x585b70),
+        hex(0xf38ba8),
+        hex(0xa6e3a1),
+        hex(0xf9e2af),
+        hex(0x89b4fa),
+        hex(0xf5c2e7),
+        hex(0x94e2d5),
+        hex(0xa6adc8),
+    ],
 };
 
 /// Nord (nordtheme.com).
@@ -136,6 +212,24 @@ pub const NORD: Theme = Theme {
     working: hex(0x81a1c1),
     interrupted: hex(0xd08770),
     idle: hex(0x616e88),
+    ansi: [
+        hex(0x3b4252),
+        hex(0xbf616a),
+        hex(0xa3be8c),
+        hex(0xebcb8b),
+        hex(0x81a1c1),
+        hex(0xb48ead),
+        hex(0x88c0d0),
+        hex(0xe5e9f0),
+        hex(0x4c566a),
+        hex(0xbf616a),
+        hex(0xa3be8c),
+        hex(0xebcb8b),
+        hex(0x81a1c1),
+        hex(0xb48ead),
+        hex(0x8fbcbb),
+        hex(0xeceff4),
+    ],
 };
 
 /// Gruvbox dark (github.com/morhetz/gruvbox).
@@ -157,6 +251,24 @@ pub const GRUVBOX: Theme = Theme {
     working: hex(0x83a598),
     interrupted: hex(0x8ec07c),
     idle: hex(0x7c6f64),
+    ansi: [
+        hex(0x282828),
+        hex(0xcc241d),
+        hex(0x98971a),
+        hex(0xd79921),
+        hex(0x458588),
+        hex(0xb16286),
+        hex(0x689d6a),
+        hex(0xa89984),
+        hex(0x928374),
+        hex(0xfb4934),
+        hex(0xb8bb26),
+        hex(0xfabd2f),
+        hex(0x83a598),
+        hex(0xd3869b),
+        hex(0x8ec07c),
+        hex(0xebdbb2),
+    ],
 };
 
 /// Tokyo Night (github.com/folke/tokyonight.nvim).
@@ -178,6 +290,24 @@ pub const TOKYONIGHT: Theme = Theme {
     working: hex(0x7dcfff),
     interrupted: hex(0xff9e64),
     idle: hex(0x565f89),
+    ansi: [
+        hex(0x15161e),
+        hex(0xf7768e),
+        hex(0x9ece6a),
+        hex(0xe0af68),
+        hex(0x7aa2f7),
+        hex(0xbb9af7),
+        hex(0x7dcfff),
+        hex(0xa9b1d6),
+        hex(0x414868),
+        hex(0xf7768e),
+        hex(0x9ece6a),
+        hex(0xe0af68),
+        hex(0x7aa2f7),
+        hex(0xbb9af7),
+        hex(0x7dcfff),
+        hex(0xc0caf5),
+    ],
 };
 
 pub const THEMES: &[&Theme] = &[

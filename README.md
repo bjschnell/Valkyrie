@@ -81,10 +81,14 @@ right-click a pane to split it, and drag a divider to resize.
 ### Settings
 
 `,` opens the settings panel: theme (`dracula`, `cyberpunk`, `blackout`,
-`catppuccin`, `nord`, `gruvbox`, `tokyonight`), tab style
-(`underline`, `folder`, `cards`), tab side (`top`, `left`, `right`), and sound.
-They're kept in `~/.config/valkyrie/settings.toml`, which you can also edit by hand.
-`VALK_THEME`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for one run.
+`catppuccin`, `nord`, `gruvbox`, `tokyonight`), whether sessions take the theme's
+colors (`theme`) or your terminal's (`terminal`), tab style (`underline`, `folder`,
+`cards`), tab side (`top`, `left`, `right`), and sound. With `theme`, a session's
+background, default text and 16 ANSI colors come from the theme; colors a program
+picks exactly (256-color or RGB) stay as it drew them. Settings are kept in
+`~/.config/valkyrie/settings.toml`, which you can also edit by hand. `VALK_THEME`,
+`VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for
+one run.
 
 ### From your phone
 

@@ -557,10 +557,11 @@ impl App {
     pub(crate) fn draw_panes(&self, frame: &mut ratatui::Frame, main: Rect, cursor: bool) {
         let (panes, dividers) = self.pane_layout(main);
         let focused = self.view.as_ref().map(|v| v.id);
+        let themed = self.settings.themed_sessions.then_some(self.settings.theme);
         let buf = frame.buffer_mut();
         for (id, r) in &panes {
             let Some(pane) = self.pane(*id) else { continue };
-            crate::render_rows(pane.shown(), *r, buf);
+            crate::render_rows(pane.shown(), *r, buf, themed);
             if let Some(sel) = &pane.selection {
                 crate::highlight(sel, *r, buf);
             }

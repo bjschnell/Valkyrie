@@ -1,7 +1,8 @@
-//! What the TUI looks and sounds like: the theme, how the tabs are drawn and on
-//! which side, and pings on or off. Kept in `settings.toml` in Valkyrie's config
-//! directory, which `,` edits (or any editor: it is plain `key = value`). At start
-//! `$VALK_THEME`, `$VALK_TABS`, `$VALK_TAB_SIDE` and `$VALK_SOUND` win over it.
+//! What the TUI looks and sounds like: the theme and whether sessions take its
+//! colors, how the tabs are drawn and on which side, and pings on or off. Kept in
+//! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
+//! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
+//! `$VALK_TABS`, `$VALK_TAB_SIDE` and `$VALK_SOUND` win over it.
 
 use crate::theme::{DRACULA, THEMES, Theme};
 use std::path::{Path, PathBuf};
@@ -63,6 +64,9 @@ impl TabSide {
 #[derive(Clone, Copy)]
 pub struct Settings {
     pub theme: &'static Theme,
+    /// Sessions draw their default and ANSI colors from the theme, not from the
+    /// terminal Valkyrie runs in.
+    pub themed_sessions: bool,
     pub tabs: TabStyle,
     pub tab_side: TabSide,
     pub sound: bool,
@@ -70,8 +74,19 @@ pub struct Settings {
 
 impl PartialEq for Settings {
     fn eq(&self, other: &Self) -> bool {
-        (self.theme.name, self.tabs, self.tab_side, self.sound)
-            == (other.theme.name, other.tabs, other.tab_side, other.sound)
+        (
+            self.theme.name,
+            self.themed_sessions,
+            self.tabs,
+            self.tab_side,
+            self.sound,
+        ) == (
+            other.theme.name,
+            other.themed_sessions,
+            other.tabs,
+            other.tab_side,
+            other.sound,
+        )
     }
 }
 
@@ -85,6 +100,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             theme: &DRACULA,
+            themed_sessions: true,
             tabs: TabStyle::Underline,
             tab_side: TabSide::Top,
             sound: true,
@@ -96,17 +112,25 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Theme,
+    SessionColors,
     Tabs,
     TabSide,
     Sound,
 }
 
 impl Field {
-    pub const ALL: &[Field] = &[Field::Theme, Field::Tabs, Field::TabSide, Field::Sound];
+    pub const ALL: &[Field] = &[
+        Field::Theme,
+        Field::SessionColors,
+        Field::Tabs,
+        Field::TabSide,
+        Field::Sound,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Field::Theme => "Theme",
+            Field::SessionColors => "Sessions",
             Field::Tabs => "Tab style",
             Field::TabSide => "Tabs on",
             Field::Sound => "Sound",
@@ -121,6 +145,7 @@ impl Settings {
         let mut settings = Settings::kept(&path());
         for (key, var) in [
             ("theme", "VALK_THEME"),
+            ("session_colors", "VALK_SESSION_COLORS"),
             ("tabs", "VALK_TABS"),
             ("tab_side", "VALK_TAB_SIDE"),
             ("sound", "VALK_SOUND"),
@@ -150,6 +175,7 @@ impl Settings {
         let mut kept = Settings::kept(path);
         match field {
             Field::Theme => kept.theme = self.theme,
+            Field::SessionColors => kept.themed_sessions = self.themed_sessions,
             Field::Tabs => kept.tabs = self.tabs,
             Field::TabSide => kept.tab_side = self.tab_side,
             Field::Sound => kept.sound = self.sound,
@@ -167,11 +193,13 @@ impl Settings {
         format!(
             "# Valkyrie's TUI settings. `,` in valk changes them too.\n\
              theme = \"{}\"     # {}\n\
+             session_colors = \"{}\"  # theme | terminal\n\
              tabs = \"{}\"      # {}\n\
              tab_side = \"{}\"  # {}\n\
              sound = {}\n",
             self.theme.name,
             names(THEMES.iter().map(|t| t.name)),
+            self.value(Field::SessionColors),
             self.tabs.name(),
             names(TabStyle::ALL.iter().map(|s| s.name())),
             self.tab_side.name(),
@@ -201,6 +229,11 @@ impl Settings {
                     self.theme = theme;
                 }
             }
+            "session_colors" => match value {
+                "theme" => self.themed_sessions = true,
+                "terminal" => self.themed_sessions = false,
+                _ => {}
+            },
             "tabs" => {
                 if let Some(&style) = find(TabStyle::ALL, value, |s| s.name()) {
                     self.tabs = style;
@@ -238,6 +271,13 @@ impl Settings {
     pub fn value(&self, field: Field) -> &'static str {
         match field {
             Field::Theme => self.theme.name,
+            Field::SessionColors => {
+                if self.themed_sessions {
+                    "theme"
+                } else {
+                    "terminal"
+                }
+            }
             Field::Tabs => self.tabs.name(),
             Field::TabSide => self.tab_side.name(),
             Field::Sound => {
@@ -258,6 +298,7 @@ impl Settings {
             Field::TabSide => {
                 self.tab_side = *step(TabSide::ALL, self.tab_side.name(), by, |s| s.name())
             }
+            Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::Sound => self.sound = !self.sound,
         }
     }
@@ -299,6 +340,7 @@ mod tests {
         s.cycle(Field::Tabs, 1);
         s.cycle(Field::TabSide, -1);
         s.cycle(Field::Sound, 1);
+        s.cycle(Field::SessionColors, 1);
         let mut back = Settings::default();
         back.apply(&s.to_toml());
         assert_eq!(back, s);
@@ -308,6 +350,7 @@ mod tests {
             "-1 from top wraps to the last"
         );
         assert!(!back.sound);
+        assert!(!back.themed_sessions);
     }
 
     #[test]
@@ -347,7 +390,7 @@ mod tests {
                 Field::Theme => THEMES.len(),
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
-                Field::Sound => 2,
+                Field::SessionColors | Field::Sound => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);

@@ -2860,7 +2860,12 @@ impl Attached {
     }
 }
 
-fn render_rows(rows: &[Row], area: Rect, buf: &mut ratatui::buffer::Buffer) {
+/// Draws a session's rows in `area`: with `theme`, its default and ANSI colors are
+/// the theme's (blank cells too), else the outer terminal's.
+fn render_rows(rows: &[Row], area: Rect, buf: &mut ratatui::buffer::Buffer, theme: Option<&Theme>) {
+    if let Some(t) = theme {
+        buf.set_style(area, style::Style::new().fg(t.fg).bg(t.bg));
+    }
     for row in rows {
         if row.y >= area.height {
             continue;
@@ -2875,7 +2880,7 @@ fn render_rows(rows: &[Row], area: Rect, buf: &mut ratatui::buffer::Buffer) {
                 area.y + row.y,
                 &span.text,
                 max,
-                to_style(span.style),
+                to_style(span.style, theme),
             );
         }
     }
@@ -2893,8 +2898,10 @@ fn highlight(sel: &Selection, area: Rect, buf: &mut ratatui::buffer::Buffer) {
     }
 }
 
-fn to_style(s: Style) -> style::Style {
-    let mut out = style::Style::new().fg(to_color(s.fg)).bg(to_color(s.bg));
+fn to_style(s: Style, theme: Option<&Theme>) -> style::Style {
+    let mut out = style::Style::new()
+        .fg(to_color(s.fg, theme.map(|t| t.fg), theme))
+        .bg(to_color(s.bg, theme.map(|t| t.bg), theme));
     for (flag, m) in [
         (Style::BOLD, Modifier::BOLD),
         (Style::ITALIC, Modifier::ITALIC),
@@ -2911,10 +2918,15 @@ fn to_style(s: Style) -> style::Style {
     out
 }
 
-fn to_color(c: Color) -> style::Color {
+/// `default` stands in for the program's default color, and `theme` supplies the
+/// 16 ANSI colors; without them the outer terminal's are used.
+fn to_color(c: Color, default: Option<style::Color>, theme: Option<&Theme>) -> style::Color {
     match c {
-        Color::Default => style::Color::Reset,
-        Color::Indexed(i) => style::Color::Indexed(i),
+        Color::Default => default.unwrap_or(style::Color::Reset),
+        Color::Indexed(i) => match theme {
+            Some(t) if i < 16 => t.ansi[i as usize],
+            _ => style::Color::Indexed(i),
+        },
         Color::Rgb(r, g, b) => style::Color::Rgb(r, g, b),
     }
 }
@@ -3385,7 +3397,7 @@ mod tests {
                             .areas(frame.area());
                     let (main, tabs) = app.split_body(body);
                     let view = app.view.as_ref().unwrap();
-                    render_rows(view.shown(), main, frame.buffer_mut());
+                    render_rows(view.shown(), main, frame.buffer_mut(), None);
                     app.draw_tabs(frame, tabs.unwrap());
                     frame.render_widget(
                         Paragraph::new(attached_bar(view, BarMode::Session, app.settings.theme)),
@@ -3568,7 +3580,12 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let (main, tabs) = app.split_body(frame.area());
-                    render_rows(app.view.as_ref().unwrap().shown(), main, frame.buffer_mut());
+                    render_rows(
+                        app.view.as_ref().unwrap().shown(),
+                        main,
+                        frame.buffer_mut(),
+                        None,
+                    );
                     app.draw_tabs(frame, tabs.unwrap());
                 })
                 .unwrap();
@@ -3672,7 +3689,12 @@ mod tests {
             assert_eq!(main.x, if side == TabSide::Left { SIDE_WIDTH } else { 0 });
             terminal
                 .draw(|frame| {
-                    render_rows(app.view.as_ref().unwrap().shown(), main, frame.buffer_mut());
+                    render_rows(
+                        app.view.as_ref().unwrap().shown(),
+                        main,
+                        frame.buffer_mut(),
+                        None,
+                    );
                     app.draw_tabs(frame, tabs);
                 })
                 .unwrap();
@@ -3751,9 +3773,9 @@ mod tests {
         app.settings_file = dir.join("valkyrie/settings.toml");
         app.on_home_key(HomeKey::Settings).await;
         assert_eq!(app.settings_cursor, Some(0));
-        // Down twice to "Tabs on", right: left. Mouse reports (SGR, and legacy with a
+        // Down three times to "Tabs on", right: left. Mouse reports (SGR, and legacy with a
         // space and `l` for bytes) and pasted text are not keys.
-        app.on_input(b"jj\x1b[C\x1b[<0;5;5M\x1b[M lj\x1b[200~ll,q\x1b[201~".to_vec())
+        app.on_input(b"jjj\x1b[C\x1b[<0;5;5M\x1b[M lj\x1b[200~ll,q\x1b[201~".to_vec())
             .await;
         assert_eq!(app.settings.tab_side, TabSide::Left);
         assert_eq!(app.settings.theme.name, "dracula");
@@ -3761,7 +3783,7 @@ mod tests {
         assert!(saved.contains("tab_side = \"left\""), "{saved}");
 
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        terminal.draw(|frame| app.draw_settings(frame, 2)).unwrap();
+        terminal.draw(|frame| app.draw_settings(frame, 3)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         snapshot(&buffer, "settings");
         let screen: String = (0..24)
@@ -4012,9 +4034,50 @@ mod tests {
         ));
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        render_rows(&view.rows, area, &mut buf);
+        render_rows(&view.rows, area, &mut buf, None);
         assert_eq!(buf[(2, 1)].symbol(), "日");
         assert_eq!(buf[(4, 1)].symbol(), "x");
         assert!(buf[(4, 1)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn a_theme_colors_defaults_and_ansi_but_not_exact_colors() {
+        let span = |x, fg| Span {
+            x,
+            text: "x".into(),
+            style: Style {
+                fg,
+                ..Style::default()
+            },
+        };
+        let rows = [Row {
+            y: 0,
+            spans: vec![
+                span(0, Color::Default),
+                span(1, Color::Indexed(1)),
+                span(2, Color::Indexed(100)),
+                span(3, Color::Rgb(1, 2, 3)),
+            ],
+            wrapped: false,
+        }];
+        let t = &theme::BLACKOUT;
+        let area = Rect::new(0, 0, 6, 2);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        render_rows(&rows, area, &mut buf, Some(t));
+        assert_eq!(buf[(0, 0)].fg, t.fg);
+        assert_eq!(buf[(1, 0)].fg, t.ansi[1]);
+        assert_eq!(buf[(2, 0)].fg, style::Color::Indexed(100));
+        assert_eq!(buf[(3, 0)].fg, style::Color::Rgb(1, 2, 3));
+        assert_eq!(buf[(0, 0)].bg, t.bg);
+        assert_eq!(
+            buf[(5, 1)].bg,
+            t.bg,
+            "blank cells take the theme's background"
+        );
+
+        let mut plain = ratatui::buffer::Buffer::empty(area);
+        render_rows(&rows, area, &mut plain, None);
+        assert_eq!(plain[(0, 0)].fg, style::Color::Reset);
+        assert_eq!(plain[(1, 0)].fg, style::Color::Indexed(1));
     }
 }
