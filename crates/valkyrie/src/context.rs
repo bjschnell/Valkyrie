@@ -111,7 +111,8 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
         Some(DecisionsCmd::Export) => {
             // The daemon's store, as the daemon would read it.
             let store = valkyrie_context::Store::new(store_base());
-            for path in store.export(&root)? {
+            let checkout = valkyrie_context::project::checkout(&cwd);
+            for path in store.export(&root, &checkout)? {
                 println!("{}", path.display());
             }
             Ok(())

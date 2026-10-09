@@ -235,6 +235,13 @@ pub enum ClientMsg {
         req: ReqId,
         cwd: Option<PathBuf>,
     },
+    /// Asks whether the connecting process is a human's (ADR-0007 §4), before doing
+    /// something only the user may, like pairing a phone. Replies `Done`, or an
+    /// error naming `what`.
+    Vouch {
+        req: ReqId,
+        what: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

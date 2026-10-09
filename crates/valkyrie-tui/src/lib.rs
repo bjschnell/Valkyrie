@@ -1734,10 +1734,13 @@ impl App {
             (main, None)
         };
         // Only while there is something to review, and never more than a few rows:
-        // past those it scrolls with the cursor.
+        // past those it scrolls with the cursor. Always one row at least, so `a`
+        // never accepts a proposal that isn't on screen.
         let proposals_height = match self.proposals.len() {
             0 => 0,
-            n => (n.min(PROPOSAL_ROWS) as u16 + 2).min(lists.height / 3),
+            n => (n.min(PROPOSAL_ROWS) as u16 + 2)
+                .min(lists.height / 3)
+                .max(3),
         };
         let queue_height = (self.queue.len().max(2) as u16 + 2)
             .min(lists.height.saturating_sub(proposals_height) / 2)

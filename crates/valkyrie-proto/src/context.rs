@@ -158,4 +158,12 @@ pub enum ReviewAction {
         body: String,
         kind: DecisionKind,
     },
+    /// Reword a proposal and accept it, in one step: refused once it isn't a
+    /// proposal any more, so a stale card can't rewrite an active decision.
+    Revise {
+        title: String,
+        #[serde(default)]
+        body: String,
+        kind: DecisionKind,
+    },
 }

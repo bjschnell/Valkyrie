@@ -322,15 +322,20 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             None => {
                 init_logging();
                 // The daemon must be up, and speak this protocol, before phones arrive.
-                drop(connect(&socket).await?);
+                let (client, _) = connect(&socket).await?;
+                let pair = client.vouch("pairing a phone").await.is_ok();
+                drop(client);
                 valkyrie_web::run(valkyrie_web::Options {
                     listen,
                     socket,
                     url,
+                    pair,
                 })
                 .await
             }
             Some(WebCmd::Pair) => {
+                // A paired device can accept decisions; an agent mustn't pair one.
+                connect(&socket).await?.0.vouch("pairing a phone").await?;
                 let url = valkyrie_web::public_url(url, listen);
                 valkyrie_web::print_pairing(&valkyrie_web::store()?, &url)
             }
@@ -406,6 +411,12 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Some(exe) => std::path::absolute(exe)?,
                 None => service::default_exe()?,
             };
+            // It ends by printing a pairing code.
+            connect(&socket)
+                .await?
+                .0
+                .vouch("setting up the web app")
+                .await?;
             service::run(service::Setup {
                 name,
                 exe,

@@ -83,7 +83,9 @@ export type ReviewAction =
   | { a: "accept" }
   | { a: "reject" }
   | { a: "retire" }
-  | { a: "edit"; title: string; body: string; kind: DecisionKind };
+  | { a: "edit"; title: string; body: string; kind: DecisionKind }
+  /** Reword a proposal and accept it; refused once it isn't a proposal any more. */
+  | { a: "revise"; title: string; body: string; kind: DecisionKind };
 
 export type Color = "default" | { indexed: number } | { rgb: [number, number, number] };
 

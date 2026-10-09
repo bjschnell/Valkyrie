@@ -1048,8 +1048,12 @@ async fn wait_proposals(pushes: &mut Pushes, pred: impl Fn(&[u32]) -> bool) -> V
     panic!("proposals never matched; last: {last:?}");
 }
 
+/// Plumbing only: who may make a decision active or review one depends on the
+/// process asking, so crates/valkyrie/tests/decisions.rs checks that with real
+/// sessions. Here the test process may be under an agent, or detached, so its
+/// decisions are proposed and its reviews may be refused.
 #[tokio::test]
-async fn decisions_are_proposed_pushed_and_reviewed() {
+async fn decisions_are_proposed_pushed_and_listed() {
     let (client, mut pushes, dir) = start().await;
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
@@ -1058,37 +1062,32 @@ async fn decisions_are_proposed_pushed_and_reviewed() {
     client.watch_queue().await.unwrap();
     wait_proposals(&mut pushes, |p| p.is_empty()).await;
 
-    let new = |title: &str, propose| NewDecision {
+    let new = |title: &str| NewDecision {
         cwd: repo.join("src"),
         title: title.into(),
         body: "why".into(),
         kind: DecisionKind::Constraint,
-        propose,
+        propose: true,
         supersedes: None,
         commit: Some("abc1234".into()),
         session: None,
     };
-    // From outside every session: a human, so it's active at once.
-    let direct = client.decide(new("Direct", false)).await.unwrap();
-    assert_eq!(direct.status, DecisionStatus::Active);
-    assert_eq!(direct.project, repo);
-    assert_eq!(direct.provenance.by, "human");
-    let asked = client.decide(new("Asked", true)).await.unwrap();
-    assert_eq!(asked.status, DecisionStatus::Proposed);
-    wait_proposals(&mut pushes, |p| p == [asked.id]).await;
+    let first = client.decide(new("First")).await.unwrap();
+    assert_eq!(first.status, DecisionStatus::Proposed);
+    assert_eq!(first.project, repo);
+    assert_eq!(first.provenance.commit.as_deref(), Some("abc1234"));
+    let second = client.decide(new("Second")).await.unwrap();
+    wait_proposals(&mut pushes, |p| p == [first.id, second.id]).await;
 
-    let accepted = client
-        .review(repo.clone(), asked.id, ReviewAction::Accept)
-        .await
-        .unwrap();
-    assert_eq!(accepted.status, DecisionStatus::Active);
-    wait_proposals(&mut pushes, |p| p.is_empty()).await;
-    assert!(
-        client
-            .review(repo.clone(), asked.id, ReviewAction::Accept)
-            .await
-            .is_err()
-    );
+    // Whoever asks, a review either goes through (and the push follows) or is
+    // refused as not the user's.
+    match client.review(repo.clone(), first.id, ReviewAction::Reject).await {
+        Ok(d) => {
+            assert_eq!(d.status, DecisionStatus::Rejected);
+            wait_proposals(&mut pushes, |p| p == [second.id]).await;
+        }
+        Err(e) => assert!(e.to_string().contains("is for the user"), "{e:#}"),
+    }
 
     let listed = client.decisions(Some(repo.join("src"))).await.unwrap();
     assert_eq!(listed.len(), 2);

@@ -354,6 +354,14 @@ impl Client {
         }
     }
 
+    /// Fails unless this process is a human's (see `ClientMsg::Vouch`).
+    pub async fn vouch(&self, what: &str) -> Result<()> {
+        let what = what.to_owned();
+        self.request(|req| ClientMsg::Vouch { req, what })
+            .await
+            .map(drop)
+    }
+
     /// The decisions of the project holding `cwd`, or of every project.
     pub async fn decisions(&self, cwd: Option<PathBuf>) -> Result<Vec<crate::Decision>> {
         match self

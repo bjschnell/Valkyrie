@@ -675,7 +675,11 @@ impl Attachment {
 
 async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
     // Who is asking, for requests an agent may not make (ADR-0007 §4).
-    let peer = stream.peer_cred().ok().and_then(|c| c.pid());
+    let peer = context::Peer::of(&stream);
+    // Whether this connection is an agent's (`Some(Some(agent))`), worked out the
+    // first time it starts or types into a session: those sessions then count as
+    // the agent's doing, so it can't launder a decision through them.
+    let mut driver: Option<Option<String>> = None;
     let (mut rd, mut wr) = stream.into_split();
     let (out, mut out_rx) = mpsc::channel::<Arc<ServerMsg>>(OUT_CAPACITY);
     let writer = tokio::spawn(async move {
@@ -708,6 +712,9 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
             ),
             ClientMsg::Input { session, data } => {
                 if let Ok(s) = registry.get(session) {
+                    if let Some(agent) = driver.get_or_insert_with(|| registry.caller(peer).agent) {
+                        s.driven_by(agent);
+                    }
                     s.typed(data);
                 }
                 continue;
@@ -773,7 +780,11 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 session,
                 side,
                 spec,
-            } => (req, split(&registry, session, side, spec)),
+            } => {
+                let result = split(&registry, session, side, spec);
+                mark_driven(&registry, &result, &mut driver, peer);
+                (req, result)
+            }
             ClientMsg::Ratio { req, a, b, ratio } => {
                 let set = registry
                     .layouts
@@ -795,7 +806,14 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                     Reply::Done
                 }),
             ),
-            ClientMsg::Spawn { req, spec } => (req, spawn(&registry, spec)),
+            ClientMsg::Spawn { req, spec } => {
+                let result = spawn(&registry, spec);
+                mark_driven(&registry, &result, &mut driver, peer);
+                (req, result)
+            }
+            ClientMsg::Vouch { req, what } => {
+                (req, registry.vouch(peer, &what).map(|()| Reply::Done))
+            }
             ClientMsg::Upgrade { req, exe } => (req, upgrade(&registry, exe).await),
             ClientMsg::List { req } => {
                 let sessions = registry.listed().iter().map(|s| s.info()).collect();
@@ -940,6 +958,21 @@ fn spawn(registry: &Registry, spec: valkyrie_proto::SpawnSpec) -> Result<Reply> 
 
 /// Starts `spec` as a new pane on `side` of `at`, in `at`'s tab, right after it in
 /// the tab order so the tab's panes stay together.
+/// Marks a session a connection just started as its agent's doing, if it is one.
+fn mark_driven(
+    registry: &Registry,
+    result: &Result<Reply>,
+    driver: &mut Option<Option<String>>,
+    peer: Option<context::Peer>,
+) {
+    if let Ok(Reply::Session { info }) = result
+        && let Some(agent) = driver.get_or_insert_with(|| registry.caller(peer).agent)
+        && let Ok(s) = registry.get(info.id)
+    {
+        s.driven_by(agent);
+    }
+}
+
 fn split(
     registry: &Registry,
     at: SessionId,

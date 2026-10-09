@@ -86,7 +86,7 @@ function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDon
   const [saving, setSaving] = useState(false);
   const save = async () => {
     setSaving(true);
-    const ok = (await review(d, { a: "edit", title, body, kind })) && (await review(d, { a: "accept" }));
+    const ok = await review(d, { a: "revise", title, body, kind });
     setSaving(false);
     if (ok) onDone();
   };

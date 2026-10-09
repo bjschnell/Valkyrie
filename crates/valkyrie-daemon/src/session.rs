@@ -195,6 +195,8 @@ pub struct SavedSession {
     /// Its place in the tab order; older images had none (id order).
     #[serde(default)]
     rank: Option<u64>,
+    #[serde(default)]
+    driven_by: Option<String>,
 }
 
 /// What brings a session back after the daemon restarts (DESIGN §8.3).
@@ -261,6 +263,9 @@ struct State {
     scan_due: bool,
     /// The agent's own conversation id, from its hooks, to resume it after a restart.
     conversation: Option<String>,
+    /// The agent that started this session or typed into it (ADR-0007 §4): what
+    /// runs here may be the agent's doing, so it can only propose decisions.
+    driven_by: Option<String>,
     /// The agent's own transcript, for the web app's Chat view (DESIGN §8.7).
     chat: Option<PathBuf>,
     /// When the program exited (ms), if it did while this image ran.
@@ -378,6 +383,7 @@ impl Session {
             last_scan_ms: 0,
             scan_due: false,
             conversation: None,
+            driven_by: None,
             chat: None,
             exited_ms: None,
             graphics: graphics::Log::new(GRAPHICS_LIMIT),
@@ -459,6 +465,7 @@ impl Session {
             last_scan_ms: 0,
             scan_due: false,
             conversation: saved.conversation,
+            driven_by: saved.driven_by,
             chat: saved.chat,
             // Exited under the old image: long enough ago to drop from the restore list.
             exited_ms: saved.exited.map(|_| 0),
@@ -623,6 +630,7 @@ impl Session {
             status: state.tracker.status().clone(),
             exited: state.exited,
             conversation: state.conversation.clone(),
+            driven_by: state.driven_by.clone(),
             chat: state.chat.clone(),
             input: self
                 .input
@@ -1121,6 +1129,49 @@ impl Session {
     /// The agent's own conversation id, once a hook named it.
     pub fn conversation(&self) -> Option<String> {
         self.state.lock().unwrap().conversation.clone()
+    }
+
+    /// Marks this session as an agent's doing; it stays marked.
+    pub fn driven_by(&self, agent: &str) {
+        let mut state = self.state.lock().unwrap();
+        if state.driven_by.is_none() {
+            state.driven_by = Some(agent.to_owned());
+        }
+    }
+
+    /// The agent behind this session: the one it runs (following the foreground),
+    /// else one that started it or typed into it. `None`: a human's.
+    pub fn agent_behind(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let running = &state.tracker.status().agent;
+        if running != "generic" {
+            return Some(running.clone());
+        }
+        state.driven_by.clone()
+    }
+
+    /// The PTY's terminal device (`foreground::dev_key`), the controlling terminal of
+    /// whatever runs in it.
+    pub fn tty(&self) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let mut name = [0 as libc::c_char; 128];
+        #[cfg(target_os = "linux")]
+        // SAFETY: the buffer is valid for its length; ptsname_r NUL-terminates.
+        let ok = unsafe { libc::ptsname_r(self.pty_fd(), name.as_mut_ptr(), name.len()) } == 0;
+        #[cfg(not(target_os = "linux"))]
+        // SAFETY: TIOCPTYGNAME writes at most 128 bytes, NUL-terminated.
+        let ok =
+            unsafe { libc::ioctl(self.pty_fd(), libc::TIOCPTYGNAME as _, name.as_mut_ptr()) } == 0;
+        if !ok {
+            return None;
+        }
+        // SAFETY: NUL-terminated above.
+        let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+        let rdev = std::fs::metadata(path.to_str().ok()?).ok()?.rdev() as libc::dev_t;
+        Some(crate::foreground::dev_key(
+            libc::major(rdev) as u32,
+            libc::minor(rdev) as u32,
+        ))
     }
 
     /// This session's line in the restore list (DESIGN §8.3): while it runs, and for

@@ -53,8 +53,52 @@ fn agent_of(argv: &[String]) -> Option<&'static str> {
     }
 }
 
-pub use sys::cwd;
-use sys::{children, cmdline, group_of, parent};
+use sys::{children, cmdline_n, group_of, parent};
+pub use sys::{cwd, started, tty};
+
+/// The first two arguments: enough to tell the program and a runtime's script.
+fn cmdline(pid: i32) -> Option<Vec<String>> {
+    cmdline_n(pid, 2)
+}
+
+/// The agent `pid` runs, by its command line (see `agent_of`).
+pub fn agent_running(pid: i32) -> Option<&'static str> {
+    cmdline(pid).and_then(|argv| agent_of(&argv))
+}
+
+/// Whether `pid` runs `valk web`, the phone app's bridge (`valk [--socket S] web …`).
+pub fn is_web_bridge(pid: i32) -> bool {
+    cmdline_n(pid, 8).is_some_and(|argv| bridge_argv(&argv))
+}
+
+fn bridge_argv(argv: &[String]) -> bool {
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    if Path::new(program).file_name() != Some("valk".as_ref()) {
+        return false;
+    }
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--socket" => {
+                args.next();
+            }
+            a if a.starts_with("--socket=") => {}
+            "web" => {
+                // `valk web pair` and the like print and exit; only the server bridges.
+                return args.next().is_none_or(|a| a.starts_with('-'));
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A terminal device as (major, minor), comparable across how each OS encodes it.
+pub fn dev_key(major: u32, minor: u32) -> u64 {
+    (u64::from(major) << 32) | u64::from(minor)
+}
 
 /// `pid` and the processes above it, nearest first, up to `MAX_PROCS`.
 pub fn ancestry(pid: i32) -> Vec<i32> {
@@ -79,13 +123,13 @@ mod sys {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
-    /// The first two arguments.
-    pub fn cmdline(pid: i32) -> Option<Vec<String>> {
+    /// The first `n` arguments.
+    pub fn cmdline_n(pid: i32, n: usize) -> Option<Vec<String>> {
         let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         Some(
             raw.split(|&b| b == 0)
                 .filter(|a| !a.is_empty())
-                .take(2)
+                .take(n)
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
         )
@@ -117,9 +161,28 @@ mod sys {
 
     /// Field 4 of `/proc/<pid>/stat`.
     pub fn parent(pid: i32) -> Option<i32> {
+        stat_field(pid, 4)
+    }
+
+    /// The controlling terminal (field 7, `tty_nr`), as `dev_key`; `None` without one.
+    pub fn tty(pid: i32) -> Option<u64> {
+        let nr: u64 = stat_field(pid, 7)?;
+        let major = (nr >> 8) & 0xfff;
+        let minor = (nr & 0xff) | ((nr >> 12) & 0xfff00);
+        (nr != 0).then(|| super::dev_key(major as u32, minor as u32))
+    }
+
+    /// When the process started (field 22, clock ticks since boot): with the pid,
+    /// it names one process, even after the pid is reused.
+    pub fn started(pid: i32) -> Option<u64> {
+        stat_field(pid, 22)
+    }
+
+    /// Field `n` (from 1) of `/proc/<pid>/stat`, counted past the command name.
+    fn stat_field<T: std::str::FromStr>(pid: i32, n: usize) -> Option<T> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let rest = &stat[stat.rfind(')')? + 1..];
-        rest.split_whitespace().nth(1)?.parse().ok()
+        rest.split_whitespace().nth(n - 3)?.parse().ok()
     }
 }
 
@@ -152,9 +215,9 @@ mod sys {
         (!path.is_empty()).then(|| PathBuf::from(path))
     }
 
-    /// The first two arguments, from `KERN_PROCARGS2`: argc, the executable path,
+    /// The first `n` arguments, from `KERN_PROCARGS2`: argc, the executable path,
     /// padding, then argv.
-    pub fn cmdline(pid: i32) -> Option<Vec<String>> {
+    pub fn cmdline_n(pid: i32, n: usize) -> Option<Vec<String>> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut size: libc::size_t = 0;
         // SAFETY: a size query with no buffer.
@@ -194,7 +257,7 @@ mod sys {
         let args = &rest[rest.iter().position(|&b| b != 0)?..];
         Some(
             args.split(|&b| b == 0)
-                .take(2)
+                .take(n)
                 .map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
         )
@@ -215,7 +278,7 @@ mod sys {
         (group > 0).then_some(group)
     }
 
-    pub fn parent(pid: i32) -> Option<i32> {
+    fn bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
         // SAFETY: zeroed is a valid proc_bsdinfo; proc_pidinfo fills at most the
         // size given.
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -229,7 +292,22 @@ mod sys {
                 size,
             )
         };
-        (n == size).then_some(info.pbi_ppid as i32)
+        (n == size).then_some(info)
+    }
+
+    pub fn parent(pid: i32) -> Option<i32> {
+        bsdinfo(pid).map(|i| i.pbi_ppid as i32)
+    }
+
+    pub fn tty(pid: i32) -> Option<u64> {
+        let dev = bsdinfo(pid)?.e_tdev as libc::dev_t;
+        (dev != 0 && dev != libc::dev_t::MAX)
+            .then(|| super::dev_key(libc::major(dev) as u32, libc::minor(dev) as u32))
+    }
+
+    pub fn started(pid: i32) -> Option<u64> {
+        let info = bsdinfo(pid)?;
+        Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 }
 
@@ -239,7 +317,7 @@ mod sys {
     pub fn cwd(_: i32) -> Option<std::path::PathBuf> {
         None
     }
-    pub fn cmdline(_: i32) -> Option<Vec<String>> {
+    pub fn cmdline_n(_: i32, _: usize) -> Option<Vec<String>> {
         None
     }
     pub fn children(_: i32) -> Vec<i32> {
@@ -249,6 +327,12 @@ mod sys {
         None
     }
     pub fn parent(_: i32) -> Option<i32> {
+        None
+    }
+    pub fn tty(_: i32) -> Option<u64> {
+        None
+    }
+    pub fn started(_: i32) -> Option<u64> {
         None
     }
 }
@@ -268,6 +352,28 @@ mod tests {
         if parent > 1 {
             assert_eq!(chain.get(1), Some(&parent));
         }
+        // The same process reads the same start time twice.
+        assert!(started(me).is_some());
+        assert_eq!(started(me), started(me));
+    }
+
+    #[test]
+    fn knows_the_web_bridge_by_its_arguments() {
+        let yes = |a: &[&str]| bridge_argv(&argv(a));
+        assert!(yes(&["/home/u/.local/bin/valk", "web"]));
+        assert!(yes(&[
+            "valk",
+            "--socket",
+            "/s.sock",
+            "web",
+            "--listen",
+            "127.0.0.1:1"
+        ]));
+        assert!(yes(&["valk", "--socket=/s", "web"]));
+        assert!(!yes(&["valk", "web", "pair"]));
+        assert!(!yes(&["valk", "new", "--", "web"]));
+        assert!(!yes(&["sh", "web"]));
+        assert!(!yes(&["valk"]));
     }
 
     fn argv(args: &[&str]) -> Vec<String> {

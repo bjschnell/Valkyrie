@@ -344,6 +344,7 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   reject: "Rejected",
   retire: "Retired",
   edit: "Saved",
+  revise: "Accepted",
 };
 
 /** Accepts, rejects or rewords a proposed decision; the daemon pushes the new list. */

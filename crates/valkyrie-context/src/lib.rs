@@ -93,17 +93,7 @@ impl Store {
     /// `proposed`. `provenance.by` must already be set by the caller (the daemon,
     /// which knows whether the session runs an agent).
     pub fn decide(&self, new: &NewDecision, provenance: Provenance, now: u64) -> Result<Decision> {
-        let title = file::one_line(&new.title);
-        if title.is_empty() {
-            bail!("a decision needs a title");
-        }
-        if title.chars().count() > MAX_TITLE {
-            bail!("title is over {MAX_TITLE} characters; put the detail in the body");
-        }
-        let body = new.body.trim().to_owned();
-        if body.chars().count() > MAX_BODY {
-            bail!("body is over {MAX_BODY} characters; a decision is a few sentences");
-        }
+        let (title, body) = clean(&new.title, &new.body)?;
         let root = project::root(&new.cwd);
         let files = self.files(&root);
         if let Some(old) = new.supersedes {
@@ -115,7 +105,7 @@ impl Store {
         }
         let by_human = provenance.by == "human";
         let decision = Decision {
-            id: files.keys().next_back().map_or(1, |id| id + 1),
+            id: self.next_id(&root),
             project: root.clone(),
             title,
             body,
@@ -132,12 +122,14 @@ impl Store {
             provenance,
         };
         self.mark_project(&root)?;
+        // The new one first: a failure between the two writes must not leave the
+        // old one pointing at a decision that doesn't exist.
+        self.write(&root, &decision, None)?;
         if decision.status == DecisionStatus::Active
             && let Some(old) = decision.supersedes
         {
             self.supersede(&root, old, decision.id, now)?;
         }
-        self.write(&root, &decision, None)?;
         Ok(decision)
     }
 
@@ -154,30 +146,19 @@ impl Store {
             bail!("no decision #{id} in {}", root.display());
         };
         let mut d = d.clone();
+        let mut accepting = false;
         match (action, d.status) {
-            (ReviewAction::Accept, Proposed) => {
-                if let Some(old) = d.supersedes {
-                    // The one it replaces may have been retired meanwhile; then
-                    // there's nothing left to supersede.
-                    if files.get(&old).is_some_and(|(_, o)| o.status == Active) {
-                        self.supersede(root, old, id, now)?;
-                    }
-                }
-                d.status = Active;
-            }
+            (ReviewAction::Accept, Proposed) => accepting = true,
             (ReviewAction::Reject, Proposed) => d.status = Rejected,
             (ReviewAction::Retire, Active) => d.status = Retired,
             (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
-                let title = file::one_line(title);
-                if title.is_empty() || title.chars().count() > MAX_TITLE {
-                    bail!("a title is 1 to {MAX_TITLE} characters");
-                }
-                if body.trim().chars().count() > MAX_BODY {
-                    bail!("body is over {MAX_BODY} characters");
-                }
-                d.title = title;
-                d.body = body.trim().to_owned();
+                (d.title, d.body) = clean(title, body)?;
                 d.kind = *kind;
+            }
+            (ReviewAction::Revise { title, body, kind }, Proposed) => {
+                (d.title, d.body) = clean(title, body)?;
+                d.kind = *kind;
+                accepting = true;
             }
             (action, status) => bail!(
                 "can't {} #{id}: it is {}",
@@ -186,12 +167,24 @@ impl Store {
                     ReviewAction::Reject => "reject",
                     ReviewAction::Retire => "retire",
                     ReviewAction::Edit { .. } => "edit",
+                    ReviewAction::Revise { .. } => "revise",
                 },
                 status.as_str()
             ),
         }
+        if accepting {
+            d.status = Active;
+        }
         d.updated = now;
         self.write(root, &d, Some(path))?;
+        // The one it replaces may have been retired meanwhile; then there's
+        // nothing left to supersede.
+        if accepting
+            && let Some(old) = d.supersedes
+            && files.get(&old).is_some_and(|(_, o)| o.status == Active)
+        {
+            self.supersede(root, old, id, now)?;
+        }
         Ok(d)
     }
 
@@ -205,6 +198,23 @@ impl Store {
         d.superseded_by = Some(by);
         d.updated = now;
         self.write(root, &d, Some(path))
+    }
+
+    /// One past the highest number on any decision file, parsed or not, so a file
+    /// broken by a hand edit never has its id given out again.
+    fn next_id(&self, root: &Path) -> u32 {
+        let Ok(entries) = std::fs::read_dir(self.dir(root)) else {
+            return 1;
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse::<u32>().ok()
+            })
+            .max()
+            .map_or(1, |id| id + 1)
     }
 
     /// Writes atomically, then removes the old file if the title (so the name)
@@ -234,23 +244,29 @@ impl Store {
         Ok(())
     }
 
-    /// Copies the active decisions into `<root>/.valkyrie/decisions/`, replacing
-    /// what an earlier export put there. Returns the files written.
-    pub fn export(&self, root: &Path) -> Result<Vec<PathBuf>> {
-        let into = root.join(".valkyrie/decisions");
+    /// Copies `root`'s active decisions into `<checkout>/.valkyrie/decisions/` (the
+    /// checkout being exported from, which may be a worktree of `root`), replacing
+    /// what an earlier export of these decisions put there. Files that aren't
+    /// this store's (a teammate's, say) are left alone. Returns the files written.
+    pub fn export(&self, root: &Path, checkout: &Path) -> Result<Vec<PathBuf>> {
+        let all = self.load(root);
+        if all.is_empty() {
+            bail!("no decisions for {} to export", root.display());
+        }
+        let into = checkout.join(".valkyrie/decisions");
         std::fs::create_dir_all(&into).with_context(|| format!("create {}", into.display()))?;
         for entry in std::fs::read_dir(&into)?.flatten() {
             let path = entry.path();
             let ours = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|t| file::parse(&t, root.to_path_buf()))
-                .is_some();
+                .is_some_and(|d| all.iter().any(|s| s.id == d.id && s.created == d.created));
             if ours {
                 std::fs::remove_file(&path)?;
             }
         }
         let mut written = Vec::new();
-        for d in self.load(root) {
+        for d in all {
             if d.status != DecisionStatus::Active {
                 continue;
             }
@@ -260,6 +276,34 @@ impl Store {
         }
         Ok(written)
     }
+}
+
+/// A title on one line and a trimmed body, both without control characters (but
+/// the body's line breaks) or bidi overrides: text a reviewer reads in a terminal
+/// must be the text agents get.
+fn clean(title: &str, body: &str) -> Result<(String, String)> {
+    let shown = |c: char, keep: &[char]| {
+        keep.contains(&c)
+            || !(c.is_control()
+                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+    };
+    let title: String = title
+        .chars()
+        .map(|c| if shown(c, &[]) { c } else { ' ' })
+        .collect();
+    let title = file::one_line(&title);
+    if title.is_empty() {
+        bail!("a decision needs a title");
+    }
+    if title.chars().count() > MAX_TITLE {
+        bail!("title is over {MAX_TITLE} characters; put the detail in the body");
+    }
+    let body: String = body.chars().filter(|&c| shown(c, &['\n', '\t'])).collect();
+    let body = body.trim().to_owned();
+    if body.chars().count() > MAX_BODY {
+        bail!("body is over {MAX_BODY} characters; a decision is a few sentences");
+    }
+    Ok((title, body))
 }
 
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
@@ -406,6 +450,55 @@ mod tests {
     }
 
     #[test]
+    fn hidden_text_is_stripped() {
+        let f = Fixture::new("hidden");
+        let mut sneaky = f.new_decision("Use \u{1b}[8mrm -rf\u{1b}[0m tabs\u{202e}");
+        sneaky.body = "line one\n\u{1b}[2K\rline two\u{2066}".into();
+        let d = f.store.decide(&sneaky, by("claude"), 1).unwrap();
+        assert_eq!(d.title, "Use [8mrm -rf [0m tabs");
+        assert_eq!(d.body, "line one\n[2Kline two");
+    }
+
+    #[test]
+    fn a_broken_file_keeps_its_id() {
+        let f = Fixture::new("broken");
+        f.store
+            .decide(&f.new_decision("A"), by("human"), 1)
+            .unwrap();
+        let dir = f.store.dir(&f.repo);
+        std::fs::write(
+            dir.join("0002-hand-edited.md"),
+            "---\nid: 2\nstatus: oops\n---\n# B\n",
+        )
+        .unwrap();
+        let c = f
+            .store
+            .decide(&f.new_decision("C"), by("human"), 2)
+            .unwrap();
+        assert_eq!(c.id, 3);
+    }
+
+    #[test]
+    fn revise_rewords_and_accepts_a_proposal_only() {
+        let f = Fixture::new("revise");
+        f.store
+            .decide(&f.new_decision("Draft"), by("claude"), 1)
+            .unwrap();
+        let revise = ReviewAction::Revise {
+            title: "Final".into(),
+            body: "Better".into(),
+            kind: DecisionKind::Constraint,
+        };
+        let d = f.store.review(&f.repo, 1, &revise, 2).unwrap();
+        assert_eq!(
+            (d.title.as_str(), d.status),
+            ("Final", DecisionStatus::Active)
+        );
+        // Already active (say, accepted elsewhere first): nothing is rewritten.
+        assert!(f.store.review(&f.repo, 1, &revise, 3).is_err());
+    }
+
+    #[test]
     fn worktrees_share_their_repos_decisions() {
         let f = Fixture::new("share");
         let private = f.repo.join(".git/worktrees/wt");
@@ -433,18 +526,23 @@ mod tests {
         let out = f.repo.join(".valkyrie/decisions");
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("README.md"), "not a decision").unwrap();
+        // A teammate's export: parses, but isn't one of ours.
+        let theirs = "---\nid: 9\nstatus: active\ncreated: 5\n---\n# Theirs\n";
+        std::fs::write(out.join("0009-theirs.md"), theirs).unwrap();
         std::fs::write(
             out.join("0001-stale-name.md"),
             file::render(&f.store.load(&f.repo)[0]),
         )
         .unwrap();
-        let written = f.store.export(&f.repo).unwrap();
+        let written = f.store.export(&f.repo, &f.repo).unwrap();
         assert_eq!(written, vec![out.join("0001-keep.md")]);
         let mut names: Vec<_> = std::fs::read_dir(&out)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["0001-keep.md", "README.md"]);
+        assert_eq!(names, vec!["0001-keep.md", "0009-theirs.md", "README.md"]);
+        let empty = Fixture::new("export-empty");
+        assert!(empty.store.export(&empty.repo, &empty.repo).is_err());
     }
 }

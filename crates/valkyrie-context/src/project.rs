@@ -22,6 +22,15 @@ pub fn root(dir: &Path) -> PathBuf {
     dir
 }
 
+/// The checkout holding `dir`: the nearest directory with a `.git` (a linked
+/// worktree's own root, unlike `root`), or `dir` outside git.
+pub fn checkout(dir: &Path) -> PathBuf {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    dir.ancestors()
+        .find(|top| std::fs::symlink_metadata(top.join(".git")).is_ok())
+        .map_or_else(|| dir.clone(), Path::to_path_buf)
+}
+
 fn main_worktree(git_file: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(git_file).ok()?;
     let gitdir = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
@@ -93,6 +102,7 @@ mod tests {
         std::fs::create_dir_all(wt.join("src")).unwrap();
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", private.display())).unwrap();
         assert_eq!(root(&wt.join("src")), main);
+        assert_eq!(checkout(&wt.join("src")), wt);
         std::fs::remove_dir_all(base).unwrap();
     }
 

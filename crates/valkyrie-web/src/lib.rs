@@ -46,6 +46,9 @@ pub struct Options {
     /// Where phones reach the server, for the pairing QR code. Default: this
     /// machine's tailnet name, else the listen address.
     pub url: Option<String>,
+    /// Print a pairing code at startup: only when a human started it, since a
+    /// paired device can do whatever the user can (ADR-0007 §4).
+    pub pair: bool,
 }
 
 pub(crate) struct App {
@@ -90,7 +93,13 @@ pub async fn run(opts: Options) -> Result<()> {
             println!("  {}", tailscale::CERTS_HELP);
         }
     }
-    print_pairing(&store, &url)?;
+    if opts.pair {
+        print_pairing(&store, &url)?;
+    } else {
+        println!(
+            "  no pairing code: this wasn't started from your own terminal; run `valk web pair` there"
+        );
+    }
     let push = match store.vapid_secret().and_then(|key| push::Sender::new(&key)) {
         Ok(sender) => Some(sender),
         Err(e) => {
