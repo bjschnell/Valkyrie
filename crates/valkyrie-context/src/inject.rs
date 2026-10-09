@@ -97,11 +97,13 @@ fn entry(d: &Decision) -> String {
     line
 }
 
-/// Claude Code's `SessionStart` hook output carrying `text` as added context.
-pub fn claude_hook_output(text: &str) -> String {
-    let out = serde_json_lite(text);
+/// A hook's output carrying `text` as added context for `event` (`SessionStart`,
+/// `UserPromptSubmit`): the same for Claude Code and Codex.
+pub fn hook_output(event: &str, text: &str) -> String {
     format!(
-        "{{\"hookSpecificOutput\":{{\"hookEventName\":\"SessionStart\",\"additionalContext\":{out}}}}}"
+        "{{\"hookSpecificOutput\":{{\"hookEventName\":{},\"additionalContext\":{}}}}}",
+        serde_json_lite(event),
+        serde_json_lite(text)
     )
 }
 
@@ -189,7 +191,7 @@ mod tests {
 
     #[test]
     fn hook_output_is_valid_json() {
-        let out = claude_hook_output("a \"q\"\n\tb\\ \u{1}");
+        let out = hook_output("SessionStart", "a \"q\"\n\tb\\ \u{1}");
         assert_eq!(
             out,
             r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a \"q\"\n\tb\\ \u0001"}}"#

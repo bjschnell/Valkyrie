@@ -22,7 +22,7 @@ DESIGN §6 (the project context layer) left storage open (§12: repo-local vs da
 
 ## Consequences
 - Sessions spawned before this build keep their old `--settings`, so they get no block until they are restarted (a reboot's restore re-prepares them).
-- Codex has no per-session settings; its injection is left for the next slice (via `valk setup codex`).
+- Codex has no per-session settings, so `valk setup codex` adds the context hook to `~/.codex/hooks.json` beside the observer, on `SessionStart` and `UserPromptSubmit` (Codex 0.159 reads `hookSpecificOutput.additionalContext` from both, as Claude Code does). Its hooks are global, so it prints nothing outside a Valkyrie session. Rerunning `valk setup codex` means trusting the new entry once with `/hooks`.
 - Two machines don't share decisions unless they're exported to the repo. That's acceptable for a local-first tool and keeps the work-laptop story clean.
 - The hook reads every active decision file on each session start; at tens of files this is well under the 50 ms hook budget.
 - Only agents Valkyrie has an adapter for count as agents by name. Another agent CLI (aider, gemini-cli) running in a plain shell session looks like a human there, unless it started or typed into that session through Valkyrie.

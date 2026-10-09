@@ -189,19 +189,19 @@ fn valk_command() -> String {
     }
 }
 
-/// `valk context-hook claude`: Claude Code's `SessionStart` hook. Prints the
-/// project's decisions as added context. Like `valk hook` it never fails and never
-/// prints anything else; outside a Valkyrie session it prints nothing.
+/// `valk context-hook <agent>`: Claude Code's and Codex's context hook. At session
+/// start it prints the project's decisions as added context. Like `valk hook` it
+/// never fails and never prints anything else; outside a Valkyrie session it
+/// prints nothing.
 pub fn hook(agent: &str) {
-    if agent != "claude" || std::env::var_os("VALK_SESSION").is_none() {
-        let _ = std::io::copy(&mut std::io::stdin().take(1 << 20), &mut std::io::sink());
-        return;
-    }
+    let ours = matches!(agent, "claude" | "codex") && std::env::var_os("VALK_SESSION").is_some();
     let mut raw = Vec::new();
+    // Read even when it isn't ours, so the agent never hits EPIPE writing it.
     if std::io::stdin()
         .take(1 << 20)
         .read_to_end(&mut raw)
         .is_err()
+        || !ours
     {
         return;
     }
@@ -213,13 +213,21 @@ pub fn hook(agent: &str) {
     let Some(cwd) = cwd else {
         return;
     };
-    let root = valkyrie_context::project::root(&cwd);
-    let decisions = valkyrie_context::Store::new(store_base()).load(&root);
-    let text = valkyrie_context::inject::block(
-        &root,
-        &decisions,
-        valkyrie_context::inject::BUDGET,
-        &valk_command(),
-    );
-    println!("{}", valkyrie_context::inject::claude_hook_output(&text));
+    let event = payload["hook_event_name"]
+        .as_str()
+        .unwrap_or("SessionStart");
+    let text = match event {
+        "SessionStart" => {
+            let root = valkyrie_context::project::root(&cwd);
+            let decisions = valkyrie_context::Store::new(store_base()).load(&root);
+            valkyrie_context::inject::block(
+                &root,
+                &decisions,
+                valkyrie_context::inject::BUDGET,
+                &valk_command(),
+            )
+        }
+        _ => return,
+    };
+    println!("{}", valkyrie_context::inject::hook_output(event, &text));
 }

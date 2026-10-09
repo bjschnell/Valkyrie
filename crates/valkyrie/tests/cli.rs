@@ -629,3 +629,53 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     daemon.wait().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// ADR-0007: the context hook answers Claude Code and Codex alike at session start,
+/// and stays silent outside a session and on events it has nothing for.
+#[test]
+fn context_hook_gives_decisions_at_session_start_only() {
+    let dir = temp("context-hook");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let run = |agent: &str, session: bool, payload: String| {
+        let mut cmd = valk(&dir.join("run/none.sock"), &dir);
+        cmd.env("VALK_CONTEXT", dir.join("context"));
+        if session {
+            cmd.env("VALK_SESSION", "1");
+        }
+        let mut child = cmd
+            .args(["context-hook", agent])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let start = |event: &str| {
+        format!(
+            r#"{{"hook_event_name":"{event}","cwd":"{}"}}"#,
+            repo.display()
+        )
+    };
+    for agent in ["claude", "codex"] {
+        let out = run(agent, true, start("SessionStart"));
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("decide --kind"), "{text}");
+        assert_silent_success(&run(agent, false, start("SessionStart")));
+    }
+    assert_silent_success(&run("codex", true, start("Stop")));
+    assert_silent_success(&run("aider", true, start("SessionStart")));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

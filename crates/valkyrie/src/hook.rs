@@ -108,6 +108,14 @@ pub fn codex_command(exe: &Path) -> String {
     )
 }
 
+/// The context hook's command line (ADR-0007), as stable as `codex_command`.
+pub fn codex_context_command(exe: &Path) -> String {
+    format!(
+        "'{}' context-hook codex 2>/dev/null || true",
+        exe.to_string_lossy().replace('\'', r"'\''")
+    )
+}
+
 pub fn codex_hooks_path() -> PathBuf {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -120,6 +128,7 @@ pub fn codex_hooks_path() -> PathBuf {
 /// backs the file up first, and writes atomically.
 pub fn setup_codex(exe: &Path, path: &Path, remove: bool, dry_run: bool) -> Result<()> {
     let command = codex_command(exe);
+    let context = codex_context_command(exe);
     // Write through a symlinked hooks.json (e.g. one kept in a dotfiles repo).
     let resolved = std::fs::canonicalize(path).ok();
     let path = resolved.as_deref().unwrap_or(path);
@@ -137,9 +146,9 @@ pub fn setup_codex(exe: &Path, path: &Path, remove: bool, dry_run: bool) -> Resu
     }
     let doc = existing.clone().unwrap_or(Value::Null);
     let updated = if remove {
-        valkyrie_agents::codex::remove_hooks(doc, &command)
+        valkyrie_agents::codex::remove_hooks(doc, &[&command, &context])
     } else {
-        valkyrie_agents::codex::install_hooks(doc, &command)
+        valkyrie_agents::codex::install_hooks(doc, &command, &context)
     };
     let text = serde_json::to_string_pretty(&updated)? + "\n";
     if dry_run {
@@ -175,7 +184,9 @@ pub fn setup_codex(exe: &Path, path: &Path, remove: bool, dry_run: bool) -> Resu
     } else {
         println!("installed Valkyrie hooks in {}", path.display());
         println!("Next: start codex once and run /hooks to review and trust them.");
-        println!("They run `{command}`; moving the binary means trusting them again.");
+        println!(
+            "They run `{command}` and `{context}`; moving the binary means trusting them again."
+        );
     }
     Ok(())
 }

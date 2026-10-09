@@ -1081,7 +1081,10 @@ async fn decisions_are_proposed_pushed_and_listed() {
 
     // Whoever asks, a review either goes through (and the push follows) or is
     // refused as not the user's.
-    match client.review(repo.clone(), first.id, ReviewAction::Reject).await {
+    match client
+        .review(repo.clone(), first.id, ReviewAction::Reject)
+        .await
+    {
         Ok(d) => {
             assert_eq!(d.status, DecisionStatus::Rejected);
             wait_proposals(&mut pushes, |p| p == [second.id]).await;

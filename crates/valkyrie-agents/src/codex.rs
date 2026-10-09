@@ -109,29 +109,39 @@ fn scan(screen: &str) -> Option<Screen> {
 
 /// `hooks.json` with our entry for every event added, replacing any older copy of
 /// it (matched by `command`). Everything else in the file is kept.
-pub fn install_hooks(mut doc: Value, command: &str) -> Value {
-    doc = remove_hooks(doc, command);
+/// Events the context hook answers (ADR-0007): decisions at session start, what
+/// other sessions are doing with each prompt. Codex reads `additionalContext` from
+/// both, as Claude Code does.
+pub const CONTEXT_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit"];
+
+/// Adds `command` (which observes every event) and `context` (which adds context
+/// on `CONTEXT_EVENTS`), replacing any earlier install of either.
+pub fn install_hooks(mut doc: Value, command: &str, context: &str) -> Value {
+    doc = remove_hooks(doc, &[command, context]);
     if !doc.is_object() {
         doc = json!({});
     }
     if !doc["hooks"].is_object() {
         doc["hooks"] = json!({});
     }
-    let entry =
-        json!({ "hooks": [{ "type": "command", "command": command, "timeout": HOOK_TIMEOUT }] });
+    let entry = |command: &str| json!({ "hooks": [{ "type": "command", "command": command, "timeout": HOOK_TIMEOUT }] });
     for event in EVENTS {
         let groups = &mut doc["hooks"][*event];
         if !groups.is_array() {
             *groups = json!([]);
         }
-        groups.as_array_mut().unwrap().push(entry.clone());
+        let groups = groups.as_array_mut().unwrap();
+        groups.push(entry(command));
+        if CONTEXT_EVENTS.contains(event) {
+            groups.push(entry(context));
+        }
     }
     doc
 }
 
 /// `hooks.json` without any hook running `command`, or the hook of a build from before
 /// the rename to Valkyrie (binary `overseer`); emptied groups and events go too.
-pub fn remove_hooks(mut doc: Value, command: &str) -> Value {
+pub fn remove_hooks(mut doc: Value, commands: &[&str]) -> Value {
     let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else {
         return doc;
     };
@@ -147,7 +157,7 @@ pub fn remove_hooks(mut doc: Value, command: &str) -> Value {
             inner.retain(|h| {
                 !h["command"]
                     .as_str()
-                    .is_some_and(|c| c == command || is_pre_rename(c))
+                    .is_some_and(|c| commands.contains(&c) || is_pre_rename(c))
             });
             !(before > 0 && inner.is_empty())
         });
@@ -239,22 +249,27 @@ mod tests {
     #[test]
     fn install_is_idempotent_and_keeps_foreign_hooks() {
         let cmd = "'/bin/valk' hook codex";
+        let ctx = "'/bin/valk' context-hook codex";
         let foreign = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}]},
                              "other": 1});
-        let once = install_hooks(foreign.clone(), cmd);
-        let twice = install_hooks(once.clone(), cmd);
+        let once = install_hooks(foreign.clone(), cmd, ctx);
+        let twice = install_hooks(once.clone(), cmd, ctx);
         assert_eq!(once, twice);
         assert_eq!(once["other"], 1);
         assert_eq!(once["hooks"]["Stop"].as_array().unwrap().len(), 2);
         assert_eq!(once["hooks"]["Interrupt"][0]["hooks"][0]["command"], cmd);
-        assert_eq!(remove_hooks(once.clone(), cmd), foreign);
+        assert_eq!(once["hooks"]["Interrupt"].as_array().unwrap().len(), 1);
+        for event in CONTEXT_EVENTS {
+            assert_eq!(once["hooks"][event][1]["hooks"][0]["command"], ctx);
+        }
+        assert_eq!(remove_hooks(once.clone(), &[cmd, ctx]), foreign);
 
         // A pre-rename install is replaced, not left running beside ours.
         let pre = "'/r/target/release/overseer' hook codex 2>/dev/null || true";
-        let upgraded = install_hooks(install_hooks(foreign.clone(), pre), cmd);
+        let upgraded = install_hooks(install_hooks(foreign.clone(), pre, ctx), cmd, ctx);
         assert_eq!(upgraded, once);
         assert_eq!(
-            install_hooks(Value::Null, cmd)["hooks"]
+            install_hooks(Value::Null, cmd, ctx)["hooks"]
                 .as_object()
                 .unwrap()
                 .len(),
