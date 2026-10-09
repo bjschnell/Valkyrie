@@ -36,7 +36,7 @@ function ProposalCard({ d }: { d: Decision }) {
     await f();
     setBusy(false);
   };
-  const who = d.provenance.by === "human" ? "you" : d.provenance.by;
+  const who = { human: "you", valkyrie: "Valkyrie, from your correction" }[d.provenance.by] ?? d.provenance.by;
   const where = [base(d.project), d.provenance.session && d.provenance.session !== base(d.project) ? d.provenance.session : null]
     .filter(Boolean)
     .join(" · ");

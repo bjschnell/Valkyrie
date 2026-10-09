@@ -118,7 +118,9 @@ Claude sessions get the active decisions when they start, after `/clear` and
 after compaction. Nothing is written to CLAUDE.md. Agents are told they can
 propose decisions with `valk decide`, but a proposal applies only after you accept
 it: on the phone, on the TUI home screen, or with `valk decisions accept <id>`.
-An agent can't accept its own. Every worktree of a repo shares its decisions,
+An agent can't accept its own. When you correct an agent ("no, we use pnpm"), a
+small model (Haiku, on your own Claude login, no tools) reads that exchange and
+proposes the rule in it; `valk decisions auto off` stops that. Every worktree of a repo shares its decisions,
 which are kept in `~/.local/state/valkyrie/context` (ADR-0007).
 
 ## How it's built

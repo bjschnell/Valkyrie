@@ -2,6 +2,7 @@
 //! markdown files in the state dir, their review lifecycle, and the block injected
 //! into agents.
 
+pub mod extract;
 mod file;
 pub mod inject;
 pub mod project;

@@ -3,6 +3,7 @@
 
 mod chat;
 mod context;
+mod extract;
 mod foreground;
 mod restore;
 mod session;
@@ -115,6 +116,9 @@ struct Registry {
     context: Mutex<valkyrie_context::Store>,
     /// Every project's decisions waiting on review, pushed with the queue.
     proposals: watch::Sender<Proposals>,
+    /// Sessions whose agent just ended a turn, for `extract` to look at.
+    turns: mpsc::UnboundedSender<SessionId>,
+    turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
 }
 
 impl Registry {
@@ -335,6 +339,7 @@ fn new_registry(
     boot: u64,
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
+    let (turns, turns_rx) = mpsc::unbounded_channel();
     let socket_for_restore = socket.clone();
     let registry = Arc::new(Registry {
         sessions: Mutex::default(),
@@ -361,6 +366,8 @@ fn new_registry(
         layouts: Mutex::default(),
         context: Mutex::new(valkyrie_context::Store::new(state_dir.join("context"))),
         proposals: watch::Sender::new(Arc::default()),
+        turns,
+        turns_rx: Mutex::new(Some(turns_rx)),
     });
     registry.refresh_proposals();
     Ok((registry, rx))
@@ -372,6 +379,9 @@ async fn serve_forever(
     mut upgrades: mpsc::Receiver<UpgradeRequest>,
 ) -> Result<()> {
     tokio::spawn(publish_queue(registry.clone()));
+    if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
+        tokio::spawn(extract::run(registry.clone(), turns));
+    }
     tokio::spawn(tick(registry.clone()));
     tokio::spawn(restore::keep(
         registry.clone(),
@@ -744,9 +754,13 @@ async fn serve(stream: UnixStream, registry: Arc<Registry>) -> Result<()> {
                 sent_us,
                 payload,
             } => {
+                let turn_ended = payload["hook_event_name"] == "Stop";
                 match registry.get(session) {
                     Ok(s) => s.hook(&agent, sent_us, payload),
                     Err(_) => tracing::debug!(session, "hook for unknown session"),
+                }
+                if turn_ended {
+                    let _ = registry.turns.send(session);
                 }
                 continue;
             }

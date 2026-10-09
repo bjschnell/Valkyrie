@@ -179,3 +179,129 @@ fn agents_only_propose_and_never_review() {
     );
     drop(daemon);
 }
+
+/// DESIGN §6.3: a correction to an agent is read by the model (a stand-in here)
+/// once, and what it finds is proposed, not made active.
+#[test]
+fn corrections_become_proposals() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-extract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join(".git"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+
+    // The model: records each prompt, answers with one decision.
+    let model = bin.join("model");
+    std::fs::write(
+        &model,
+        format!(
+            "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
+             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"constraint\\\",\\\"title\\\":\\\"Use pnpm, never npm\\\",\\\"body\\\":\\\"The repo is pnpm.\\\"}}]}}\"}}'\n",
+            calls = out.join("calls").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&model, exec.clone()).unwrap();
+
+    // The agent: a transcript where you corrected it, then its hooks.
+    let transcript = out.join("t.jsonl");
+    let line = |v: serde_json::Value| v.to_string();
+    let lines = [
+        line(
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"I'll run npm install."}]}}),
+        ),
+        line(
+            serde_json::json!({"type":"user","message":{"content":"no, we use pnpm here, never npm"}}),
+        ),
+        line(
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"Switching to pnpm."}]}}),
+        ),
+    ];
+    std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    let hook = |event: &str| {
+        format!(
+            "echo '{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"c1\",\"transcript_path\":\"{}\"}}' | valk hook claude\n",
+            transcript.display()
+        )
+    };
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            hook("SessionStart"),
+            hook("Stop"),
+            // The same message ending another turn isn't read again.
+            hook("Stop"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, exec).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let valk = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env("VALK_EXTRACTOR", model.to_str().unwrap())
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    valk(&[
+        "new",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--",
+        agent.to_str().unwrap(),
+    ]);
+    let start = Instant::now();
+    let mut listed = String::new();
+    while start.elapsed() < Duration::from_secs(10) && !listed.contains("pnpm") {
+        std::thread::sleep(Duration::from_millis(100));
+        listed = valk(&["decisions"]);
+    }
+    assert!(
+        listed.contains("#1  constraint Use pnpm, never npm (proposed)"),
+        "{listed}"
+    );
+    let shown = valk(&["decisions", "show", "1"]);
+    assert!(
+        shown.contains("by: valkyrie")
+            && shown.contains("From your message: “no, we use pnpm here, never npm”"),
+        "{shown}"
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    let calls = std::fs::read_to_string(out.join("calls")).unwrap();
+    assert_eq!(calls.matches("---").count(), 1, "{calls}");
+    assert!(
+        calls.contains("Developer: no, we use pnpm here, never npm"),
+        "{calls}"
+    );
+    assert!(calls.contains("Agent: I'll run npm install."), "{calls}");
+
+    assert!(valk(&["decisions", "auto", "off"]).starts_with("off"));
+    assert!(valk(&["decisions", "auto"]).starts_with("off"));
+    assert!(valk(&["decisions", "auto", "on"]).starts_with("on"));
+    drop(daemon);
+}

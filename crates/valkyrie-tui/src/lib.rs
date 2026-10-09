@@ -1846,7 +1846,7 @@ impl App {
                 format!(
                     "{}  ·  {} · {}",
                     d.kind.as_str(),
-                    d.provenance.by,
+                    proposer(d),
                     short_path(&d.project)
                 )
                 .fg(t.muted),
@@ -2750,6 +2750,15 @@ fn name_cell(id: SessionId, name: &str, t: &Theme) -> Cell<'static> {
 }
 
 /// `#id  kind  title`, then who proposed it and in which project, muted.
+/// Who proposed a decision, as the lists say it.
+fn proposer(d: &Decision) -> &str {
+    match d.provenance.by.as_str() {
+        "human" => "you",
+        "valkyrie" => "your correction",
+        by => by,
+    }
+}
+
 fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
     let project = d.project.file_name().map_or_else(
         || d.project.display().to_string(),
@@ -2759,7 +2768,7 @@ fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
         Cell::from(format!("#{}", d.id).fg(t.muted)),
         Cell::from(d.kind.as_str().fg(t.accent2)),
         Cell::from(d.title.clone().fg(t.fg).bold()),
-        Cell::from(format!("{} · {project}", d.provenance.by).fg(t.muted)),
+        Cell::from(format!("{} · {project}", proposer(d)).fg(t.muted)),
     ])
 }
 

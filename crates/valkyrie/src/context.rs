@@ -21,6 +21,15 @@ pub enum DecisionsCmd {
     Preview,
     /// Copy the active decisions into <repo>/.valkyrie/decisions/ for git.
     Export,
+    /// Whether Valkyrie proposes decisions from your corrections to agents (a small
+    /// model reads the exchange): on or off, or show which.
+    Auto { state: Option<OnOff> },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 pub fn parse_kind(s: &str) -> Result<DecisionKind, String> {
@@ -106,6 +115,29 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
                     &valk
                 )
             );
+            Ok(())
+        }
+        Some(DecisionsCmd::Auto { state }) => {
+            let marker = store_base().join("auto-off");
+            match state {
+                Some(OnOff::On) => match std::fs::remove_file(&marker) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                },
+                Some(OnOff::Off) => {
+                    std::fs::create_dir_all(store_base())?;
+                    std::fs::write(&marker, "")?;
+                }
+                None => {}
+            }
+            if marker.exists() {
+                println!("off: corrections aren't read");
+            } else {
+                println!(
+                    "on: when you correct an agent, a small model (claude -p --model haiku, \
+                     no tools) reads that exchange and proposes the rule in it for you to review"
+                );
+            }
             Ok(())
         }
         Some(DecisionsCmd::Export) => {

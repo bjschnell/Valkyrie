@@ -3251,6 +3251,7 @@ name = "valkyrie-context"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "serde_json",
  "valkyrie-proto",
 ]
 
