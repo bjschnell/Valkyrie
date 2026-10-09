@@ -75,8 +75,13 @@ code {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
+/* The keyboard covers the home indicator's strip; the box sits right on it. */
+.keyboard .page {
+  padding-bottom: 0;
+}
+
 .page.session {
-  height: 100dvh;
+  height: var(--app-height, 100dvh);
   min-height: 0;
 }
 
@@ -615,7 +620,8 @@ code {
   border: 1px solid var(--line);
   background: var(--card);
   color: var(--fg);
-  font: 15px/1.4 var(--font);
+  /* Under 16px, iOS zooms in on focus and the send button ends up off screen. */
+  font: 16px/1.4 var(--font);
   outline: none;
 }
 
@@ -1349,7 +1355,7 @@ code {
 /* Launcher ------------------------------------------------------------------- */
 
 .launcher-page {
-  height: 100dvh;
+  height: var(--app-height, 100dvh);
   min-height: 0;
 }
 
@@ -1399,7 +1405,7 @@ code {
   border: 1px solid var(--line);
   background: var(--card);
   color: var(--fg);
-  font: 15px/1.4 var(--font);
+  font: 16px/1.4 var(--font);
   outline: none;
   resize: none;
 }
