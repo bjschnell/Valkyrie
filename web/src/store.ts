@@ -371,9 +371,15 @@ export function openChoices(screen: Screen | null): Choice[] {
 const SPAWN_SIZE = { cols: 120, rows: 40 };
 
 /** Starts a session (DESIGN §8.8) and returns its id. */
-export async function spawn(command: string[], cwd: string, name: string | null): Promise<SessionId> {
+export async function spawn(
+  command: string[],
+  cwd: string,
+  name: string | null,
+  worktree: string | null = null,
+): Promise<SessionId> {
   if (!conn) throw new Error("not connected");
-  const reply = await conn.request({ t: "spawn", spec: { command, cwd, name, size: SPAWN_SIZE, env: [] } });
+  const spec = { command, cwd, name, size: SPAWN_SIZE, env: [], worktree };
+  const reply = await conn.request({ t: "spawn", spec });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
   return reply.info.id;

@@ -48,6 +48,8 @@ export function Launcher() {
   const [agent, setAgent] = useState<Agent>(() => lastUsed().agent ?? "claude");
   const [folder, setFolder] = useState(() => lastUsed().folder ?? "");
   const [name, setName] = useState("");
+  // Not remembered: the next folder may not be a repository.
+  const [worktree, setWorktree] = useState(false);
   const [message, setMessage] = useState("");
   const [places, setPlaces] = useState<Places | null>(null);
   const [browsing, setBrowsing] = useState<Listing | null>(null);
@@ -89,7 +91,7 @@ export function Launcher() {
     setBusy(true);
     try {
       const path = expand(folder, places.home);
-      const id = await spawn(command, path, name.trim() || null);
+      const id = await spawn(command, path, name.trim() || null, worktree ? "" : null);
       remember({ agent, folder: path });
       navigator.vibrate?.(10);
       location.replace(`#/s/${id}`);
@@ -187,7 +189,19 @@ export function Launcher() {
 
         <label className="field">
           <span className="field-label">Name</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Its folder" />
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={worktree ? "Also its branch" : "Its folder"}
+          />
+        </label>
+
+        <label className="check-row">
+          <input type="checkbox" checked={worktree} onChange={(e) => setWorktree(e.target.checked)} />
+          <span className="check-what">
+            <span className="check-name">Own worktree</span>
+            <span className="check-about">A new branch and checkout beside the repo, so it can't touch other agents' files</span>
+          </span>
         </label>
 
         {agent !== "shell" && (

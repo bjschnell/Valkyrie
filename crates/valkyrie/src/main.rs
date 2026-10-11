@@ -53,6 +53,10 @@ enum Cmd {
         /// Attach right after spawning.
         #[arg(short, long)]
         attach: bool,
+        /// Start in a new git worktree beside the repository, on BRANCH (an existing
+        /// one is checked out; without BRANCH, one named after --name).
+        #[arg(short, long, value_name = "BRANCH", num_args = 0..=1, default_missing_value = "")]
+        worktree: Option<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -276,6 +280,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             cwd,
             name,
             attach,
+            worktree,
             command,
         }) => {
             // Check before spawning so a failed attach can't leave a stray session behind.
@@ -307,6 +312,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     name,
                     size,
                     env: valkyrie_proto::login_env(),
+                    worktree,
                 })
                 .await?;
             if attach {
@@ -444,6 +450,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                         rows: 40,
                     },
                     env: valkyrie_proto::login_env(),
+                    worktree: None,
                 })
                 .await?;
             if attach {

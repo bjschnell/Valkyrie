@@ -9,6 +9,7 @@ mod foreground;
 mod pty;
 mod restore;
 mod session;
+mod worktree;
 
 pub use restore::path as restore_path;
 
@@ -937,7 +938,11 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 side,
                 spec,
             } => {
-                let result = split(&registry, session, side, spec);
+                // Checked first too, so a bad target never costs a checkout.
+                let result = match registry.listed().iter().any(|s| s.id == session) {
+                    true => in_worktree(spec, |spec| split(&registry, session, side, spec)).await,
+                    false => Err(anyhow::anyhow!("no session {session}")),
+                };
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }
@@ -963,7 +968,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 }),
             ),
             ClientMsg::Spawn { req, spec } => {
-                let result = spawn(&registry, spec);
+                let result = in_worktree(spec, |spec| spawn(&registry, spec)).await;
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }
@@ -1108,6 +1113,33 @@ async fn reply(out: &Out, req: ReqId, result: Result<Reply>) {
         },
     };
     let _ = out.send(Arc::new(msg)).await;
+}
+
+/// Starts `spec` with `start`, in the git worktree it asks for (DESIGN §4.3), made
+/// first and taken away again if the session fails to start.
+async fn in_worktree(
+    mut spec: valkyrie_proto::SpawnSpec,
+    start: impl FnOnce(valkyrie_proto::SpawnSpec) -> Result<Reply>,
+) -> Result<Reply> {
+    let Some(branch) = spec.worktree.take() else {
+        return start(spec);
+    };
+    let dir = spec
+        .cwd
+        .clone()
+        .context("a worktree needs the folder of its repository")?;
+    let name = spec.name.clone();
+    // `git worktree add` checks out the whole tree: off the connection's thread.
+    let made =
+        tokio::task::spawn_blocking(move || worktree::create(&dir, &branch, name.as_deref()))
+            .await??;
+    tracing::info!(cwd = %made.start.display(), "made a worktree");
+    spec.cwd = Some(made.start.clone());
+    let reply = start(spec);
+    if reply.is_err() {
+        tokio::task::spawn_blocking(move || made.undo());
+    }
+    reply
 }
 
 fn spawn(registry: &Registry, spec: valkyrie_proto::SpawnSpec) -> Result<Reply> {

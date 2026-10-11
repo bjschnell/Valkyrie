@@ -68,6 +68,7 @@ mod tests {
                         ("SSH_AUTH_SOCK".into(), Some("/tmp/a".into())),
                         ("DISPLAY".into(), None),
                     ],
+                    worktree: Some("fix".into()),
                 },
             },
             ClientMsg::Input {

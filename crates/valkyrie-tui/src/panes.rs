@@ -368,6 +368,7 @@ impl App {
             name: None,
             size,
             env: valkyrie_proto::login_env(),
+            worktree: None,
         };
         match self.client.split(at, side, spec).await {
             Ok(info) => {

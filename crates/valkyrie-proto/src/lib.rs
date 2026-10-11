@@ -24,7 +24,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 11;
+pub const PROTOCOL: u32 = 12;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -55,6 +55,10 @@ pub struct SpawnSpec {
     /// variable the daemon inherited from whichever login started it.
     #[serde(default)]
     pub env: Vec<(String, Option<String>)>,
+    /// Start in a new git worktree of `cwd`'s repository on this branch (DESIGN
+    /// §4.3); empty names the branch after the session. The daemon makes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 /// Variables tied to one login rather than the user: the daemon outlives the login

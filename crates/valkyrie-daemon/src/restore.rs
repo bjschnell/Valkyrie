@@ -183,6 +183,7 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
             name: Some(entry.name.clone()),
             size: SIZE,
             env: Vec::new(),
+            worktree: None,
         };
         match spawn_with(registry, spec, entry.conversation.clone()) {
             Ok(Reply::Session { info }) => {

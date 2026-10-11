@@ -1433,6 +1433,36 @@ code {
   border-color: var(--accent);
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 2px;
+}
+
+.check-row input {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.check-what {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.check-name {
+  font-weight: 600;
+}
+
+.check-about {
+  font-size: 13px;
+  color: var(--soft);
+}
+
 .folders {
   flex: none;
   display: flex;

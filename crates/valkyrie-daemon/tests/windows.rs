@@ -42,6 +42,7 @@ fn cmd(args: &[&str]) -> SpawnSpec {
         name: None,
         size: Size { cols: 80, rows: 20 },
         env: Vec::new(),
+        worktree: None,
     }
 }
 

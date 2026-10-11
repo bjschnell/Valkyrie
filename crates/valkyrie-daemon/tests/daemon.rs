@@ -44,6 +44,7 @@ fn sh(script: &str, size: Size) -> SpawnSpec {
         name: None,
         size,
         env: Vec::new(),
+        worktree: None,
     }
 }
 
@@ -691,6 +692,7 @@ async fn a_fresh_daemon_restores_agents_and_shells() {
         name: Some(name.into()),
         size: SIZE,
         env: Vec::new(),
+        worktree: None,
     };
     let agent = client
         .spawn(spawn(
@@ -977,6 +979,7 @@ async fn splits_come_back_after_a_restart() {
         name: Some(name.into()),
         size: SIZE,
         env: Vec::new(),
+        worktree: None,
     };
     let a = client.spawn(shell("left")).await.unwrap().id;
     client.spawn(shell("alone")).await.unwrap();
@@ -1108,4 +1111,79 @@ async fn decisions_are_proposed_pushed_and_listed() {
     // The files are where the store says, for the hook to read.
     let store = valkyrie_context::Store::new(dir.join("state/context"));
     assert_eq!(store.load(&repo).len(), 2);
+}
+
+#[tokio::test]
+async fn spawn_can_start_in_a_new_worktree() {
+    let (client, _pushes, dir) = start().await;
+    let repo = dir.join("repos/app");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "--quiet"]);
+    git(&["commit", "--quiet", "--allow-empty", "-m", "init"]);
+
+    let info = client
+        .spawn(SpawnSpec {
+            cwd: Some(repo.clone()),
+            name: Some("Fix login".into()),
+            worktree: Some(String::new()),
+            ..sh(
+                "pwd; sleep 5",
+                Size {
+                    cols: 120,
+                    rows: 10,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let made = std::fs::canonicalize(dir.join("repos/app-fix-login")).unwrap();
+    assert_eq!(info.cwd, made);
+    wait_dump(&client, info.id, |t| t.contains("app-fix-login")).await;
+
+    // Outside a repository it refuses, and nothing starts.
+    let err = client
+        .spawn(SpawnSpec {
+            cwd: Some(dir.join("repos")),
+            worktree: Some(String::new()),
+            ..sh("true", SIZE)
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not in a git repository"), "{err}");
+    assert_eq!(client.list().await.unwrap().len(), 1);
+
+    // A session that fails to start takes its worktree away with it.
+    let err = client
+        .spawn(SpawnSpec {
+            command: Vec::new(),
+            cwd: Some(repo.clone()),
+            name: Some("broken".into()),
+            worktree: Some(String::new()),
+            ..sh("", SIZE)
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("empty command"), "{err}");
+    let broken = dir.join("repos/app-broken");
+    for _ in 0..200 {
+        if !broken.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!broken.exists(), "the failed session's worktree stayed");
+    let _ = std::fs::remove_dir_all(&dir);
 }

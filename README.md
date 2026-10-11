@@ -62,11 +62,21 @@ available through `install-wsl.ps1`. [docs/install.md](docs/install.md) covers e
 valk                       # open the TUI
 valk new -a -- claude      # start Claude Code in a new session and attach
 valk new -- codex          # start Codex in the background
+valk new -w --name "fix login" -a -- claude   # in its own git worktree and branch
 valk ls                    # list sessions, with their state
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 ```
 
 Claude Code needs no setup, because its hooks are added per session.
+
+`-w`/`--worktree [BRANCH]` starts a session in a new git worktree, so agents in
+the same repo never edit one checkout. It goes beside the main checkout as
+`<repo>-<branch>` (`~/repos/app-fix-login`), on a new branch from the current
+`HEAD`, or on BRANCH if it already exists. Without BRANCH, the branch is named
+after `--name`. Uncommitted changes and ignored files (`node_modules`, `.env`)
+don't come along. The phone's New session screen has the same choice, and every
+worktree shares the repo's decisions. Valkyrie doesn't remove worktrees: when the
+work is merged, `git worktree remove <path>`.
 
 ### Keys
 

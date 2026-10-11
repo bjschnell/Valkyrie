@@ -86,6 +86,14 @@ Open question: ACP gives clean structure but may bypass the native TUI the user 
 ### 4.3 Worktrees / isolation
 Optional per-session git worktree; sandbox/container support is **deferred** (AoE has it; not our wedge).
 
+**Per-session worktrees (2026-10-11, protocol 12).**
+- `SpawnSpec.worktree: Option<String>` asks for one: the branch, or `""` for one named after the session's name (slugged, `session` without one; `-2`, `-3` until neither the branch nor the folder exists). `valk new -w [BRANCH]` and the phone's "Own worktree" box send it.
+- The daemon makes it, so every client gets the same behavior: `git worktree add` (on `spawn_blocking`) beside the main checkout as `<repo>-<branch>`, `/` in the branch becoming `-`. A new branch starts at the `HEAD` of `cwd`'s checkout; an existing branch is checked out. Asked from inside a linked worktree, it still goes beside the main checkout.
+- The session starts in the same subdirectory of the new checkout as `cwd` was of its own. Restore sees only the new `cwd`, so a restored session never makes a second worktree.
+- Failures (not a repo, a bad branch name, the folder taken, the branch checked out elsewhere) fail the spawn with git's reason, and nothing starts. A session that fails to start after its worktree was made takes it away again, and the branch too if it was new. A split checks its target session before making anything.
+- Names: an auto-named branch keeps only ASCII letters, digits and `_` (so always a valid ref), and if another spawn takes the name between the check and `git worktree add`, it moves on to the next. A given branch must pass `check-ref-format refs/heads/<b>` and not start with `-`, so `-f` or `@{-1}` never reach git as options or expansions. Paths go through `canonical`, so Windows never hands git or the session a `\\?\` path.
+- **Not yet:** removing a worktree when its session ends (it may hold unmerged work, so this needs a review step), and copying ignored files such as `.env`.
+
 ## 5. Attention queue (core differentiator)
 
 ### 5.1 States
