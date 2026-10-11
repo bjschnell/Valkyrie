@@ -91,11 +91,12 @@ such as vim). Over SSH the link is copied to your clipboard instead.
 ### Settings
 
 `,` opens the settings panel: theme (`dracula`, `cyberpunk`, `blackout`,
-`catppuccin`, `nord`, `gruvbox`, `tokyonight`), whether sessions take the theme's
-colors (`theme`) or your terminal's (`terminal`), tab style (`underline`, `folder`,
-`cards`), tab side (`top`, `left`, `right`), and sound. With `theme`, a session's
-background, default text and 16 ANSI colors come from the theme; colors a program
-picks exactly (256-color or RGB) stay as it drew them. Settings are kept in
+`catppuccin`, `nord`, `gruvbox`, `tokyonight`, plus `matrix` and `violet`, whose
+home screen has digital rain), whether sessions take the theme's colors (`theme`)
+or your terminal's (`terminal`), tab style (`underline`, `folder`, `cards`), tab
+side (`top`, `left`, `right`), and sound. With `theme`, a session's background,
+default text and 16 ANSI colors come from the theme; colors a program picks exactly
+(256-color or RGB) stay as it drew them. Settings are kept in
 `~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
 which you can also edit by hand. `VALK_THEME`,
 `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for

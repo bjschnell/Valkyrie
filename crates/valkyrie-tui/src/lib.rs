@@ -9,6 +9,7 @@ mod mouse;
 mod panes;
 mod ping;
 mod quiet;
+mod rain;
 mod settings;
 mod theme;
 
@@ -19,7 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{self, Modifier, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -383,6 +384,7 @@ impl App {
         self.sessions
             .iter()
             .any(|s| s.exited.is_none() && s.status.state == AgentState::Working)
+            || (self.settings.theme.rain.is_some() && self.view.is_none())
     }
 
     /// Fetches the selected session's screen for the preview pane.
@@ -1737,6 +1739,7 @@ impl App {
                 &self.queue,
                 &self.sessions,
                 self.proposals.len(),
+                now,
                 t,
             )),
             header,
@@ -1799,11 +1802,20 @@ impl App {
         if self.queue.is_empty() {
             let inner = queue_block.inner(queue_area);
             frame.render_widget(queue_block, queue_area);
-            let calm = Line::from(vec![
-                "✓ ".fg(t.done).bold(),
-                "all clear".fg(t.fg).bold(),
-                "  ·  nothing needs you".fg(t.muted),
-            ])
+            let calm = if t.rain.is_some() {
+                Line::from(vec![
+                    "> ".fg(t.accent).bold(),
+                    "all clear".fg(t.fg).bold(),
+                    " · nothing needs you ".fg(t.muted),
+                    rain::cursor(now).fg(t.accent),
+                ])
+            } else {
+                Line::from(vec![
+                    "✓ ".fg(t.done).bold(),
+                    "all clear".fg(t.fg).bold(),
+                    "  ·  nothing needs you".fg(t.muted),
+                ])
+            }
             .centered();
             let [_, mid, _] = Layout::vertical([
                 Constraint::Fill(1),
@@ -1834,6 +1846,22 @@ impl App {
 
         if let Some(area) = preview {
             self.draw_preview(frame, area);
+        }
+        if let Some(colors) = &t.rain {
+            let inside = Margin::new(1, 1);
+            let regions: Vec<Rect> = [
+                Some(proposals_area),
+                Some(queue_area),
+                Some(sessions_area),
+                preview,
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|r| r.height > 2)
+            .map(|r| r.inner(inside))
+            .collect();
+            let screen = frame.area();
+            rain::draw(frame.buffer_mut(), screen, &regions, now, colors);
         }
 
         let mut footer = match &self.renaming {
@@ -2871,12 +2899,23 @@ fn header_line(
     queue: &[QueueItem],
     sessions: &[SessionInfo],
     proposals: usize,
+    now: u64,
     t: &Theme,
 ) -> Line<'static> {
-    let mut spans = vec![
-        " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
-        " agent control ".fg(t.muted),
-    ];
+    let mut spans = if t.rain.is_some() {
+        vec![
+            rain::glitch(" ◆ VALKYRIE ", now)
+                .fg(t.bg)
+                .bg(t.accent)
+                .bold(),
+            " agent control ".fg(t.muted),
+        ]
+    } else {
+        vec![
+            " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
+            " agent control ".fg(t.muted),
+        ]
+    };
     for (state, n) in counts(queue, sessions) {
         let color = t.state(state);
         spans.push(" ".into());
@@ -3861,6 +3900,10 @@ mod tests {
                 "Do you want to proceed?",
                 "theme",
             ] {
+                // The matrix and violet logos glitch a letter now and then.
+                if theme.rain.is_some() && want == "VALKYRIE" {
+                    continue;
+                }
                 assert!(text.contains(want), "{} theme lacks {want:?}", theme.name);
             }
             snapshot(buffer, theme.name);

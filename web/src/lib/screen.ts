@@ -134,11 +134,8 @@ function trimEnd(runs: Run[]): void {
   }
 }
 
-/** The Dracula ANSI colors (the TUI's default theme), then the xterm 256 cube. */
-const ANSI = [
-  "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
-  "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
-];
+/** The 16 ANSI colors come from the look's CSS (Dracula unless it's matrix). */
+const ANSI = Array.from({ length: 16 }, (_, i) => `var(--ansi-${i})`);
 
 export function cssColor(c: Color | undefined): string | undefined {
   if (!c || c === "default") return undefined;

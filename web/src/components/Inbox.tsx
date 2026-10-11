@@ -3,10 +3,12 @@ import { STATE_LABEL, program, type QueueItem, type SessionInfo } from "../proto
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
 import { answer, answerAll, markSeen, useApp } from "../store";
-import { Chevron, Plus } from "./icons";
+import { nextLook, setLook, useLook } from "../lib/theme";
+import { Chevron, Plus, Prompt } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyButton, NotifyHint } from "./Notify";
+import { Rain } from "./Rain";
 
 const go = (id: number) => {
   location.hash = `#/s/${id}`;
@@ -16,6 +18,7 @@ const go = (id: number) => {
 export function Inbox() {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
+  const look = useLook();
   const working = sessions.filter((s) => s.exited === null && s.status.state === "working").length;
   const [sel, setSel] = useState(-1);
   // What j/k move through: the cards, then the session rows.
@@ -54,12 +57,21 @@ export function Inbox() {
 
   return (
     <div className="page">
+      {look !== "default" && <Rain key={look} />}
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">◆</span> Valkyrie
+          <span className="brand-mark">◆</span> <span className="brand-name">Valkyrie</span>
         </div>
         <ConnectionPill />
         <NotifyButton />
+        <button
+          className={`icon-btn ${look !== "default" ? "lit" : ""}`}
+          aria-label={`Look: ${look}`}
+          title={`Look: ${look}`}
+          onClick={() => setLook(nextLook(look))}
+        >
+          <Prompt />
+        </button>
         <button className="icon-btn" aria-label="New session" onClick={() => (location.hash = "#/new")}>
           <Plus />
         </button>

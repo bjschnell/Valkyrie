@@ -19,6 +19,24 @@
   --idle: #6272a4;
   --term-bg: #1e1f29;
   --term-fg: #f8f8f2;
+  --on-accent: #1b1530;
+  /* The Dracula ANSI colors (the TUI's default theme). */
+  --ansi-0: #21222c;
+  --ansi-1: #ff5555;
+  --ansi-2: #50fa7b;
+  --ansi-3: #f1fa8c;
+  --ansi-4: #bd93f9;
+  --ansi-5: #ff79c6;
+  --ansi-6: #8be9fd;
+  --ansi-7: #f8f8f2;
+  --ansi-8: #6272a4;
+  --ansi-9: #ff6e6e;
+  --ansi-10: #69ff94;
+  --ansi-11: #ffffa5;
+  --ansi-12: #d6acff;
+  --ansi-13: #ff92df;
+  --ansi-14: #a4ffff;
+  --ansi-15: #ffffff;
   --radius: 16px;
   --font: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", Inter, Roboto, sans-serif;
   --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -798,7 +816,7 @@ code {
   padding: 9px 16px;
   border-radius: 11px;
   background: var(--accent);
-  color: #1b1530;
+  color: var(--on-accent);
   font-weight: 650;
   font-size: 14.5px;
 }
@@ -1780,4 +1798,199 @@ code {
 
 .decision-card.stale {
   --state: var(--interrupted);
+}
+
+/* Matrix and violet looks: palettes, then the effects both share --------- */
+
+:root[data-theme="matrix"] {
+  --page: #000000;
+  --surface: #020a04;
+  --card: #04120a;
+  --raised: #0a2a14;
+  --line: #0f4d22;
+  --fg: #b4ffc4;
+  --muted: #2f8f4c;
+  --soft: #6fdc8c;
+  --accent: #00ff41;
+  --accent2: #7dffa0;
+  --needs: #d8ff3e;
+  --blocked: #ff3b3b;
+  --done: #00ff41;
+  --working: #3dffd2;
+  --interrupted: #ffb000;
+  --idle: #1f6e36;
+  --term-bg: #010603;
+  --term-fg: #b4ffc4;
+  --on-accent: #001a07;
+  --font: var(--mono);
+  --ansi-0: #08190d;
+  --ansi-1: #ff3b3b;
+  --ansi-2: #00ff41;
+  --ansi-3: #d8ff3e;
+  --ansi-4: #00b386;
+  --ansi-5: #7dffa0;
+  --ansi-6: #3dffd2;
+  --ansi-7: #b4ffc4;
+  --ansi-8: #2f8f4c;
+  --ansi-9: #ff6b6b;
+  --ansi-10: #5cff7f;
+  --ansi-11: #e8ff80;
+  --ansi-12: #33d9a8;
+  --ansi-13: #a8ffbf;
+  --ansi-14: #8affe6;
+  --ansi-15: #e8ffec;
+  --glow: 0 255 65;
+  --glitch-a: #ff3b3b;
+  --glitch-b: #3dffd2;
+  --rain-head: #e8ffec;
+  --rain-trail: #00c234;
+}
+
+:root[data-theme="violet"] {
+  --page: #07050c;
+  --surface: #0c0914;
+  --card: #161127;
+  --raised: #261d45;
+  --line: #3b2e68;
+  --fg: #ebe4ff;
+  --muted: #8a7cb8;
+  --soft: #bfb0ec;
+  --accent: #c8b4ff;
+  --accent2: #e6ccff;
+  --needs: #ffe8a6;
+  --blocked: #ff7d9c;
+  --done: #a9f0d1;
+  --working: #a3d4ff;
+  --interrupted: #ffc59c;
+  --idle: #5f5388;
+  --term-bg: #08060f;
+  --term-fg: #ebe4ff;
+  --on-accent: #1b1238;
+  --font: var(--mono);
+  --ansi-0: #161127;
+  --ansi-1: #ff7d9c;
+  --ansi-2: #a9f0d1;
+  --ansi-3: #ffe8a6;
+  --ansi-4: #a3b4ff;
+  --ansi-5: #c8b4ff;
+  --ansi-6: #a3d4ff;
+  --ansi-7: #dcd3f5;
+  --ansi-8: #8a7cb8;
+  --ansi-9: #ff9fb6;
+  --ansi-10: #c4f7e1;
+  --ansi-11: #fff0c4;
+  --ansi-12: #c0ccff;
+  --ansi-13: #dccfff;
+  --ansi-14: #c4e4ff;
+  --ansi-15: #f6f2ff;
+  --glow: 200 180 255;
+  --glitch-a: #ff7d9c;
+  --glitch-b: #a3d4ff;
+  --rain-head: #f6f2ff;
+  --rain-trail: #9a82e6;
+}
+
+.rain {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+[data-fx] .page:has(> .rain) > :not(.rain) {
+  position: relative;
+  z-index: 1;
+}
+
+[data-fx] .topbar {
+  position: sticky;
+  z-index: 10;
+}
+
+/* CRT scanlines over everything. */
+[data-fx] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, rgb(0 0 0 / 0.18) 0 1px, transparent 1px 3px);
+}
+
+[data-fx] .brand,
+[data-fx] .section-title,
+[data-fx] .calm-title {
+  color: var(--accent);
+  text-shadow: 0 0 6px rgb(var(--glow) / 0.55);
+}
+
+[data-fx] .brand-name {
+  display: inline-block;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  animation: glitch 4s steps(1) infinite;
+}
+
+[data-fx] .section-title::before {
+  content: "//";
+  color: var(--muted);
+}
+
+[data-fx] .calm-title::before {
+  content: "> ";
+}
+
+[data-fx] .calm-title::after {
+  content: "█";
+  margin-left: 2px;
+  animation: blink 1.06s steps(1) infinite;
+}
+
+/* The rain shows through the panels; a card stays solid over what's under it. */
+[data-fx] .calm,
+[data-fx] .list {
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+[data-fx] .calm,
+[data-fx] .card,
+[data-fx] .list {
+  box-shadow: 0 0 18px rgb(var(--glow) / 0.08);
+}
+
+[data-fx] .primary {
+  box-shadow: 0 0 12px rgb(var(--glow) / 0.45);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes glitch {
+  0%,
+  94%,
+  100% {
+    transform: none;
+    text-shadow: 0 0 6px rgb(var(--glow) / 0.55);
+  }
+  95% {
+    transform: translateX(-2px) skewX(-8deg);
+    text-shadow: 2px 0 var(--glitch-a), -2px 0 var(--glitch-b);
+  }
+  97% {
+    transform: translateX(2px);
+    text-shadow: -2px 0 var(--glitch-a), 2px 0 var(--glitch-b);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-fx] .brand-name,
+  [data-fx] .calm-title::after {
+    animation: none;
+  }
 }

@@ -76,3 +76,8 @@ export const Diff = () => (
     <path d="M12 4v8M8 8h8M8 18h8" />
   </svg>
 );
+export const Prompt = () => (
+  <svg {...base}>
+    <path d="M4 7l5 5-5 5M12 18h8" />
+  </svg>
+);

@@ -28,9 +28,18 @@ pub struct Theme {
     pub working: Color,
     pub interrupted: Color,
     pub idle: Color,
+    /// Digital rain in these colors falls through the home screen's empty rows,
+    /// and the header glitches: the effects of matrix and violet.
+    pub rain: Option<Rain>,
     /// The 16 ANSI colors a session's programs draw with: black, red, green,
     /// yellow, blue, magenta, cyan, white, then their bright versions.
     pub ansi: [Color; 16],
+}
+
+/// Digital rain's colors: a drop's head, then its trail, brightest first.
+pub struct Rain {
+    pub head: Color,
+    pub trail: [Color; 3],
 }
 
 const fn hex(rgb: u32) -> Color {
@@ -56,6 +65,7 @@ pub const DRACULA: Theme = Theme {
     working: hex(0x8be9fd),
     interrupted: hex(0xffb86c),
     idle: hex(0x6272a4),
+    rain: None,
     ansi: [
         hex(0x21222c),
         hex(0xff5555),
@@ -95,6 +105,7 @@ pub const CYBERPUNK: Theme = Theme {
     working: hex(0x05d9e8),
     interrupted: hex(0xff9e00),
     idle: hex(0x5a5f8a),
+    rain: None,
     ansi: [
         hex(0x1b1e3d),
         hex(0xff003c),
@@ -134,6 +145,7 @@ pub const BLACKOUT: Theme = Theme {
     working: hex(0x9ae6ff),
     interrupted: hex(0xffc39e),
     idle: hex(0x5a5666),
+    rain: None,
     ansi: [
         hex(0x1a1a1f),
         hex(0xff8a9e),
@@ -173,6 +185,7 @@ pub const CATPPUCCIN: Theme = Theme {
     working: hex(0x89dceb),
     interrupted: hex(0xfab387),
     idle: hex(0x6c7086),
+    rain: None,
     ansi: [
         hex(0x45475a),
         hex(0xf38ba8),
@@ -212,6 +225,7 @@ pub const NORD: Theme = Theme {
     working: hex(0x81a1c1),
     interrupted: hex(0xd08770),
     idle: hex(0x616e88),
+    rain: None,
     ansi: [
         hex(0x3b4252),
         hex(0xbf616a),
@@ -251,6 +265,7 @@ pub const GRUVBOX: Theme = Theme {
     working: hex(0x83a598),
     interrupted: hex(0x8ec07c),
     idle: hex(0x7c6f64),
+    rain: None,
     ansi: [
         hex(0x282828),
         hex(0xcc241d),
@@ -290,6 +305,7 @@ pub const TOKYONIGHT: Theme = Theme {
     working: hex(0x7dcfff),
     interrupted: hex(0xff9e64),
     idle: hex(0x565f89),
+    rain: None,
     ansi: [
         hex(0x15161e),
         hex(0xf7768e),
@@ -310,6 +326,92 @@ pub const TOKYONIGHT: Theme = Theme {
     ],
 };
 
+/// Phosphor green on black, with digital rain on the home screen.
+pub const MATRIX: Theme = Theme {
+    name: "matrix",
+    bg: hex(0x000000),
+    panel: hex(0x020a04),
+    strip: hex(0x000000),
+    card: hex(0x08190d),
+    selection: hex(0x0c3318),
+    border: hex(0x0f4d22),
+    fg: hex(0xb4ffc4),
+    muted: hex(0x2f8f4c),
+    accent: hex(0x00ff41),
+    accent2: hex(0x7dffa0),
+    needs: hex(0xd8ff3e),
+    blocked: hex(0xff3b3b),
+    done: hex(0x00ff41),
+    working: hex(0x3dffd2),
+    interrupted: hex(0xffb000),
+    idle: hex(0x1f6e36),
+    rain: Some(Rain {
+        head: hex(0xe8ffec),
+        trail: [hex(0x00ff41), hex(0x00b02c), hex(0x005c18)],
+    }),
+    ansi: [
+        hex(0x08190d),
+        hex(0xff3b3b),
+        hex(0x00ff41),
+        hex(0xd8ff3e),
+        hex(0x00b386),
+        hex(0x7dffa0),
+        hex(0x3dffd2),
+        hex(0xb4ffc4),
+        hex(0x2f8f4c),
+        hex(0xff6b6b),
+        hex(0x5cff7f),
+        hex(0xe8ff80),
+        hex(0x33d9a8),
+        hex(0xa8ffbf),
+        hex(0x8affe6),
+        hex(0xe8ffec),
+    ],
+};
+
+/// Pale lavender on near-black violet, with lavender digital rain.
+pub const VIOLET: Theme = Theme {
+    name: "violet",
+    bg: hex(0x07050c),
+    panel: hex(0x0c0914),
+    strip: hex(0x040308),
+    card: hex(0x161127),
+    selection: hex(0x261d45),
+    border: hex(0x3b2e68),
+    fg: hex(0xebe4ff),
+    muted: hex(0x8a7cb8),
+    accent: hex(0xc8b4ff),
+    accent2: hex(0xe6ccff),
+    needs: hex(0xffe8a6),
+    blocked: hex(0xff7d9c),
+    done: hex(0xa9f0d1),
+    working: hex(0xa3d4ff),
+    interrupted: hex(0xffc59c),
+    idle: hex(0x5f5388),
+    rain: Some(Rain {
+        head: hex(0xf6f2ff),
+        trail: [hex(0xc8b4ff), hex(0x8b70d8), hex(0x463a7d)],
+    }),
+    ansi: [
+        hex(0x161127),
+        hex(0xff7d9c),
+        hex(0xa9f0d1),
+        hex(0xffe8a6),
+        hex(0xa3b4ff),
+        hex(0xc8b4ff),
+        hex(0xa3d4ff),
+        hex(0xdcd3f5),
+        hex(0x8a7cb8),
+        hex(0xff9fb6),
+        hex(0xc4f7e1),
+        hex(0xfff0c4),
+        hex(0xc0ccff),
+        hex(0xdccfff),
+        hex(0xc4e4ff),
+        hex(0xf6f2ff),
+    ],
+};
+
 pub const THEMES: &[&Theme] = &[
     &DRACULA,
     &CYBERPUNK,
@@ -318,6 +420,8 @@ pub const THEMES: &[&Theme] = &[
     &NORD,
     &GRUVBOX,
     &TOKYONIGHT,
+    &MATRIX,
+    &VIOLET,
 ];
 
 impl Theme {
