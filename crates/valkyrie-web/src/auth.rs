@@ -230,6 +230,15 @@ fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
+    /// Saved devices are found by this hash, so it must not change with a dependency.
+    #[test]
+    fn hashes_like_the_fips_example() {
+        assert_eq!(
+            sha256("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     #[test]
     fn a_code_pairs_once_and_its_token_checks() {
         let dir = std::env::temp_dir().join(format!("valkyrie-web-auth-{}", std::process::id()));

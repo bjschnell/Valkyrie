@@ -27,7 +27,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - id: tag
         run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
       - env:
@@ -54,7 +54,7 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -87,7 +87,7 @@ jobs:
     needs: [release, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}

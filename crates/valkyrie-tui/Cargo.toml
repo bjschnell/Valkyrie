@@ -10,7 +10,7 @@ valkyrie-proto.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 unicode-width = "0.2"
 
 [dev-dependencies]
