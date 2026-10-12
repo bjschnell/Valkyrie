@@ -785,7 +785,9 @@ async fn a_fresh_daemon_restores_agents_and_shells() {
             ("shell", vec!["sh"]),
         ]
     );
-    assert!(sessions.iter().all(|s| s.cwd == dir));
+    // Through symlinks: macOS's temp dir is under /var, a link to /private/var.
+    let same = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+    assert!(sessions.iter().all(|s| same(&s.cwd) == same(&dir)));
     let mut kept = String::new();
     for _ in 0..30 {
         kept = std::fs::read_to_string(&next_list).unwrap_or_default();

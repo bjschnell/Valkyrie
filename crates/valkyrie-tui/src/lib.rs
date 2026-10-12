@@ -4399,8 +4399,14 @@ mod tests {
     async fn settings_panel_changes_what_it_shows() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let dir =
-            std::env::temp_dir().join(format!("valkyrie-tui-settings-{}", std::process::id()));
+        // Short enough that the panel shows the whole settings path: macOS's temp dir
+        // alone is about 50 bytes.
+        let base = if cfg!(target_os = "macos") {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base.join(format!("valkyrie-tui-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let socket = dir.join("s.sock");
         valkyrie_proto::ensure_private_dir(&dir).unwrap();

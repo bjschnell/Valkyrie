@@ -233,6 +233,7 @@ fn recorded_sessions_meet_the_accuracy_gate() {
 /// named for this host, not under `$XDG_RUNTIME_DIR` (deleted at logout, often unset
 /// over SSH).
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "reads /proc")]
 fn auto_started_daemon_is_detached_and_found_without_a_runtime_dir() {
     /// Kills the daemon's whole session even when an assertion fails first.
     struct Reap(Option<u32>, PathBuf);
@@ -301,6 +302,7 @@ fn auto_started_daemon_is_detached_and_found_without_a_runtime_dir() {
 /// same process, same screen, input and exit still work. A binary that doesn't speak
 /// the handoff format is refused before anything is frozen.
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "reads /proc")]
 fn upgrade_keeps_sessions_and_refuses_a_foreign_binary() {
     let dir = temp("upgrade");
     let socket = dir.join("run/o.sock");
@@ -480,6 +482,7 @@ fn upgrade_keeps_input_the_program_has_not_read_yet() {
 /// screen, live program), and a killed program that ignores SIGHUP must not survive
 /// the handoff or be left unreaped.
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "reads /proc")]
 fn upgrade_survives_a_lost_transcript_and_finishes_pending_kills() {
     let d = Daemon::start("upgrade-edges");
     d.ok(&[
@@ -518,6 +521,7 @@ fn upgrade_survives_a_lost_transcript_and_finishes_pending_kills() {
 /// Review finding: killed sessions were kept alive by the handoff's kill list, so each
 /// kill leaked its PTY fds and writer thread. A killed, reaped session must free them.
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "reads /proc")]
 fn killed_sessions_release_their_fds() {
     let d = Daemon::start("kill-fds");
     let fds = || {
