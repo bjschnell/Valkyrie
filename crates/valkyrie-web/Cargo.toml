@@ -15,7 +15,7 @@ tracing.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 include_dir = "0.7"
 sha2 = "0.10"
-getrandom = "0.3"
+getrandom = "0.4"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 # Web Push: RFC 8291 encryption and VAPID signing.
