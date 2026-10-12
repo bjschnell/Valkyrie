@@ -1,25 +1,36 @@
 name: test
 
 on:
+  # Branches only: a tag push runs this through release.yml instead.
   push:
+    branches: ["**"]
   pull_request:
   workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Every platform release.yml ships a binary for.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked --no-fail-fast
+      - name: Validate shell installers
+        if: runner.os == 'Linux'
+        run: shellcheck install.sh install-release.sh
       - name: Validate PowerShell installers
         if: runner.os == 'Windows'
         shell: pwsh
@@ -30,3 +41,37 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $file), [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { throw ($errors | Out-String) }
           }
+
+  # The rust-version Cargo.toml promises.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --locked
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # `valk` embeds the committed web/dist, so it must match web/src.
+      - run: npm run build
+      - name: web/dist is up to date
+        run: |
+          git status --porcelain -- dist
+          test -z "$(git status --porcelain -- dist)" \
+            || { echo "::error::web/dist is stale: run 'npm run build' in web/ and commit it"; exit 1; }

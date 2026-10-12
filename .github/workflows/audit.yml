@@ -1,0 +1,33 @@
+# Known vulnerabilities in dependencies (npm: only what ships in web/dist).
+# Kept apart from test, so a newly published advisory doesn't block a release
+# until it's looked at.
+name: audit
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/Cargo.lock", "**/Cargo.toml", "web/package-lock.json", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["**/Cargo.lock", "**/Cargo.toml", "web/package-lock.json", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: web

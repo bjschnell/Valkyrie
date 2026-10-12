@@ -202,7 +202,8 @@ mod tests {
             ] {
                 git(&main, args).unwrap();
             }
-            Repo(std::fs::canonicalize(base).unwrap())
+            // As `create` canonicalizes: without `\\?\` on Windows.
+            Repo(valkyrie_proto::canonical(&base).unwrap())
         }
 
         fn main(&self) -> PathBuf {
