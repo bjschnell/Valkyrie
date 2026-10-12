@@ -16,7 +16,7 @@ axum = { version = "0.8", features = ["ws"] }
 include_dir = "0.7"
 sha2 = "0.10"
 getrandom = "0.3"
-base64 = "0.22"
+base64 = "0.23"
 qrcode = { version = "0.14", default-features = false }
 # Web Push: RFC 8291 encryption and VAPID signing.
 p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
