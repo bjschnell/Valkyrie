@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::path::Path;
 use valkyrie_proto::{AgentState, AgentStatus, AskKind, QueueItem};
 
+pub use claude::{ambient_context_command, install_ambient_context, remove_ambient_context};
 pub use tracker::{DENY_AFTER_MS, INTERRUPT_AFTER_MS, STALE_AFTER_MS, Tracker};
 
 /// What adapters normalize hook payloads (and PTY signals) into.

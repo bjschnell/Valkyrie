@@ -2,10 +2,12 @@
 //! colors, how the tabs are drawn and on which side, and pings on or off. Kept in
 //! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
 //! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
-//! `$VALK_TABS`, `$VALK_TAB_SIDE` and `$VALK_SOUND` win over it.
+//! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_SOUND` and `$VALK_PROJECT_CONTEXT` win
+//! over it.
 
 use crate::theme::{DRACULA, THEMES, Theme};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// How the tab strip is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +72,8 @@ pub struct Settings {
     pub tabs: TabStyle,
     pub tab_side: TabSide,
     pub sound: bool,
+    /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
+    pub context: bool,
 }
 
 impl PartialEq for Settings {
@@ -80,12 +84,14 @@ impl PartialEq for Settings {
             self.tabs,
             self.tab_side,
             self.sound,
+            self.context,
         ) == (
             other.theme.name,
             other.themed_sessions,
             other.tabs,
             other.tab_side,
             other.sound,
+            other.context,
         )
     }
 }
@@ -104,6 +110,7 @@ impl Default for Settings {
             tabs: TabStyle::Underline,
             tab_side: TabSide::Top,
             sound: true,
+            context: true,
         }
     }
 }
@@ -116,6 +123,7 @@ pub enum Field {
     Tabs,
     TabSide,
     Sound,
+    Context,
 }
 
 impl Field {
@@ -125,6 +133,7 @@ impl Field {
         Field::Tabs,
         Field::TabSide,
         Field::Sound,
+        Field::Context,
     ];
 
     pub fn label(self) -> &'static str {
@@ -134,6 +143,7 @@ impl Field {
             Field::Tabs => "Tab style",
             Field::TabSide => "Tabs on",
             Field::Sound => "Sound",
+            Field::Context => "Context",
         }
     }
 }
@@ -149,6 +159,7 @@ impl Settings {
             ("tabs", "VALK_TABS"),
             ("tab_side", "VALK_TAB_SIDE"),
             ("sound", "VALK_SOUND"),
+            ("context", "VALK_PROJECT_CONTEXT"),
         ] {
             if let Ok(value) = std::env::var(var) {
                 settings.set(key, &value);
@@ -179,6 +190,7 @@ impl Settings {
             Field::Tabs => kept.tabs = self.tabs,
             Field::TabSide => kept.tab_side = self.tab_side,
             Field::Sound => kept.sound = self.sound,
+            Field::Context => kept.context = self.context,
         }
         let Some(dir) = path.parent() else { return };
         let _ = std::fs::create_dir_all(dir);
@@ -196,7 +208,8 @@ impl Settings {
              session_colors = \"{}\"  # theme | terminal\n\
              tabs = \"{}\"      # {}\n\
              tab_side = \"{}\"  # {}\n\
-             sound = {}\n",
+             sound = {}\n\
+             context = {}      # agents in Valkyrie sessions get the project's decisions\n",
             self.theme.name,
             names(THEMES.iter().map(|t| t.name)),
             self.value(Field::SessionColors),
@@ -205,6 +218,7 @@ impl Settings {
             self.tab_side.name(),
             names(TabSide::ALL.iter().map(|s| s.name())),
             self.sound,
+            self.context,
         )
     }
 
@@ -249,6 +263,11 @@ impl Settings {
                 "false" | "off" => self.sound = false,
                 _ => {}
             },
+            "context" => match value {
+                "true" | "on" => self.context = true,
+                "false" | "off" => self.context = false,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -280,13 +299,8 @@ impl Settings {
             }
             Field::Tabs => self.tabs.name(),
             Field::TabSide => self.tab_side.name(),
-            Field::Sound => {
-                if self.sound {
-                    "on"
-                } else {
-                    "off"
-                }
-            }
+            Field::Sound => on_off(self.sound),
+            Field::Context => on_off(self.context),
         }
     }
 
@@ -300,7 +314,34 @@ impl Settings {
             }
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::Sound => self.sound = !self.sound,
+            Field::Context => self.context = !self.context,
         }
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// Whether agents in Valkyrie sessions get the project's decisions: the setting as
+/// kept now, so the hook that injects them honors a change at once. Hooks call
+/// this on every session start, so it reads one small file.
+pub fn context_enabled() -> bool {
+    Settings::load().context
+}
+
+static ON_CONTEXT_CHANGE: OnceLock<fn(bool)> = OnceLock::new();
+
+/// Runs `f` with the new value each time the Context setting is changed. It is how
+/// the hook in the agent's own settings is put in place (or taken out) as the
+/// switch moves.
+pub fn on_context_change(f: fn(bool)) {
+    let _ = ON_CONTEXT_CHANGE.set(f);
+}
+
+pub(crate) fn context_changed(on: bool) {
+    if let Some(f) = ON_CONTEXT_CHANGE.get() {
+        f(on);
     }
 }
 
@@ -336,6 +377,7 @@ mod tests {
         s.cycle(Field::TabSide, -1);
         s.cycle(Field::Sound, 1);
         s.cycle(Field::SessionColors, 1);
+        s.cycle(Field::Context, 1);
         let mut back = Settings::default();
         back.apply(&s.to_toml());
         assert_eq!(back, s);
@@ -346,6 +388,19 @@ mod tests {
         );
         assert!(!back.sound);
         assert!(!back.themed_sessions);
+        assert!(!back.context);
+    }
+
+    #[test]
+    fn context_is_on_unless_turned_off() {
+        let mut s = Settings::default();
+        assert!(s.context);
+        s.apply("context = maybe\n");
+        assert!(s.context);
+        s.apply("context = off\n");
+        assert!(!s.context);
+        s.apply("context = \"on\"\n");
+        assert!(s.context);
     }
 
     #[test]
@@ -385,7 +440,7 @@ mod tests {
                 Field::Theme => THEMES.len(),
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
-                Field::SessionColors | Field::Sound => 2,
+                Field::SessionColors | Field::Sound | Field::Context => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);

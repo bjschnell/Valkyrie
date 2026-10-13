@@ -23,6 +23,8 @@ const EVENTS: &[&str] = &[
 ];
 /// Seconds; the hook itself returns in milliseconds.
 const HOOK_TIMEOUT: u64 = 5;
+/// The events the context hook answers (ADR-0007).
+const CONTEXT_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit"];
 /// A subagent's dialogs and tool calls happen in the same terminal, but its
 /// Stop/SessionStart must not settle the parent.
 const SUBAGENT_EVENTS: &[&str] = &[
@@ -73,7 +75,7 @@ pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
         .iter()
         .map(|&e| {
             let mut list = vec![hook(command)];
-            if matches!(e, "SessionStart" | "UserPromptSubmit")
+            if CONTEXT_EVENTS.contains(&e)
                 && let Some(context) = context
             {
                 list.push(hook(context));
@@ -82,6 +84,49 @@ pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
         })
         .collect();
     json!({ "hooks": hooks })
+}
+
+/// What the context hook in Claude Code's own settings runs. Outside a Valkyrie
+/// session (no `$VALK_SESSION`) it prints nothing, so it can sit in the user's
+/// settings for every `claude`; `--ambient` also keeps it quiet where Valkyrie put
+/// the same hook in the session's settings itself.
+pub fn ambient_context_command(exe: &Path) -> String {
+    format!(
+        "{} context-hook claude --ambient 2>/dev/null || true",
+        shell_quote(exe)
+    )
+}
+
+fn is_ambient_context(command: &str) -> bool {
+    command.contains(" context-hook claude --ambient ")
+}
+
+/// Claude Code's settings with the ambient context hook running `command` on the
+/// events it answers, replacing any earlier copy of it (from a `valk` that has
+/// moved). Everything else in the settings is kept.
+pub fn install_ambient_context(doc: Value, command: &str) -> Value {
+    let mut doc = remove_ambient_context(doc);
+    if !doc.is_object() {
+        doc = json!({});
+    }
+    if !doc["hooks"].is_object() {
+        doc["hooks"] = json!({});
+    }
+    for event in CONTEXT_EVENTS {
+        let groups = &mut doc["hooks"][*event];
+        if !groups.is_array() {
+            *groups = json!([]);
+        }
+        groups.as_array_mut().unwrap().push(json!({
+            "hooks": [{ "type": "command", "command": command, "timeout": HOOK_TIMEOUT }]
+        }));
+    }
+    doc
+}
+
+/// Claude Code's settings without the ambient context hook, wherever `valk` was.
+pub fn remove_ambient_context(doc: Value) -> Value {
+    crate::codex::remove_where(doc, is_ambient_context)
 }
 
 pub(crate) fn shell_quote(path: &Path) -> String {
@@ -429,6 +474,32 @@ mod tests {
             n(json!({"hook_event_name": "Stop", "agent_id": null})),
             Some(E::TurnEnded { summary: None })
         );
+    }
+
+    #[test]
+    fn ambient_context_is_idempotent_follows_a_moved_binary_and_keeps_the_rest() {
+        let mine = ambient_context_command(Path::new("/old/valk"));
+        assert_eq!(
+            mine,
+            "'/old/valk' context-hook claude --ambient 2>/dev/null || true"
+        );
+        let user = json!({
+            "model": "opus",
+            "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}],
+                      "SessionStart": [{"hooks": [{"type": "command", "command": "mine"}]}]}
+        });
+        let once = install_ambient_context(user.clone(), &mine);
+        assert_eq!(install_ambient_context(once.clone(), &mine), once);
+        let moved = ambient_context_command(Path::new("/new/valk"));
+        let again = install_ambient_context(once.clone(), &moved);
+        let starts = again["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(starts.len(), 2, "theirs and one of ours: {again}");
+        assert_eq!(
+            again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(again["model"], "opus");
+        assert_eq!(remove_ambient_context(again), user);
     }
 
     #[test]

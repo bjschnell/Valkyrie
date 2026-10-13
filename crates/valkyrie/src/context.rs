@@ -278,15 +278,19 @@ fn valk_command() -> String {
 /// start it prints the project's decisions as added context; with each prompt,
 /// what the other agents in the repository are doing, when that's news. Like `valk hook` it
 /// never fails and never prints anything else; outside a Valkyrie session it
-/// prints nothing.
-pub fn hook(agent: &str) {
-    let ours = matches!(agent, "claude" | "codex") && std::env::var_os("VALK_SESSION").is_some();
+/// prints nothing. It prints nothing either when the Context setting is off, or
+/// with `ambient` (the copy in the user's own settings) where the session's own
+/// settings already carry the hook.
+pub fn hook(agent: &str, ambient: bool) {
+    let ours = matches!(agent, "claude" | "codex")
+        && std::env::var_os("VALK_SESSION").is_some()
+        && !(ambient && std::env::var_os("VALK_SESSION_HOOKS").is_some());
     let mut raw = Vec::new();
     let read = std::io::stdin().take(1 << 20).read_to_end(&mut raw);
     // Drain whatever is past the limit (a huge paste), so the agent never hits
     // EPIPE writing it.
     let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
-    if read.is_err() || !ours {
+    if read.is_err() || !ours || !valkyrie_tui::context_enabled() {
         return;
     }
     // Answer only an event it names: a payload cut short or garbled gets nothing.

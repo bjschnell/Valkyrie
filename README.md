@@ -109,7 +109,7 @@ default text and 16 ANSI colors come from the theme; colors a program picks exac
 (256-color or RGB) stay as it drew them. Settings are kept in
 `~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
 which you can also edit by hand. `VALK_THEME`,
-`VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it for
+`VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_SOUND` and `VALK_PROJECT_CONTEXT` override it for
 one run.
 
 ### From your phone
@@ -138,7 +138,12 @@ claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 ```
 
 Claude sessions get the active decisions when they start, after `/clear` and
-after compaction. Nothing is written to CLAUDE.md. Agents are told they can
+after compaction, including a `claude` you type into a Valkyrie shell: `valk`
+keeps a context hook in Claude Code's own settings (`~/.claude/settings.json`) that
+does nothing outside a Valkyrie session. The **Context** row in the settings (`,`)
+switches this off (`context = off` in `settings.toml`, or `VALK_PROJECT_CONTEXT=off`);
+`valk setup claude --remove` takes the hook out of Claude's settings, and
+`valk setup claude` puts it back. Nothing is written to CLAUDE.md. Agents are told they can
 propose decisions with `valk decide`, but a proposal applies only after you accept
 it: on the phone, on the TUI home screen, or with `valk decisions accept <id>`.
 An agent can't accept its own. When you correct an agent ("no, we use pnpm"), a

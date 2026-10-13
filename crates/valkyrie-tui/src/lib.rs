@@ -28,6 +28,7 @@ use ratatui::widgets::{
     TableState, Wrap,
 };
 use settings::{Field, Settings, TabSide, TabStyle};
+pub use settings::{context_enabled, on_context_change};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1140,6 +1141,9 @@ impl App {
         let before = self.settings;
         self.settings.cycle(field, by);
         self.settings.save_field(field, &self.settings_file);
+        if field == Field::Context {
+            settings::context_changed(self.settings.context);
+        }
         if (before.tabs, before.tab_side) != (self.settings.tabs, self.settings.tab_side) {
             self.relayout();
         }

@@ -141,7 +141,13 @@ pub fn install_hooks(mut doc: Value, command: &str, context: &str) -> Value {
 
 /// `hooks.json` without any hook running `command`, or the hook of a build from before
 /// the rename to Valkyrie (binary `overseer`); emptied groups and events go too.
-pub fn remove_hooks(mut doc: Value, commands: &[&str]) -> Value {
+pub fn remove_hooks(doc: Value, commands: &[&str]) -> Value {
+    remove_where(doc, |c| commands.contains(&c) || is_pre_rename(c))
+}
+
+/// `doc` without the hooks whose command `gone` accepts; emptied groups and events
+/// go too. Everything else is kept.
+pub(crate) fn remove_where(mut doc: Value, gone: impl Fn(&str) -> bool) -> Value {
     let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else {
         return doc;
     };
@@ -154,11 +160,7 @@ pub fn remove_hooks(mut doc: Value, commands: &[&str]) -> Value {
                 return true;
             };
             let before = inner.len();
-            inner.retain(|h| {
-                !h["command"]
-                    .as_str()
-                    .is_some_and(|c| commands.contains(&c) || is_pre_rename(c))
-            });
+            inner.retain(|h| !h["command"].as_str().is_some_and(&gone));
             !(before > 0 && inner.is_empty())
         });
     }

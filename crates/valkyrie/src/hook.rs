@@ -193,6 +193,118 @@ pub fn setup_codex(exe: &Path, path: &Path, remove: bool, dry_run: bool) -> Resu
     Ok(())
 }
 
+/// Claude Code's user settings: `$CLAUDE_CONFIG_DIR/settings.json`, else
+/// `~/.claude/settings.json`.
+pub fn claude_settings_path() -> PathBuf {
+    let home = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| valkyrie_proto::home_dir().join(".claude"));
+    home.join("settings.json")
+}
+
+/// Puts the context hook in Claude Code's own settings, or takes it out, to match
+/// the Context setting. It is how a `claude` typed in a Valkyrie shell (which
+/// Valkyrie never launched, so could not hand `--settings`) still gets the
+/// project's decisions. Best effort: a settings file that can't be edited costs
+/// the feature there, not the caller anything.
+///
+/// A debug build (the test suite's daemons) leaves the real settings alone unless
+/// `$CLAUDE_CONFIG_DIR` names where to put the hook.
+pub fn sync_claude(on: bool) {
+    if cfg!(debug_assertions) && std::env::var_os("CLAUDE_CONFIG_DIR").is_none() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let path = claude_settings_path();
+    // Not installing into a Claude Code that was never set up here.
+    if on && !path.parent().is_some_and(Path::is_dir) {
+        return;
+    }
+    if let Err(e) = setup_claude(&exe, &path, !on, false, true) {
+        tracing::warn!("claude settings not updated: {e:#}");
+    }
+}
+
+/// Adds (or with `remove`, takes out) the ambient context hook in Claude Code's
+/// settings. Keeps everything else, writes atomically, and keeps one backup of the
+/// file as it was before Valkyrie first changed it. `quiet` prints nothing.
+pub fn setup_claude(
+    exe: &Path,
+    path: &Path,
+    remove: bool,
+    dry_run: bool,
+    quiet: bool,
+) -> Result<()> {
+    let say = |text: String| {
+        if !quiet {
+            println!("{text}");
+        }
+    };
+    // Write through a symlinked settings.json (e.g. one kept in a dotfiles repo).
+    let resolved = std::fs::canonicalize(path).ok();
+    let path = resolved.as_deref().unwrap_or(path);
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(
+            serde_json::from_str::<Value>(&text)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    if remove && existing.is_none() {
+        say(format!(
+            "{} does not exist; nothing to remove",
+            path.display()
+        ));
+        return Ok(());
+    }
+    let doc = existing.clone().unwrap_or(Value::Null);
+    let updated = if remove {
+        valkyrie_agents::remove_ambient_context(doc)
+    } else {
+        let command = valkyrie_agents::ambient_context_command(exe);
+        valkyrie_agents::install_ambient_context(doc, &command)
+    };
+    let text = serde_json::to_string_pretty(&updated)? + "\n";
+    if dry_run {
+        print!("{text}");
+        return Ok(());
+    }
+    if existing.as_ref() == Some(&updated) {
+        say(format!("{} already up to date", path.display()));
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mode = std::fs::metadata(path).ok().map(|m| m.permissions());
+    if existing.is_some() {
+        let backup = path.with_extension("json.valkyrie-bak");
+        if !backup.exists() {
+            std::fs::copy(path, &backup)?;
+            say(format!("backed up to {}", backup.display()));
+        }
+    }
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, text)?;
+    if let Some(mode) = mode {
+        std::fs::set_permissions(&tmp, mode)?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if remove {
+        say(format!("removed Valkyrie's hook from {}", path.display()));
+    } else {
+        say(format!(
+            "installed Valkyrie's context hook in {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

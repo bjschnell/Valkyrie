@@ -291,6 +291,9 @@ impl Session {
             .context("openpty")?;
         let mut argv = spec.command.clone();
         adapter.prepare(&mut argv, &host.hook_exe);
+        // The agent carries Valkyrie's hooks in its own arguments; a copy in the
+        // user's settings (`valk context-hook --ambient`) stays quiet then.
+        let hooked = argv != spec.command;
         let mut cmd = CommandBuilder::new(&program);
         cmd.args(&argv[1..]);
         cmd.cwd(&cwd);
@@ -307,6 +310,9 @@ impl Session {
         cmd.env("VALK_SESSION", id.to_string());
         cmd.env("VALK_SOCKET", &host.socket);
         cmd.env("VALK_CONTEXT", &host.context_dir);
+        if hooked {
+            cmd.env("VALK_SESSION_HOOKS", "1");
+        }
         #[cfg(windows)]
         crate::pty::resolve_agent_shim(&mut cmd, adapter.name())?;
 

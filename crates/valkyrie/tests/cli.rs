@@ -19,7 +19,10 @@ fn valk(socket: &Path, state: &Path) -> Command {
     let mut cmd = Command::new(BIN);
     cmd.env("VALK_SOCKET", socket)
         .env("XDG_STATE_HOME", state)
-        .env_remove("VALK_SESSION");
+        .env("XDG_CONFIG_HOME", state.join("config"))
+        .env_remove("VALK_SESSION")
+        .env_remove("VALK_SESSION_HOOKS")
+        .env_remove("VALK_PROJECT_CONTEXT");
     cmd
 }
 
@@ -190,6 +193,208 @@ fn setup_codex_installs_backs_up_and_removes() {
         doc,
         serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify-send done"}]}]}})
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A `claude` typed in a Valkyrie shell gets no `--settings`, so the context hook
+/// also lives in Claude Code's own settings, put there and taken out by `valk`.
+#[test]
+fn setup_claude_installs_once_keeps_the_rest_and_removes() {
+    let dir = temp("claude-settings");
+    let settings = dir.join("settings.json");
+    let theirs = r#"{"model":"opus","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"theirs"}]}]}}"#;
+    std::fs::write(&settings, theirs).unwrap();
+    let setup = |exe: &str, extra: &[&str]| {
+        let out = Command::new(BIN)
+            .env("CLAUDE_CONFIG_DIR", &dir)
+            .args(["setup", "claude", "--exe", exe])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap()
+    };
+    let ours = |exe: &str| format!("'{exe}' context-hook claude --ambient 2>/dev/null || true");
+
+    assert!(setup("/opt/valk", &["--dry-run"]).contains(&ours("/opt/valk")));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), theirs);
+
+    setup("/opt/valk", &[]);
+    let doc = read();
+    assert_eq!(doc["model"], "opus");
+    let starts = doc["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(starts.len(), 2, "{doc}");
+    assert_eq!(starts[1]["hooks"][0]["command"], ours("/opt/valk"));
+    assert_eq!(
+        doc["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        ours("/opt/valk")
+    );
+    assert!(setup("/opt/valk", &[]).contains("already up to date"));
+
+    // A binary that moved replaces the hook; it is not added beside it.
+    setup("/elsewhere/valk", &[]);
+    let doc = read();
+    assert_eq!(doc["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
+    assert!(!doc.to_string().contains("/opt/valk"));
+
+    // The file as it was before the first change is kept, once.
+    let backup = dir.join("settings.json.valkyrie-bak");
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), theirs);
+
+    setup("/elsewhere/valk", &["--remove"]);
+    assert_eq!(
+        read(),
+        serde_json::from_str::<serde_json::Value>(theirs).unwrap()
+    );
+
+    // Taking it out where there is no settings file creates none.
+    let empty = dir.join("empty");
+    let out = Command::new(BIN)
+        .env("CLAUDE_CONFIG_DIR", &empty)
+        .args(["setup", "claude", "--remove"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(!empty.join("settings.json").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The Context setting switches the hook off wherever it runs, and the copy in
+/// Claude Code's own settings steps aside where the session carries one already.
+#[test]
+fn context_hook_follows_the_setting_and_the_sessions_own_hooks() {
+    let dir = temp("context-switch");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(dir.join("config/valkyrie")).unwrap();
+    let run = |args: &[&str], envs: &[(&str, &str)]| {
+        let mut cmd = valk(&dir.join("run/none.sock"), &dir);
+        cmd.env("VALK_CONTEXT", dir.join("context"))
+            .env("VALK_SESSION", "1");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
+            .arg("context-hook")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = format!(
+            r#"{{"hook_event_name":"SessionStart","cwd":"{}"}}"#,
+            repo.display()
+        );
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let speaks = |out: &Output| {
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        !out.stdout.is_empty()
+    };
+    assert!(speaks(&run(&["claude"], &[])), "on by default");
+    assert!(speaks(&run(&["claude", "--ambient"], &[])));
+    // Where the session was launched with the hook, the ambient copy is quiet.
+    let hooked = [("VALK_SESSION_HOOKS", "1")];
+    assert!(speaks(&run(&["claude"], &hooked)));
+    assert!(!speaks(&run(&["claude", "--ambient"], &hooked)));
+
+    std::fs::write(dir.join("config/valkyrie/settings.toml"), "context = off\n").unwrap();
+    assert!(!speaks(&run(&["claude"], &[])));
+    assert!(!speaks(&run(&["claude", "--ambient"], &[])));
+    // The environment wins over the file, as for every setting.
+    assert!(speaks(&run(&["claude"], &[("VALK_PROJECT_CONTEXT", "on")])));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The daemon keeps the hook in Claude Code's settings while Context is on, and
+/// marks the sessions it launched an agent in with its hooks itself.
+#[test]
+fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
+    let dir = temp("daemon-claude");
+    let socket = dir.join("run/o.sock");
+    let (claude_dir, bin) = (dir.join("claude"), dir.join("bin"));
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    // Stands in for claude: records what its environment says, then exits.
+    let stub = bin.join("claude");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"${{VALK_SESSION_HOOKS:-unset}}\" > {}/env-claude\n",
+            dir.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut daemon = valk(&socket, &dir)
+        .env("CLAUDE_CONFIG_DIR", &claude_dir)
+        .arg("daemon")
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let spawn = |command: &[&str]| {
+        (0..100)
+            .find_map(|_| {
+                let out = valk(&socket, &dir)
+                    .args(["new", "--"])
+                    .args(command)
+                    .output()
+                    .unwrap();
+                if out.status.success() {
+                    return Some(out);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                None
+            })
+            .expect("daemon did not start")
+    };
+    spawn(&[stub.to_str().unwrap()]);
+    let shell = format!(
+        "printf '%s' \"${{VALK_SESSION_HOOKS:-unset}}\" > {}/env-sh",
+        dir.display()
+    );
+    spawn(&["sh", "-c", &shell]);
+    let read = |name: &str| {
+        let file = dir.join(name);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            if let Ok(text) = std::fs::read_to_string(&file)
+                && !text.is_empty()
+            {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("{name} never written");
+    };
+    assert_eq!(read("env-claude"), "1", "an agent launched with its hooks");
+    assert_eq!(
+        read("env-sh"),
+        "unset",
+        "a shell has none to be quiet about"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+            .unwrap();
+    assert!(
+        doc["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("context-hook claude --ambient 2>/dev/null || true"),
+        "{doc}"
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

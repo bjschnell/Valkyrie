@@ -82,7 +82,12 @@ enum Cmd {
     /// Print the project's decisions for an agent's session start (ADR-0007). Agents
     /// run this; like `hook`, it never fails.
     #[command(hide = true, name = "context-hook")]
-    ContextHook { agent: String },
+    ContextHook {
+        agent: String,
+        /// Run from the user's own settings: quiet where the session already has it.
+        #[arg(long)]
+        ambient: bool,
+    },
     /// Record a project decision that every agent in this repo gets from now on. Run
     /// by an agent, it is only proposed, for you to accept.
     Decide {
@@ -193,6 +198,20 @@ enum SetupCmd {
         #[arg(long)]
         exe: Option<PathBuf>,
     },
+    /// Add Valkyrie's context hook to Claude Code's own settings
+    /// (~/.claude/settings.json), so a `claude` typed in any Valkyrie session gets
+    /// the project's decisions. `valk` does this itself while Context is on.
+    Claude {
+        /// Print the resulting settings.json instead of writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove Valkyrie's hook instead.
+        #[arg(long)]
+        remove: bool,
+        /// The valk binary the hook runs (default: this one).
+        #[arg(long)]
+        exe: Option<PathBuf>,
+    },
     /// Keep `valk web` running in the background: a systemd user service on Linux,
     /// a launchd agent on macOS. Also puts it behind `tailscale serve`, then shows
     /// a pairing QR code.
@@ -234,14 +253,15 @@ fn main() -> Result<()> {
         hook::run(agent, &socket);
         return Ok(());
     }
-    if let Some(Cmd::ContextHook { agent }) = &cli.cmd {
-        context::hook(agent);
+    if let Some(Cmd::ContextHook { agent, ambient }) = &cli.cmd {
+        context::hook(agent, *ambient);
         return Ok(());
     }
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
 }
 
 async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
+    valkyrie_tui::on_context_change(hook::sync_claude);
     match cmd {
         Some(Cmd::Daemon {
             handoff_check: true,
@@ -257,6 +277,8 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             init_logging();
             let exe = std::env::current_exe()?;
             let state = valkyrie_proto::state_dir();
+            // Also after an upgrade: the binary the hook runs may be a new one.
+            hook::sync_claude(valkyrie_tui::context_enabled());
             match resume_fd {
                 #[cfg(unix)]
                 Some(fd) => valkyrie_daemon::resume(fd, &state, &exe).await,
@@ -474,6 +496,17 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => std::env::current_exe()?,
             };
             hook::setup_codex(&exe, &hook::codex_hooks_path(), remove, dry_run)
+        }
+        Some(Cmd::Setup(SetupCmd::Claude {
+            dry_run,
+            remove,
+            exe,
+        })) => {
+            let exe = match exe {
+                Some(exe) => std::path::absolute(exe)?,
+                None => std::env::current_exe()?,
+            };
+            hook::setup_claude(&exe, &hook::claude_settings_path(), remove, dry_run, false)
         }
         Some(Cmd::Setup(SetupCmd::Web {
             listen,
