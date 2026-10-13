@@ -218,6 +218,7 @@ fn setup_claude_installs_once_keeps_the_rest_and_removes() {
         serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap()
     };
     let ours = |exe: &str| format!("'{exe}' context-hook claude --ambient 2>/dev/null || true");
+    let observer = |exe: &str| format!("'{exe}' hook claude --ambient 2>/dev/null || true");
 
     assert!(setup("/opt/valk", &["--dry-run"]).contains(&ours("/opt/valk")));
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), theirs);
@@ -227,9 +228,14 @@ fn setup_claude_installs_once_keeps_the_rest_and_removes() {
     assert_eq!(doc["model"], "opus");
     let starts = doc["hooks"]["SessionStart"].as_array().unwrap();
     assert_eq!(starts.len(), 2, "{doc}");
-    assert_eq!(starts[1]["hooks"][0]["command"], ours("/opt/valk"));
+    assert_eq!(starts[1]["hooks"][0]["command"], observer("/opt/valk"));
+    assert_eq!(starts[1]["hooks"][1]["command"], ours("/opt/valk"));
     assert_eq!(
-        doc["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        observer("/opt/valk")
+    );
+    assert_eq!(
+        doc["hooks"]["UserPromptSubmit"][0]["hooks"][1]["command"],
         ours("/opt/valk")
     );
     assert!(setup("/opt/valk", &[]).contains("already up to date"));
@@ -387,12 +393,86 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
     assert!(
-        doc["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        doc["hooks"]["SessionStart"][0]["hooks"][1]["command"]
             .as_str()
             .unwrap()
             .ends_with("context-hook claude --ambient 2>/dev/null || true"),
         "{doc}"
     );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The observer hook in Claude Code's own settings reports a typed `claude` to the
+/// daemon, and stays quiet where the session carries the hook itself.
+#[test]
+fn ambient_observer_reports_a_typed_claude_once() {
+    let dir = temp("ambient-observer");
+    let socket = dir.join("run/o.sock");
+    let mut daemon = valk(&socket, &dir)
+        .arg("daemon")
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = (0..100)
+        .find_map(|_| {
+            let out = valk(&socket, &dir)
+                .args(["new", "--", "sleep", "30"])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                return Some(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .expect("daemon did not start");
+    let id = String::from_utf8(new.stdout).unwrap().trim().to_string();
+    let send = |hooked: bool| {
+        let mut cmd = valk(&socket, &dir);
+        cmd.env("VALK_SESSION", &id);
+        if hooked {
+            cmd.env("VALK_SESSION_HOOKS", "1");
+        }
+        let payload = br#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        let mut child = cmd
+            .args(["hook", "claude", "--ambient"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(payload).unwrap();
+        assert_silent_success(&child.wait_with_output().unwrap());
+    };
+    let reported = || {
+        let sessions = dir.join("valkyrie/sessions");
+        std::fs::read_dir(sessions)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .ends_with(&format!("-{id}.events.jsonl"))
+            })
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .map(|log| log.matches(r#""k":"hook""#).count())
+            .sum::<usize>()
+    };
+    send(true);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        reported(),
+        0,
+        "a session with its own hooks hears none twice"
+    );
+    send(false);
+    let start = Instant::now();
+    while reported() == 0 && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(reported(), 1);
     daemon.kill().unwrap();
     daemon.wait().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();

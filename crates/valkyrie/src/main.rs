@@ -78,7 +78,12 @@ enum Cmd {
     /// Forward an agent hook event (stdin JSON) to the daemon. Agents run this; it
     /// prints nothing, always exits 0, and does nothing outside a Valkyrie session.
     #[command(hide = true)]
-    Hook { agent: String },
+    Hook {
+        agent: String,
+        /// Run from the user's own settings: quiet where the session already has it.
+        #[arg(long)]
+        ambient: bool,
+    },
     /// Print the project's decisions for an agent's session start (ADR-0007). Agents
     /// run this; like `hook`, it never fails.
     #[command(hide = true, name = "context-hook")]
@@ -198,17 +203,17 @@ enum SetupCmd {
         #[arg(long)]
         exe: Option<PathBuf>,
     },
-    /// Add Valkyrie's context hook to Claude Code's own settings
-    /// (~/.claude/settings.json), so a `claude` typed in any Valkyrie session gets
-    /// the project's decisions. `valk` does this itself while Context is on.
+    /// Add Valkyrie's hooks to Claude Code's own settings (~/.claude/settings.json),
+    /// so a `claude` typed in any Valkyrie session gets the project's decisions and
+    /// is watched like one Valkyrie started. `valk` does this itself while Context is on.
     Claude {
         /// Print the resulting settings.json instead of writing it.
         #[arg(long)]
         dry_run: bool,
-        /// Remove Valkyrie's hook instead.
+        /// Remove Valkyrie's hooks instead.
         #[arg(long)]
         remove: bool,
-        /// The valk binary the hook runs (default: this one).
+        /// The valk binary the hooks run (default: this one).
         #[arg(long)]
         exe: Option<PathBuf>,
     },
@@ -249,8 +254,8 @@ fn main() -> Result<()> {
         .socket
         .unwrap_or_else(valkyrie_proto::default_socket_path);
     // Hooks run on every agent event: skip the async runtime and never fail.
-    if let Some(Cmd::Hook { agent }) = &cli.cmd {
-        hook::run(agent, &socket);
+    if let Some(Cmd::Hook { agent, ambient }) = &cli.cmd {
+        hook::run(agent, &socket, *ambient);
         return Ok(());
     }
     if let Some(Cmd::ContextHook { agent, ambient }) = &cli.cmd {

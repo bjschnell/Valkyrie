@@ -139,10 +139,11 @@ claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 
 Claude sessions get the active decisions when they start, after `/clear` and
 after compaction, including a `claude` you type into a Valkyrie shell: `valk`
-keeps a context hook in Claude Code's own settings (`~/.claude/settings.json`) that
-does nothing outside a Valkyrie session. The **Context** row in the settings (`,`)
+keeps its hooks in Claude Code's own settings (`~/.claude/settings.json`); they do
+nothing outside a Valkyrie session, and give a typed `claude` the same state
+tracking, correction reading and sibling notes as one Valkyrie started. The **Context** row in the settings (`,`)
 switches this off (`context = off` in `settings.toml`, or `VALK_PROJECT_CONTEXT=off`);
-`valk setup claude --remove` takes the hook out of Claude's settings, and
+`valk setup claude --remove` takes the hooks out of Claude's settings, and
 `valk setup claude` puts it back. Nothing is written to CLAUDE.md. Agents are told they can
 propose decisions with `valk decide`, but a proposal applies only after you accept
 it: on the phone, on the TUI home screen, or with `valk decisions accept <id>`.

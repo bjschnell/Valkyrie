@@ -18,7 +18,15 @@ const MAX_PAYLOAD: u64 = 8 * 1024 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Never fails and never prints; errors only go to `$VALK_HOOK_LOG` if set.
-pub fn run(agent: &str, socket: &Path) {
+pub fn run(agent: &str, socket: &Path, ambient: bool) {
+    // The session was launched with this hook in its own arguments.
+    if ambient && std::env::var_os("VALK_SESSION_HOOKS").is_some() {
+        let _ = std::io::copy(
+            &mut std::io::stdin().take(MAX_PAYLOAD),
+            &mut std::io::sink(),
+        );
+        return;
+    }
     if let Err(e) = forward(agent, socket)
         && let Some(path) = std::env::var_os("VALK_HOOK_LOG")
         && let Ok(mut log) = std::fs::OpenOptions::new()
@@ -203,10 +211,11 @@ pub fn claude_settings_path() -> PathBuf {
     home.join("settings.json")
 }
 
-/// Puts the context hook in Claude Code's own settings, or takes it out, to match
+/// Puts Valkyrie's hooks in Claude Code's own settings, or takes them out, to match
 /// the Context setting. It is how a `claude` typed in a Valkyrie shell (which
 /// Valkyrie never launched, so could not hand `--settings`) still gets the
-/// project's decisions. Best effort: a settings file that can't be edited costs
+/// project's decisions, and still has its corrections read and its edits told to
+/// the other agents. Best effort: a settings file that can't be edited costs
 /// the feature there, not the caller anything.
 ///
 /// A debug build (the test suite's daemons) leaves the real settings alone unless
@@ -228,8 +237,7 @@ pub fn sync_claude(on: bool) {
     }
 }
 
-/// Adds (or with `remove`, takes out) the ambient context hook in Claude Code's
-/// settings. Keeps everything else, writes atomically, and keeps one backup of the
+/// Adds (or with `remove`, takes out) the ambient hooks in Claude Code's settings. Keeps everything else, writes atomically, and keeps one backup of the
 /// file as it was before Valkyrie first changed it. `quiet` prints nothing.
 pub fn setup_claude(
     exe: &Path,
@@ -263,10 +271,9 @@ pub fn setup_claude(
     }
     let doc = existing.clone().unwrap_or(Value::Null);
     let updated = if remove {
-        valkyrie_agents::remove_ambient_context(doc)
+        valkyrie_agents::remove_ambient(doc)
     } else {
-        let command = valkyrie_agents::ambient_context_command(exe);
-        valkyrie_agents::install_ambient_context(doc, &command)
+        valkyrie_agents::install_ambient(doc, exe)
     };
     let text = serde_json::to_string_pretty(&updated)? + "\n";
     if dry_run {
@@ -295,12 +302,9 @@ pub fn setup_claude(
     }
     std::fs::rename(&tmp, path)?;
     if remove {
-        say(format!("removed Valkyrie's hook from {}", path.display()));
+        say(format!("removed Valkyrie's hooks from {}", path.display()));
     } else {
-        say(format!(
-            "installed Valkyrie's context hook in {}",
-            path.display()
-        ));
+        say(format!("installed Valkyrie's hooks in {}", path.display()));
     }
     Ok(())
 }

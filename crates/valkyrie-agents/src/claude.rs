@@ -86,47 +86,55 @@ pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
     json!({ "hooks": hooks })
 }
 
-/// What the context hook in Claude Code's own settings runs. Outside a Valkyrie
-/// session (no `$VALK_SESSION`) it prints nothing, so it can sit in the user's
-/// settings for every `claude`; `--ambient` also keeps it quiet where Valkyrie put
-/// the same hook in the session's settings itself.
-pub fn ambient_context_command(exe: &Path) -> String {
-    format!(
-        "{} context-hook claude --ambient 2>/dev/null || true",
-        shell_quote(exe)
+/// The hooks Valkyrie keeps in Claude Code's own settings, for a `claude` typed
+/// into a Valkyrie shell (which Valkyrie never launched, so could not hand
+/// `--settings`): the same two as a session's own, `valk hook` (the agent's
+/// events, which drive its state, the correction reader and what the other
+/// agents hear) and `valk context-hook` (the project's decisions). Both do nothing
+/// outside a Valkyrie session; `--ambient` also keeps them quiet where the session
+/// carries them already (`$VALK_SESSION_HOOKS`).
+pub fn ambient_commands(exe: &Path) -> (String, String) {
+    let exe = shell_quote(exe);
+    (
+        format!("{exe} hook claude --ambient 2>/dev/null || true"),
+        format!("{exe} context-hook claude --ambient 2>/dev/null || true"),
     )
 }
 
-fn is_ambient_context(command: &str) -> bool {
-    command.contains(" context-hook claude --ambient ")
+fn is_ambient(command: &str) -> bool {
+    command.contains(" hook claude --ambient ")
+        || command.contains(" context-hook claude --ambient ")
 }
 
-/// Claude Code's settings with the ambient context hook running `command` on the
-/// events it answers, replacing any earlier copy of it (from a `valk` that has
-/// moved). Everything else in the settings is kept.
-pub fn install_ambient_context(doc: Value, command: &str) -> Value {
-    let mut doc = remove_ambient_context(doc);
+/// Claude Code's settings with Valkyrie's ambient hooks running `exe`, replacing
+/// any earlier copy (from a `valk` that has moved). Everything else in the
+/// settings is kept.
+pub fn install_ambient(doc: Value, exe: &Path) -> Value {
+    let mut doc = remove_ambient(doc);
     if !doc.is_object() {
         doc = json!({});
     }
     if !doc["hooks"].is_object() {
         doc["hooks"] = json!({});
     }
-    for event in CONTEXT_EVENTS {
-        let groups = &mut doc["hooks"][*event];
+    let (observe, context) = ambient_commands(exe);
+    let ours = hook_settings(&observe, Some(&context));
+    for (event, ours) in ours["hooks"].as_object().into_iter().flatten() {
+        let groups = &mut doc["hooks"][event];
         if !groups.is_array() {
             *groups = json!([]);
         }
-        groups.as_array_mut().unwrap().push(json!({
-            "hooks": [{ "type": "command", "command": command, "timeout": HOOK_TIMEOUT }]
-        }));
+        groups
+            .as_array_mut()
+            .unwrap()
+            .extend(ours.as_array().into_iter().flatten().cloned());
     }
     doc
 }
 
-/// Claude Code's settings without the ambient context hook, wherever `valk` was.
-pub fn remove_ambient_context(doc: Value) -> Value {
-    crate::codex::remove_where(doc, is_ambient_context)
+/// Claude Code's settings without Valkyrie's ambient hooks, wherever `valk` was.
+pub fn remove_ambient(doc: Value) -> Value {
+    crate::codex::remove_where(doc, is_ambient)
 }
 
 pub(crate) fn shell_quote(path: &Path) -> String {
@@ -477,10 +485,14 @@ mod tests {
     }
 
     #[test]
-    fn ambient_context_is_idempotent_follows_a_moved_binary_and_keeps_the_rest() {
-        let mine = ambient_context_command(Path::new("/old/valk"));
+    fn ambient_hooks_are_idempotent_follow_a_moved_binary_and_keep_the_rest() {
+        let (observe, context) = ambient_commands(Path::new("/old/valk"));
         assert_eq!(
-            mine,
+            observe,
+            "'/old/valk' hook claude --ambient 2>/dev/null || true"
+        );
+        assert_eq!(
+            context,
             "'/old/valk' context-hook claude --ambient 2>/dev/null || true"
         );
         let user = json!({
@@ -488,18 +500,26 @@ mod tests {
             "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}],
                       "SessionStart": [{"hooks": [{"type": "command", "command": "mine"}]}]}
         });
-        let once = install_ambient_context(user.clone(), &mine);
-        assert_eq!(install_ambient_context(once.clone(), &mine), once);
-        let moved = ambient_context_command(Path::new("/new/valk"));
-        let again = install_ambient_context(once.clone(), &moved);
-        let starts = again["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(starts.len(), 2, "theirs and one of ours: {again}");
+        let once = install_ambient(user.clone(), Path::new("/old/valk"));
+        assert_eq!(install_ambient(once.clone(), Path::new("/old/valk")), once);
+        let again = install_ambient(once, Path::new("/new/valk"));
+        assert!(!again.to_string().contains("/old/valk"));
+        // Theirs and ours: the observer and the context hook at session start.
         assert_eq!(
-            again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
-            1
+            again["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "mine"
         );
+        assert_eq!(
+            again["hooks"]["SessionStart"][1]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(again["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
         assert_eq!(again["model"], "opus");
-        assert_eq!(remove_ambient_context(again), user);
+        assert_eq!(remove_ambient(again), user);
     }
 
     #[test]
