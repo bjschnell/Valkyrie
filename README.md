@@ -87,6 +87,7 @@ work is merged, `git worktree remove <path>`.
 | | `s` / `S` | mark seen / all seen |
 | | `,` · `t` · `m` | settings · theme · sound |
 | Attached | `^\` | tab mode (below) |
+| | `^^` | new shell tab |
 | | `^]` | back home |
 | Tab mode | `h`/`l` (or `j`/`k`) · `H`/`L` | move between tabs · reorder |
 | | `1`–`9` · `0` · `⇥` | jump to a tab · home · next one needing you |

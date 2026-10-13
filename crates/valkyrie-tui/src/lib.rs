@@ -46,6 +46,9 @@ use valkyrie_proto::{
 pub const DETACH_KEY: u8 = 0x1d;
 /// Ctrl-\ — give the tab strip the keyboard: switch, jump, rename, start sessions.
 pub const TABS_KEY: u8 = 0x1c;
+/// Ctrl-^ — start a shell in a new tab, from where you are. The same as `^\ n`, in one
+/// key; no agent or shell binds it, unlike Ctrl-T or Ctrl-N.
+pub const NEW_TAB_KEY: u8 = 0x1e;
 
 /// How long the TUI keeps trying to reach the daemon after the connection drops. An
 /// upgrade handoff (ADR-0006) takes milliseconds; a daemon restart is not coming back.
@@ -501,7 +504,8 @@ impl App {
                             && self.tab_cursor.is_none()
                             && self.renaming.is_none()
                             && self.menu.is_none()
-                            && !keys.contains(&TABS_KEY) =>
+                            && !keys.contains(&TABS_KEY)
+                            && !keys.contains(&NEW_TAB_KEY) =>
                     {
                         if self.others.is_empty() {
                             self.detach().await;
@@ -551,10 +555,23 @@ impl App {
         }
         let Some(view) = &self.view else { return };
         let id = view.id;
-        match rest.iter().position(|&b| b == DETACH_KEY || b == TABS_KEY) {
+        match rest
+            .iter()
+            .position(|&b| matches!(b, DETACH_KEY | TABS_KEY | NEW_TAB_KEY))
+        {
             Some(i) => {
                 if i > 0 {
                     let _ = self.client.input(id, rest[..i].to_vec());
+                }
+                if rest[i] == NEW_TAB_KEY {
+                    let cwd = self.attached_cwd();
+                    self.new_shell(cwd).await;
+                    // Keys typed right after ^^ in the same read belong to the new tab.
+                    let after = rest[i + 1..].to_vec();
+                    if !after.is_empty() {
+                        Box::pin(self.on_keys(after)).await;
+                    }
+                    return;
                 }
                 if rest[i] == TABS_KEY {
                     self.tab_cursor = Some(self.attached_index().unwrap_or(0));
