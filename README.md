@@ -89,8 +89,10 @@ Codex, run `valk setup codex` once.
 
 <br>
 
-**Updating.** Rerun the same install line. A running daemon is handed to the new
-binary, and every session keeps running.
+**Updating.** Run `valk upgrade`. It downloads the latest release, swaps it in,
+and hands the running daemon to it, so every session keeps running (Windows
+restarts them). The home screen says when a newer release is out. From v0.0.1,
+rerun the install line once to get `valk upgrade`.
 
 **Windows.** The PowerShell installer puts a native `valk` on your user PATH and
 adds a Windows Terminal profile. Use agents installed on Windows and your Windows
