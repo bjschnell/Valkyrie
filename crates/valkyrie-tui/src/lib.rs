@@ -142,6 +142,9 @@ struct App {
     renaming: Option<(SessionId, String)>,
     /// A tab's menu, opened with a right click or `x` in tab mode.
     menu: Option<Menu>,
+    /// The decisions to review, opened over a session with `d` in tab mode, its
+    /// cursor on this proposal.
+    reviewing: Option<usize>,
     /// The tab being dragged to a new place.
     tab_drag: Option<SessionId>,
     /// The attached tab's other panes, when it is split; `view` is the focused one.
@@ -260,6 +263,7 @@ impl App {
             needing: None,
             renaming: None,
             menu: None,
+            reviewing: None,
             tab_drag: None,
             others: Vec::new(),
             layout: None,
@@ -413,16 +417,29 @@ impl App {
             || (self.settings.theme.rain.is_some() && self.view.is_none())
     }
 
-    /// Fetches the selected session's screen for the preview pane.
+    /// Fetches the screen for the preview pane: the selected session's at home, the
+    /// peeked tab's while attached.
     async fn update_preview(&mut self) {
-        if self.view.is_some() {
-            return;
-        }
-        let (Some(id), _) = self.selection() else {
+        let id = match &self.view {
+            None => self.selection().0,
+            Some(_) => self.peeked().map(|s| s.id),
+        };
+        let Some(id) = id else {
             self.preview = None;
             return;
         };
-        self.preview = self.client.dump(id).await.ok().map(|text| (id, text));
+        // Keys wait on this in tab mode: a slow daemon leaves the last one.
+        let dump = tokio::time::timeout(PREVIEW_WAIT, self.client.dump(id)).await;
+        if let Ok(text) = dump {
+            self.preview = text.ok().map(|text| (id, text));
+        }
+    }
+
+    /// The tab the strip's cursor is on, when it is another session than the
+    /// attached tab's: tab mode shows a peek at it.
+    fn peeked(&self) -> Option<&SessionInfo> {
+        let s = self.tab_session(self.tab_cursor?)?;
+        (!self.pane_ids().contains(&s.id)).then_some(s)
     }
 
     async fn refresh(&mut self) {
@@ -489,9 +506,12 @@ impl App {
         self.divider_drag = None;
         self.tab_cursor = None;
         self.menu = None;
+        self.reviewing = None;
         let _ = reset_terminal_modes();
         let _ = self.client.detach().await;
         self.refresh().await;
+        // The preview showed a peeked tab, or nothing, while attached.
+        self.update_preview().await;
     }
 
     async fn on_input(&mut self, mut bytes: Vec<u8>) {
@@ -523,6 +543,7 @@ impl App {
                         }
                     }
                     (None, Input::Mouse(_)) => {}
+                    (Some(_), Input::Mouse(_)) if self.reviewing.is_some() => {}
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
                     // A finished program: any key returns home (or to the next pane),
                     // unless you are reading its scrollback.
@@ -532,6 +553,7 @@ impl App {
                             && self.tab_cursor.is_none()
                             && self.renaming.is_none()
                             && self.menu.is_none()
+                            && self.reviewing.is_none()
                             && find_direct(&keys, &self.settings.keys).is_none() =>
                     {
                         if self.others.is_empty() {
@@ -560,6 +582,9 @@ impl App {
         }
         if self.menu.is_some() {
             return self.menu_keys(&bytes).await;
+        }
+        if self.reviewing.is_some() {
+            return self.review_keys(&bytes).await;
         }
         if self.tab_cursor.is_some() {
             return self.tab_keys(&bytes).await;
@@ -798,6 +823,17 @@ impl App {
                     self.open_focused_pane_menu();
                     return Box::pin(self.menu_keys(keys)).await;
                 }
+                b"d" => {
+                    self.tab_cursor = None;
+                    if self.proposals.is_empty() {
+                        if let Some(view) = &mut self.view {
+                            view.notice("no decisions to review".into());
+                        }
+                    } else {
+                        self.reviewing = Some(0);
+                        return Box::pin(self.review_keys(keys)).await;
+                    }
+                }
                 [DETACH_KEY] => {
                     self.tab_cursor = None;
                     self.detach().await;
@@ -807,6 +843,11 @@ impl App {
                 b"\x1b" if whole => self.tab_cursor = None,
                 _ => {}
             }
+        }
+        // The tick keeps it fresh; a move to another tab can't wait for that.
+        let peeked = self.peeked().map(|s| s.id);
+        if peeked.is_some() && peeked != self.preview.as_ref().map(|(id, _)| *id) {
+            self.update_preview().await;
         }
         if !keys.is_empty() && self.view.is_some() {
             Box::pin(self.on_keys(keys.to_vec())).await;
@@ -1656,14 +1697,20 @@ impl App {
     /// `a`/`d` on the selected row: accept or reject a proposal, or say an active
     /// decision flagged as maybe out of date still holds, or retire it.
     async fn review(&mut self, yes: bool) {
-        let Some(d) = self.proposal() else { return };
+        if let Some(said) = self.review_at(self.selected, yes).await {
+            self.status = said;
+        }
+    }
+
+    /// Reviews proposal `i` (see `review`), and says how it went.
+    async fn review_at(&mut self, i: usize, yes: bool) -> Option<String> {
+        let d = self.proposals.get(i)?;
         let (project, id, title, seen) = (d.project.clone(), d.id, d.title.clone(), d.updated);
         let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
         let armed = self.retire_armed.take() == Some((project.clone(), id));
         if flagged && !yes && !armed {
             self.retire_armed = Some((project, id));
-            self.status = format!("d again to retire #{id}; agents stop getting it");
-            return;
+            return Some(format!("d again to retire #{id}; agents stop getting it"));
         }
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
@@ -1671,10 +1718,50 @@ impl App {
             (true, true) => (ReviewAction::Confirm, "still holds:"),
             (true, false) => (ReviewAction::Retire, "retired"),
         };
-        self.status = match self.client.review(project, id, action, Some(seen)).await {
-            Ok(_) => format!("{done} #{id} {title}"),
-            Err(e) => format!("review failed: {e:#}"),
-        };
+        Some(
+            match self.client.review(project, id, action, Some(seen)).await {
+                Ok(_) => format!("{done} #{id} {title}"),
+                Err(e) => format!("review failed: {e:#}"),
+            },
+        )
+    }
+
+    /// Keys over the decisions opened from a session: move, `a`/`d` as at home, and
+    /// Esc back to the session. Keys after that go to the session.
+    async fn review_keys(&mut self, mut keys: &[u8]) {
+        let toggle = self.settings.keys.get(Action::Tabs).map(Key::bytes);
+        while let Some(cursor) = self.reviewing
+            && !keys.is_empty()
+        {
+            // As in tab mode, its key gives the keyboard back.
+            if let Some(toggle) = &toggle
+                && keys.starts_with(toggle)
+            {
+                keys = &keys[toggle.len()..];
+                self.reviewing = None;
+                continue;
+            }
+            let key = next_key(keys);
+            let whole = key.len() == keys.len();
+            keys = &keys[key.len()..];
+            let last = self.proposals.len().saturating_sub(1);
+            match key {
+                b"k" | b"\x1b[A" | b"\x1bOA" => self.reviewing = Some(cursor.saturating_sub(1)),
+                b"j" | b"\x1b[B" | b"\x1bOB" => self.reviewing = Some((cursor + 1).min(last)),
+                b"a" | b"d" => {
+                    let said = self.review_at(cursor, key == b"a").await;
+                    if let (Some(said), Some(view)) = (said, &mut self.view) {
+                        view.notice(said);
+                    }
+                }
+                [DETACH_KEY] | b"q" => self.reviewing = None,
+                b"\x1b" if whole => self.reviewing = None,
+                _ => {}
+            }
+        }
+        if !keys.is_empty() && self.view.is_some() {
+            Box::pin(self.on_keys(keys.to_vec())).await;
+        }
     }
 
     async fn on_home_key(&mut self, key: HomeKey) {
@@ -1762,6 +1849,10 @@ impl App {
             let anchor = self.anchor();
             self.proposals = items;
             self.restore(anchor);
+            // The reviewed one leaves, so the cursor lands on the next; the last
+            // one closes the list.
+            let last = self.proposals.len().checked_sub(1);
+            self.reviewing = self.reviewing.zip(last).map(|(i, last)| i.min(last));
             return Ok(true);
         }
         if let ServerMsg::Queue { items } = msg {
@@ -1861,28 +1952,39 @@ impl App {
                     let cursor = self.tab_cursor.is_none()
                         && self.renaming.is_none()
                         && self.menu.is_none()
+                        && self.reviewing.is_none()
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none();
                     self.draw_panes(frame, main, cursor);
                     if let Some(tabs) = tabs {
                         self.draw_tabs(frame, tabs);
                     }
+                    if let Some(session) = self.peeked() {
+                        self.draw_peek(frame, main, tabs, session);
+                    }
                     if let Some(menu) = &self.menu {
                         self.draw_menu(frame, menu);
+                    }
+                    if let Some(cursor) = self.reviewing {
+                        self.draw_reviews(frame, main, cursor);
                     }
                     let mode = if self.renaming.is_some() {
                         BarMode::Renaming
                     } else if self.menu.is_some() {
                         BarMode::Menu
+                    } else if self.reviewing.is_some() {
+                        BarMode::Reviewing
                     } else if self.tab_cursor.is_some() {
                         BarMode::Tabs
                     } else {
                         BarMode::Session
                     };
+                    let t = self.settings.theme;
                     let mut line =
-                        attached_bar(view, mode, self.settings.theme, &self.settings.keys);
+                        attached_bar(view, mode, self.proposals.len(), t, &self.settings.keys);
                     if let Some(toast) = self.toast() {
-                        line.spans.extend(toast_spans(toast, self.settings.theme));
+                        line.spans
+                            .extend(toast_spans(toast, self.toast_summary(toast), t));
                     }
                     frame.render_widget(
                         Paragraph::new(line)
@@ -1903,6 +2005,8 @@ impl App {
     }
 }
 
+/// How long a preview waits for the daemon's copy of a screen.
+const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
 
@@ -1937,6 +2041,15 @@ impl App {
             .filter(|(_, at)| at.elapsed() < TOAST_FOR)
             .map(|(ping, _)| ping)
     }
+
+    /// What the pinged session needs or finished, as it is now: a summary can
+    /// arrive after the ping.
+    fn toast_summary(&self, ping: &Ping) -> Option<&str> {
+        self.sessions
+            .iter()
+            .find(|s| s.id == ping.session)
+            .and_then(|s| s.status.summary.as_deref())
+    }
 }
 
 async fn sleep_until(at: Option<Instant>) {
@@ -1945,16 +2058,26 @@ async fn sleep_until(at: Option<Instant>) {
     }
 }
 
-/// ` ● api needs input ` in the ping's color.
-fn toast_spans(ping: &Ping, t: &Theme) -> Vec<ratatui::text::Span<'static>> {
+/// The longest summary a toast carries.
+const TOAST_SUMMARY_MAX: usize = 60;
+
+/// ` ● api needs input ` in the ping's color, then what it asks or finished.
+fn toast_spans(ping: &Ping, summary: Option<&str>, t: &Theme) -> Vec<ratatui::text::Span<'static>> {
     let (icon, color) = match ping.kind {
         Kind::Request => ("●", t.needs),
         Kind::Done => ("✓", t.done),
     };
-    vec![
-        format!(" {icon} {} ", ping.text).fg(t.bg).bg(color).bold(),
-        " ".into(),
-    ]
+    let mut spans = vec![format!(" {icon} {} ", ping.text).fg(t.bg).bg(color).bold()];
+    if let Some(summary) = summary.map(one_line).filter(|s| !s.is_empty()) {
+        spans.push(format!(" {} ", fit(&summary, TOAST_SUMMARY_MAX)).fg(color));
+    }
+    spans.push(" ".into());
+    spans
+}
+
+/// `text` with its whitespace runs (newlines too) made single spaces.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// How often the working spinner advances.
@@ -2117,7 +2240,9 @@ impl App {
             ),
         };
         if let Some(toast) = self.toast() {
-            footer.spans.splice(0..0, toast_spans(toast, t));
+            footer
+                .spans
+                .splice(0..0, toast_spans(toast, self.toast_summary(toast), t));
         }
         frame.render_widget(
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
@@ -2156,12 +2281,24 @@ impl App {
             frame.render_widget(panel(Line::from(" preview ".fg(t.muted)), t, false), area);
             return;
         };
+        self.draw_session_preview(frame, area, session, false);
+    }
+
+    /// A session's state, full summary, then the bottom of its screen, in a panel.
+    fn draw_session_preview(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        session: &SessionInfo,
+        focused: bool,
+    ) {
+        let t = self.settings.theme;
         let title = Line::from(vec![
             " ▸ ".fg(t.accent).bold(),
             session.name.clone().fg(t.fg).bold(),
             format!(" #{} ", session.id).fg(t.muted),
         ]);
-        let block = panel(title, t, false);
+        let block = panel(title, t, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -2200,6 +2337,130 @@ impl App {
     }
 }
 
+impl App {
+    /// A look at the tab the strip's cursor is on, over the attached session, next
+    /// to that tab.
+    fn draw_peek(
+        &self,
+        frame: &mut ratatui::Frame,
+        main: Rect,
+        strip: Option<Rect>,
+        session: &SessionInfo,
+    ) {
+        let width = (main.width * 3 / 5).max(PEEK_MIN_WIDTH).min(main.width);
+        let height = (main.height / 2).max(PEEK_MIN_HEIGHT).min(main.height);
+        let tab = strip.and_then(|strip| {
+            let layout = self.tab_layout(strip);
+            let tab = layout
+                .tabs
+                .iter()
+                .find(|&&(i, _)| Some(i) == self.tab_cursor);
+            tab.map(|&(_, r)| r)
+        });
+        let (x, y) = match (self.settings.tab_side, tab) {
+            (TabSide::Top, Some(r)) => (r.x.min(main.right() - width), main.y),
+            (TabSide::Left, Some(r)) => (main.x, r.y.min(main.bottom() - height)),
+            (TabSide::Right, Some(r)) => (main.right() - width, r.y.min(main.bottom() - height)),
+            _ => (main.x, main.y),
+        };
+        let rect = Rect::new(x.max(main.x), y.max(main.y), width, height);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        self.draw_session_preview(frame, rect, session, true);
+    }
+
+    /// The decisions to review, over the attached session: the list, then the one
+    /// under the cursor in full.
+    fn draw_reviews(&self, frame: &mut ratatui::Frame, area: Rect, cursor: usize) {
+        let t = self.settings.theme;
+        let Some(d) = self.proposals.get(cursor) else {
+            return;
+        };
+        let rows = self.proposals.len().min(PROPOSAL_ROWS) as u16;
+        let width = area.width.min(REVIEWS_MAX_WIDTH);
+        let height = (rows + REVIEWS_BODY_ROWS + 3).min(area.height);
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let title = Line::from(vec![
+            " ◇ ".fg(t.accent2).bold(),
+            "decisions to review ".fg(t.fg).bold(),
+            format!("{} ", self.proposals.len()).fg(t.muted),
+        ]);
+        let flagged = d.fresh.review.is_some();
+        let keys: &[(&str, &str)] = if flagged {
+            &[
+                ("j/k", "move"),
+                ("a", "still holds"),
+                ("d", "retire"),
+                ("esc", "back"),
+            ]
+        } else {
+            &[
+                ("j/k", "move"),
+                ("a", "accept"),
+                ("d", "reject"),
+                ("esc", "back"),
+            ]
+        };
+        let hints = Line::from(
+            keys.iter()
+                .flat_map(|(key, what)| {
+                    [
+                        format!(" {key} ").fg(t.accent).bold(),
+                        format!("{what} ").fg(t.muted),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        let block = panel(title, t, true).title_bottom(hints.centered());
+        let inner = block.inner(rect);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(block, rect);
+
+        let [list, rule, body] = Layout::vertical([
+            Constraint::Length(rows),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(inner);
+        let mut state = TableState::default().with_selected(Some(cursor));
+        frame.render_stateful_widget(
+            proposal_table(self.proposals.iter().map(|d| proposal_row(d, t)), t),
+            list,
+            &mut state,
+        );
+        frame.render_widget(
+            Paragraph::new("─".repeat(rule.width as usize).fg(t.border)),
+            rule,
+        );
+        let mut lines = vec![Line::from(
+            format!(
+                "{}  ·  {} · {}",
+                d.kind.as_str(),
+                proposer(d),
+                short_path(&d.project)
+            )
+            .fg(t.muted),
+        )];
+        if let Some(why) = &d.fresh.review {
+            lines.push(Line::from(
+                format!("may be out of date: {why}").fg(t.interrupted),
+            ));
+        }
+        lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+    }
+}
+
+/// A peek's smallest size, when the session leaves room for it.
+const PEEK_MIN_WIDTH: u16 = 50;
+const PEEK_MIN_HEIGHT: u16 = 12;
+/// The decisions list over a session: its widest, and the rows for the body.
+const REVIEWS_MAX_WIDTH: u16 = 100;
+const REVIEWS_BODY_ROWS: u16 = 8;
 /// Shorter terminals leave the session every row.
 const TABS_MIN_ROWS: u16 = 12;
 /// The column of tabs beside the session: the widest tab, its rule and a margin.
@@ -3332,9 +3593,16 @@ enum BarMode {
     Tabs,
     Menu,
     Renaming,
+    Reviewing,
 }
 
-fn attached_bar(view: &Attached, mode: BarMode, t: &Theme, map: &Keymap) -> Line<'static> {
+fn attached_bar(
+    view: &Attached,
+    mode: BarMode,
+    proposals: usize,
+    t: &Theme,
+    map: &Keymap,
+) -> Line<'static> {
     let mut spans = vec![
         " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
         format!(" {} ", view.name).fg(t.fg).bold(),
@@ -3358,6 +3626,15 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme, map: &Keymap) -> Line
             );
         }
         (None, None) => {}
+    }
+    if proposals > 0 {
+        spans.push(
+            format!(" ◇ {proposals} to review ")
+                .fg(t.bg)
+                .bg(t.accent2)
+                .bold(),
+        );
+        spans.push(" ".into());
     }
     if let Some(page) = &view.scroll {
         let up = page.history - page.from_top;
@@ -3390,6 +3667,7 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme, map: &Keymap) -> Line
             ("n", "new"),
             ("s/v", "split"),
             ("o", "pane"),
+            ("d", "decisions"),
             ("r", "rename"),
             ("x", "close"),
             (",", "settings"),
@@ -3397,6 +3675,8 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme, map: &Keymap) -> Line
         ],
         BarMode::Menu => &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")],
         BarMode::Renaming => &[("↩", "save"), ("esc", "cancel"), ("blank", "folder name")],
+        // The list's own border has its keys.
+        BarMode::Reviewing => &[],
     };
     for (key, what) in keys {
         spans.push(" ".into());
@@ -4382,6 +4662,7 @@ mod tests {
                         Paragraph::new(attached_bar(
                             view,
                             BarMode::Session,
+                            0,
                             app.settings.theme,
                             &app.settings.keys,
                         )),
@@ -4993,6 +5274,141 @@ mod tests {
         for (_, r) in &layout.tabs {
             assert!(r.right() <= layout.plus.x, "tabs overlap the +");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the home screen says, while attached: a peek at the tab under the
+    /// strip's cursor, the decisions to review over the session, and what a ping
+    /// is about.
+    #[tokio::test]
+    async fn a_session_shows_what_the_home_screen_would() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-peek-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = (1..=2)
+            .map(|id| {
+                let mut s = info(id);
+                s.name = format!("proj{id}");
+                s
+            })
+            .collect();
+        app.sessions[0].status.agent = "claude".into();
+        app.sessions[0].status.state = AgentState::ReviewReady;
+        app.sessions[0].status.summary = Some("Fixed the login\nredirect".into());
+        app.preview = Some((1, "cargo test\nall 41 passed\n\n".into()));
+        app.proposals = vec![
+            proposed("/r/api", 1, "Use pnpm"),
+            proposed("/r/api", 2, "Never pkill by pattern"),
+        ];
+        app.proposals[1].body = "It killed tool shells.".into();
+        let mut view = Attached::new(2, "proj2".into(), None);
+        view.apply(update(true, vec![row(0, "inside session 2")]));
+        app.view = Some(view);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let draw = |app: &App, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    let (main, tabs) = app.split_body(body);
+                    let view = app.view.as_ref().unwrap();
+                    render_rows(view.shown(), main, frame.buffer_mut(), None);
+                    app.draw_tabs(frame, tabs.unwrap());
+                    if let Some(session) = app.peeked() {
+                        app.draw_peek(frame, main, tabs, session);
+                    }
+                    if let Some(cursor) = app.reviewing {
+                        app.draw_reviews(frame, main, cursor);
+                    }
+                    let line = attached_bar(
+                        view,
+                        BarMode::Session,
+                        app.proposals.len(),
+                        app.settings.theme,
+                        &app.settings.keys,
+                    );
+                    frame.render_widget(Paragraph::new(line), bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+        };
+
+        // The bar says decisions wait, though home is out of sight.
+        let lines = draw(&app, &mut terminal);
+        assert!(lines[23].contains("◇ 2 to review"), "{}", lines[23]);
+        assert!(!lines.join("\n").contains("all 41 passed"));
+
+        // On its own tab the strip's cursor peeks at nothing: you're looking at it.
+        app.on_keys(vec![TABS_KEY]).await;
+        assert!(app.peeked().is_none());
+        // On another tab: its state, its summary and the bottom of its screen.
+        app.on_keys(b"h".to_vec()).await;
+        assert_eq!(app.peeked().map(|s| s.id), Some(1));
+        let screen = draw(&app, &mut terminal).join("\n");
+        assert!(screen.contains("proj1 #1"), "{screen}");
+        assert!(screen.contains("Fixed the login"), "{screen}");
+        assert!(screen.contains("all 41 passed"), "{screen}");
+        // Leaving tab mode closes it.
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert!(app.peeked().is_none());
+
+        // `d` in tab mode lists the decisions over the session, the first one open.
+        app.on_keys(vec![TABS_KEY, b'd']).await;
+        assert_eq!((app.tab_cursor, app.reviewing), (None, Some(0)));
+        let screen = draw(&app, &mut terminal).join("\n");
+        assert!(screen.contains("decisions to review"), "{screen}");
+        assert!(
+            screen.contains("Use pnpm") && screen.contains("Never pkill"),
+            "{screen}"
+        );
+        assert!(!screen.contains("It killed tool shells"), "{screen}");
+        app.on_keys(b"jjj".to_vec()).await;
+        assert_eq!(app.reviewing, Some(1), "stops at the last");
+        let screen = draw(&app, &mut terminal).join("\n");
+        assert!(screen.contains("It killed tool shells"), "{screen}");
+        // Esc goes back to the session; what follows goes to the program.
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert_eq!(app.reviewing, None);
+
+        // Reviewed away: the cursor stays in the list, and the last one closes it.
+        app.reviewing = Some(1);
+        app.on_push(ServerMsg::Proposals {
+            items: vec![proposed("/r/api", 1, "Use pnpm")],
+        })
+        .unwrap();
+        assert_eq!(app.reviewing, Some(0));
+        app.on_push(ServerMsg::Proposals { items: vec![] }).unwrap();
+        assert_eq!(app.reviewing, None);
+        // With none, `d` says so rather than opening an empty list.
+        app.on_keys(vec![TABS_KEY, b'd']).await;
+        assert_eq!(app.reviewing, None);
+        assert!(app.view.as_ref().unwrap().notice.is_some());
+
+        // A ping says what the session finished, on one line, and short.
+        let ping = Ping {
+            kind: Kind::Done,
+            session: 1,
+            text: "proj1 finished".into(),
+            sound: false,
+        };
+        let toast: String = toast_spans(&ping, app.toast_summary(&ping), app.settings.theme)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(toast, " ✓ proj1 finished  Fixed the login redirect  ");
+        app.sessions[0].status.summary = Some("x".repeat(200));
+        let toast = toast_spans(&ping, app.toast_summary(&ping), app.settings.theme);
+        assert_eq!(toast[1].content.width(), TOAST_SUMMARY_MAX + 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

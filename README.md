@@ -7,7 +7,9 @@ and why. Use it from the terminal (`valk`) or from your phone.
 - **Attention queue.** The home screen is a ranked inbox of sessions waiting on you,
   not a grid of terminals. It shows states such as `needs input`, `blocked`, `done`
   and `working`, read from agent hooks and the screen itself. A chime plays when
-  something new needs you.
+  something new needs you, and says what it asked or finished. Inside a session,
+  tab mode (`^\`) peeks at the tab under its cursor, and decisions waiting for
+  review show in the bar.
 - **Sessions that outlive the TUI.** A daemon owns every PTY. Close the TUI, SSH in
   from elsewhere, and every session keeps running. Unix upgrades keep running
   sessions; Windows upgrades restart them and resume agent conversations.
@@ -96,6 +98,7 @@ work is merged, `git worktree remove <path>`.
 | | `1`–`9` · `0` · `⇥` | jump to a tab · home · next one needing you |
 | | `s` / `v` · `o` | split · move between panes |
 | | `n` · `r` · `x` · `,` | new tab · rename · close · settings |
+| | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
 
 These are the defaults. `K` on the home screen (or in the settings panel) remaps
 any of them: `↩` and then the new key, `⌫` clears one, `r` puts back its default
