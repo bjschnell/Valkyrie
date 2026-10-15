@@ -1,5 +1,6 @@
-//! The matrix and violet themes' effects: digital rain falling through the home screen's
-//! empty rows, a glitching logo and a blinking cursor. All of it is stateless: a
+//! The effects of the themes with rain (matrix, violet, cyberpunk, valkyrie): code
+//! or runes falling through the home screen's empty rows, a logo that glitches into
+//! the same glyphs, and a blinking cursor. All of it is stateless: a
 //! column's speed, trail and phase come from a hash of its x, so a frame depends
 //! only on the clock.
 
@@ -9,9 +10,6 @@ use ratatui::style::Modifier;
 
 use crate::theme::Rain;
 
-/// One column wide in every coding font.
-const GLYPHS: &[u8] = b"0123456789ABCDEFXZ$#@%&*+=<>:;|";
-
 fn mix(mut x: u64) -> u64 {
     // splitmix64's finalizer.
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -20,8 +18,9 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-fn glyph(seed: u64) -> char {
-    GLYPHS[(seed % GLYPHS.len() as u64) as usize] as char
+fn glyph(seed: u64, glyphs: &str) -> char {
+    let n = glyphs.chars().count() as u64;
+    glyphs.chars().nth((seed % n) as usize).unwrap_or(' ')
 }
 
 /// Rain through `regions`, falling the full height of `screen` so drops pass from
@@ -38,7 +37,7 @@ pub fn draw(buf: &mut Buffer, screen: Rect, regions: &[Rect], now_ms: u64, color
                 continue;
             }
             for x in region.left()..region.right() {
-                if let Some((ch, shade)) = drop_at(x, y - screen.y, height, now_ms) {
+                if let Some((ch, shade)) = drop_at(x, y - screen.y, height, now_ms, colors.glyphs) {
                     let cell = &mut buf[(x, y)];
                     cell.set_char(ch);
                     match shade {
@@ -57,7 +56,13 @@ pub fn draw(buf: &mut Buffer, screen: Rect, regions: &[Rect], now_ms: u64, color
 
 /// What column `x` shows at row `y`: a glyph and, for the trail, its shade (an
 /// index into `Rain::trail`); `None` is the head. Or nothing.
-fn drop_at(x: u16, y: u16, height: u64, now_ms: u64) -> Option<(char, Option<usize>)> {
+fn drop_at(
+    x: u16,
+    y: u16,
+    height: u64,
+    now_ms: u64,
+    glyphs: &str,
+) -> Option<(char, Option<usize>)> {
     let h = mix(x as u64);
     // About half the columns are dry.
     if h % 100 < 45 {
@@ -76,7 +81,7 @@ fn drop_at(x: u16, y: u16, height: u64, now_ms: u64) -> Option<(char, Option<usi
     } else {
         now_ms / every
     };
-    let ch = glyph(mix(h ^ ((y as u64) << 32) ^ tick));
+    let ch = glyph(mix(h ^ ((y as u64) << 32) ^ tick), glyphs);
     if behind == 0 {
         return Some((ch, None));
     }
@@ -84,9 +89,9 @@ fn drop_at(x: u16, y: u16, height: u64, now_ms: u64) -> Option<(char, Option<usi
     Some((ch, Some(shade.min(2))))
 }
 
-/// `text` with a letter or two swapped for rain glyphs during a short burst every
+/// `text` with a letter or two swapped for rain `glyphs` during a short burst every
 /// few seconds, otherwise as is.
-pub fn glitch(text: &str, now_ms: u64) -> String {
+pub fn glitch(text: &str, now_ms: u64, glyphs: &str) -> String {
     const EVERY_MS: u64 = 4_000;
     const FOR_MS: u64 = 220;
     let burst = now_ms / EVERY_MS;
@@ -108,7 +113,7 @@ pub fn glitch(text: &str, now_ms: u64) -> String {
             }
             n += 1;
             if n - 1 == a || n - 1 == b {
-                glyph(mix(frame ^ n))
+                glyph(mix(frame ^ n), glyphs)
             } else {
                 c
             }
@@ -130,6 +135,7 @@ mod tests {
     use super::*;
 
     const GREEN: &Rain = crate::theme::MATRIX.rain.as_ref().unwrap();
+    const RUNES: &Rain = crate::theme::VALKYRIE.rain.as_ref().unwrap();
 
     #[test]
     fn rain_keeps_out_of_text() {
@@ -161,16 +167,31 @@ mod tests {
     }
 
     #[test]
+    fn runes_fall() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut b = Buffer::empty(area);
+        draw(&mut b, area, &[area], 5_000, RUNES);
+        let lit: Vec<&str> = b
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .filter(|s| *s != " ")
+            .collect();
+        assert!(!lit.is_empty());
+        assert!(lit.iter().all(|s| RUNES.glyphs.contains(s)), "{lit:?}");
+    }
+
+    #[test]
     fn glitch_keeps_shape() {
         for now in (0..10_000).step_by(13) {
-            let g = glitch("◆ VALKYRIE", now);
+            let g = glitch("◆ VALKYRIE", now, GREEN.glyphs);
             assert_eq!(g.chars().count(), "◆ VALKYRIE".chars().count());
             assert!(g.starts_with("◆ "));
         }
-        assert_eq!(glitch("VALKYRIE", 1_000), "VALKYRIE");
+        assert_eq!(glitch("VALKYRIE", 1_000, GREEN.glyphs), "VALKYRIE");
         assert_ne!(
             (0..220)
-                .map(|t| glitch("VALKYRIE", t))
+                .map(|t| glitch("VALKYRIE", t, GREEN.glyphs))
                 .filter(|g| g != "VALKYRIE")
                 .count(),
             0

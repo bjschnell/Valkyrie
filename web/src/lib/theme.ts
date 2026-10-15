@@ -1,11 +1,11 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * The look: the default Dracula palette, or matrix (green) or violet (pale purple),
- * both mono with digital rain.
+ * The look: the default Dracula palette, or matrix (green), violet (pale purple) or
+ * valkyrie (the app icon's neon), all mono with digital rain; valkyrie's is runes.
  */
-export type Look = "default" | "matrix" | "violet";
-const LOOKS: Look[] = ["default", "matrix", "violet"];
+export type Look = "default" | "matrix" | "violet" | "valkyrie";
+const LOOKS: Look[] = ["default", "matrix", "violet", "valkyrie"];
 
 const KEY = "valk.look";
 const listeners = new Set<() => void>();

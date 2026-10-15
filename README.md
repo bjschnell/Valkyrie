@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="web/public/favicon.svg" width="96" alt="Valkyrie logo">
+<img src="web/public/icons/icon-512.png" width="128" alt="Valkyrie logo: a horned, braided Viking helmet in violet neon">
 
 # Valkyrie
 
@@ -207,7 +207,7 @@ such as vim). Over SSH, the link is copied to your clipboard instead.
 Press `,` to open the settings panel. You can change:
 
 - the theme: `dracula`, `cyberpunk`, `blackout`, `catppuccin`, `nord`, `gruvbox`,
-  `tokyonight`, `matrix` or `violet`
+  `tokyonight`, `matrix`, `violet` or `valkyrie`
 - whether sessions take the theme's colors (`theme`) or your terminal's
   (`terminal`)
 - the tab style (`underline`, `folder`, `cards`) and side (`top`, `left`, `right`)

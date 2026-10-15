@@ -1830,7 +1830,7 @@ code {
   --state: var(--interrupted);
 }
 
-/* Matrix and violet looks: palettes, then the effects both share --------- */
+/* Matrix, violet and valkyrie looks: palettes, then the effects they share */
 
 :root[data-theme="matrix"] {
   --page: #000000;
@@ -1918,6 +1918,51 @@ code {
   --glitch-b: #a3d4ff;
   --rain-head: #f6f2ff;
   --rain-trail: #9a82e6;
+}
+
+:root[data-theme="valkyrie"] {
+  --page: #0b0a14;
+  --surface: #100e1c;
+  --card: #1a1a24;
+  --raised: #2a1858;
+  --line: #3d2a7a;
+  --fg: #ece6ff;
+  --muted: #8577b3;
+  --soft: #c2b6ee;
+  --accent: #9d6bff;
+  --accent2: #ff3ed8;
+  --needs: #ffe36e;
+  --blocked: #ff4d6d;
+  --done: #39ff7a;
+  --working: #c77dff;
+  --interrupted: #ff9e5e;
+  --idle: #5a4f86;
+  --term-bg: #08070f;
+  --term-fg: #ece6ff;
+  --on-accent: #12082e;
+  --font: var(--mono);
+  --ansi-0: #1a1a24;
+  --ansi-1: #ff4d6d;
+  --ansi-2: #39ff7a;
+  --ansi-3: #ffe36e;
+  --ansi-4: #8b6bff;
+  --ansi-5: #ff3ed8;
+  --ansi-6: #5ee7ff;
+  --ansi-7: #d9d2f0;
+  --ansi-8: #4a4566;
+  --ansi-9: #ff7a92;
+  --ansi-10: #7dffa6;
+  --ansi-11: #fff09e;
+  --ansi-12: #a98cff;
+  --ansi-13: #ff7ae6;
+  --ansi-14: #9cf0ff;
+  --ansi-15: #ffffff;
+  --glow: 157 107 255;
+  --glitch-a: #ff3ed8;
+  --glitch-b: #39ff7a;
+  --rain-head: #8dffb0;
+  --rain-trail: #c03ae0;
+  --rain-glyphs: runes;
 }
 
 .rain {

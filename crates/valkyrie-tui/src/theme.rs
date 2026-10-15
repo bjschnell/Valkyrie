@@ -29,18 +29,26 @@ pub struct Theme {
     pub interrupted: Color,
     pub idle: Color,
     /// Digital rain in these colors falls through the home screen's empty rows,
-    /// and the header glitches: the effects of matrix and violet.
+    /// and the header glitches: the effects of matrix, violet, cyberpunk and valkyrie.
     pub rain: Option<Rain>,
     /// The 16 ANSI colors a session's programs draw with: black, red, green,
     /// yellow, blue, magenta, cyan, white, then their bright versions.
     pub ansi: [Color; 16],
 }
 
-/// Digital rain's colors: a drop's head, then its trail, brightest first.
+/// Digital rain: what it's made of, then a drop's head color and its trail's,
+/// brightest first.
 pub struct Rain {
+    pub glyphs: &'static str,
     pub head: Color,
     pub trail: [Color; 3],
 }
+
+/// Code rain: one column wide in every coding font.
+const CODE: &str = "0123456789ABCDEFXZ$#@%&*+=<>:;|";
+/// The Elder Futhark, falling. One column wide too, from the font's own runes or
+/// the terminal's fallback.
+const RUNES: &str = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛊᛏᛒᛖᛗᛚᛜᛞᛟ";
 
 const fn hex(rgb: u32) -> Color {
     Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
@@ -86,7 +94,7 @@ pub const DRACULA: Theme = Theme {
     ],
 };
 
-/// Neon on deep navy.
+/// Neon on deep navy, with runes falling through the home screen.
 pub const CYBERPUNK: Theme = Theme {
     name: "cyberpunk",
     bg: hex(0x0b0c1a),
@@ -105,7 +113,11 @@ pub const CYBERPUNK: Theme = Theme {
     working: hex(0x05d9e8),
     interrupted: hex(0xff9e00),
     idle: hex(0x5a5f8a),
-    rain: None,
+    rain: Some(Rain {
+        glyphs: RUNES,
+        head: hex(0xe6fdff),
+        trail: [hex(0x05d9e8), hex(0xff2a6d), hex(0x5a1a4a)],
+    }),
     ansi: [
         hex(0x1b1e3d),
         hex(0xff003c),
@@ -346,6 +358,7 @@ pub const MATRIX: Theme = Theme {
     interrupted: hex(0xffb000),
     idle: hex(0x1f6e36),
     rain: Some(Rain {
+        glyphs: CODE,
         head: hex(0xe8ffec),
         trail: [hex(0x00ff41), hex(0x00b02c), hex(0x005c18)],
     }),
@@ -389,6 +402,7 @@ pub const VIOLET: Theme = Theme {
     interrupted: hex(0xffc59c),
     idle: hex(0x5f5388),
     rain: Some(Rain {
+        glyphs: CODE,
         head: hex(0xf6f2ff),
         trail: [hex(0xc8b4ff), hex(0x8b70d8), hex(0x463a7d)],
     }),
@@ -412,6 +426,51 @@ pub const VIOLET: Theme = Theme {
     ],
 };
 
+/// The app icon's colors: violet and magenta neon on near-black, the brow rune's
+/// green, and runes falling with green heads.
+pub const VALKYRIE: Theme = Theme {
+    name: "valkyrie",
+    bg: hex(0x0b0a14),
+    panel: hex(0x100e1c),
+    strip: hex(0x06050c),
+    card: hex(0x1a1a24),
+    selection: hex(0x2a1858),
+    border: hex(0x3d2a7a),
+    fg: hex(0xece6ff),
+    muted: hex(0x8577b3),
+    accent: hex(0x9d6bff),
+    accent2: hex(0xff3ed8),
+    needs: hex(0xffe36e),
+    blocked: hex(0xff4d6d),
+    done: hex(0x39ff7a),
+    working: hex(0xc77dff),
+    interrupted: hex(0xff9e5e),
+    idle: hex(0x5a4f86),
+    rain: Some(Rain {
+        glyphs: RUNES,
+        head: hex(0x8dffb0),
+        trail: [hex(0xff3ed8), hex(0x6b3aff), hex(0x33206e)],
+    }),
+    ansi: [
+        hex(0x1a1a24),
+        hex(0xff4d6d),
+        hex(0x39ff7a),
+        hex(0xffe36e),
+        hex(0x8b6bff),
+        hex(0xff3ed8),
+        hex(0x5ee7ff),
+        hex(0xd9d2f0),
+        hex(0x4a4566),
+        hex(0xff7a92),
+        hex(0x7dffa6),
+        hex(0xfff09e),
+        hex(0xa98cff),
+        hex(0xff7ae6),
+        hex(0x9cf0ff),
+        hex(0xffffff),
+    ],
+};
+
 pub const THEMES: &[&Theme] = &[
     &DRACULA,
     &CYBERPUNK,
@@ -422,6 +481,7 @@ pub const THEMES: &[&Theme] = &[
     &TOKYONIGHT,
     &MATRIX,
     &VIOLET,
+    &VALKYRIE,
 ];
 
 impl Theme {
@@ -471,6 +531,16 @@ mod tests {
         }
         assert_eq!(Theme::by_name(" Cyberpunk\n").unwrap().name, "cyberpunk");
         assert!(Theme::by_name("nope").is_none());
+    }
+
+    #[test]
+    fn rain_glyphs_are_one_column_wide() {
+        for glyphs in [CODE, RUNES] {
+            for c in glyphs.chars() {
+                let span = ratatui::text::Span::raw(c.to_string());
+                assert_eq!(span.width(), 1, "{c}");
+            }
+        }
     }
 
     #[test]

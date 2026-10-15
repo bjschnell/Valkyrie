@@ -134,7 +134,7 @@ function trimEnd(runs: Run[]): void {
   }
 }
 
-/** The 16 ANSI colors come from the look's CSS (Dracula unless it's matrix). */
+/** The 16 ANSI colors come from the look's CSS (Dracula in the default look). */
 const ANSI = Array.from({ length: 16 }, (_, i) => `var(--ansi-${i})`);
 
 export function cssColor(c: Color | undefined): string | undefined {

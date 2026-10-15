@@ -3587,9 +3587,9 @@ fn header_line(
     now: u64,
     t: &Theme,
 ) -> Line<'static> {
-    let mut spans = if t.rain.is_some() {
+    let mut spans = if let Some(colors) = &t.rain {
         vec![
-            rain::glitch(" ◆ VALKYRIE ", now)
+            rain::glitch(" ◆ VALKYRIE ", now, colors.glyphs)
                 .fg(t.bg)
                 .bg(t.accent)
                 .bold(),
@@ -4685,7 +4685,7 @@ mod tests {
                 "Do you want to proceed?",
                 "theme",
             ] {
-                // The matrix and violet logos glitch a letter now and then.
+                // The logos of themes with rain glitch a letter now and then.
                 if theme.rain.is_some() && want == "VALKYRIE" {
                     continue;
                 }
