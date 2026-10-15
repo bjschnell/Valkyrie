@@ -21,7 +21,7 @@ qrcode = { version = "0.14", default-features = false }
 # Web Push: RFC 8291 encryption and VAPID signing.
 p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
 hkdf = "0.13"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # The Chat view: an edit as a diff.
 similar = "3"
 # Posting to push services; TLS by rustls with ring (no C toolchain beyond cc).
