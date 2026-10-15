@@ -1,64 +1,135 @@
+<div align="center">
+
+<img src="web/public/favicon.svg" width="96" alt="Valkyrie logo">
+
 # Valkyrie
 
-An attention-first manager for coding-agent CLIs. Run Claude Code, Codex and plain
-shells as sessions under one daemon, and Valkyrie tells you which one needs you next
-and why. Use it from the terminal (`valk`) or from your phone.
+**Run all your coding agents in one place, and know which one needs you next.**
 
-- **Attention queue.** The home screen is a ranked inbox of sessions waiting on you,
-  not a grid of terminals. It shows states such as `needs input`, `blocked`, `done`
-  and `working`, read from agent hooks and the screen itself. A chime plays when
-  something new needs you, and says what it asked or finished. Inside a session,
-  tab mode (`^\`) peeks at the tab under its cursor, and decisions waiting for
-  review show in the bar.
-- **Sessions that outlive the TUI.** A daemon owns every PTY. Close the TUI, SSH in
-  from elsewhere, and every session keeps running. Unix upgrades keep running
-  sessions; Windows upgrades restart them and resume agent conversations.
-  After a reboot, Claude and Codex conversations resume.
-- **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right, as
-  underline, folder or card tabs. Split a tab into panes up, down, left or right.
-- **Phone.** `valk web` serves a PWA over your tailnet. It has the inbox with
-  one-tap answers to prompts, a chat view built from the agent's own transcript, a
-  review of what an agent changed, a way to start new sessions, dictation, and
-  notifications.
-- **No tmux.** Valkyrie hosts the terminals itself (alacritty's VT engine), so it
-  can read state reliably and redraw for a phone.
+[![CI](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml/badge.svg)](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bjschnell/Valkyrie?include_prereleases&label=release&color=bd93f9)](https://github.com/bjschnell/Valkyrie/releases)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-ff79c6)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust)](https://www.rust-lang.org)
+![Platforms](https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20WSL2-50fa7b)
 
-## Install
+[Quick start](#quick-start) · [Screenshots](#screenshots) · [Usage](#usage) · [Phone app](#from-your-phone) · [Project decisions](#project-decisions) · [Install guide](docs/install.md)
 
-### Windows
+<br>
 
-In PowerShell on Windows x64 (Windows 10 version 1809 or newer). It installs native
-`valk`, adds it to your user PATH, and adds a Windows Terminal profile:
+<img src="docs/images/home.svg" alt="The Valkyrie home screen: a queue of sessions that need you, a list of every session, and a preview of the selected one" width="100%">
 
-```powershell
-irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
-```
+</div>
 
-### Prebuilt binary (Linux, WSL2, macOS arm64)
+---
 
-One static binary that carries the web app:
+## What is this?
+
+Run a few Claude Code or Codex sessions at once and one of them will end up
+sitting on a permission prompt while you watch another tab.
+
+Valkyrie runs Claude Code, Codex and plain shells as sessions under one background
+daemon. Its home screen is an inbox ranked by who needs you: `needs input` first,
+then `blocked`, then `done`, with every other session listed below. It reads those
+states from agent hooks and from the screen itself. When something new needs you,
+it plays a chime and tells you what the agent asked or finished.
+
+You use it from the terminal with `valk`, or from your phone.
+
+### Highlights
+
+- **An attention queue, not a grid of terminals.** The home screen lists the
+  sessions waiting on you. Inside a session, tab mode (`^\`) peeks at the tab under
+  its cursor, and decisions waiting for review show in the bar.
+- **Sessions that outlive the TUI.** The daemon owns every terminal. Close the TUI,
+  SSH in from somewhere else, and every session is still running. Upgrades on Unix
+  keep running sessions; Windows upgrades restart them and resume agent
+  conversations. After a reboot, Claude and Codex conversations resume.
+- **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right,
+  drawn as underlines, folders or cards. Split a tab into panes in any direction.
+- **A phone app.** `valk web` serves a PWA over your tailnet with the inbox, one-tap
+  answers to prompts, a chat view built from the agent's transcript, a review of
+  what an agent changed, new sessions, dictation and notifications.
+- **Project decisions.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
+  in the repo starts with it.
+- **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so
+  it can read state reliably and redraw the screen for a phone.
+
+## Quick start
+
+**1. Install.** Pick the line for your system.
 
 ```sh
+# Linux, WSL2, macOS (Apple silicon): one static binary, installed to ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 ```
 
-This installs `valk` to `~/.local/bin`. Rerun the same line to update. A running
-daemon is handed to the new binary, and every session keeps running.
+```powershell
+# Windows x64 (Windows 10 version 1809 or newer), in PowerShell
+irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
+```
 
-### From source
+**2. Start an agent.**
+
+```sh
+valk new -a -- claude      # start Claude Code in a new session and attach to it
+```
+
+**3. Go home.** Press `^]` to get back to the home screen. Start a few more
+sessions, and let the queue tell you where to look.
+
+```sh
+valk                       # open the home screen any time
+```
+
+Claude Code needs no setup, since Valkyrie adds its hooks per session. If you use
+Codex, run `valk setup codex` once.
+
+<details>
+<summary><b>Updating, Windows notes, and building from source</b></summary>
+
+<br>
+
+**Updating.** Rerun the same install line. A running daemon is handed to the new
+binary, and every session keeps running.
+
+**Windows.** The PowerShell installer puts a native `valk` on your user PATH and
+adds a Windows Terminal profile. Use agents installed on Windows and your Windows
+repos. WSL2 is still available through `install-wsl.ps1`.
+
+**From source.** This needs a C toolchain. `install.sh` installs Rust with rustup
+if you don't have it.
 
 ```sh
 git clone https://github.com/bjschnell/Valkyrie.git ~/repos/valkyrie
 cd ~/repos/valkyrie && ./install.sh
 ```
 
-This needs a C toolchain. `install.sh` installs Rust with rustup if you don't have
-it.
+[docs/install.md](docs/install.md) covers each platform in detail.
 
-On Windows, use agents installed on Windows and your Windows repos. WSL2 remains
-available through `install-wsl.ps1`. [docs/install.md](docs/install.md) covers each platform.
+</details>
 
-## Use
+## Screenshots
+
+<sub>Made-up sessions, rendered from the app's own test fixtures.</sub>
+
+**Inside a session.** Every session is a tab that shows its program and state. The
+bar at the bottom has the keys, and the number of decisions waiting for you.
+
+<img src="docs/images/session.svg" alt="An attached Claude Code session under a tab strip showing four sessions and their states" width="100%">
+
+**On your phone.** Answer a permission prompt with one tap, accept a decision an
+agent proposed, or follow an agent's work as a chat.
+
+<p align="center">
+  <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
+</p>
+
+**Themes.** Dracula, Cyberpunk, Blackout, Catppuccin, Nord, Gruvbox and Tokyo
+Night, plus Matrix and Violet, whose home screens have digital rain.
+
+<img src="docs/images/themes.png" alt="The home screen in the tokyonight, matrix, cyberpunk and gruvbox themes" width="100%">
+
+## Usage
 
 ```sh
 valk                       # open the TUI
@@ -69,18 +140,29 @@ valk ls                    # list sessions, with their state
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 ```
 
-Claude Code needs no setup, because its hooks are added per session.
+### One worktree per agent
 
-`-w`/`--worktree [BRANCH]` starts a session in a new git worktree, so agents in
-the same repo never edit one checkout. It goes beside the main checkout as
-`<repo>-<branch>` (`~/repos/app-fix-login`), on a new branch from the current
-`HEAD`, or on BRANCH if it already exists. Without BRANCH, the branch is named
-after `--name`. Uncommitted changes and ignored files (`node_modules`, `.env`)
-don't come along. The phone's New session screen has the same choice, and every
-worktree shares the repo's decisions. Valkyrie doesn't remove worktrees: when the
-work is merged, `git worktree remove <path>`.
+`-w`/`--worktree [BRANCH]` starts a session in a new git worktree, so agents in the
+same repo never edit one checkout. The worktree goes beside the main checkout as
+`<repo>-<branch>` (for example `~/repos/app-fix-login`).
+
+- The branch is new, made from the current `HEAD`, unless BRANCH already exists.
+  Without BRANCH, it's named after `--name`.
+- Uncommitted changes and ignored files (`node_modules`, `.env`) don't come along.
+- Every worktree shares the repo's decisions. The phone's New session screen has
+  the same option.
+- Valkyrie doesn't remove worktrees. Once the work is merged, run
+  `git worktree remove <path>`.
 
 ### Keys
+
+Three keys get you started: `↩` on the home screen attaches to a session, `^]`
+takes you back home, and `Alt-n` steps through each session that needs you.
+
+<details>
+<summary><b>All default keys, remapping, and the mouse</b></summary>
+
+<br>
 
 | Where | Key | Does |
 |---|---|---|
@@ -100,35 +182,50 @@ work is merged, `git worktree remove <path>`.
 | | `n` · `r` · `x` · `,` | new tab · rename · close · settings |
 | | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
 
-These are the defaults. `K` on the home screen (or in the settings panel) remaps
-any of them: `↩` and then the new key, `⌫` clears one, `r` puts back its default
-and `R` twice puts back every default. A key can be Alt and almost any key, or
-Ctrl and a letter, apart from the ones programs need (Ctrl-C, Ctrl-D, Ctrl-Z, …).
-`^]` always goes home, so a map can't lock you out. Changes are kept in
-`settings.toml` as `keys.<action> = "<key>"`.
+**Remapping.** Press `K` on the home screen (or in the settings panel), then `↩`
+and the new key. `⌫` clears a key, `r` puts back its default, and `R` twice puts
+back every default. A key can be Alt and almost any key, or Ctrl and a letter,
+apart from the ones programs need (Ctrl-C, Ctrl-D, Ctrl-Z, …). `^]` always goes
+home, so a remap can't lock you out. Changes are kept in `settings.toml` as
+`keys.<action> = "<key>"`.
 
-On a Mac, set your terminal to send Option as Meta (Terminal.app: Settings →
-Profiles → Keyboard; iTerm2: Profiles → Keys → Left Option key → Esc+) for the Alt
-keys; tab mode works without it.
+**On a Mac,** set your terminal to send Option as Meta for the Alt keys
+(Terminal.app: Settings → Profiles → Keyboard; iTerm2: Profiles → Keys → Left
+Option key → Esc+). Tab mode works without it.
 
-The mouse works too: click a tab, drag it to reorder, right-click it for a menu,
+**The mouse.** Click a tab, drag it to reorder, right-click it for a menu,
 right-click a pane to split it, and drag a divider to resize. Click a link in a
 session to open it in your browser (Ctrl+click over a program that takes the mouse,
-such as vim). Over SSH the link is copied to your clipboard instead.
+such as vim). Over SSH, the link is copied to your clipboard instead.
+
+</details>
 
 ### Settings
 
-`,` opens the settings panel: theme (`dracula`, `cyberpunk`, `blackout`,
-`catppuccin`, `nord`, `gruvbox`, `tokyonight`, plus `matrix` and `violet`, whose
-home screen has digital rain), whether sessions take the theme's colors (`theme`)
-or your terminal's (`terminal`), tab style (`underline`, `folder`, `cards`), tab
-side (`top`, `left`, `right`), and sound. With `theme`, a session's background,
-default text and 16 ANSI colors come from the theme; colors a program picks exactly
-(256-color or RGB) stay as it drew them. Settings are kept in
-`~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
-which you can also edit by hand. `VALK_THEME`,
-`VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_SOUND` and `VALK_PROJECT_CONTEXT` override it for
-one run.
+Press `,` to open the settings panel. You can change:
+
+- the theme: `dracula`, `cyberpunk`, `blackout`, `catppuccin`, `nord`, `gruvbox`,
+  `tokyonight`, `matrix` or `violet`
+- whether sessions take the theme's colors (`theme`) or your terminal's
+  (`terminal`)
+- the tab style (`underline`, `folder`, `cards`) and side (`top`, `left`, `right`)
+- sound, and project context
+
+With `theme` colors, a session's background, default text and 16 ANSI colors come
+from the theme. Colors a program picks exactly (256-color or RGB) stay as it drew
+them.
+
+<details>
+<summary><b>Where settings are kept</b></summary>
+
+<br>
+
+Settings are kept in `~/.config/valkyrie/settings.toml`
+(`%APPDATA%\Valkyrie\settings.toml` on Windows), which you can also edit by hand.
+`VALK_THEME`, `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_SOUND` and
+`VALK_PROJECT_CONTEXT` override it for one run.
+
+</details>
 
 ### From your phone
 
@@ -136,14 +233,21 @@ one run.
 valk setup web    # runs valk web as a service, behind tailscale serve
 ```
 
-It needs HTTPS certificates turned on in the Tailscale admin console. Scan the QR code it prints. Each code works once, for ten minutes. `valk web pair`
-prints another, `valk web devices` lists paired devices, and `valk web revoke <name>`
-unpairs one. The server listens only on localhost, and the daemon never listens on a
+This needs HTTPS certificates turned on in the Tailscale admin console. Scan the
+QR code it prints. Each code works once, for ten minutes.
+
+```sh
+valk web pair             # print another pairing code
+valk web devices          # list paired devices
+valk web revoke <name>    # unpair one
+```
+
+The web server listens only on localhost, and the daemon never listens on a
 network.
 
 ### Project decisions
 
-Tell Valkyrie something once, and every agent in the repo starts with it:
+Tell Valkyrie something once, and every agent in the repo starts with it.
 
 ```sh
 valk decide -k constraint "Never pkill by pattern" "It killed tool shells; kill exact pids."
@@ -155,27 +259,46 @@ valk decisions health     # what waits on you; decisions that may be out of date
 claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 ```
 
-Claude sessions get the active decisions when they start, after `/clear` and
-after compaction, including a `claude` you type into a Valkyrie shell: `valk`
-keeps its hooks in Claude Code's own settings (`~/.claude/settings.json`); they do
-nothing outside a Valkyrie session, and give a typed `claude` the same state
-tracking, correction reading and sibling notes as one Valkyrie started. The **Context** row in the settings (`,`)
-switches this off (`context = off` in `settings.toml`, or `VALK_PROJECT_CONTEXT=off`);
+How it works:
+
+1. **Agents get the rules.** Claude sessions receive the active decisions when they
+   start, after `/clear`, and after compaction. Nothing is written to CLAUDE.md.
+2. **Agents propose, you decide.** Agents are told they can propose decisions with
+   `valk decide`, but a proposal applies only after you accept it: on the phone, on
+   the TUI home screen, or with `valk decisions accept <id>`. An agent can't accept
+   its own.
+3. **Corrections become proposals.** When you correct an agent ("no, we use pnpm"),
+   a small model (Haiku, on your own Claude login, with no tools) reads that
+   exchange and proposes the rule in it. This is on for Claude sessions by default;
+   `valk decisions auto all|off` changes it.
+4. **Agents know about each other.** With each prompt, an agent also hears what the
+   other agents in the same repo are doing: what you asked them, the files they're
+   editing, and any file you've both touched. Two agents don't end up silently
+   editing the same file.
+
+<details>
+<summary><b>Hooks, turning it off, and where decisions are kept</b></summary>
+
+<br>
+
+This also works for a `claude` you type into a Valkyrie shell. `valk` keeps its
+hooks in Claude Code's own settings (`~/.claude/settings.json`). They do nothing
+outside a Valkyrie session, and they give a typed `claude` the same state tracking,
+correction reading and sibling notes as a session Valkyrie started.
+
+To switch context off, use the **Context** row in the settings (`,`), set
+`context = off` in `settings.toml`, or set `VALK_PROJECT_CONTEXT=off`.
 `valk setup claude --remove` takes the hooks out of Claude's settings, and
-`valk setup claude` puts it back. Nothing is written to CLAUDE.md. Agents are told they can
-propose decisions with `valk decide`, but a proposal applies only after you accept
-it: on the phone, on the TUI home screen, or with `valk decisions accept <id>`.
-An agent can't accept its own. When you correct an agent ("no, we use pnpm"), a
-small model (Haiku, on your own Claude login, no tools) reads that exchange and
-proposes the rule in it (Claude sessions by default; `valk decisions auto all|off`). With each prompt,
-an agent also hears what the other agents in the same repo are doing (what you
-asked them, the files they're editing, and any file you've both touched), so two
-agents don't silently edit the same file. Every worktree of a repo shares its decisions,
-which are kept in `~/.local/state/valkyrie/context` (ADR-0007).
+`valk setup claude` puts them back.
+
+Every worktree of a repo shares its decisions, which are kept in
+`~/.local/state/valkyrie/context` (ADR-0007 in [docs/adr](docs/adr)).
+
+</details>
 
 ## How it's built
 
-A Rust workspace:
+Valkyrie is a Rust workspace:
 
 | Crate | Role |
 |---|---|
@@ -191,24 +314,33 @@ A Rust workspace:
 The web app (`web/`, React + Vite) is built into `web/dist`, which is committed and
 embedded in the binary, so building `valk` needs no Node.
 
+## Contributing
+
+Issues and pull requests are welcome. To run the tests:
+
 ```sh
 cargo test --workspace             # Rust tests
 cd web && npm ci && npm test       # web tests; `npm run build` refreshes web/dist
 ```
 
-Pushing a `v*` tag builds the release binaries
-(`.github/workflows/release.yml`). [DESIGN.md](DESIGN.md) is the design and its
-history, and [docs/adr](docs/adr) holds the architecture decisions.
+[DESIGN.md](DESIGN.md) is the design and its history, and [docs/adr](docs/adr)
+holds the architecture decisions. Pushing a `v*` tag builds the release binaries
+(`.github/workflows/release.yml`).
 
 ## Status
 
-Early and in daily use by its author. Built so far: the daemon, TUI, attention queue,
-splits, upgrades, restore after a restart, and the phone app. Still to come, per
-DESIGN.md: the rest of the project context layer (extraction from transcripts,
-staleness, MCP, handoff, Codex injection) and a supervisor agent. Its first slice is
-in: decisions, review, and injection into Claude.
+Early, and in daily use by its author. Built so far: the daemon, TUI, attention
+queue, splits, upgrades, restore after a restart, and the phone app. Still to come,
+per DESIGN.md: the rest of the project context layer (extraction from transcripts,
+staleness, MCP, handoff, Codex injection) and a supervisor agent. The first slice
+of that layer is in: decisions, review, and injection into Claude.
 
 ## License
 
 [AGPL-3.0](LICENSE). You can use, change and share Valkyrie freely. If you run a
 modified version as a service for others, you must offer them its source.
+
+<div align="center">
+<br>
+<sub>If Valkyrie catches a prompt you would have missed, a ⭐ helps other people find it.</sub>
+</div>
