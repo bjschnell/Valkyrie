@@ -222,7 +222,9 @@ away. On Linux, `tailscale serve` needs `sudo tailscale set --operator=$USER` on
 hand instead: `tailscale serve --bg 8790` and `valk web`.
 
 Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
-prints another. `valk web devices` lists paired devices, and `valk web revoke <name>`
+prints another. To use the web app on the computer running Valkyrie, run
+`valk web open`: it opens the app in your browser, already paired. On another
+computer, paste the link `valk web pair` prints into the app's pairing screen. `valk web devices` lists paired devices, and `valk web revoke <name>`
 unpairs one (and stops its notifications).
 
 **Chat.** A Claude Code or Codex session opens on its Chat tab: the conversation from the

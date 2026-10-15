@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { parseCode } from "../lib/pair";
 import { saveToken, useApp } from "../store";
 
 /** A name for this device in `valk web devices`: the platform, roughly. */
@@ -9,26 +10,29 @@ function deviceName(): string {
   if (/Android/.test(ua)) return "Android";
   if (/Mac/.test(ua)) return "Mac";
   if (/Windows/.test(ua)) return "Windows";
+  if (/Linux/.test(ua)) return "Linux";
   return "browser";
 }
 
-/** The code from a scanned pairing link (`/#pair=<code>`). */
-function linkCode(): string | null {
-  const m = /^#pair=([A-Za-z0-9_-]+)$/.exec(location.hash);
-  return m ? m[1] : null;
+/** A mouse, not a camera: say how to pair from this computer instead. */
+function onDesktop(): boolean {
+  return matchMedia("(pointer: fine)").matches;
 }
 
 export function Pair() {
   const status = useApp((s) => s.status);
-  const [code] = useState(linkCode);
+  const [code, setCode] = useState(() => (/^#pair=/.test(location.hash) ? parseCode(location.hash) : null));
   const [state, setState] = useState<"idle" | "pairing" | "failed">(code ? "pairing" : "idle");
   const [error, setError] = useState("");
+  const [typed, setTyped] = useState("");
+  const [desktop] = useState(onDesktop);
 
   useEffect(() => {
     if (!code) return;
     // The code is single-use: out of the address bar (and history) at once.
-    history.replaceState(null, "", location.pathname);
+    if (location.hash) history.replaceState(null, "", location.pathname);
     let live = true;
+    setState("pairing");
     (async () => {
       try {
         const res = await fetch("/api/pair", {
@@ -43,12 +47,15 @@ export function Pair() {
         if (!live) return;
         setError((e as Error).message || "pairing failed");
         setState("failed");
+        setCode(null);
       }
     })();
     return () => {
       live = false;
     };
   }, [code]);
+
+  const pasted = parseCode(typed);
 
   return (
     <main className="pair">
@@ -66,12 +73,47 @@ export function Pair() {
               : "Pair this device to drive your agents from here."}
           </p>
           {error && <p className="pair-error">{error}</p>}
-          <ol className="pair-steps">
-            <li>
-              On the machine running Valkyrie, run <code>valk web pair</code>
-            </li>
-            <li>Scan the QR code it shows with this device's camera</li>
-          </ol>
+          {desktop ? (
+            <ol className="pair-steps">
+              <li>
+                On this computer, run <code>valk web open</code>. It opens Valkyrie here, paired.
+              </li>
+              <li>
+                On another one, run <code>valk web pair</code> on the machine running Valkyrie and paste the link it
+                prints below
+              </li>
+            </ol>
+          ) : (
+            <ol className="pair-steps">
+              <li>
+                On the machine running Valkyrie, run <code>valk web pair</code>
+              </li>
+              <li>Scan the QR code it shows with this device's camera</li>
+            </ol>
+          )}
+          <form
+            className="pair-paste"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (pasted) {
+                setError("");
+                setCode(pasted);
+                setTyped("");
+              }
+            }}
+          >
+            <input
+              aria-label="Pairing link or code"
+              placeholder="Paste a pairing link or code"
+              autoComplete="off"
+              spellCheck={false}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+            />
+            <button className="primary" type="submit" disabled={!pasted}>
+              Pair
+            </button>
+          </form>
           <p className="pair-note">The code works once, for ten minutes.</p>
         </>
       )}

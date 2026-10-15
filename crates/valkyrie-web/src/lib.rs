@@ -129,10 +129,28 @@ pub async fn run(opts: Options) -> Result<()> {
     Ok(())
 }
 
+/// A link that pairs whichever browser opens it, once, with a fresh code.
+pub fn pairing_link(store: &auth::Store, url: &str) -> Result<String> {
+    let code = store.new_code()?;
+    Ok(format!("{}/#pair={code}", url.trim_end_matches('/')))
+}
+
+/// Where a browser on this machine reaches the server: the listen address, with
+/// a wildcard one named as localhost.
+pub fn local_url(listen: SocketAddr) -> String {
+    let mut addr = listen;
+    if addr.ip().is_unspecified() {
+        addr.set_ip(match addr {
+            SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    format!("http://{addr}")
+}
+
 /// Prints a fresh pairing code as a QR code and a link.
 pub fn print_pairing(store: &auth::Store, url: &str) -> Result<()> {
-    let code = store.new_code()?;
-    let link = format!("{}/#pair={code}", url.trim_end_matches('/'));
+    let link = pairing_link(store, url)?;
     match qrcode::QrCode::new(link.as_bytes()) {
         Ok(qr) => println!(
             "\n{}\n",
@@ -147,6 +165,7 @@ pub fn print_pairing(store: &auth::Store, url: &str) -> Result<()> {
         "  the code works once, for {} minutes; `valk web pair` makes another",
         auth::CODE_TTL_SECS / 60
     );
+    println!("  on this machine, `valk web open` opens it in your browser instead");
     Ok(())
 }
 
@@ -631,6 +650,19 @@ mod tests {
         };
         assert!(!allowed(&upgrade));
         assert!(allowed(&ClientMsg::List { req: 1 }));
+    }
+
+    #[test]
+    fn this_machine_opens_the_listen_address() {
+        assert_eq!(
+            local_url("127.0.0.1:8790".parse().unwrap()),
+            "http://127.0.0.1:8790"
+        );
+        assert_eq!(
+            local_url("0.0.0.0:8790".parse().unwrap()),
+            "http://127.0.0.1:8790"
+        );
+        assert_eq!(local_url("[::]:8790".parse().unwrap()), "http://[::1]:8790");
     }
 
     #[test]

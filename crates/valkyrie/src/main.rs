@@ -194,6 +194,8 @@ enum Cmd {
 enum WebCmd {
     /// Show a new pairing QR code for the running server.
     Pair,
+    /// Open the web app in this machine's browser, paired.
+    Open,
     /// List paired devices.
     Devices,
     /// Unpair a device by name, or `all`.
@@ -442,6 +444,14 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 let url = valkyrie_web::public_url(url, listen);
                 valkyrie_web::print_pairing(&valkyrie_web::store()?, &url)
             }
+            Some(WebCmd::Open) => {
+                connect(&socket)
+                    .await?
+                    .0
+                    .vouch("pairing this browser")
+                    .await?;
+                open_web(&valkyrie_web::store()?, listen)
+            }
             Some(WebCmd::Devices) => {
                 for d in valkyrie_web::store()?.devices() {
                     println!("{}  (paired {})", d.name, d.created_unix);
@@ -604,6 +614,35 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
 }
 
 /// The TUI reads raw keys from stdin and draws to stdout, so both must be a terminal.
+/// `valk web open`: pairs this machine's browser with a fresh code and opens the
+/// app in it, on the local address (its own origin, so its own device).
+fn open_web(store: &valkyrie_web::auth::Store, listen: std::net::SocketAddr) -> Result<()> {
+    let url = valkyrie_web::local_url(listen);
+    let reachable = std::net::TcpStream::connect_timeout(
+        &url.trim_start_matches("http://").parse()?,
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok();
+    anyhow::ensure!(
+        reachable,
+        "nothing answers at {url}; start it with `valk web` (or `valk setup web`)"
+    );
+    let link = valkyrie_web::pairing_link(store, &url)?;
+    let over_ssh =
+        std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some();
+    if !over_ssh && valkyrie_tui::open_link(&link).is_ok() {
+        println!("opened the web app in your browser");
+        println!("  (if it didn't open: {link})");
+    } else {
+        println!("open this in a browser on this machine: {link}");
+    }
+    println!(
+        "  the code works once, for {} minutes",
+        valkyrie_web::auth::CODE_TTL_SECS / 60
+    );
+    Ok(())
+}
+
 fn require_tty() -> Result<()> {
     use std::io::IsTerminal;
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {

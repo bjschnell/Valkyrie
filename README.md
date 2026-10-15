@@ -240,6 +240,7 @@ QR code it prints. Each code works once, for ten minutes.
 
 ```sh
 valk web pair             # print another pairing code
+valk web open             # open it in this computer's browser, paired
 valk web devices          # list paired devices
 valk web revoke <name>    # unpair one
 ```

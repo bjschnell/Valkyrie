@@ -16,6 +16,7 @@ mod theme;
 
 use anyhow::Result;
 use keys::{Action, Key, Keymap};
+pub use links::open as open_link;
 use mouse::{Input, Mouse, MouseKind, Selection};
 use ping::{Kind, Ping, Pinger};
 use ratatui::Terminal;
