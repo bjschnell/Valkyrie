@@ -327,14 +327,6 @@ cd web && npm ci && npm test       # web tests; `npm run build` refreshes web/di
 holds the architecture decisions. Pushing a `v*` tag builds the release binaries
 (`.github/workflows/release.yml`).
 
-## Status
-
-Early, and in daily use by its author. Built so far: the daemon, TUI, attention
-queue, splits, upgrades, restore after a restart, and the phone app. Still to come,
-per DESIGN.md: the rest of the project context layer (extraction from transcripts,
-staleness, MCP, handoff, Codex injection) and a supervisor agent. The first slice
-of that layer is in: decisions, review, and injection into Claude.
-
 ## License
 
 [AGPL-3.0](LICENSE). You can use, change and share Valkyrie freely. If you run a
