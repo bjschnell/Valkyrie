@@ -85,14 +85,28 @@ work is merged, `git worktree remove <path>`.
 | Home | `↩` / `⇥` | attach to the selected session / the top of the queue |
 | | `n` · `x` · `R` | new shell · kill · rename |
 | | `s` / `S` | mark seen / all seen |
-| | `,` · `t` · `m` | settings · theme · sound |
+| | `,` · `t` · `m` · `K` | settings · theme · sound · keys |
+| Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
+| | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
+| | `Alt-n` | each session that needs you, then back where you started |
+| | `Alt-t` · `Alt-w` · `Alt-o` | new shell tab · close tab · next pane |
 | Attached | `^\` | tab mode (below) |
-| | `^^` | new shell tab |
 | | `^]` | back home |
 | Tab mode | `h`/`l` (or `j`/`k`) · `H`/`L` | move between tabs · reorder |
 | | `1`–`9` · `0` · `⇥` | jump to a tab · home · next one needing you |
 | | `s` / `v` · `o` | split · move between panes |
 | | `n` · `r` · `x` · `,` | new tab · rename · close · settings |
+
+These are the defaults. `K` on the home screen (or in the settings panel) remaps
+any of them: `↩` and then the new key, `⌫` clears one, `r` puts back its default
+and `R` twice puts back every default. A key can be Alt and almost any key, or
+Ctrl and a letter, apart from the ones programs need (Ctrl-C, Ctrl-D, Ctrl-Z, …).
+`^]` always goes home, so a map can't lock you out. Changes are kept in
+`settings.toml` as `keys.<action> = "<key>"`.
+
+On a Mac, set your terminal to send Option as Meta (Terminal.app: Settings →
+Profiles → Keyboard; iTerm2: Profiles → Keys → Left Option key → Esc+) for the Alt
+keys; tab mode works without it.
 
 The mouse works too: click a tab, drag it to reorder, right-click it for a menu,
 right-click a pane to split it, and drag a divider to resize. Click a link in a

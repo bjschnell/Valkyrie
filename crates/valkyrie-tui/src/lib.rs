@@ -4,6 +4,7 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod keys;
 mod links;
 mod mouse;
 mod panes;
@@ -14,6 +15,7 @@ mod settings;
 mod theme;
 
 use anyhow::Result;
+use keys::{Action, Key, Keymap};
 use mouse::{Input, Mouse, MouseKind, Selection};
 use ping::{Kind, Ping, Pinger};
 use ratatui::Terminal;
@@ -42,13 +44,24 @@ use valkyrie_proto::{
     Style,
 };
 
-/// Ctrl-] — detach from the attached session.
-pub const DETACH_KEY: u8 = 0x1d;
-/// Ctrl-\ — give the tab strip the keyboard: switch, jump, rename, start sessions.
-pub const TABS_KEY: u8 = 0x1c;
-/// Ctrl-^ — start a shell in a new tab, from where you are. The same as `^\ n`, in one
-/// key; no agent or shell binds it, unlike Ctrl-T or Ctrl-N.
-pub const NEW_TAB_KEY: u8 = 0x1e;
+/// Ctrl-] — detach from the attached session, whatever the keys page maps.
+pub const DETACH_KEY: u8 = keys::HOME_KEY;
+/// Ctrl-\ — tab mode's key unless remapped; tests type it.
+#[cfg(test)]
+const TABS_KEY: u8 = 0x1c;
+
+/// The first direct key in `bytes`: where it starts, what it does, and its length.
+fn find_direct(bytes: &[u8], map: &Keymap) -> Option<(usize, Action, usize)> {
+    (0..bytes.len()).find_map(|i| map.at(&bytes[i..]).map(|(a, n)| (i, a, n)))
+}
+
+/// A run of Alt-n: where it started (`None`: home), where it last landed, and every
+/// session it has shown, so each one that needs you comes up once.
+struct NeedingRun {
+    from: Option<SessionId>,
+    at: SessionId,
+    shown: Vec<SessionId>,
+}
 
 /// How long the TUI keeps trying to reach the daemon after the connection drops. An
 /// upgrade handoff (ADR-0006) takes milliseconds; a daemon restart is not coming back.
@@ -109,6 +122,8 @@ struct App {
     settings_file: PathBuf,
     /// The settings panel is open, its cursor on this field.
     settings_cursor: Option<usize>,
+    /// The keys page is open (`K` on the home screen).
+    keys_page: Option<KeysPage>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -119,6 +134,10 @@ struct App {
     /// The tab strip has the keyboard, its cursor on this tab (one past the sessions
     /// is "+").
     tab_cursor: Option<usize>,
+    /// The tab attached before this one, for Alt-p.
+    previous: Option<SessionId>,
+    /// The Alt-n run going on, if the last switch was one.
+    needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
     renaming: Option<(SessionId, String)>,
     /// A tab's menu, opened with a right click or `x` in tab mode.
@@ -231,11 +250,14 @@ impl App {
             settings: Settings::load(),
             settings_file: settings::path(),
             settings_cursor: None,
+            keys_page: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
             partial: Vec::new(),
             tab_cursor: None,
+            previous: None,
+            needing: None,
             renaming: None,
             menu: None,
             tab_drag: None,
@@ -457,6 +479,9 @@ impl App {
     }
 
     async fn detach(&mut self) {
+        if let Some(view) = &self.view {
+            self.previous = Some(view.id);
+        }
         self.view = None;
         self.others.clear();
         self.layout = None;
@@ -475,6 +500,9 @@ impl App {
             joined.extend(bytes);
             bytes = joined;
         }
+        if self.keys_page.is_some() {
+            return self.keys_page_keys(&bytes);
+        }
         if self.settings_cursor.is_some() {
             return self.settings_keys(&bytes);
         }
@@ -490,7 +518,7 @@ impl App {
                 match (&self.view, input) {
                     // Detached mid-read: the rest belongs to the home screen.
                     (None, Input::Bytes(rest)) => {
-                        for key in home_keys(&rest) {
+                        for key in home_keys(&rest, &self.settings.keys) {
                             Box::pin(self.on_home_key(key)).await;
                         }
                     }
@@ -504,8 +532,7 @@ impl App {
                             && self.tab_cursor.is_none()
                             && self.renaming.is_none()
                             && self.menu.is_none()
-                            && !keys.contains(&TABS_KEY)
-                            && !keys.contains(&NEW_TAB_KEY) =>
+                            && find_direct(&keys, &self.settings.keys).is_none() =>
                     {
                         if self.others.is_empty() {
                             self.detach().await;
@@ -521,7 +548,7 @@ impl App {
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
         }
-        for key in home_keys(&bytes) {
+        for key in home_keys(&bytes, &self.settings.keys) {
             self.on_home_key(key).await;
         }
     }
@@ -555,39 +582,102 @@ impl App {
         }
         let Some(view) = &self.view else { return };
         let id = view.id;
-        match rest
-            .iter()
-            .position(|&b| matches!(b, DETACH_KEY | TABS_KEY | NEW_TAB_KEY))
-        {
-            Some(i) => {
+        match find_direct(rest, &self.settings.keys) {
+            Some((i, action, len)) => {
                 if i > 0 {
                     let _ = self.client.input(id, rest[..i].to_vec());
                 }
-                if rest[i] == NEW_TAB_KEY {
-                    let cwd = self.attached_cwd();
-                    self.new_shell(cwd).await;
-                    // Keys typed right after ^^ in the same read belong to the new tab.
-                    let after = rest[i + 1..].to_vec();
-                    if !after.is_empty() {
-                        Box::pin(self.on_keys(after)).await;
-                    }
-                    return;
-                }
-                if rest[i] == TABS_KEY {
+                let after = &rest[i + len..];
+                if action == Action::Tabs {
                     self.tab_cursor = Some(self.attached_index().unwrap_or(0));
                     // Keys typed right after ^\ in the same read belong to the strip.
-                    return Box::pin(self.tab_keys(&rest[i + 1..])).await;
+                    return Box::pin(self.tab_keys(after)).await;
                 }
-                self.detach().await;
-                // Keys typed right after ^] in the same read belong to the home screen.
-                for key in home_keys(&rest[i + 1..]) {
-                    Box::pin(self.on_home_key(key)).await;
-                }
+                self.on_direct(action).await;
+                // Keys typed right after it in the same read go where it led.
+                Box::pin(self.after_direct(after)).await;
             }
             None => {
                 let _ = self.client.input(id, rest.to_vec());
             }
         }
+    }
+
+    /// Keys that came in the same read as a direct key, after it.
+    async fn after_direct(&mut self, keys: &[u8]) {
+        if keys.is_empty() {
+            return;
+        }
+        if self.menu.is_some() {
+            self.menu_keys(keys).await;
+        } else if self.view.is_some() {
+            self.on_keys(keys.to_vec()).await;
+        } else {
+            for key in home_keys(keys, &self.settings.keys) {
+                self.on_home_key(key).await;
+            }
+        }
+    }
+
+    /// Does what a direct key says, attached or from home.
+    async fn on_direct(&mut self, action: Action) {
+        let here = self.view.as_ref().map(|v| v.id);
+        match action {
+            // Attached, `on_keys` hands the strip the keyboard; home has no strip.
+            Action::Tabs => {}
+            Action::NewTab => self.new_shell(self.attached_cwd()).await,
+            Action::Home => {
+                if here.is_some() {
+                    self.detach().await;
+                }
+            }
+            Action::Tab(i) => match self.tab_session(i as usize).map(|s| s.id) {
+                Some(id) => self.switch_to(id).await,
+                None => self.say(format!("no tab {}", i + 1)),
+            },
+            Action::NextTab | Action::PrevTab => {
+                let step = if action == Action::NextTab { 1 } else { -1 };
+                let n = self.tabs().len() as isize;
+                if n == 0 {
+                    return;
+                }
+                // From home, forward is the first tab and back the last.
+                let i = match self.attached_index() {
+                    Some(i) => (i as isize + step).rem_euclid(n),
+                    None if step > 0 => 0,
+                    None => n - 1,
+                };
+                if let Some(id) = self.tab_session(i as usize).map(|s| s.id) {
+                    self.switch_to(id).await;
+                }
+            }
+            Action::Needing => self.next_needing().await,
+            Action::Last => {
+                match self
+                    .previous
+                    .filter(|&id| self.sessions.iter().any(|s| s.id == id))
+                {
+                    Some(id) => self.switch_to(id).await,
+                    None => self.say("no tab to go back to".into()),
+                }
+            }
+            Action::Close => {
+                if let Some(id) = here {
+                    self.open_menu(id, MENU_CLOSE);
+                }
+            }
+            Action::Pane => self.cycle_focus(1),
+        }
+    }
+
+    /// Whether `key` is the one tab mode is mapped to.
+    fn is_tabs_key(&self, key: &[u8]) -> bool {
+        self.settings
+            .keys
+            .get(Action::Tabs)
+            .map(Key::bytes)
+            .as_deref()
+            == Some(key)
     }
 
     /// The attached tab's place among the tabs.
@@ -605,9 +695,18 @@ impl App {
     /// Keys while the tab strip has the keyboard. Keys after the one that hands the
     /// keyboard back go to the session.
     async fn tab_keys(&mut self, mut keys: &[u8]) {
+        let toggle = self.settings.keys.get(Action::Tabs).map(Key::bytes);
         while let Some(cursor) = self.tab_cursor
             && !keys.is_empty()
         {
+            // Tab mode's own key gives the keyboard back.
+            if let Some(toggle) = &toggle
+                && keys.starts_with(toggle)
+            {
+                keys = &keys[toggle.len()..];
+                self.tab_cursor = None;
+                continue;
+            }
             let key = next_key(keys);
             // A lone Esc is a key; Esc with more after it is Alt plus that key.
             let whole = key.len() == keys.len();
@@ -704,7 +803,7 @@ impl App {
                     self.detach().await;
                     return;
                 }
-                [TABS_KEY] | b"q" => self.tab_cursor = None,
+                b"q" => self.tab_cursor = None,
                 b"\x1b" if whole => self.tab_cursor = None,
                 _ => {}
             }
@@ -714,9 +813,19 @@ impl App {
         }
     }
 
-    /// Attaches to the next session that needs you, in queue order after this one.
+    /// Attaches to the next session that needs you, in queue order after this one,
+    /// each once; when none is left, goes back to where the run started.
     async fn next_needing(&mut self) {
         let here = self.view.as_ref().map(|v| v.id);
+        // A run goes on while you are where it left you; anywhere else starts one.
+        let mut run = match self.needing.take() {
+            Some(run) if Some(run.at) == here => run,
+            _ => NeedingRun {
+                from: here,
+                at: SessionId::default(),
+                shown: here.into_iter().collect(),
+            },
+        };
         let n = self.queue.len();
         let start = self
             .queue
@@ -725,14 +834,23 @@ impl App {
             .map_or(0, |i| i + 1);
         let next = (0..n)
             .map(|k| self.queue[(start + k) % n].session)
-            .find(|&id| Some(id) != here);
+            .find(|id| !run.shown.contains(id) && Some(*id) != run.from);
         match next {
-            Some(id) => self.switch_to(id).await,
-            None => {
-                if let Some(view) = &mut self.view {
-                    view.notice("nothing else needs you".into());
-                }
+            Some(id) => {
+                self.switch_to(id).await;
+                run.at = id;
+                run.shown.push(id);
+                self.needing = Some(run);
             }
+            None if run.from != here => match run.from {
+                Some(id) if self.sessions.iter().any(|s| s.id == id) => {
+                    self.switch_to(id).await;
+                    self.say("back where you were".into());
+                }
+                Some(_) => self.say("nothing else needs you".into()),
+                None => self.detach().await,
+            },
+            None => self.say("nothing else needs you".into()),
         }
     }
 
@@ -766,7 +884,8 @@ impl App {
                 }
                 [0x15] => name.clear(),
                 b"\x1b" if whole => self.renaming = None,
-                [TABS_KEY] | [0x03] => self.renaming = None,
+                [0x03] => self.renaming = None,
+                k if self.is_tabs_key(k) => self.renaming = None,
                 _ => {}
             }
         }
@@ -959,7 +1078,8 @@ impl App {
                     let close = menu.items().len() - 1;
                     self.pick(close).await
                 }
-                [TABS_KEY] | b"q" => self.menu = None,
+                b"q" => self.menu = None,
+                k if self.is_tabs_key(k) => self.menu = None,
                 b"\x1b" if whole => self.menu = None,
                 _ => {}
             }
@@ -1200,9 +1320,102 @@ impl App {
                 b"l" | b"\x1b[C" | b"\x1bOC" | b"\r" | b" " => self.change(Field::ALL[cursor], 1),
                 b"\x1b" if whole => self.settings_cursor = None,
                 b"," | b"q" | [0x03] => self.settings_cursor = None,
+                b"K" => {
+                    self.settings_cursor = None;
+                    self.keys_page = Some(KeysPage::default());
+                    return;
+                }
                 _ => {}
             }
         }
+    }
+
+    /// Keys while the keys page is open: ↑/↓ pick an action; Enter waits for the
+    /// key to give it (Esc gives up); Backspace clears it; `r` puts back its
+    /// default and `R`, pressed twice, every default; Esc (or `q`) closes.
+    fn keys_page_keys(&mut self, mut keys: &[u8]) {
+        while let Some(page) = &mut self.keys_page
+            && !keys.is_empty()
+        {
+            let action = Action::ALL[page.cursor];
+            if page.capturing {
+                // The whole read is the key: Alt sends Esc and it at once.
+                page.capturing = false;
+                if keys == b"\x1b" {
+                    return;
+                }
+                // A mouse report, an arrow, a paste: not a key to map; keep waiting.
+                if keys.starts_with(b"\x1b[") || keys.starts_with(b"\x1bO") {
+                    page.capturing = true;
+                    return;
+                }
+                match Key::from_bytes(keys) {
+                    Some(key) => self.rebind(action, Some(key)),
+                    None => self.say(
+                        "that key stays the program's: try Alt and a key, or Ctrl and a letter"
+                            .into(),
+                    ),
+                }
+                return;
+            }
+            let key = next_key(keys);
+            let whole = key.len() == keys.len();
+            keys = &keys[key.len()..];
+            let last = Action::ALL.len() - 1;
+            if key != b"R" {
+                page.reset_armed = false;
+            }
+            match key {
+                b"k" | b"\x1b[A" | b"\x1bOA" => page.cursor = page.cursor.saturating_sub(1),
+                b"j" | b"\x1b[B" | b"\x1bOB" => page.cursor = (page.cursor + 1).min(last),
+                b"\r" | b"\n" | b" " => {
+                    page.capturing = true;
+                    let text = format!("press the key for {}", action.label().to_lowercase());
+                    self.say(text);
+                }
+                [0x7f] | [0x08] | b"\x1b[3~" => self.rebind(action, None),
+                b"r" => {
+                    let had = self.settings.keys.reset(action);
+                    self.keys_changed(action, had);
+                }
+                b"R" if page.reset_armed => {
+                    page.reset_armed = false;
+                    self.settings.keys = Keymap::default();
+                    self.settings.save_keys(&self.settings_file);
+                    self.say("every key is back to its default".into());
+                }
+                b"R" => {
+                    page.reset_armed = true;
+                    self.say("R again puts every key back to its default".into());
+                }
+                b"\x1b" if whole => self.keys_page = None,
+                b"q" | b"K" | [0x03] => self.keys_page = None,
+                _ => {}
+            }
+        }
+    }
+
+    fn rebind(&mut self, action: Action, key: Option<Key>) {
+        let had = self.settings.keys.bind(action, key);
+        self.keys_changed(action, had);
+    }
+
+    /// Saves the map and says what changed, and what lost its key to it.
+    fn keys_changed(&mut self, action: Action, had: Option<Action>) {
+        self.settings.save_keys(&self.settings_file);
+        let key = self
+            .settings
+            .keys
+            .get(action)
+            .map_or("no key".into(), Key::label);
+        let mut text = format!("{}: {key}", action.label().to_lowercase());
+        if let Some(had) = had {
+            text += &format!(
+                " (taken from {}, which has none now)",
+                had.label().to_lowercase()
+            );
+        }
+        self.say(text);
     }
 
     async fn on_mouse(&mut self, m: Mouse) {
@@ -1530,6 +1743,8 @@ impl App {
                 }
             }
             HomeKey::NewShell => self.new_shell(None).await,
+            HomeKey::Direct(action) => self.on_direct(action).await,
+            HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
         }
     }
 
@@ -1646,7 +1861,8 @@ impl App {
                     let cursor = self.tab_cursor.is_none()
                         && self.renaming.is_none()
                         && self.menu.is_none()
-                        && self.settings_cursor.is_none();
+                        && self.settings_cursor.is_none()
+                        && self.keys_page.is_none();
                     self.draw_panes(frame, main, cursor);
                     if let Some(tabs) = tabs {
                         self.draw_tabs(frame, tabs);
@@ -1663,7 +1879,8 @@ impl App {
                     } else {
                         BarMode::Session
                     };
-                    let mut line = attached_bar(view, mode, self.settings.theme);
+                    let mut line =
+                        attached_bar(view, mode, self.settings.theme, &self.settings.keys);
                     if let Some(toast) = self.toast() {
                         line.spans.extend(toast_spans(toast, self.settings.theme));
                     }
@@ -1677,6 +1894,9 @@ impl App {
             }
             if let Some(cursor) = self.settings_cursor {
                 self.draw_settings(frame, cursor);
+            }
+            if let Some(page) = &self.keys_page {
+                self.draw_keys_page(frame, page);
             }
         })?;
         Ok(())
@@ -2673,6 +2893,8 @@ impl App {
             "choose ".fg(t.muted),
             " ←→ ".fg(t.accent).bold(),
             "change ".fg(t.muted),
+            " K ".fg(t.accent).bold(),
+            "keys ".fg(t.muted),
             " esc ".fg(t.accent).bold(),
             "done ".fg(t.muted),
         ]);
@@ -2685,6 +2907,92 @@ impl App {
             .style(style::Style::new().bg(t.panel).fg(t.fg));
         frame.render_widget(Paragraph::new(lines).block(block), rect);
     }
+}
+
+impl App {
+    /// The keys page, in the middle of the screen: one row per action with its key,
+    /// and the default beside a key that was changed.
+    fn draw_keys_page(&self, frame: &mut ratatui::Frame, page: &KeysPage) {
+        let t = self.settings.theme;
+        let map = &self.settings.keys;
+        let width = 52;
+        let area = frame.area();
+        // Rows for the actions: what fits, sliding to keep the cursor in view.
+        let room = area.height.saturating_sub(7).max(1) as usize;
+        let shown = Action::ALL.len().min(room);
+        let start = page.cursor.saturating_sub(shown - 1);
+        let height = shown as u16 + 6;
+        let rect = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        )
+        .intersection(area);
+        let mut lines = vec![Line::default()];
+        for (i, &action) in Action::ALL.iter().enumerate().skip(start).take(shown) {
+            let here = i == page.cursor;
+            let key = if here && page.capturing {
+                "press a key…".fg(t.accent).bold()
+            } else {
+                match map.get(action) {
+                    Some(k) if here => k.label().fg(t.accent).bold(),
+                    Some(k) => k.label().fg(t.fg),
+                    None => "—".fg(t.muted),
+                }
+            };
+            let mut line = Line::from(vec![
+                format!("  {:<20}", action.label()).fg(if here { t.fg } else { t.muted }),
+                key,
+            ]);
+            if !map.is_default(action) {
+                let default = Keymap::default()
+                    .get(action)
+                    .map_or("none".into(), Key::label);
+                line.spans
+                    .push(format!("  (default {default})").fg(t.muted));
+            }
+            let pad = (width as usize).saturating_sub(2 + line.width());
+            line.spans.push(" ".repeat(pad).into());
+            lines.push(if here {
+                line.style(style::Style::new().bg(t.selection))
+            } else {
+                line
+            });
+        }
+        lines.push(Line::default());
+        lines.push(Line::from("  ^]  home, always".fg(t.muted)));
+        let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
+        let hints: Vec<_> = if page.capturing {
+            hint(" esc ", "cancel ").to_vec()
+        } else {
+            [
+                hint(" ↩ ", "change "),
+                hint(" ⌫ ", "clear "),
+                hint(" r ", "reset "),
+                hint(" R ", "all "),
+                hint(" esc ", "done "),
+            ]
+            .concat()
+        };
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(style::Style::new().fg(t.accent))
+            .title(" Keys ".fg(t.fg).bold())
+            .title_bottom(Line::from(hints).centered())
+            .style(style::Style::new().bg(t.panel).fg(t.fg));
+        frame.render_widget(Paragraph::new(lines).block(block), rect);
+    }
+}
+
+/// The keys page: its cursor, whether it waits for a key, and whether `R` was
+/// pressed once.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct KeysPage {
+    cursor: usize,
+    capturing: bool,
+    reset_armed: bool,
 }
 
 /// Whether an agent (not a shell or another program) runs in the session.
@@ -3004,6 +3312,7 @@ fn footer_line(
         ("n", "new"),
         ("t", "theme"),
         (",", "settings"),
+        ("K", "keys"),
         ("m", if sound { "sound" } else { "muted" }),
         ("q", "quit"),
     ];
@@ -3025,7 +3334,7 @@ enum BarMode {
     Renaming,
 }
 
-fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
+fn attached_bar(view: &Attached, mode: BarMode, t: &Theme, map: &Keymap) -> Line<'static> {
     let mut spans = vec![
         " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
         format!(" {} ", view.name).fg(t.fg).bold(),
@@ -3065,8 +3374,12 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
     {
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
+    let session = session_hints(map);
     let keys: &[(&str, &str)] = match mode {
-        BarMode::Session => &[("^\\", "tabs"), ("^]", "home")],
+        BarMode::Session => &session
+            .iter()
+            .map(|(k, w)| (k.as_str(), *w))
+            .collect::<Vec<_>>(),
         BarMode::Tabs => &[
             ("h/l", "move"),
             ("H/L", "reorder"),
@@ -3091,6 +3404,30 @@ fn attached_bar(view: &Attached, mode: BarMode, t: &Theme) -> Line<'static> {
         spans.push(format!(" {what}").fg(t.muted));
     }
     Line::from(spans).style(style::Style::new().bg(t.panel))
+}
+
+/// The bar's hints under a session: the keys as mapped, most used first. The tab
+/// keys show as one hint while they are Alt and the digits.
+fn session_hints(map: &Keymap) -> Vec<(String, &'static str)> {
+    let mut hints = Vec::new();
+    let digits = (0..9).all(|i| map.get(Action::Tab(i)) == Some(Key::Alt(b'1' + i)));
+    if digits {
+        hints.push(("alt 1-9".to_string(), "tab"));
+    }
+    for (action, what) in [
+        (Action::NextTab, "next"),
+        (Action::PrevTab, "prev"),
+        (Action::Needing, "next ●"),
+        (Action::Last, "last"),
+        (Action::NewTab, "new"),
+        (Action::Home, "home"),
+        (Action::Tabs, "more"),
+    ] {
+        if let Some(key) = map.get(action) {
+            hints.push((key.label(), what));
+        }
+    }
+    hints
 }
 
 /// `~/repos/x` for paths under `$HOME`.
@@ -3445,6 +3782,10 @@ enum HomeKey {
     /// Ping sounds on/off.
     Sound,
     Rename,
+    /// A key that works the same attached (`keys::Action`).
+    Direct(Action),
+    /// Open the keys page.
+    Keys,
     /// Accept the selected proposal.
     Accept,
     /// Reject the selected proposal.
@@ -3452,7 +3793,7 @@ enum HomeKey {
     Quit,
 }
 
-fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
+fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
     let mut keys = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -3477,6 +3818,11 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
             i += if key == b"\x1b[M" { 6 } else { key.len() };
             continue;
         }
+        if let Some((action, len)) = map.at(rest) {
+            keys.push(HomeKey::Direct(action));
+            i += len;
+            continue;
+        }
         match rest[0] {
             b'k' => keys.push(HomeKey::Up),
             b'j' => keys.push(HomeKey::Down),
@@ -3491,6 +3837,7 @@ fn home_keys(bytes: &[u8]) -> Vec<HomeKey> {
             b',' => keys.push(HomeKey::Settings),
             b'm' => keys.push(HomeKey::Sound),
             b'R' => keys.push(HomeKey::Rename),
+            b'K' => keys.push(HomeKey::Keys),
             b'a' => keys.push(HomeKey::Accept),
             b'd' => keys.push(HomeKey::Reject),
             b'q' | 0x03 => keys.push(HomeKey::Quit),
@@ -3506,10 +3853,49 @@ mod tests {
     use super::*;
     use valkyrie_proto::{Cursor, Span};
 
+    /// The default map's keys go past the program; Esc before `[` or `O` is a
+    /// sequence, and an Alt key no one here claims is the program's.
+    #[test]
+    fn finds_direct_keys() {
+        let map = Keymap::default();
+        let at = |b: &[u8]| map.at(b);
+        assert_eq!(at(b"\x1b3"), Some((Action::Tab(2), 2)));
+        assert_eq!(at(b"\x1bh"), Some((Action::Home, 2)));
+        assert_eq!(at(b"\x1bt"), Some((Action::NewTab, 2)));
+        assert_eq!(at(&[0x1e]), None, "Ctrl-^ is the program's again");
+        assert_eq!(at(&[DETACH_KEY]), Some((Action::Home, 1)));
+        assert_eq!(at(&[TABS_KEY]), Some((Action::Tabs, 1)));
+        assert_eq!(at(b"\x1bk"), Some((Action::PrevTab, 2)));
+        assert_eq!(at(b"\x1bp"), Some((Action::Last, 2)));
+        assert_eq!(at(b"\x1b[A"), None);
+        assert_eq!(at(b"\x1bOA"), None);
+        assert_eq!(at(b"\x1bl"), None, "fish's ls");
+        assert_eq!(at(b"\x1b"), None, "a lone Esc");
+        assert_eq!(at(b"n"), None);
+        assert_eq!(
+            find_direct(b"ls\x1b[D\x1bnx", &map),
+            Some((5, Action::Needing, 2))
+        );
+        assert_eq!(find_direct(b"\x1b[1;3A plain", &map), None);
+        // Home takes them too.
+        assert_eq!(
+            home_keys(b"\x1b2j\x1bn", &map),
+            vec![
+                HomeKey::Direct(Action::Tab(1)),
+                HomeKey::Down,
+                HomeKey::Direct(Action::Needing)
+            ]
+        );
+    }
+
+    fn home_keys_default(bytes: &[u8]) -> Vec<HomeKey> {
+        home_keys(bytes, &Keymap::default())
+    }
+
     #[test]
     fn parses_home_keys() {
         assert_eq!(
-            home_keys(b"j\x1b[Ak\x1bOB\r\tsSq"),
+            home_keys_default(b"j\x1b[Ak\x1bOB\r\tsSq"),
             vec![
                 HomeKey::Down,
                 HomeKey::Up,
@@ -3524,11 +3910,14 @@ mod tests {
         );
         // Mouse reports arriving after a detach are not keys (`m` would toggle sound,
         // an X10 report's raw bytes could be `q` or `x`).
-        assert_eq!(home_keys(b"\x1b[<0;5;3m\x1b[Mqxj"), []);
-        assert_eq!(home_keys(b"\x1b[<0;5;3mj"), [HomeKey::Down]);
+        assert_eq!(home_keys_default(b"\x1b[<0;5;3m\x1b[Mqxj"), []);
+        assert_eq!(home_keys_default(b"\x1b[<0;5;3mj"), [HomeKey::Down]);
         // Nor is the terminal's answer to an image command.
-        assert_eq!(home_keys(b"\x1b_Gi=1;EINVAL:q\x1b\\j"), [HomeKey::Down]);
-        assert_eq!(home_keys(b"ad"), [HomeKey::Accept, HomeKey::Reject]);
+        assert_eq!(
+            home_keys_default(b"\x1b_Gi=1;EINVAL:q\x1b\\j"),
+            [HomeKey::Down]
+        );
+        assert_eq!(home_keys_default(b"ad"), [HomeKey::Accept, HomeKey::Reject]);
     }
 
     /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)
@@ -3990,7 +4379,12 @@ mod tests {
                     render_rows(view.shown(), main, frame.buffer_mut(), None);
                     app.draw_tabs(frame, tabs.unwrap());
                     frame.render_widget(
-                        Paragraph::new(attached_bar(view, BarMode::Session, app.settings.theme)),
+                        Paragraph::new(attached_bar(
+                            view,
+                            BarMode::Session,
+                            app.settings.theme,
+                            &app.settings.keys,
+                        )),
                         bar,
                     );
                 })
@@ -4113,6 +4507,110 @@ mod tests {
         app.tab_click(tabs, right).await;
         app.on_mouse(Mouse::at(MouseKind::Press, 100, 15)).await;
         assert_eq!((app.menu, app.renaming.is_none()), (None, true));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Direct keys that need no switch: Alt-w opens the menu on Close, a missing
+    /// tab or no last tab says so, and the bytes before a direct key reach nobody
+    /// else's tab.
+    #[tokio::test]
+    async fn direct_keys_without_a_switch() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-direct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = (1..=2).map(info).collect();
+        app.view = Some(Attached::new(2, "two".into(), None));
+
+        app.on_keys(b"\x1bw".to_vec()).await;
+        let menu = app.menu.expect("Alt-w opens the menu");
+        assert_eq!((menu.session, menu.cursor), (2, MENU_CLOSE));
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert_eq!(app.menu, None);
+
+        let notice = |app: &App| app.view.as_ref().unwrap().notice.clone().map(|n| n.0);
+        app.on_keys(b"\x1b9".to_vec()).await;
+        assert_eq!(notice(&app).as_deref(), Some("no tab 9"));
+        app.on_keys(b"\x1bp".to_vec()).await;
+        assert_eq!(notice(&app).as_deref(), Some("no tab to go back to"));
+        // Nothing needs you and the run started here: stay.
+        app.on_keys(b"\x1bn".to_vec()).await;
+        assert_eq!(notice(&app).as_deref(), Some("nothing else needs you"));
+        assert_eq!(app.view.as_ref().map(|v| v.id), Some(2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `K` on the home screen opens the keys page. Enter waits for a key and maps
+    /// it, taking it from whoever had it; the map is kept in the settings file, and
+    /// `r`, Backspace and `R R` reset, clear and reset everything.
+    #[tokio::test]
+    async fn keys_page_remaps_and_resets() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.settings_file = dir.join("settings.toml");
+
+        app.on_input(b"K".to_vec()).await;
+        assert_eq!(app.keys_page, Some(KeysPage::default()));
+        // Home is the second row: give it Alt-p, which Last had.
+        app.on_input(b"j\r".to_vec()).await;
+        assert!(app.keys_page.unwrap().capturing);
+        app.on_input(b"\x1bp".to_vec()).await;
+        assert_eq!(app.settings.keys.get(Action::Home), Some(Key::Alt(b'p')));
+        assert_eq!(app.settings.keys.get(Action::Last), None);
+        assert!(app.status.contains("taken from last tab"), "{}", app.status);
+        assert_eq!(Settings::kept(&app.settings_file).keys, app.settings.keys);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| app.draw_keys_page(f, app.keys_page.as_ref().unwrap()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("alt p  (default alt h)"), "{text}");
+        assert!(text.contains("Last tab"));
+
+        // A key the program needs is refused; an arrow while waiting is ignored.
+        app.on_input(b"\r\x1b[A".to_vec()).await;
+        assert!(app.keys_page.unwrap().capturing, "still waiting");
+        app.on_input(b"\x03".to_vec()).await;
+        assert!(app.status.contains("stays the program's"));
+        assert_eq!(app.settings.keys.get(Action::Home), Some(Key::Alt(b'p')));
+        // Ctrl and a letter is fine.
+        app.on_input(b"\r".to_vec()).await;
+        app.on_input(b"\x07".to_vec()).await;
+        assert_eq!(app.settings.keys.get(Action::Home), Some(Key::Ctrl(0x07)));
+
+        app.on_input(b"\x7f".to_vec()).await;
+        assert_eq!(app.settings.keys.get(Action::Home), None);
+        app.on_input(b"r".to_vec()).await;
+        assert_eq!(app.settings.keys.get(Action::Home), Some(Key::Alt(b'h')));
+        app.on_input(b"kR".to_vec()).await;
+        assert_eq!(
+            app.settings.keys.get(Action::Last),
+            None,
+            "one R does nothing"
+        );
+        app.on_input(b"R".to_vec()).await;
+        assert_eq!(app.settings.keys, Keymap::default());
+        assert_eq!(Settings::kept(&app.settings_file).keys, Keymap::default());
+        app.on_input(b"\x1b".to_vec()).await;
+        assert_eq!(app.keys_page, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

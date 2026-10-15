@@ -1,10 +1,12 @@
 //! What the TUI looks and sounds like: the theme and whether sessions take its
-//! colors, how the tabs are drawn and on which side, and pings on or off. Kept in
+//! colors, how the tabs are drawn and on which side, pings on or off, and the
+//! direct keys (`keys`, which `K` remaps). Kept in
 //! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
 //! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
 //! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_SOUND` and `$VALK_PROJECT_CONTEXT` win
 //! over it.
 
+use crate::keys::Keymap;
 use crate::theme::{DRACULA, THEMES, Theme};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -74,6 +76,7 @@ pub struct Settings {
     pub sound: bool,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
+    pub keys: Keymap,
 }
 
 impl PartialEq for Settings {
@@ -85,6 +88,7 @@ impl PartialEq for Settings {
             self.tab_side,
             self.sound,
             self.context,
+            self.keys,
         ) == (
             other.theme.name,
             other.themed_sessions,
@@ -92,6 +96,7 @@ impl PartialEq for Settings {
             other.tab_side,
             other.sound,
             other.context,
+            other.keys,
         )
     }
 }
@@ -111,6 +116,7 @@ impl Default for Settings {
             tab_side: TabSide::Top,
             sound: true,
             context: true,
+            keys: Keymap::default(),
         }
     }
 }
@@ -183,15 +189,24 @@ impl Settings {
     /// it is, so neither an environment override nor another TUI's older picks
     /// are written over it. Failing to save is not worth an error.
     pub fn save_field(&self, field: Field, path: &Path) {
-        let mut kept = Settings::kept(path);
-        match field {
+        Settings::save_with(path, |kept| match field {
             Field::Theme => kept.theme = self.theme,
             Field::SessionColors => kept.themed_sessions = self.themed_sessions,
             Field::Tabs => kept.tabs = self.tabs,
             Field::TabSide => kept.tab_side = self.tab_side,
             Field::Sound => kept.sound = self.sound,
             Field::Context => kept.context = self.context,
-        }
+        });
+    }
+
+    /// Keeps the keymap as it is in `self`, and only it (as `save_field`).
+    pub fn save_keys(&self, path: &Path) {
+        Settings::save_with(path, |kept| kept.keys = self.keys);
+    }
+
+    fn save_with(path: &Path, change: impl FnOnce(&mut Settings)) {
+        let mut kept = Settings::kept(path);
+        change(&mut kept);
         let Some(dir) = path.parent() else { return };
         let _ = std::fs::create_dir_all(dir);
         // Whole or not at all: a new file renamed over the old.
@@ -209,7 +224,9 @@ impl Settings {
              tabs = \"{}\"      # {}\n\
              tab_side = \"{}\"  # {}\n\
              sound = {}\n\
-             context = {}      # agents in Valkyrie sessions get the project's decisions\n",
+             context = {}      # agents in Valkyrie sessions get the project's decisions\n\
+             # Direct keys, where they differ from the defaults: `K` on the home screen.\n\
+             {}",
             self.theme.name,
             names(THEMES.iter().map(|t| t.name)),
             self.value(Field::SessionColors),
@@ -219,6 +236,7 @@ impl Settings {
             names(TabSide::ALL.iter().map(|s| s.name())),
             self.sound,
             self.context,
+            self.keys.to_toml(),
         )
     }
 
@@ -268,7 +286,11 @@ impl Settings {
                 "false" | "off" => self.context = false,
                 _ => {}
             },
-            _ => {}
+            _ => {
+                if let Some(action) = key.strip_prefix("keys.") {
+                    self.keys.set(action, value);
+                }
+            }
         }
     }
 
@@ -378,6 +400,8 @@ mod tests {
         s.cycle(Field::Sound, 1);
         s.cycle(Field::SessionColors, 1);
         s.cycle(Field::Context, 1);
+        s.keys
+            .bind(crate::keys::Action::Home, Some(crate::keys::Key::Alt(b'#')));
         let mut back = Settings::default();
         back.apply(&s.to_toml());
         assert_eq!(back, s);

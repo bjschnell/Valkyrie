@@ -159,6 +159,11 @@ impl App {
             return;
         }
         // Switching from another tab: its modes and images must not carry over.
+        if let Some(view) = &self.view
+            && !ids.contains(&view.id)
+        {
+            self.previous = Some(view.id);
+        }
         if self.view.is_some() {
             let _ = reset_terminal_modes();
         }
