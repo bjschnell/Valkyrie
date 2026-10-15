@@ -4,6 +4,7 @@ mod hook;
 mod mcp;
 mod service;
 mod tools;
+mod update;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -16,7 +17,7 @@ use valkyrie_proto::{SessionId, Size, SpawnSpec};
 #[derive(Parser)]
 #[command(
     name = "valk",
-    version,
+    version = update::VERSION,
     about = "Attention-first manager for coding-agent CLIs"
 )]
 struct Cli {
@@ -38,11 +39,21 @@ enum Cmd {
         #[arg(long, hide = true)]
         handoff_check: bool,
     },
-    /// Switch the running daemon to this binary, keeping every session (ADR-0006).
+    /// Update valk to the latest release, then switch the running daemon to it,
+    /// keeping every session (ADR-0006). A build from source skips the download.
     Upgrade {
-        /// The valk binary to switch to (default: this one).
+        /// Switch the daemon to this valk binary instead; nothing is downloaded.
         #[arg(long)]
         exe: Option<PathBuf>,
+        /// Don't download: switch the daemon to this binary as it is.
+        #[arg(long, conflicts_with = "exe")]
+        local: bool,
+        /// Only say whether a newer release is out.
+        #[arg(long, conflicts_with_all = ["exe", "local"])]
+        check: bool,
+        /// Install this release tag instead of the latest.
+        #[arg(long, value_name = "TAG", conflicts_with_all = ["exe", "local"])]
+        tag: Option<String>,
     },
     /// Spawn a session: `valk new -- claude`.
     New {
@@ -292,7 +303,40 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => valkyrie_daemon::run(&socket, &state, &exe).await,
             }
         }
-        Some(Cmd::Upgrade { exe }) => upgrade(&socket, exe).await,
+        Some(Cmd::Upgrade {
+            exe,
+            local,
+            check,
+            tag,
+        }) => {
+            let next = match exe {
+                Some(exe) => update::Next::Handoff(Some(exe)),
+                None if local => update::Next::Handoff(None),
+                None => update::update(check, tag.as_deref())?,
+            };
+            match next {
+                update::Next::Stop => Ok(()),
+                // A daemon on another protocol runs an older valk; on the same one,
+                // a handoff would only cost a replay (a restart, on Windows).
+                update::Next::Current => match Client::connect(&socket).await {
+                    Ok((client, _))
+                        if client.hello_info().await?.protocol != valkyrie_proto::PROTOCOL =>
+                    {
+                        upgrade(&socket, None).await
+                    }
+                    _ => Ok(()),
+                },
+                update::Next::Handoff(Some(new)) if !local => {
+                    if Client::connect(&socket).await.is_ok() {
+                        upgrade(&socket, Some(new.clone())).await?;
+                    } else {
+                        println!("no daemon running; the next valk command starts one");
+                    }
+                    update::activate(&new)
+                }
+                update::Next::Handoff(exe) => upgrade(&socket, exe).await,
+            }
+        }
         None => {
             require_tty()?;
             let (client, pushes) = connect(&socket).await?;

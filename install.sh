@@ -42,7 +42,7 @@ bin="$HOME/.cargo/bin/valk"
 say "installed $("$bin" --version 2>/dev/null || echo valk) at $bin"
 
 # A daemon from an older build keeps running its sessions; switch it over in place.
-if out="$("$bin" upgrade 2>&1)"; then
+if out="$("$bin" upgrade --local 2>&1)"; then
     say "$out"
 elif printf '%s' "$out" | grep -q "nothing to upgrade"; then
     say "no daemon running yet; the first valk command starts one"

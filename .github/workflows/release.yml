@@ -54,11 +54,19 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
+      # The tag, not the branch a manual run was started from.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
       - name: musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
+      # The tag's commit, also for a manual run: `valk upgrade` compares it with
+      # what the tag points at (build.rs).
+      - name: stamp
+        shell: bash
+        run: echo "VALK_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - run: cargo build --locked --release -p valkyrie --target ${{ matrix.target }}
       - name: publish
         if: runner.os != 'Windows'

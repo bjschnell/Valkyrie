@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-rel
 
 It installs to `~/.local/bin` (set `VALK_BIN_DIR` for another directory, `VALK_VERSION`
 for a tag other than the latest), checks the checksum, and hands a running daemon to
-the new binary. Rerun the same line to update. Ubuntu puts `~/.local/bin` on PATH at
+the new binary. To update, run `valk upgrade` ([Updating](#updating)). Ubuntu puts `~/.local/bin` on PATH at
 login once it exists, so open a new shell after the first install.
 
 To cut a release, from a checkout: `git tag v0.0.2 && git push origin v0.0.2`. The
@@ -81,7 +81,7 @@ your user PATH and a Windows Terminal profile. `VALK_VERSION` selects a release 
 `VALK_BIN_DIR` selects another install directory. Reopen Windows Terminal to see the
 profile. No Rust, WSL, or administrator access is needed.
 
-Rerun the line to update. Each install uses a new version directory, so a running
+To update, run `valk upgrade` or rerun the line. Each install uses a new version directory, so a running
 binary can stay open while its replacement is downloaded. The `valk.cmd` launcher
 runs that native executable. Older version directories are retained; remove them
 once no TUI, web service, or daemon uses them. If you use `valk setup web`, rerun it
@@ -138,7 +138,7 @@ It:
 Windows Terminal reads new profiles, and new terminals pick up PATH, only when they
 start. If it was open while you installed, restart it to see the profile and `valk`.
 
-Rerun the same line to update. Clone repos into the Linux filesystem (`~/repos`), not
+To update, run `valk upgrade` inside WSL. Clone repos into the Linux filesystem (`~/repos`), not
 `/mnt/c`: it's much faster, and file watching works. Behind a corporate proxy, set
 `HTTPS_PROXY` inside WSL. Windows Terminal binds neither `Ctrl-\` nor `Ctrl-]` by
 default. If either does nothing, look for a conflicting action under Settings → Actions.
@@ -163,13 +163,32 @@ checkout in `~/repos`, which also needs `build-essential`); then a Windows Termi
 profile with the command line above and a font with the `⌂ ● ⠋` glyphs, such as
 Cascadia Mono.
 
+## Updating
+
+`valk upgrade` updates everything at once: it downloads the latest release for your
+platform, checks its checksum, puts it in place of the `valk` you ran, and hands the
+running daemon to it. On Linux and macOS every session keeps running; on Windows they
+restart as described above. An open TUI reconnects by itself, and if the new daemon
+speaks a newer protocol it restarts into the new `valk` on the same tab (Linux and
+macOS). Run it from a shell tab inside Valkyrie or from any terminal.
+
+- `valk upgrade --check` only says whether a newer release is out.
+- `valk upgrade --tag v0.0.2` installs that release instead of the latest.
+- `valk upgrade --local` downloads nothing and hands the daemon to this binary.
+- Releases are told apart by the commit they were built from, so a release that is
+  replaced under the same tag is still picked up.
+
+A `valk` built from a checkout never downloads a release over itself: `git pull &&
+./install.sh` rebuilds it and hands the daemon over. `valk upgrade` on such a build only
+does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows 10
+1803 or later already have.
+
 ## After installing
 
 - `valk` opens the TUI. `valk new -a -- claude` starts an agent and attaches.
 - `valk setup codex` once, if you use Codex: it adds Valkyrie's hooks, for accurate
   states. Claude Code needs nothing, because its hooks are added per session.
-- To update, rerun the `install-release.sh` line, or `git pull && ./install.sh` in a
-  checkout.
+- To update, run `valk upgrade` ([Updating](#updating)).
 - `,` opens the settings: the theme, whether sessions take the theme's colors or
   your terminal's, the tab style (`underline`, `folder` or `cards`), which side the
   tabs are on (`top`, `left`, `right`), and sound. They are kept in

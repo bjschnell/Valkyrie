@@ -48,7 +48,7 @@ mv -f "$bin_dir/.valk.new" "$bin_dir/valk"
 bin="$bin_dir/valk"
 say "installed $("$bin" --version 2>/dev/null || echo valk) at $bin"
 
-if out="$("$bin" upgrade 2>&1)"; then
+if out="$("$bin" upgrade --local 2>&1)"; then
     say "$out"
 elif printf '%s' "$out" | grep -q "nothing to upgrade"; then
     say "no daemon running yet; the first valk command starts one"

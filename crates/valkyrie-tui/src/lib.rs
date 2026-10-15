@@ -76,6 +76,8 @@ pub async fn run(
     attach_to: Option<SessionId>,
     socket: PathBuf,
 ) -> Result<()> {
+    // Now, while it names this binary: an upgrade renames a new one over it.
+    let exe = std::env::current_exe();
     // Raw mode, the alternate screen and ratatui's panic hook; then the same
     // terminal behind `Quiet`.
     drop(ratatui::try_init()?);
@@ -90,13 +92,53 @@ pub async fn run(
         let _ = reset_terminal_modes();
         ratatui_hook(info);
     }));
-    let result = App::new(client, socket)
+    let result = App::new(client, socket.clone())
         .run(&mut terminal, pushes, attach_to)
         .await;
     let _ = reset_terminal_modes();
     ratatui::restore();
+    #[cfg(unix)]
+    if let Err(e) = &result
+        && let Some(restart) = e.downcast_ref::<Restart>()
+        && let Ok(exe) = exe
+    {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--socket").arg(&socket).arg("attach");
+        cmd.args(restart.attach.map(|id| id.to_string()));
+        let failed = cmd.exec();
+        anyhow::bail!(
+            "{restart}; restarting as {} failed: {failed}",
+            exe.display()
+        );
+    }
+    #[cfg(windows)]
+    let _ = exe;
     result
 }
+
+/// The daemon came back from an upgrade on a protocol this TUI doesn't speak. On Unix
+/// `run` then restarts the TUI as the binary it was started from, which `valk
+/// upgrade` replaced, on the same session.
+#[derive(Debug)]
+struct Restart {
+    protocol: u32,
+    #[cfg_attr(windows, allow(dead_code))]
+    attach: Option<SessionId>,
+}
+
+impl std::fmt::Display for Restart {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "the daemon now speaks protocol {}, this valk {}; run the new valk",
+            self.protocol,
+            valkyrie_proto::PROTOCOL
+        )
+    }
+}
+
+impl std::error::Error for Restart {}
 
 struct App {
     client: Client,
@@ -372,11 +414,13 @@ impl App {
             };
             let info = match client.hello_info().await {
                 Ok(info) if info.protocol == valkyrie_proto::PROTOCOL => info,
-                Ok(info) => anyhow::bail!(
-                    "the daemon now speaks protocol {}, this valk {}; run the new valk",
-                    info.protocol,
-                    valkyrie_proto::PROTOCOL
-                ),
+                Ok(info) => {
+                    return Err(Restart {
+                        protocol: info.protocol,
+                        attach: self.view.as_ref().map(|v| v.id),
+                    }
+                    .into());
+                }
                 Err(_) => continue,
             };
             self.client = client;
