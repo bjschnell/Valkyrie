@@ -172,6 +172,11 @@ restart as described above. An open TUI reconnects by itself, and if the new dae
 speaks a newer protocol it restarts into the new `valk` on the same tab (Linux and
 macOS). Run it from a shell tab inside Valkyrie or from any terminal.
 
+- The home screen says so too, at the right of its header (`↑ v0.0.2 (abc1234)
+  valk upgrade`). It asks GitHub at most once a day and keeps the answer in
+  `update-check` in the state directory. Turn it off with **Updates** in the settings
+  (`,`), `updates = false` in `settings.toml`, or `VALK_UPDATES=off`. A build from
+  source never asks.
 - `valk upgrade --check` only says whether a newer release is out.
 - `valk upgrade --tag v0.0.2` installs that release instead of the latest.
 - `valk upgrade --local` downloads nothing and hands the daemon to this binary.
@@ -191,10 +196,11 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
 - To update, run `valk upgrade` ([Updating](#updating)).
 - `,` opens the settings: the theme, whether sessions take the theme's colors or
   your terminal's, the tab style (`underline`, `folder` or `cards`), which side the
-  tabs are on (`top`, `left`, `right`), and sound. They are kept in
+  tabs are on (`top`, `left`, `right`), sound, and whether to say when a newer release
+  is out. They are kept in
   `~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
   which you can also edit by hand. `VALK_THEME`,
-  `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE` and `VALK_SOUND` override it
+  `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_SOUND` and `VALK_UPDATES` override it
   for one run.
 
 ## Phone and web

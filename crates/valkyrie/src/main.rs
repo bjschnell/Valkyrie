@@ -278,6 +278,7 @@ fn main() -> Result<()> {
 
 async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
     valkyrie_tui::on_context_change(hook::sync_claude);
+    valkyrie_tui::on_update_check(update::newer_release);
     match cmd {
         Some(Cmd::Daemon {
             handoff_check: true,

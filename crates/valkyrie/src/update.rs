@@ -61,6 +61,35 @@ pub fn update(check: bool, tag: Option<&str>) -> Result<Next> {
     install(&release)
 }
 
+/// The latest release when it isn't this build, as `v0.0.2 (abc1234)`: the TUI's
+/// notice. GitHub is asked at most once a day, the answer kept in
+/// `<state>/update-check`. Quiet: a failure is no notice, and a build from source
+/// never asks.
+pub fn newer_release() -> Option<String> {
+    const DAY: u64 = 24 * 60 * 60;
+    let ours = COMMIT?;
+    let file = valkyrie_proto::state_dir().join("update-check");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let kept = std::fs::read_to_string(&file).ok().and_then(|text| {
+        let mut words = text.split_whitespace();
+        let at: u64 = words.next()?.parse().ok()?;
+        let (commit, tag) = (words.next()?.to_owned(), words.next()?.to_owned());
+        (now.saturating_sub(at) < DAY).then_some(Release { tag, commit })
+    });
+    let latest = match kept {
+        Some(latest) => latest,
+        None => {
+            let latest = find(None).ok()?;
+            let _ = std::fs::write(&file, format!("{now} {} {}\n", latest.commit, latest.tag));
+            latest
+        }
+    };
+    (latest.commit != ours).then(|| format!("{} ({})", latest.tag, &latest.commit[..7]))
+}
+
 fn find(tag: Option<&str>) -> Result<Release> {
     let tag = match tag {
         Some(tag) => tag.to_owned(),

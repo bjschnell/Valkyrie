@@ -67,6 +67,15 @@ struct NeedingRun {
 /// upgrade handoff (ADR-0006) takes milliseconds; a daemon restart is not coming back.
 const RECONNECT_FOR: Duration = Duration::from_secs(10);
 
+static UPDATE_CHECK: std::sync::OnceLock<fn() -> Option<String>> = std::sync::OnceLock::new();
+
+/// Sets how the TUI learns of a newer release: `f` names it (`v0.0.2 (abc1234)`), or
+/// gives `None`. It runs on its own thread, at start and when the Updates setting is
+/// turned on, so it may block on the network.
+pub fn on_update_check(f: fn() -> Option<String>) {
+    let _ = UPDATE_CHECK.set(f);
+}
+
 /// The terminal, through a backend that stays silent while nothing changes.
 type Term = Terminal<quiet::Quiet<CrosstermBackend<std::io::Stdout>>>;
 
@@ -162,6 +171,10 @@ struct App {
     settings: Settings,
     /// Where `settings` are kept.
     settings_file: PathBuf,
+    /// A newer release, for the home screen's header.
+    newer: Option<String>,
+    /// The update check under way.
+    newer_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
     /// The settings panel is open, its cursor on this field.
     settings_cursor: Option<usize>,
     /// The keys page is open (`K` on the home screen).
@@ -294,6 +307,8 @@ impl App {
             quit: false,
             settings: Settings::load(),
             settings_file: settings::path(),
+            newer: None,
+            newer_rx: None,
             settings_cursor: None,
             keys_page: None,
             preview: None,
@@ -338,6 +353,7 @@ impl App {
         if let Some(id) = attach_to {
             self.attach(id).await;
         }
+        self.look_for_updates();
 
         while !self.quit {
             self.draw(terminal)?;
@@ -391,6 +407,10 @@ impl App {
                 _ = tick.tick() => {
                     self.refresh().await;
                     self.update_preview().await;
+                    if let Some(newer) = self.newer_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                        self.newer = newer;
+                        self.newer_rx = None;
+                    }
                 }
                 _ = anim.tick(), if self.animating() => {}
                 _ = sleep_until(self.pinger.next_due()), if self.pinger.next_due().is_some() => {
@@ -1358,6 +1378,22 @@ impl App {
         keys
     }
 
+    /// Asks, off the UI thread, whether a newer release is out, unless the Updates
+    /// setting is off or an answer is already coming.
+    fn look_for_updates(&mut self) {
+        let Some(&check) = UPDATE_CHECK.get() else {
+            return;
+        };
+        if !self.settings.updates || self.newer_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(check());
+        });
+        self.newer_rx = Some(rx);
+    }
+
     /// Steps a setting, keeps it, and lays the screen out again if the tabs moved.
     fn change(&mut self, field: Field, by: isize) {
         let before = self.settings;
@@ -1365,6 +1401,9 @@ impl App {
         self.settings.save_field(field, &self.settings_file);
         if field == Field::Context {
             settings::context_changed(self.settings.context);
+        }
+        if field == Field::Updates {
+            self.look_for_updates();
         }
         if (before.tabs, before.tab_side) != (self.settings.tabs, self.settings.tab_side) {
             self.relayout();
@@ -2153,6 +2192,17 @@ impl App {
             )),
             header,
         );
+        if let Some(newer) = self.newer.as_ref().filter(|_| self.settings.updates) {
+            let notice = Line::from(vec![
+                format!(" ↑ {newer} ").fg(t.bg).bg(t.accent2).bold(),
+                " valk upgrade ".fg(t.muted),
+            ]);
+            // Only where it clears the counts on the left.
+            let left = header_line(&self.queue, &self.sessions, self.proposals.len(), now, t);
+            if left.width() + notice.width() < header.width as usize {
+                frame.render_widget(Paragraph::new(notice).right_aligned(), header);
+            }
+        }
 
         let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
             let [lists, preview] =

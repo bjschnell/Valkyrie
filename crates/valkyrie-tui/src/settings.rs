@@ -1,10 +1,10 @@
 //! What the TUI looks and sounds like: the theme and whether sessions take its
-//! colors, how the tabs are drawn and on which side, pings on or off, and the
-//! direct keys (`keys`, which `K` remaps). Kept in
+//! colors, how the tabs are drawn and on which side, pings on or off, whether to
+//! look for a newer release, and the direct keys (`keys`, which `K` remaps). Kept in
 //! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
 //! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
-//! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_SOUND` and `$VALK_PROJECT_CONTEXT` win
-//! over it.
+//! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_SOUND`, `$VALK_PROJECT_CONTEXT` and
+//! `$VALK_UPDATES` win over it.
 
 use crate::keys::Keymap;
 use crate::theme::{DRACULA, THEMES, Theme};
@@ -76,6 +76,9 @@ pub struct Settings {
     pub sound: bool,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
+    /// The home screen says when a newer release is out (release builds; GitHub is
+    /// asked at most once a day).
+    pub updates: bool,
     pub keys: Keymap,
 }
 
@@ -88,6 +91,7 @@ impl PartialEq for Settings {
             self.tab_side,
             self.sound,
             self.context,
+            self.updates,
             self.keys,
         ) == (
             other.theme.name,
@@ -96,6 +100,7 @@ impl PartialEq for Settings {
             other.tab_side,
             other.sound,
             other.context,
+            other.updates,
             other.keys,
         )
     }
@@ -116,6 +121,7 @@ impl Default for Settings {
             tab_side: TabSide::Top,
             sound: true,
             context: true,
+            updates: true,
             keys: Keymap::default(),
         }
     }
@@ -130,6 +136,7 @@ pub enum Field {
     TabSide,
     Sound,
     Context,
+    Updates,
 }
 
 impl Field {
@@ -140,6 +147,7 @@ impl Field {
         Field::TabSide,
         Field::Sound,
         Field::Context,
+        Field::Updates,
     ];
 
     pub fn label(self) -> &'static str {
@@ -150,6 +158,7 @@ impl Field {
             Field::TabSide => "Tabs on",
             Field::Sound => "Sound",
             Field::Context => "Context",
+            Field::Updates => "Updates",
         }
     }
 }
@@ -166,6 +175,7 @@ impl Settings {
             ("tab_side", "VALK_TAB_SIDE"),
             ("sound", "VALK_SOUND"),
             ("context", "VALK_PROJECT_CONTEXT"),
+            ("updates", "VALK_UPDATES"),
         ] {
             if let Ok(value) = std::env::var(var) {
                 settings.set(key, &value);
@@ -196,6 +206,7 @@ impl Settings {
             Field::TabSide => kept.tab_side = self.tab_side,
             Field::Sound => kept.sound = self.sound,
             Field::Context => kept.context = self.context,
+            Field::Updates => kept.updates = self.updates,
         });
     }
 
@@ -225,6 +236,7 @@ impl Settings {
              tab_side = \"{}\"  # {}\n\
              sound = {}\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
+             updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
              # Direct keys, where they differ from the defaults: `K` on the home screen.\n\
              {}",
             self.theme.name,
@@ -236,6 +248,7 @@ impl Settings {
             names(TabSide::ALL.iter().map(|s| s.name())),
             self.sound,
             self.context,
+            self.updates,
             self.keys.to_toml(),
         )
     }
@@ -286,6 +299,11 @@ impl Settings {
                 "false" | "off" => self.context = false,
                 _ => {}
             },
+            "updates" => match value {
+                "true" | "on" => self.updates = true,
+                "false" | "off" => self.updates = false,
+                _ => {}
+            },
             _ => {
                 if let Some(action) = key.strip_prefix("keys.") {
                     self.keys.set(action, value);
@@ -323,6 +341,7 @@ impl Settings {
             Field::TabSide => self.tab_side.name(),
             Field::Sound => on_off(self.sound),
             Field::Context => on_off(self.context),
+            Field::Updates => on_off(self.updates),
         }
     }
 
@@ -337,6 +356,7 @@ impl Settings {
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::Sound => self.sound = !self.sound,
             Field::Context => self.context = !self.context,
+            Field::Updates => self.updates = !self.updates,
         }
     }
 }
@@ -400,6 +420,7 @@ mod tests {
         s.cycle(Field::Sound, 1);
         s.cycle(Field::SessionColors, 1);
         s.cycle(Field::Context, 1);
+        s.cycle(Field::Updates, 1);
         s.keys
             .bind(crate::keys::Action::Home, Some(crate::keys::Key::Alt(b'#')));
         let mut back = Settings::default();
@@ -413,6 +434,7 @@ mod tests {
         assert!(!back.sound);
         assert!(!back.themed_sessions);
         assert!(!back.context);
+        assert!(!back.updates);
     }
 
     #[test]
@@ -464,7 +486,7 @@ mod tests {
                 Field::Theme => THEMES.len(),
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
-                Field::SessionColors | Field::Sound | Field::Context => 2,
+                Field::SessionColors | Field::Sound | Field::Context | Field::Updates => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);
