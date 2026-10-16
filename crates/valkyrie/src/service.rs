@@ -145,7 +145,7 @@ pub fn run(setup: Setup) -> Result<()> {
         }
     }
     println!("logs: {}", platform.logs(&setup.name));
-    valkyrie_web::print_pairing(&valkyrie_web::store()?, &url)
+    valkyrie_web::print_pairing(&valkyrie_web::store()?, &url, true)
 }
 
 fn wait_for(addr: SocketAddr, limit: Duration) -> bool {

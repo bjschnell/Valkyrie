@@ -81,3 +81,9 @@ export const Prompt = () => (
     <path d="M4 7l5 5-5 5M12 18h8" />
   </svg>
 );
+export const Device = () => (
+  <svg {...base}>
+    <rect x="7" y="3" width="10" height="18" rx="2" />
+    <path d="M11 18h2" />
+  </svg>
+);

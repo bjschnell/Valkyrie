@@ -93,7 +93,7 @@ pub async fn run(opts: Options) -> Result<()> {
         }
     }
     if opts.pair {
-        print_pairing(&store, &url)?;
+        print_pairing(&store, &url, false)?;
     } else {
         println!(
             "  no pairing code: this wasn't started from your own terminal; run `valk web pair` there"
@@ -115,6 +115,8 @@ pub async fn run(opts: Options) -> Result<()> {
     tokio::spawn(notify::run(app.clone()));
     let router = Router::new()
         .route("/api/pair", post(pair))
+        .route("/api/pair/code", post(new_short_code))
+        .route("/api/pair/code/{id}", get(code_state))
         .route("/api/push", get(push_key))
         .route("/api/push/subscribe", post(subscribe))
         .route("/api/push/unsubscribe", post(unsubscribe))
@@ -148,9 +150,12 @@ pub fn local_url(listen: SocketAddr) -> String {
     format!("http://{addr}")
 }
 
-/// Prints a fresh pairing code as a QR code and a link.
-pub fn print_pairing(store: &auth::Store, url: &str) -> Result<()> {
+/// Prints a fresh pairing code as a QR code and a link; with `short`, also a short
+/// code to type into an app that can't open the link (an installed iPhone app).
+/// Only on request: the server's start shouldn't open one into a service's log.
+pub fn print_pairing(store: &auth::Store, url: &str, short: bool) -> Result<()> {
     let link = pairing_link(store, url)?;
+    let short = short.then(|| store.new_short_code(None)).transpose()?;
     match qrcode::QrCode::new(link.as_bytes()) {
         Ok(qr) => println!(
             "\n{}\n",
@@ -160,11 +165,24 @@ pub fn print_pairing(store: &auth::Store, url: &str) -> Result<()> {
         ),
         Err(e) => println!("(no QR code: {e})"),
     }
-    println!("  pair a phone: scan this, or open {link}");
-    println!(
-        "  the code works once, for {} minutes; `valk web pair` makes another",
-        auth::CODE_TTL_SECS / 60
-    );
+    println!("  pair a device: scan this, or open {link}");
+    match short {
+        Some(short) => {
+            println!(
+                "  or type {} into the app's pairing screen (an installed iPhone app can't open links)",
+                short.code
+            );
+            println!(
+                "  the link works once, for {} minutes, and the typed code for {}; a paired device stays paired until `valk web revoke`",
+                auth::CODE_TTL_SECS / 60,
+                auth::SHORT_CODE_TTL_SECS / 60
+            );
+        }
+        None => println!(
+            "  the link works once, for {} minutes; a paired device stays paired until `valk web revoke`; `valk web pair` also gives a code to type",
+            auth::CODE_TTL_SECS / 60
+        ),
+    }
     println!("  on this machine, `valk web open` opens it in your browser instead");
     Ok(())
 }
@@ -190,6 +208,29 @@ async fn pair(State(app): State<Arc<App>>, Json(req): Json<PairRequest>) -> Resp
         }
         Err(e) => (StatusCode::FORBIDDEN, e.to_string()).into_response(),
     }
+}
+
+/// A short code for another device, made by a paired one (ADR-0009).
+async fn new_short_code(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let Some(device) = device(&app, &headers) else {
+        return unpaired();
+    };
+    match app.store.new_short_code(Some(&device)) {
+        Ok(code) => Json(code).into_response(),
+        Err(e) => failed(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+/// Whether a short code was used yet, and by which device.
+async fn code_state(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    Json(app.store.code_state(&id)).into_response()
 }
 
 /// The paired device making an HTTP request (`Authorization: Bearer <token>`).

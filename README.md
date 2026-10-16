@@ -236,10 +236,16 @@ valk setup web    # runs valk web as a service, behind tailscale serve
 ```
 
 This needs HTTPS certificates turned on in the Tailscale admin console. Scan the
-QR code it prints. Each code works once, for ten minutes.
+QR code it prints. The code works once, for ten minutes; the phone stays paired
+until you revoke it.
+
+To add another device, such as the app installed on your Home Screen (on iPhone
+it can't open the QR link) or a laptop, tap **Add a device** in an app that's
+already paired, or press `p` in `valk`. Type the short code it shows into the
+new device's pairing screen.
 
 ```sh
-valk web pair             # print another pairing code
+valk web pair             # print another QR code and short code
 valk web open             # open it in this computer's browser, paired
 valk web devices          # list paired devices
 valk web revoke <name>    # unpair one

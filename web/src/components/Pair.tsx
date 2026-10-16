@@ -73,24 +73,23 @@ export function Pair() {
               : "Pair this device to drive your agents from here."}
           </p>
           {error && <p className="pair-error">{error}</p>}
-          {desktop ? (
-            <ol className="pair-steps">
+          <ol className="pair-steps">
+            <li>
+              On a device that's already paired, tap <b>Add a device</b> and type the code it shows below. Or, on
+              the machine running Valkyrie, press <code>p</code> in <code>valk</code>, or run{" "}
+              <code>valk web pair</code>.
+            </li>
+            {desktop ? (
               <li>
-                On this computer, run <code>valk web open</code>. It opens Valkyrie here, paired.
+                On that machine itself, <code>valk web open</code> opens Valkyrie here, already paired.
               </li>
+            ) : (
               <li>
-                On another one, run <code>valk web pair</code> on the machine running Valkyrie and paste the link it
-                prints below
+                Or scan the QR code <code>valk web pair</code> shows. On iPhone that opens Safari, not the installed
+                app, so type the code here instead.
               </li>
-            </ol>
-          ) : (
-            <ol className="pair-steps">
-              <li>
-                On the machine running Valkyrie, run <code>valk web pair</code>
-              </li>
-              <li>Scan the QR code it shows with this device's camera</li>
-            </ol>
-          )}
+            )}
+          </ol>
           <form
             className="pair-paste"
             onSubmit={(e) => {
@@ -103,8 +102,9 @@ export function Pair() {
             }}
           >
             <input
-              aria-label="Pairing link or code"
-              placeholder="Paste a pairing link or code"
+              aria-label="Pairing code or link"
+              placeholder="Code (KQ7-4M2) or pairing link"
+              autoCapitalize="characters"
               autoComplete="off"
               spellCheck={false}
               value={typed}
@@ -114,7 +114,9 @@ export function Pair() {
               Pair
             </button>
           </form>
-          <p className="pair-note">The code works once, for ten minutes.</p>
+          <p className="pair-note">
+            A code works once, for a few minutes. Once paired, this device stays paired until you revoke it.
+          </p>
         </>
       )}
     </main>

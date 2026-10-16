@@ -1,5 +1,8 @@
-/** The code in a pairing link (`…/#pair=<code>`), or a bare code. */
+/** The code in a pairing link (`…/#pair=<code>`), a bare link code, or a short code
+ * as typed (`KQ7-4M2`, `kq7 4m2`). */
 export function parseCode(text: string): string | null {
   const m = /#pair=([A-Za-z0-9_-]+)\s*$/.exec(text) ?? /^\s*([A-Za-z0-9_-]{20,})\s*$/.exec(text);
-  return m ? m[1] : null;
+  if (m) return m[1];
+  const short = text.replace(/[\s-]/g, "");
+  return /^[0-9A-Za-z]{6}$/.test(short) ? short.toUpperCase() : null;
 }

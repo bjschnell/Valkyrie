@@ -10,7 +10,13 @@ describe("parseCode", () => {
     expect(parseCode(` ${code} `)).toBe(code);
   });
 
+  it("takes a short code as typed", () => {
+    expect(parseCode("KQ7-4M2")).toBe("KQ74M2");
+    expect(parseCode(" kq7 4m2 ")).toBe("KQ74M2");
+  });
+
   it("refuses anything else", () => {
+    expect(parseCode("KQ7-4M")).toBeNull();
     expect(parseCode("")).toBeNull();
     expect(parseCode("valk web pair")).toBeNull();
     expect(parseCode("https://thor.example.ts.net/")).toBeNull();

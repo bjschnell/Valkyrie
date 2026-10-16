@@ -78,6 +78,14 @@ pub fn on_update_check(f: fn() -> Option<String>) {
     let _ = UPDATE_CHECK.set(f);
 }
 
+static ADD_DEVICE: std::sync::OnceLock<fn() -> Result<String, String>> = std::sync::OnceLock::new();
+
+/// Sets how `p` on the home screen adds a device to the web app: `f` makes a short
+/// pairing code (`KQ7-4M2`) for its pairing screen (ADR-0009).
+pub fn on_add_device(f: fn() -> Result<String, String>) {
+    let _ = ADD_DEVICE.set(f);
+}
+
 /// The terminal, through a backend that stays silent while nothing changes.
 type Term = Terminal<quiet::Quiet<CrosstermBackend<std::io::Stdout>>>;
 
@@ -1942,7 +1950,25 @@ impl App {
             HomeKey::NewShell => self.new_shell(None).await,
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
+            HomeKey::AddDevice => self.add_device().await,
         }
+    }
+
+    async fn add_device(&mut self) {
+        let Some(&make) = ADD_DEVICE.get() else {
+            return;
+        };
+        // A paired device can do whatever the user can; an agent mustn't add one.
+        if let Err(e) = self.client.vouch("adding a device").await {
+            self.status = format!("can't add a device: {e:#}");
+            return;
+        }
+        self.status = match make() {
+            Ok(code) => format!(
+                "add a device: type {code} into its Valkyrie pairing screen (works once, for 5 minutes)"
+            ),
+            Err(e) => format!("can't add a device: {e}"),
+        };
     }
 
     async fn mark_seen(&mut self, items: &[(SessionId, u64)]) {
@@ -3695,6 +3721,7 @@ fn footer_line(
         ("t", "theme"),
         (",", "settings"),
         ("K", "keys"),
+        ("p", "pair"),
         ("m", if sound { "sound" } else { "muted" }),
         ("q", "quit"),
     ];
@@ -4191,6 +4218,8 @@ enum HomeKey {
     Accept,
     /// Reject the selected proposal.
     Reject,
+    /// A short code that pairs another device with the web app.
+    AddDevice,
     Quit,
 }
 
@@ -4241,6 +4270,7 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             b'K' => keys.push(HomeKey::Keys),
             b'a' => keys.push(HomeKey::Accept),
             b'd' => keys.push(HomeKey::Reject),
+            b'p' => keys.push(HomeKey::AddDevice),
             b'q' | 0x03 => keys.push(HomeKey::Quit),
             _ => {}
         }
@@ -4319,6 +4349,7 @@ mod tests {
             [HomeKey::Down]
         );
         assert_eq!(home_keys_default(b"ad"), [HomeKey::Accept, HomeKey::Reject]);
+        assert_eq!(home_keys_default(b"p"), [HomeKey::AddDevice]);
     }
 
     /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)

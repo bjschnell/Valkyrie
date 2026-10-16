@@ -8,6 +8,7 @@ import { Chevron, Plus, Prompt } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyButton, NotifyHint } from "./Notify";
+import { AddDeviceButton } from "./AddDevice";
 import { Rain } from "./Rain";
 
 const go = (id: number) => {
@@ -64,6 +65,7 @@ export function Inbox() {
         </div>
         <ConnectionPill />
         <NotifyButton />
+        <AddDeviceButton />
         <button
           className={`icon-btn ${look !== "default" ? "lit" : ""}`}
           aria-label={`Look: ${look}`}

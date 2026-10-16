@@ -826,8 +826,10 @@ code {
 
 /* Notifications -------------------------------------------------------- */
 
+/* Not positioned: a topbar button's panel hangs from the bar's right edge, so it
+   stays on screen wherever the button sits. */
 .notify {
-  position: relative;
+  position: static;
 }
 
 .icon-btn.lit {
@@ -849,7 +851,7 @@ code {
 }
 
 .menu.panel {
-  right: -4px;
+  right: 10px;
   width: min(330px, calc(100vw - 24px));
   padding: 14px 14px 12px;
 }
@@ -897,6 +899,21 @@ code {
 
 .menu.panel .panel-actions .primary {
   padding: 9px 16px;
+}
+
+.device-code {
+  margin: 4px 0 6px;
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+  color: var(--accent);
+  user-select: all;
+}
+
+.device-code-note {
+  font-size: 13px;
 }
 
 .hint {

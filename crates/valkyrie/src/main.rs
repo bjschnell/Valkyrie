@@ -192,7 +192,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum WebCmd {
-    /// Show a new pairing QR code for the running server.
+    /// Show a new pairing QR code, and a short code to type, for the running server.
     Pair,
     /// Open the web app in this machine's browser, paired.
     Open,
@@ -281,6 +281,12 @@ fn main() -> Result<()> {
 async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
     valkyrie_tui::on_context_change(hook::sync_claude);
     valkyrie_tui::on_update_check(update::newer_release);
+    valkyrie_tui::on_add_device(|| {
+        valkyrie_web::store()
+            .and_then(|store| store.new_short_code(None))
+            .map(|short| short.code)
+            .map_err(|e| format!("{e:#}"))
+    });
     match cmd {
         Some(Cmd::Daemon {
             handoff_check: true,
@@ -442,7 +448,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 // A paired device can accept decisions; an agent mustn't pair one.
                 connect(&socket).await?.0.vouch("pairing a phone").await?;
                 let url = valkyrie_web::public_url(url, listen);
-                valkyrie_web::print_pairing(&valkyrie_web::store()?, &url)
+                valkyrie_web::print_pairing(&valkyrie_web::store()?, &url, true)
             }
             Some(WebCmd::Open) => {
                 connect(&socket)
@@ -454,7 +460,8 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
             Some(WebCmd::Devices) => {
                 for d in valkyrie_web::store()?.devices() {
-                    println!("{}  (paired {})", d.name, d.created_unix);
+                    let by = d.added_by.as_deref().unwrap_or("this machine");
+                    println!("{}  (paired {}, added by {by})", d.name, d.created_unix);
                 }
                 Ok(())
             }
@@ -637,7 +644,7 @@ fn open_web(store: &valkyrie_web::auth::Store, listen: std::net::SocketAddr) -> 
         println!("open this in a browser on this machine: {link}");
     }
     println!(
-        "  the code works once, for {} minutes",
+        "  the link works once, for {} minutes; the browser stays paired until `valk web revoke`",
         valkyrie_web::auth::CODE_TTL_SECS / 60
     );
     Ok(())
