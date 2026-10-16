@@ -72,6 +72,8 @@ pub const LOGIN_ENV: &[&str] = &[
     "WAYLAND_DISPLAY",
     "XDG_RUNTIME_DIR",
     "DBUS_SESSION_BUS_ADDRESS",
+    // WSL's interop socket, for Windows programs (`powershell.exe`, `clip.exe`).
+    "WSL_INTEROP",
 ];
 
 pub fn login_env() -> Vec<(String, Option<String>)> {

@@ -12,6 +12,8 @@ tokio.workspace = true
 anyhow.workspace = true
 base64 = "0.23"
 unicode-width = "0.2"
+arboard = { version = "3.7", features = ["wayland-data-control"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 serde_json.workspace = true

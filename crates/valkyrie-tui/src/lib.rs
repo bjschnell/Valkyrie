@@ -4,6 +4,7 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod clip;
 mod keys;
 mod links;
 mod mouse;
@@ -688,9 +689,34 @@ impl App {
                 Box::pin(self.after_direct(after)).await;
             }
             None => {
-                let _ = self.client.input(id, rest.to_vec());
+                let keys = match self.image_paste(rest).await {
+                    Some(paste) => paste,
+                    None => rest.to_vec(),
+                };
+                let _ = self.client.input(id, keys);
             }
         }
+    }
+
+    /// An agent's image-paste key with an image on the clipboard: the saved image's
+    /// path, to paste in the key's place (see `clip`).
+    async fn image_paste(&self, keys: &[u8]) -> Option<Vec<u8>> {
+        let view = self.view.as_ref()?;
+        let session = self.sessions.iter().find(|s| s.id == view.id)?;
+        if !clip::is_image_key(keys) || !matches!(session.status.agent.as_str(), "claude" | "codex")
+        {
+            return None;
+        }
+        let bracketed = view.modes.bracketed_paste;
+        let dir = valkyrie_proto::state_dir().join("pastes");
+        // The TUI waits for it, so a clipboard that never answers (a hung owner,
+        // broken WSL interop) gives up and the key goes through as typed.
+        let read = tokio::task::spawn_blocking(move || clip::save_image(&dir));
+        let path = tokio::time::timeout(Duration::from_secs(3), read)
+            .await
+            .ok()?
+            .ok()??;
+        Some(clip::paste_text(&path, bracketed))
     }
 
     /// Keys that came in the same read as a direct key, after it.

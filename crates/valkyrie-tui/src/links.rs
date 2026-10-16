@@ -163,7 +163,7 @@ pub fn open(url: &str) -> std::io::Result<Opened> {
     Ok(Opened::Browser)
 }
 
-fn is_wsl() -> bool {
+pub fn is_wsl() -> bool {
     std::env::var_os("WSL_DISTRO_NAME").is_some()
         || std::fs::read_to_string("/proc/sys/kernel/osrelease")
             .is_ok_and(|r| r.to_ascii_lowercase().contains("microsoft"))
