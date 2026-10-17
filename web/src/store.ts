@@ -6,7 +6,9 @@ import { Conn, type Status } from "./net/conn";
 import type { Decision, Modes, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
-import { keyBytes, messageBytes, type Key } from "./lib/keys";
+import { upload } from "./lib/api";
+import { shrinkImage } from "./lib/shrink";
+import { keyBytes, messageBytes, pathBytes, textBytes, type Key } from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
 import {
   clearNotifications,
@@ -287,17 +289,35 @@ export function sendKey(key: Key): void {
   if (id !== null) input(id, keyBytes(key, get().screen?.modes));
 }
 
-/** Types a message, then presses Enter once the program has read it as typing. */
-function message(session: SessionId, text: string, modes?: Modes): boolean {
-  if (!input(session, messageBytes(text, modes))) return false;
-  setTimeout(() => input(session, keyBytes("enter", modes)), ENTER_GAP_MS);
+/**
+ * Types a message, then presses Enter once the program has read it as typing. Files
+ * go first, each path on its own, which Claude Code and Codex attach as an image
+ * when it is one; other files they read by path.
+ */
+function message(session: SessionId, text: string, modes?: Modes, paths: string[] = []): boolean {
+  const parts = paths.flatMap((p) => [pathBytes(p, modes), textBytes(" ")]);
+  if (text.trim()) parts.push(messageBytes(text, modes));
+  parts.push(keyBytes("enter", modes));
+  const [first, ...rest] = parts;
+  if (!input(session, first)) return false;
+  rest.forEach((part, i) => setTimeout(() => input(session, part), ENTER_GAP_MS * (i + 1)));
   return true;
 }
 
-export function sendMessage(text: string): boolean {
+export function sendMessage(text: string, paths: string[] = []): boolean {
   const id = get().openId;
-  if (id === null || !text.trim()) return false;
-  return message(id, text, get().screen?.modes);
+  if (id === null || (!text.trim() && paths.length === 0)) return false;
+  return message(id, text, get().screen?.modes, paths);
+}
+
+/**
+ * Sends a file to the session's machine, for a message to hand to the agent; a
+ * photo first made small, and a JPEG if the agents can't attach its format.
+ */
+export async function sendFile(file: File): Promise<string> {
+  const token = get().token;
+  if (!token) throw new Error("pair this device first");
+  return upload(token, await shrinkImage(file));
 }
 
 /** Picks a choice: moves the program's cursor to it, then Enter. */

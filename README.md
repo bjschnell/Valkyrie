@@ -48,7 +48,8 @@ You use it from the terminal with `valk`, or from your phone.
   drawn as underlines, folders or cards. Split a tab into panes in any direction.
 - **A phone app.** `valk web` serves a PWA over your tailnet with the inbox, one-tap
   answers to prompts, a chat view built from the agent's transcript, a review of
-  what an agent changed, new sessions, dictation and notifications.
+  what an agent changed, new sessions, dictation, sending files and screenshots to
+  an agent, and notifications.
 - **Project decisions.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
   in the repo starts with it.
 - **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so

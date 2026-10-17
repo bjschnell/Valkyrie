@@ -66,6 +66,11 @@ export const Mic = () => (
     <path d="M5 11a7 7 0 0014 0M12 18v3" />
   </svg>
 );
+export const Clip = () => (
+  <svg {...base}>
+    <path d="M21 11.5l-8.6 8.6a5 5 0 01-7.1-7.1l8.6-8.6a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4l7.9-7.9" />
+  </svg>
+);
 export const Plus = () => (
   <svg {...base}>
     <path d="M12 5v14M5 12h14" />

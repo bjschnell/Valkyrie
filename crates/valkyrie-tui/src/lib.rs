@@ -716,7 +716,7 @@ impl App {
             return None;
         }
         let bracketed = view.modes.bracketed_paste;
-        let dir = valkyrie_proto::state_dir().join("pastes");
+        let dir = valkyrie_proto::pastes::dir();
         // The TUI waits for it, so a clipboard that never answers (a hung owner,
         // broken WSL interop) gives up and the key goes through as typed.
         let read = tokio::task::spawn_blocking(move || clip::save_image(&dir));

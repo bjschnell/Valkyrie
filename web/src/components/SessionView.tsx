@@ -4,8 +4,8 @@ import { isNegative } from "../lib/choices";
 import type { Key } from "../lib/keys";
 import { cssStyle, reflow, rowRuns, type Run } from "../lib/screen";
 import { age } from "../lib/time";
-import { answer, kill, openChoices, rename, sendKey, sendMessage, useApp } from "../store";
-import { Back, Dots, Grid, Send, Wrap } from "./icons";
+import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, toast, useApp } from "../store";
+import { Back, Clip, Dots, Grid, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
 import { MicButton } from "./Mic";
@@ -234,8 +234,21 @@ function KeyBar() {
   );
 }
 
+/** A file picked for the next message: sending until it has a path on the machine. */
+interface Attachment {
+  key: number;
+  name: string;
+  path: string | null;
+}
+
+let attachmentKey = 0;
+
 function Composer({ id, area }: { id: number; area: RefObject<HTMLTextAreaElement | null> }) {
   const [text, setText] = useState(() => localStorage.getItem(DRAFT_KEY(id)) ?? "");
+  const [files, setFiles] = useState<Attachment[]>([]);
+  const picker = useRef<HTMLInputElement>(null);
+  const sending = files.some((f) => f.path === null);
+  const ready = files.flatMap((f) => (f.path ? [f.path] : []));
 
   // A draft survives the app being closed mid-sentence.
   useEffect(() => {
@@ -250,40 +263,111 @@ function Composer({ id, area }: { id: number; area: RefObject<HTMLTextAreaElemen
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [text, area]);
 
+  // Each file goes up as soon as it's picked, so Send only waits on the last one.
+  const attach = (picked: Iterable<File>) => {
+    for (const file of picked) {
+      const key = ++attachmentKey;
+      setFiles((fs) => [...fs, { key, name: file.name || "image.png", path: null }]);
+      sendFile(file).then(
+        (path) => setFiles((fs) => fs.map((f) => (f.key === key ? { ...f, path } : f))),
+        (e: Error) => {
+          setFiles((fs) => fs.filter((f) => f.key !== key));
+          toast(`${file.name}: ${e.message}`);
+        },
+      );
+    }
+  };
+
   const send = () => {
-    if (sendMessage(text)) setText("");
+    if (sending) return;
+    if (sendMessage(text, ready)) {
+      setText("");
+      setFiles([]);
+    }
   };
   return (
-    <form
-      className="composer"
-      onSubmit={(e) => {
-        e.preventDefault();
-        send();
-      }}
-    >
-      <textarea
-        ref={area}
-        rows={1}
-        value={text}
-        placeholder="Message the session"
-        enterKeyHint="send"
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          // A desktop keyboard sends with Enter (Shift-Enter for a new line);
-          // a phone's return key adds a line, its send button sends.
-          if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) {
-            e.preventDefault();
-            send();
-          }
-          // Back to the keys above; the draft stays.
-          if (e.key === "Escape") area.current?.blur();
+    <>
+      {files.length > 0 && (
+        <div className="attachments">
+          {files.map((f) => (
+            <span key={f.key} className={`attachment ${f.path ? "" : "sending"}`}>
+              {f.path === null && <span className="spin" />}
+              <span className="attachment-name">{f.name}</span>
+              <button
+                type="button"
+                aria-label={`Remove ${f.name}`}
+                onClick={() => setFiles((fs) => fs.filter((x) => x.key !== f.key))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <form
+        className="composer"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
         }}
-      />
-      <MicButton value={text} onChange={setText} />
-      <button className="send" aria-label="Send" disabled={!text.trim()}>
-        <Send />
-      </button>
-    </form>
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          if (!e.dataTransfer.files.length) return;
+          e.preventDefault();
+          attach(e.dataTransfer.files);
+        }}
+      >
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            if (e.target.files) attach(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          className="attach"
+          aria-label="Attach files"
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={() => picker.current?.click()}
+        >
+          <Clip />
+        </button>
+        <textarea
+          ref={area}
+          rows={1}
+          value={text}
+          placeholder="Message the session"
+          enterKeyHint="send"
+          onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            // A screenshot or a copied file; text pastes as usual.
+            if (!e.clipboardData.files.length) return;
+            e.preventDefault();
+            attach(e.clipboardData.files);
+          }}
+          onKeyDown={(e) => {
+            // A desktop keyboard sends with Enter (Shift-Enter for a new line);
+            // a phone's return key adds a line, its send button sends.
+            if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) {
+              e.preventDefault();
+              send();
+            }
+            // Back to the keys above; the draft stays.
+            if (e.key === "Escape") area.current?.blur();
+          }}
+        />
+        <MicButton value={text} onChange={setText} />
+        <button className="send" aria-label="Send" disabled={sending || (!text.trim() && ready.length === 0)}>
+          <Send />
+        </button>
+      </form>
+    </>
   );
 }
 

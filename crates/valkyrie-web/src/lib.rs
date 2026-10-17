@@ -36,6 +36,8 @@ static DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../web/dist");
 const SUBPROTOCOL: &str = "valk.v1";
 /// The close code for a device that isn't paired (or was unpaired).
 const CLOSE_UNPAIRED: u16 = 4401;
+/// The largest file the app can send an agent.
+const UPLOAD_MAX: usize = 50 << 20;
 /// Keeps phone connections from being dropped as idle by proxies and radios.
 const PING_EVERY: Duration = Duration::from_secs(25);
 
@@ -124,6 +126,7 @@ pub async fn run(opts: Options) -> Result<()> {
         .route("/api/places", get(places_route))
         .route("/api/dirs", get(dirs_route))
         .route("/api/review/{session}", get(review_route))
+        .route("/api/upload", post(upload))
         .route("/ws", get(ws))
         .fallback(get(asset))
         .with_state(app);
@@ -342,6 +345,40 @@ async fn review_route(
     match review::review(&info.cwd).await {
         Ok(review) => Json(review).into_response(),
         Err(e) => failed(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    name: String,
+}
+
+/// A file from the app, saved where the agents read pasted images (`pastes`), so a
+/// message can hand its path to the agent. The body is the file itself; it's read
+/// only once the device checks out.
+async fn upload(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Query(q): Query<UploadQuery>,
+    body: axum::body::Body,
+) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, UPLOAD_MAX).await else {
+        return failed(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("files are at most {} MB", UPLOAD_MAX >> 20),
+        );
+    };
+    let saved = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::pastes::save(&valkyrie_proto::pastes::dir(), &q.name, &bytes)
+    })
+    .await;
+    match saved {
+        Ok(Ok(path)) => Json(serde_json::json!({ "path": path })).into_response(),
+        Ok(Err(e)) => failed(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => failed(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 

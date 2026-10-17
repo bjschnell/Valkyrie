@@ -17,6 +17,17 @@ export async function getJson<T>(token: string, path: string): Promise<T> {
   return (await api(token, path)).json() as Promise<T>;
 }
 
+/** Sends a file to this machine, where an agent can read it; its saved path. */
+export async function upload(token: string, file: File): Promise<string> {
+  const res = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return ((await res.json()) as { path: string }).path;
+}
+
 export interface Place {
   path: string;
   label: string;

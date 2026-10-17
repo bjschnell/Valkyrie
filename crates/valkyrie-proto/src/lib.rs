@@ -10,6 +10,7 @@ pub mod codec;
 pub mod context;
 pub mod ipc;
 pub mod layout;
+pub mod pastes;
 pub mod screen;
 
 use serde::{Deserialize, Serialize};

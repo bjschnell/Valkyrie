@@ -667,6 +667,45 @@ code {
   transform: scale(0.94);
 }
 
+/* Files picked for the next message, above the composer. */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 4px 4px 10px;
+  border-radius: 14px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.attachment.sending {
+  color: var(--soft);
+}
+
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment button {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: var(--soft);
+  font-size: 16px;
+  line-height: 1;
+}
+
 .scrim {
   position: fixed;
   inset: 0;
@@ -1295,7 +1334,8 @@ code {
 
 /* Dictation ----------------------------------------------------------------- */
 
-.mic {
+.mic,
+.attach {
   display: grid;
   place-items: center;
   flex: none;

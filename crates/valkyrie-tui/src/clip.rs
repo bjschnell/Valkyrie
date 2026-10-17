@@ -7,12 +7,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-
-/// How long a pasted image stays: well past the turn that reads it.
-const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// Whether `keys` is an agent's image-paste key: Ctrl-V (Claude on macOS and Linux,
 /// Codex), Alt-V (Claude on Windows and WSL), or an empty paste, which is what a
@@ -23,25 +19,7 @@ pub fn is_image_key(keys: &[u8]) -> bool {
 
 /// Saves the clipboard's image as a PNG in `dir`; `None` when it holds none.
 pub fn save_image(dir: &Path) -> Option<PathBuf> {
-    let png = read_png()?;
-    // Screenshots can hold anything: only you read them.
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir).ok()?;
-    prune(dir);
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let path = dir.join(format!("{ms}.png"));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    std::io::Write::write_all(&mut options.open(&path).ok()?, &png).ok()?;
-    Some(path)
+    valkyrie_proto::pastes::save(dir, ".png", &read_png()?).ok()
 }
 
 /// What to type for `path`: quoted if it has a space, since Codex reads an unquoted
@@ -97,22 +75,6 @@ fn windows_png() -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(out.stdout.trim_ascii())
         .ok()
-}
-
-/// Removes images pasted more than `KEEP` ago.
-fn prune(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > KEEP));
-        if old {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
 }
 
 #[cfg(test)]

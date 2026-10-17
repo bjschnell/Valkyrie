@@ -38,6 +38,16 @@ export function messageBytes(text: string, modes?: Modes): number[] {
   return [...enc.encode(typed)];
 }
 
+/**
+ * A file's path, for the agent to attach: quoted if it has a space, since Codex
+ * reads an unquoted one as text, and pasted when the program takes bracketed
+ * paste, so it's read as one (as the TUI pastes a clipboard image).
+ */
+export function pathBytes(path: string, modes?: Modes): number[] {
+  const quoted = /\s/.test(path) ? `"${path}"` : path;
+  return [...enc.encode(modes?.bracketed_paste ? `\x1b[200~${quoted}\x1b[201~` : quoted)];
+}
+
 export function textBytes(text: string): number[] {
   return [...enc.encode(text)];
 }
