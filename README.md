@@ -16,6 +16,9 @@
 
 <br>
 
+<!-- TODO(demo): swap this still for the looping demo once it's recorded.
+     See docs/demo/README.md. Target: docs/images/demo.gif, under 30 s and 5 MB:
+     <img src="docs/images/demo.gif" alt="Several agent sessions in valk; one needs input, chimes, and is answered from the phone" width="100%"> -->
 <img src="docs/images/home.svg" alt="The Valkyrie home screen: a queue of sessions that need you, a list of every session, and a preview of the selected one" width="100%">
 
 </div>
@@ -24,36 +27,15 @@
 
 ## What is this?
 
-Run a few Claude Code or Codex sessions at once and one of them will end up
-sitting on a permission prompt while you watch another tab.
+Run a few Claude Code or Codex sessions at once and one of them ends up sitting
+on a permission prompt while you watch another.
 
-Valkyrie runs Claude Code, Codex and plain shells as sessions under one background
-daemon. Its home screen is an inbox ranked by who needs you: `needs input` first,
-then `blocked`, then `done`, with every other session listed below. It reads those
-states from agent hooks and from the screen itself. When something new needs you,
-it plays a chime and tells you what the agent asked or finished.
+Valkyrie runs every session under one background daemon. Its home screen is an
+inbox ranked by who needs you (`needs input`, then `blocked`, then `done`). When
+something new needs you, it chimes and tells you what the agent asked.
 
-You use it from the terminal with `valk`, or from your phone.
-
-### Highlights
-
-- **An attention queue, not a grid of terminals.** The home screen lists the
-  sessions waiting on you. Inside a session, tab mode (`^\`) peeks at the tab under
-  its cursor, and decisions waiting for review show in the bar.
-- **Sessions that outlive the TUI.** The daemon owns every terminal. Close the TUI,
-  SSH in from somewhere else, and every session is still running. Upgrades on Unix
-  keep running sessions; Windows upgrades restart them and resume agent
-  conversations. After a reboot, Claude and Codex conversations resume.
-- **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right,
-  drawn as underlines, folders or cards. Split a tab into panes in any direction.
-- **A phone app.** `valk web` serves a PWA over your tailnet with the inbox, one-tap
-  answers to prompts, a chat view built from the agent's transcript, a review of
-  what an agent changed, new sessions, dictation, sending files and screenshots to
-  an agent, and notifications.
-- **Project decisions.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
-  in the repo starts with it.
-- **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so
-  it can read state reliably and redraw the screen for a phone.
+Sessions keep running after you close the TUI, and `valk web` serves a phone app
+over your tailnet, so you can answer a prompt with one tap.
 
 ## Quick start
 
@@ -110,6 +92,26 @@ cd ~/repos/valkyrie && ./install.sh
 [docs/install.md](docs/install.md) covers each platform in detail.
 
 </details>
+
+## Highlights
+
+- **An attention queue, not a grid of terminals.** The home screen lists the
+  sessions waiting on you. Inside a session, tab mode (`^\`) peeks at the tab under
+  its cursor, and decisions waiting for review show in the bar.
+- **Sessions that outlive the TUI.** The daemon owns every terminal. Close the TUI,
+  SSH in from somewhere else, and every session is still running. Upgrades on Unix
+  keep running sessions; Windows upgrades restart them and resume agent
+  conversations. After a reboot, Claude and Codex conversations resume.
+- **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right,
+  drawn as underlines, folders or cards. Split a tab into panes in any direction.
+- **A phone app.** `valk web` serves a PWA over your tailnet with the inbox, one-tap
+  answers to prompts, a chat view built from the agent's transcript, a review of
+  what an agent changed, new sessions, dictation, sending files and screenshots to
+  an agent, and notifications.
+- **Project decisions.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
+  in the repo starts with it.
+- **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so
+  it can read state reliably and redraw the screen for a phone.
 
 ## Screenshots
 
