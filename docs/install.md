@@ -207,21 +207,29 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
 
 ## Phone and web
 
-The web app reaches your phone over Tailscale. Turn on HTTPS certificates once in the
-Tailscale admin console (DNS → HTTPS Certificates); without them the page won't open.
-Then:
+`valk web` serves the web app on localhost (port 8790). How your phone reaches it
+is up to you. The app installs and sends notifications only over HTTPS.
 
 ```sh
-valk setup web
+valk setup web                                  # with Tailscale
+valk setup web --url https://valk.example.com   # behind your own proxy or tunnel
 ```
 
 That runs `valk web` in the background as a service (systemd on Linux, launchd on
-macOS, Task Scheduler on Windows) that starts again at login, puts it on your tailnet with `tailscale serve`
-(HTTPS, reachable only by your devices), and prints a QR code that pairs your phone.
-Run it again after upgrading to restart the service; `valk setup web --remove` takes it
-away. On Linux, `tailscale serve` needs `sudo tailscale set --operator=$USER` once, and
-`loginctl enable-linger` keeps the service running while you're logged out. To run it by
-hand instead: `tailscale serve --bg 8790` and `valk web`.
+macOS, Task Scheduler on Windows) that starts again at login, and prints a QR code
+that pairs your phone. Run it again after upgrading to restart the service;
+`valk setup web --remove` takes it away. On Linux, `loginctl enable-linger` keeps the
+service running while you're logged out. To run it by hand instead: `valk web`.
+
+- **Tailscale.** If Tailscale runs on this machine, `valk setup web` puts the app
+  behind `tailscale serve`, so only your devices reach it, over HTTPS. Turn on HTTPS
+  certificates once in the Tailscale admin console (DNS → HTTPS Certificates);
+  without them the page won't open. On Linux, `tailscale serve` needs
+  `sudo tailscale set --operator=$USER` once.
+- **Your own proxy or tunnel.** Forward HTTPS to `127.0.0.1:8790`, keep the `Host`
+  header (or set `X-Forwarded-Host`), and pass the public address with `--url` so the
+  QR code points there. Anyone who can reach that address can try to pair, so put
+  it somewhere only you can reach.
 
 Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
 prints another. A paired device stays paired until you revoke it. To use the web
@@ -249,5 +257,5 @@ Add to Home Screen, and open Valkyrie from the Home Screen. iOS only offers
 notifications to an installed app. On Android, use Chrome's Install app. Then tap the
 bell in the app and turn notifications on. You'll get one when an agent needs you,
 finishes or stops while you're away: no typing at any session for 90 seconds, and the
-app not open. Notifications need the HTTPS address (`tailscale serve`), and `valk web`
-has to keep running to send them.
+app not open. Notifications need the HTTPS address, and `valk web` has to keep running to send
+them.

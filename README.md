@@ -12,7 +12,7 @@
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust)](https://www.rust-lang.org)
 ![Platforms](https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20WSL2-50fa7b)
 
-[Quick start](#quick-start) · [Screenshots](#screenshots) · [Usage](#usage) · [Phone app](#from-your-phone) · [Project decisions](#project-decisions) · [Install guide](docs/install.md)
+[Quick start](#quick-start) · [Screenshots](#screenshots) · [Usage](#usage) · [Phone app](#on-your-phone) · [Project decisions](#project-decisions) · [Install guide](docs/install.md)
 
 <br>
 
@@ -24,16 +24,10 @@
 
 ## What is this?
 
-Running many agents at once turns into a game of hide and seek: which one is
-waiting on you to continue? Valkyrie points your attention to where it's needed
-most. No more searching.
-
-Valkyrie runs every session under one background daemon. Its home screen is an
-inbox ranked by who needs you (`needs input`, then `blocked`, then `done`). When
-something new needs you, it chimes and tells you what the agent asked.
-
-Sessions keep running after you close the TUI, and `valk web` serves a phone app
-over your tailnet, so you can answer a prompt with one tap.
+Run several coding agents at once and it turns into a game of hide and seek:
+which one is waiting on you? Valkyrie runs all of them in one place and points
+you to where you're needed, in your terminal or on your phone. No more
+searching.
 
 ## Quick start
 
@@ -49,13 +43,12 @@ curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-rel
 irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
 ```
 
-**2. Start.** Run `valk` from any terminal to open the home screen. Press `n` for
-a new shell, then start `claude` or `codex` in it (or run
-`valk new -a -- claude`). Press `^]` to get back home, where the queue shows which
-agent needs you next.
+**2. Run `valk`.** Press `n` for a new shell and start `claude` or `codex` in it.
+Start as many as you like. `Alt-n` takes you to the next one that needs you, and
+`^]` or `Alt-h` takes you home.
 
 ```sh
-valk                       # open the home screen any time
+valk
 ```
 
 Claude Code needs no setup, since Valkyrie adds its hooks per session. If you use
@@ -89,24 +82,68 @@ cd ~/repos/valkyrie && ./install.sh
 
 ## Highlights
 
-- **An attention queue, not a grid of terminals.** The home screen lists the
-  sessions waiting on you. Jump to whichever agent needs you with `Alt-n`.
-  Inside a session, tab mode (`^\`) peeks at the tab under its cursor, and
-  decisions waiting for review show in the bar.
-- **Sessions that outlive the TUI.** The daemon owns every terminal. Close the TUI,
-  SSH in from somewhere else, and every session is still running. Upgrades on Unix
-  keep running sessions; Windows upgrades restart them and resume agent
-  conversations. After a reboot, Claude and Codex conversations resume.
-- **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right,
-  drawn as underlines, folders or cards. Split a tab into panes in any direction.
-- **Control your agents remotely.** `valk web` serves a PWA over your tailnet with
-  an inbox, one-tap answers to prompts, a chat view built from the agent's
-  transcript, a review of what an agent changed, new sessions, dictation, sending
-  files and screenshots to an agent, and notifications.
+- **Many agents, side by side.** Every Claude Code, Codex or shell session is a
+  tab, and any tab splits into panes. A background daemon owns them, so they keep
+  running when you close the TUI or your SSH connection drops. Claude and Codex
+  conversations resume after a reboot.
+- **Know where you're needed.** The home screen ranks sessions by who needs you:
+  `needs input`, then `blocked`, then `done`. When one changes, it chimes and
+  shows what the agent asked or finished. Inside a session, each tab shows its
+  agent's state, and Home shows how many need you.
+- **`Alt-n` for the next one.** From anywhere, `Alt-n` jumps to the next agent
+  waiting on you. Keep pressing to work through them; it brings you back where
+  you started.
+- **[Your agents on your phone](#on-your-phone).** Answer prompts with a tap,
+  follow an agent's work as a chat, and get notified when one needs you.
 - **Project memory.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
   in the repo starts with it.
 - **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so
   it can read state reliably and redraw the screen for a phone.
+
+## On your phone
+
+`valk web` serves Valkyrie as an app for your phone or any browser. It's built
+for watching and answering agents, not for typing into a remote terminal:
+
+- The inbox shows who needs you, with a prompt's answers as buttons. One tap
+  answers, and **Allow all** clears a run of plain yes prompts.
+- Each agent's work reads as a chat, built from its transcript, with the live
+  terminal a tab away.
+- When an agent finishes, **Review changes** shows its diff, and one tap asks it
+  to commit, run the tests or explain.
+- Start Claude Code, Codex or a shell in any folder, dictate messages, and send
+  files and screenshots to an agent.
+- Push notifications tell you when an agent needs you, finishes or stops while
+  you're away.
+
+<p align="center">
+  <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
+</p>
+
+```sh
+valk setup web    # keep valk web running as a service, and pair with a QR code
+```
+
+`valk web` listens only on localhost, and the daemon never listens on a network.
+How your devices reach it is up to you: Tailscale, a reverse proxy or a tunnel.
+If Tailscale is installed, `valk setup web` puts it behind `tailscale serve`;
+otherwise pass `--url` with the address your devices open. The app installs and
+sends notifications only over HTTPS.
+
+Scan the QR code it prints. The code works once, for ten minutes; the device
+stays paired until you revoke it.
+
+To add another device, such as the app installed on your Home Screen (on iPhone
+it can't open the QR link) or a laptop, tap **Add a device** in an app that's
+already paired, or press `p` in `valk`. Type the short code it shows into the
+new device's pairing screen.
+
+```sh
+valk web pair             # print another QR code and short code
+valk web open             # open it in this computer's browser, paired
+valk web devices          # list paired devices
+valk web revoke <name>    # unpair one
+```
 
 ## Screenshots
 
@@ -116,13 +153,6 @@ cd ~/repos/valkyrie && ./install.sh
 bar at the bottom has the keys, and the number of decisions waiting for you.
 
 <img src="docs/images/session.svg" alt="An attached Claude Code session under a tab strip showing four sessions and their states" width="100%">
-
-**On your phone.** Answer a permission prompt with one tap, accept a decision an
-agent proposed, or follow an agent's work as a chat.
-
-<p align="center">
-  <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
-</p>
 
 **Themes.** Dracula, Cyberpunk, Blackout, Catppuccin, Nord, Gruvbox and Tokyo
 Night, plus Matrix and Violet, whose home screens have digital rain.
@@ -154,10 +184,10 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
 - Valkyrie doesn't remove worktrees. Once the work is merged, run
   `git worktree remove <path>`.
 
-### Keys
+### Keybinds
 
-Three keys get you started: `↩` on the home screen attaches to a session, `^]`
-takes you back home, and `Alt-n` steps through each session that needs you.
+A few keys get you started: `↩` on the home screen attaches to a session, `^]`
+or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you.
 
 <details>
 <summary><b>All default keys, remapping, and the mouse</b></summary>
@@ -229,31 +259,6 @@ Settings are kept in `~/.config/valkyrie/settings.toml`
 `VALK_PROJECT_CONTEXT` override it for one run.
 
 </details>
-
-### From your phone
-
-```sh
-valk setup web    # runs valk web as a service, behind tailscale serve
-```
-
-This needs HTTPS certificates turned on in the Tailscale admin console. Scan the
-QR code it prints. The code works once, for ten minutes; the phone stays paired
-until you revoke it.
-
-To add another device, such as the app installed on your Home Screen (on iPhone
-it can't open the QR link) or a laptop, tap **Add a device** in an app that's
-already paired, or press `p` in `valk`. Type the short code it shows into the
-new device's pairing screen.
-
-```sh
-valk web pair             # print another QR code and short code
-valk web open             # open it in this computer's browser, paired
-valk web devices          # list paired devices
-valk web revoke <name>    # unpair one
-```
-
-The web server listens only on localhost, and the daemon never listens on a
-network.
 
 ### Project decisions
 
