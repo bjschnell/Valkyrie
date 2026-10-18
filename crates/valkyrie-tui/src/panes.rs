@@ -385,13 +385,15 @@ impl App {
     }
 
     /// The mouse wants the program's or Valkyrie's mode: both use SGR reports, and
-    /// plain motion only while some pane asked for it.
+    /// plain motion only while some pane asked for it, or the rail of minimal tabs
+    /// is up (moving onto it opens it).
     pub(crate) fn update_capture(&mut self) {
-        let motion = self
-            .view
-            .iter()
-            .chain(&self.others)
-            .any(|p| p.modes.mouse_motion);
+        let motion = self.rail()
+            || self
+                .view
+                .iter()
+                .chain(&self.others)
+                .any(|p| p.modes.mouse_motion);
         if self.captured != Some(motion) {
             self.captured = Some(motion);
             let mut out = std::io::stdout();

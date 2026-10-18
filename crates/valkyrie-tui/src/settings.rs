@@ -3,8 +3,8 @@
 //! look for a newer release, and the direct keys (`keys`, which `K` remaps). Kept in
 //! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
 //! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
-//! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_SOUND`, `$VALK_PROJECT_CONTEXT` and
-//! `$VALK_UPDATES` win over it.
+//! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_TAB_DETAIL`, `$VALK_SOUND`,
+//! `$VALK_PROJECT_CONTEXT` and `$VALK_UPDATES` win over it.
 
 use crate::keys::Keymap;
 use crate::theme::{DRACULA, THEMES, Theme};
@@ -42,13 +42,15 @@ impl TabStyle {
         }
     }
 
-    /// Rows a strip on top takes: the name, then what runs and its state; under
-    /// flat tabs their rule, and over folder tabs the attached one's bar.
-    pub fn rows(self) -> u16 {
+    /// Rows a strip on top takes: the name, then (unless `minimal`) what runs and
+    /// its state; under flat tabs their rule, and over folder tabs the attached
+    /// one's bar.
+    pub fn rows(self, minimal: bool) -> u16 {
+        let text = if minimal { 1 } else { 2 };
         match self {
-            TabStyle::Folder => 4,
-            TabStyle::Underline => 3,
-            TabStyle::Cards => 2,
+            TabStyle::Folder => text + 2,
+            TabStyle::Underline => text + 1,
+            TabStyle::Cards => text,
         }
     }
 }
@@ -73,6 +75,9 @@ pub struct Settings {
     pub themed_sessions: bool,
     pub tabs: TabStyle,
     pub tab_side: TabSide,
+    /// Each tab is one row, its state's icon and its name, with no program or
+    /// state word: the peek still has those.
+    pub minimal_tabs: bool,
     pub sound: bool,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
@@ -89,6 +94,7 @@ impl PartialEq for Settings {
             self.themed_sessions,
             self.tabs,
             self.tab_side,
+            self.minimal_tabs,
             self.sound,
             self.context,
             self.updates,
@@ -98,6 +104,7 @@ impl PartialEq for Settings {
             other.themed_sessions,
             other.tabs,
             other.tab_side,
+            other.minimal_tabs,
             other.sound,
             other.context,
             other.updates,
@@ -119,6 +126,7 @@ impl Default for Settings {
             themed_sessions: true,
             tabs: TabStyle::Underline,
             tab_side: TabSide::Top,
+            minimal_tabs: false,
             sound: true,
             context: true,
             updates: true,
@@ -134,6 +142,7 @@ pub enum Field {
     SessionColors,
     Tabs,
     TabSide,
+    TabDetail,
     Sound,
     Context,
     Updates,
@@ -145,6 +154,7 @@ impl Field {
         Field::SessionColors,
         Field::Tabs,
         Field::TabSide,
+        Field::TabDetail,
         Field::Sound,
         Field::Context,
         Field::Updates,
@@ -156,6 +166,7 @@ impl Field {
             Field::SessionColors => "Sessions",
             Field::Tabs => "Tab style",
             Field::TabSide => "Tabs on",
+            Field::TabDetail => "Tab detail",
             Field::Sound => "Sound",
             Field::Context => "Context",
             Field::Updates => "Updates",
@@ -173,6 +184,7 @@ impl Settings {
             ("session_colors", "VALK_SESSION_COLORS"),
             ("tabs", "VALK_TABS"),
             ("tab_side", "VALK_TAB_SIDE"),
+            ("tab_detail", "VALK_TAB_DETAIL"),
             ("sound", "VALK_SOUND"),
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
@@ -204,6 +216,7 @@ impl Settings {
             Field::SessionColors => kept.themed_sessions = self.themed_sessions,
             Field::Tabs => kept.tabs = self.tabs,
             Field::TabSide => kept.tab_side = self.tab_side,
+            Field::TabDetail => kept.minimal_tabs = self.minimal_tabs,
             Field::Sound => kept.sound = self.sound,
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
@@ -234,6 +247,7 @@ impl Settings {
              session_colors = \"{}\"  # theme | terminal\n\
              tabs = \"{}\"      # {}\n\
              tab_side = \"{}\"  # {}\n\
+             tab_detail = \"{}\"  # full | minimal: a row per tab, its state and name\n\
              sound = {}\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
@@ -246,6 +260,7 @@ impl Settings {
             names(TabStyle::ALL.iter().map(|s| s.name())),
             self.tab_side.name(),
             names(TabSide::ALL.iter().map(|s| s.name())),
+            self.value(Field::TabDetail),
             self.sound,
             self.context,
             self.updates,
@@ -289,6 +304,11 @@ impl Settings {
                     self.tab_side = side;
                 }
             }
+            "tab_detail" => match value {
+                "full" => self.minimal_tabs = false,
+                "minimal" => self.minimal_tabs = true,
+                _ => {}
+            },
             "sound" => match value {
                 "true" | "on" => self.sound = true,
                 "false" | "off" => self.sound = false,
@@ -339,6 +359,13 @@ impl Settings {
             }
             Field::Tabs => self.tabs.name(),
             Field::TabSide => self.tab_side.name(),
+            Field::TabDetail => {
+                if self.minimal_tabs {
+                    "minimal"
+                } else {
+                    "full"
+                }
+            }
             Field::Sound => on_off(self.sound),
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
@@ -354,6 +381,7 @@ impl Settings {
                 self.tab_side = *step(TabSide::ALL, self.tab_side.name(), by, |s| s.name())
             }
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
+            Field::TabDetail => self.minimal_tabs = !self.minimal_tabs,
             Field::Sound => self.sound = !self.sound,
             Field::Context => self.context = !self.context,
             Field::Updates => self.updates = !self.updates,
@@ -417,6 +445,7 @@ mod tests {
         s.cycle(Field::Theme, 1);
         s.cycle(Field::Tabs, 1);
         s.cycle(Field::TabSide, -1);
+        s.cycle(Field::TabDetail, 1);
         s.cycle(Field::Sound, 1);
         s.cycle(Field::SessionColors, 1);
         s.cycle(Field::Context, 1);
@@ -431,6 +460,7 @@ mod tests {
             TabSide::Right,
             "-1 from top wraps to the last"
         );
+        assert!(back.minimal_tabs);
         assert!(!back.sound);
         assert!(!back.themed_sessions);
         assert!(!back.context);
@@ -486,7 +516,11 @@ mod tests {
                 Field::Theme => THEMES.len(),
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
-                Field::SessionColors | Field::Sound | Field::Context | Field::Updates => 2,
+                Field::SessionColors
+                | Field::TabDetail
+                | Field::Sound
+                | Field::Context
+                | Field::Updates => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);

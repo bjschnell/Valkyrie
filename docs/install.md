@@ -196,11 +196,13 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
 - To update, run `valk upgrade` ([Updating](#updating)).
 - `,` opens the settings: the theme, whether sessions take the theme's colors or
   your terminal's, the tab style (`underline`, `folder` or `cards`), which side the
-  tabs are on (`top`, `left`, `right`), sound, and whether to say when a newer release
+  tabs are on (`top`, `left`, `right`), how much each tab shows (`full`, or `minimal`:
+  one row, its state icon and name, and at the side a rail of icons that opens under
+  the mouse; `m` in tab mode switches it), sound, and whether to say when a newer release
   is out. They are kept in
   `~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
   which you can also edit by hand. `VALK_THEME`,
-  `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_SOUND` and `VALK_UPDATES` override it
+  `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_TAB_DETAIL`, `VALK_SOUND` and `VALK_UPDATES` override it
   for one run.
 
 ## Phone and web

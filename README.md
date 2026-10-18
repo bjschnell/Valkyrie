@@ -183,6 +183,7 @@ takes you back home, and `Alt-n` steps through each session that needs you.
 | | `1`–`9` · `0` · `⇥` | jump to a tab · home · next one needing you |
 | | `s` / `v` · `o` | split · move between panes |
 | | `n` · `r` · `x` · `,` | new tab · rename · close · settings |
+| | `m` | minimal tabs: one row each; at the side, a rail of icons that opens under the mouse |
 | | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
 
 **Remapping.** Press `K` on the home screen (or in the settings panel), then `↩`
@@ -211,7 +212,9 @@ Press `,` to open the settings panel. You can change:
   `tokyonight`, `matrix`, `violet` or `valkyrie`
 - whether sessions take the theme's colors (`theme`) or your terminal's
   (`terminal`)
-- the tab style (`underline`, `folder`, `cards`) and side (`top`, `left`, `right`)
+- the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
+  and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
+  and state icons that opens over the session under the mouse or in tab mode)
 - sound, and project context
 
 With `theme` colors, a session's background, default text and 16 ANSI colors come
@@ -225,7 +228,7 @@ them.
 
 Settings are kept in `~/.config/valkyrie/settings.toml`
 (`%APPDATA%\Valkyrie\settings.toml` on Windows), which you can also edit by hand.
-`VALK_THEME`, `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_SOUND` and
+`VALK_THEME`, `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_TAB_DETAIL`, `VALK_SOUND` and
 `VALK_PROJECT_CONTEXT` override it for one run.
 
 </details>

@@ -212,6 +212,8 @@ struct App {
     reviewing: Option<usize>,
     /// The tab being dragged to a new place.
     tab_drag: Option<SessionId>,
+    /// The mouse is over the minimal tabs' rail, which opens it.
+    rail_hover: bool,
     /// The attached tab's other panes, when it is split; `view` is the focused one.
     others: Vec<Attached>,
     /// The attached tab's split layout (`None`: one pane).
@@ -332,6 +334,7 @@ impl App {
             menu: None,
             reviewing: None,
             tab_drag: None,
+            rail_hover: false,
             others: Vec::new(),
             layout: None,
             layouts: Vec::new(),
@@ -849,6 +852,8 @@ impl App {
                     self.settings_cursor = Some(0);
                     return self.settings_keys(keys);
                 }
+                // The strip stays in tab mode, so you see the change and can undo it.
+                b"m" => self.change(Field::TabDetail, 1),
                 b"\r" | b"\n" => {
                     self.tab_cursor = None;
                     match self.tab_session(cursor).map(|s| s.id) {
@@ -1163,9 +1168,12 @@ impl App {
     /// Opens a tab's menu under the tab (beside it, for a column), the cursor on
     /// `item`.
     fn open_menu(&mut self, id: SessionId, item: usize) {
-        let tabs =
-            self.tabs_area()
-                .unwrap_or(Rect::new(0, 0, MENU_WIDTH, self.settings.tabs.rows()));
+        let tabs = self.tabs_area().unwrap_or(Rect::new(
+            0,
+            0,
+            MENU_WIDTH,
+            self.settings.tabs.rows(self.settings.minimal_tabs),
+        ));
         let index = self.tab_of(id);
         let tab = self
             .tab_layout(tabs)
@@ -1440,8 +1448,13 @@ impl App {
         if field == Field::Updates {
             self.look_for_updates();
         }
-        if (before.tabs, before.tab_side) != (self.settings.tabs, self.settings.tab_side) {
+        let strip = |s: &Settings| (s.tabs, s.tab_side, s.minimal_tabs);
+        if strip(&before) != strip(&self.settings) {
             self.relayout();
+            // The rail wants plain motion, to open under the mouse.
+            if self.view.is_some() {
+                self.update_capture();
+            }
         }
         self.status = format!(
             "{}: {}",
@@ -1580,6 +1593,13 @@ impl App {
     async fn on_mouse(&mut self, m: Mouse) {
         if self.menu.is_some() {
             return self.menu_click(m).await;
+        }
+        // On the rail it opens; anywhere else it shuts.
+        if self.rail() {
+            let over = self
+                .tabs_area()
+                .is_some_and(|tabs| tabs.contains(Position::new(m.x, m.y)));
+            self.rail_hover = over;
         }
         let tabs = self.tabs_area();
         let Some(view) = &self.view else { return };
@@ -2090,7 +2110,8 @@ impl App {
                         && self.menu.is_none()
                         && self.reviewing.is_none()
                         && self.settings_cursor.is_none()
-                        && self.keys_page.is_none();
+                        && self.keys_page.is_none()
+                        && !self.rail_open();
                     self.draw_panes(frame, main, cursor);
                     if let Some(tabs) = tabs {
                         self.draw_tabs(frame, tabs);
@@ -2506,11 +2527,15 @@ impl App {
         });
         let (x, y) = match (self.settings.tab_side, tab) {
             (TabSide::Top, Some(r)) => (r.x.min(main.right() - width), main.y),
-            (TabSide::Left, Some(r)) => (main.x, r.y.min(main.bottom() - height)),
-            (TabSide::Right, Some(r)) => (main.right() - width, r.y.min(main.bottom() - height)),
+            // Beside the strip, which an open rail lays over the session.
+            (TabSide::Left, Some(r)) => (r.right() + 1, r.y.min(main.bottom() - height)),
+            (TabSide::Right, Some(r)) => (
+                r.x.saturating_sub(width + 1).min(main.right() - width),
+                r.y.min(main.bottom() - height),
+            ),
             _ => (main.x, main.y),
         };
-        let rect = Rect::new(x.max(main.x), y.max(main.y), width, height);
+        let rect = Rect::new(x.max(main.x), y.max(main.y), width, height).intersection(main);
         frame.render_widget(ratatui::widgets::Clear, rect);
         self.draw_session_preview(frame, rect, session, true);
     }
@@ -2612,10 +2637,16 @@ const REVIEWS_BODY_ROWS: u16 = 8;
 const TABS_MIN_ROWS: u16 = 12;
 /// The column of tabs beside the session: the widest tab, its rule and a margin.
 const SIDE_WIDTH: u16 = TAB_MAX + 2;
+/// The column of minimal tabs: a short name, its icon and number. Beside the
+/// session only on top; at the side it is the rail, open.
+const MINIMAL_SIDE_WIDTH: u16 = 18;
+/// The rail, shut: each tab's number and icon, and the rule.
+const RAIL_WIDTH: u16 = 6;
 /// Narrower terminals leave the session every column.
 const SIDE_MIN_COLS: u16 = 70;
-/// A tab's width bounds, padding included.
+/// A tab's width bounds, padding included; a minimal tab can be narrower.
 const TAB_MIN: u16 = 10;
+const MINIMAL_TAB_MIN: u16 = 6;
 const TAB_MAX: u16 = 24;
 /// The ` + new` card at the end of the strip.
 const PLUS_WIDTH: u16 = 7;
@@ -2692,23 +2723,64 @@ impl App {
     /// The attached session's area and, when shown, the tab strip's, within `body`.
     fn split_body(&self, body: Rect) -> (Rect, Option<Rect>) {
         let side = |at| Layout::horizontal(at).areas::<2>(body);
+        let width = match (self.rail(), self.settings.minimal_tabs) {
+            (true, _) => RAIL_WIDTH,
+            (false, true) => MINIMAL_SIDE_WIDTH,
+            (false, false) => SIDE_WIDTH,
+        };
+        // An open rail lies over the session, which keeps its size.
+        let open = |tabs: Rect| {
+            if !self.rail_open() {
+                return tabs;
+            }
+            let width = MINIMAL_SIDE_WIDTH.min(body.width);
+            match self.settings.tab_side {
+                TabSide::Right => Rect {
+                    x: tabs.right() - width,
+                    width,
+                    ..tabs
+                },
+                _ => Rect { width, ..tabs },
+            }
+        };
         match self.settings.tab_side {
             TabSide::Top if body.height >= TABS_MIN_ROWS => {
-                let rows = self.settings.tabs.rows();
+                let rows = self.settings.tabs.rows(self.settings.minimal_tabs);
                 let [tabs, main] =
                     Layout::vertical([Constraint::Length(rows), Constraint::Fill(1)]).areas(body);
                 (main, Some(tabs))
             }
             TabSide::Left if body.width >= SIDE_MIN_COLS && body.height >= TABS_MIN_ROWS => {
-                let [tabs, main] = side([Constraint::Length(SIDE_WIDTH), Constraint::Fill(1)]);
-                (main, Some(tabs))
+                let [tabs, main] = side([Constraint::Length(width), Constraint::Fill(1)]);
+                (main, Some(open(tabs)))
             }
             TabSide::Right if body.width >= SIDE_MIN_COLS && body.height >= TABS_MIN_ROWS => {
-                let [main, tabs] = side([Constraint::Fill(1), Constraint::Length(SIDE_WIDTH)]);
-                (main, Some(tabs))
+                let [main, tabs] = side([Constraint::Fill(1), Constraint::Length(width)]);
+                (main, Some(open(tabs)))
             }
             _ => (body, None),
         }
+    }
+
+    /// Minimal tabs in a column are a rail of icons, as a browser's vertical tabs
+    /// are when collapsed.
+    pub(crate) fn rail(&self) -> bool {
+        self.settings.minimal_tabs && self.settings.tab_side != TabSide::Top
+    }
+
+    /// The rail opens to names over the session while the mouse is on it, and
+    /// while tab mode, a drag or a rename works on the tabs.
+    fn rail_open(&self) -> bool {
+        self.rail()
+            && (self.rail_hover
+                || self.tab_cursor.is_some()
+                || self.tab_drag.is_some()
+                || (self.renaming.is_some() && self.view.is_some()))
+    }
+
+    /// The rail shut: icons only.
+    fn rail_shut(&self) -> bool {
+        self.rail() && !self.rail_open()
     }
 
     /// The attached session's area and, when shown, the tab strip's, on screen now.
@@ -2760,7 +2832,13 @@ impl App {
         let widths: Vec<u16> = self
             .tabs()
             .iter()
-            .map(|tab| tab_width(&self.sessions[self.face(tab)], tab.len()))
+            .map(|tab| {
+                tab_width(
+                    &self.sessions[self.face(tab)],
+                    tab.len(),
+                    self.settings.minimal_tabs,
+                )
+            })
             .collect();
         let focus = self
             .tab_cursor
@@ -2793,16 +2871,18 @@ impl App {
     }
 
     /// Tabs in a column beside the session: home on top, then a tab of two rows per
-    /// session with a row between, then "+". The column's edge toward the session
-    /// is left for underlined tabs' rule.
+    /// session with a row between (minimal: one row each, back to back), then "+".
+    /// The column's edge toward the session is left for underlined tabs' rule.
     fn column_layout(&self, strip: Rect) -> TabLayout {
+        let minimal = self.settings.minimal_tabs;
+        let (height, step) = if minimal { (1, 1) } else { (2, 3) };
         let x = match self.settings.tab_side {
             TabSide::Right => strip.x + 1,
             _ => strip.x,
         };
         let width = strip.width.saturating_sub(1);
         let row = |y: u16, height: u16| Rect::new(x, y, width, height).intersection(strip);
-        let home = row(strip.y, 2);
+        let home = row(strip.y, height);
         let first = home.bottom() + 1;
         let n = self.tabs().len();
         let focus = self
@@ -2814,7 +2894,7 @@ impl App {
         let room = strip.bottom().saturating_sub(first);
         let fits = |start: usize, end: usize| {
             let marks = u16::from(start > 0) + u16::from(end < n);
-            (end - start) as u16 * 3 + marks < room
+            (end - start) as u16 * step + marks < room
         };
         let (start, end) = window(n, focus, fits);
         let mut y = first;
@@ -2824,8 +2904,8 @@ impl App {
         });
         let mut tabs = Vec::new();
         for i in start..end {
-            tabs.push((i, row(y, 2)));
-            y += 3;
+            tabs.push((i, row(y, height)));
+            y += step;
         }
         let more_after = (end < n).then(|| {
             y += 1;
@@ -2855,6 +2935,9 @@ impl App {
 
     /// One tab per session: its name, then what runs in it and its state.
     fn draw_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if self.rail_open() {
+            frame.render_widget(ratatui::widgets::Clear, area);
+        }
         match self.settings.tabs {
             TabStyle::Cards => self.draw_cards(frame, area),
             TabStyle::Underline | TabStyle::Folder => self.draw_underlined(frame, area),
@@ -2865,6 +2948,7 @@ impl App {
     fn draw_more(&self, frame: &mut ratatui::Frame, layout: &TabLayout) {
         let (before, after) = match self.settings.tab_side {
             TabSide::Top => ("‹", "›"),
+            _ if self.rail_shut() => ("  ▲", "  ▼"),
             _ => ("  ▲ more", "  ▼ more"),
         };
         for (rect, mark) in [(layout.more_before, before), (layout.more_after, after)] {
@@ -2878,7 +2962,11 @@ impl App {
     /// are set apart by a thin line of the strip rather than a whole row.
     fn card_edge(&self, frame: &mut ratatui::Frame, area: Rect, card: Rect, color: style::Color) {
         let y = card.bottom();
-        if self.settings.tab_side == TabSide::Top || y >= area.bottom() {
+        // Minimal tabs in a column sit back to back: the row under is the next one.
+        if self.settings.tab_side == TabSide::Top
+            || self.settings.minimal_tabs
+            || y >= area.bottom()
+        {
             return;
         }
         let buf = frame.buffer_mut();
@@ -2897,6 +2985,8 @@ impl App {
         let buf = frame.buffer_mut();
         buf.set_style(area, style::Style::new().bg(t.strip));
         let layout = self.tab_layout(area);
+        let minimal = self.settings.minimal_tabs;
+        let shut = self.rail_shut();
         // Every clickable thing is a card on the darker strip; the cursor's is lit.
         let lit = style::Style::new().bg(t.accent).fg(t.bg);
         let attached = self.attached_index();
@@ -2935,12 +3025,29 @@ impl App {
                 ]),
                 _ => {
                     let name_color = if queued { color } else { t.fg };
-                    let mut name =
-                        fit(&s.name, width.saturating_sub(1 + number.width())).fg(name_color);
+                    let icon = if minimal {
+                        format!("{} ", state_icon(state, spin))
+                    } else {
+                        String::new()
+                    };
+                    let panes = if minimal && !shut {
+                        panes.trim_end()
+                    } else {
+                        ""
+                    };
+                    let room =
+                        width.saturating_sub(1 + number.width() + icon.width() + panes.width());
+                    let mut name = fit(&s.name, room).fg(name_color);
                     if here || queued {
                         name = name.bold();
                     }
-                    Line::from(vec![mark.fg(t.accent).bold(), number.fg(t.muted), name])
+                    Line::from(vec![
+                        mark.fg(t.accent).bold(),
+                        number.fg(t.muted),
+                        icon.fg(color),
+                        name,
+                        format!(" {panes}").trim_end().to_string().fg(t.muted),
+                    ])
                 }
             };
             let mut bottom = vec![mark.fg(t.accent).bold()];
@@ -2952,9 +3059,13 @@ impl App {
                 width - 1,
                 t,
             ));
-            let bottom = Line::from(bottom);
+            let lines = if minimal {
+                vec![top]
+            } else {
+                vec![top, Line::from(bottom)]
+            };
             frame.render_widget(
-                Paragraph::new(vec![top, bottom]).style(style::Style::new().bg(bg)),
+                Paragraph::new(lines).style(style::Style::new().bg(bg)),
                 rect,
             );
             if cursor {
@@ -2963,7 +3074,7 @@ impl App {
             self.card_edge(frame, area, rect, if cursor { t.accent } else { bg });
         }
         // Home: the way back to the whole picture, with how many need you.
-        let needs = if self.queue.is_empty() {
+        let mut needs = if self.queue.is_empty() {
             Line::default()
         } else {
             Line::from(format!(" ● {}", self.queue.len()).fg(t.needs).bold())
@@ -2976,17 +3087,30 @@ impl App {
             },
             _ => layout.home,
         };
-        frame.render_widget(
-            Paragraph::new(vec![
+        let home_lines = if !minimal {
+            vec![
                 Line::from(vec![" ⌂ ".fg(t.accent).bold(), "home".fg(t.fg).bold()]),
                 needs,
-            ])
-            .style(style::Style::new().bg(t.card)),
+            ]
+        } else if shut {
+            vec![rail_home(self.queue.len(), t)]
+        } else if self.queue.is_empty() {
+            vec![Line::from(vec![
+                " ⌂ ".fg(t.accent).bold(),
+                "home".fg(t.fg).bold(),
+            ])]
+        } else {
+            needs.spans.insert(0, " ⌂".fg(t.accent).bold());
+            vec![needs]
+        };
+        frame.render_widget(
+            Paragraph::new(home_lines).style(style::Style::new().bg(t.card)),
             home,
         );
         self.card_edge(frame, area, home, t.card);
         self.draw_more(frame, &layout);
-        let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), "new".fg(t.fg)]))
+        let new = if shut { "" } else { "new" };
+        let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), new.fg(t.fg)]))
             .style(style::Style::new().bg(t.card));
         frame.render_widget(plus, layout.plus);
         if self.tab_cursor == Some(tabs.len()) {
@@ -3017,6 +3141,8 @@ impl App {
         // The rule runs along the strip's edge toward the session: under a strip on
         // top, beside a column. A tab is underlined where it meets the rule.
         let folder = self.settings.tabs == TabStyle::Folder;
+        let minimal = self.settings.minimal_tabs;
+        let shut = self.rail_shut();
         let mut bar = None;
         let (rule, text) = match self.settings.tab_side {
             TabSide::Top if folder => {
@@ -3119,8 +3245,20 @@ impl App {
                     "▏".fg(t.accent),
                 ]),
                 _ => {
+                    let icon = if minimal {
+                        format!("{} ", state_icon(state, spin))
+                    } else {
+                        String::new()
+                    };
+                    let panes = if minimal && !shut {
+                        panes.trim_end()
+                    } else {
+                        ""
+                    };
+                    let room =
+                        width.saturating_sub(1 + number.width() + icon.width() + panes.width());
                     // Bright when attached, the state's color when it needs you.
-                    let name = fit(&s.name, width.saturating_sub(1 + number.width()));
+                    let name = fit(&s.name, room);
                     let name = match (here, queued) {
                         (_, true) => name.fg(color).bold(),
                         (true, false) => name.fg(t.fg).bold(),
@@ -3131,7 +3269,13 @@ impl App {
                     } else {
                         number.fg(t.border)
                     };
-                    Line::from(vec![" ".into(), number, name])
+                    Line::from(vec![
+                        " ".into(),
+                        number,
+                        icon.fg(color),
+                        name,
+                        format!(" {panes}").trim_end().to_string().fg(t.muted),
+                    ])
                 }
             };
             let mut bottom = vec![Span::raw(" ")];
@@ -3143,10 +3287,12 @@ impl App {
                 width - 1,
                 t,
             ));
-            frame.render_widget(
-                Paragraph::new(vec![top, Line::from(bottom)]),
-                rect.intersection(text),
-            );
+            let lines = if minimal {
+                vec![top]
+            } else {
+                vec![top, Line::from(bottom)]
+            };
+            frame.render_widget(Paragraph::new(lines), rect.intersection(text));
             if self.tab_cursor == Some(i) {
                 lift(frame, rect);
                 underline(frame, rect, t.accent2);
@@ -3178,7 +3324,9 @@ impl App {
         if rule.width == 1 {
             let join = if rule.x > text.x { "┤" } else { "├" };
             let buf = frame.buffer_mut();
-            let below = std::iter::once(layout.home).chain(layout.tabs.iter().map(|&(_, r)| r));
+            // Minimal tabs sit back to back: only home has a rule under it.
+            let tabs_below = layout.tabs.iter().map(|&(_, r)| r).filter(|_| !minimal);
+            let below = std::iter::once(layout.home).chain(tabs_below);
             for r in below {
                 let y = r.bottom();
                 if y >= area.bottom() {
@@ -3191,21 +3339,29 @@ impl App {
             }
         }
         // Home: the way back to the whole picture, with how many need you.
-        let needs = if self.queue.is_empty() {
+        let mut needs = if self.queue.is_empty() {
             Line::default()
         } else {
             Line::from(format!(" ● {}", self.queue.len()).fg(t.needs).bold())
         };
-        frame.render_widget(
-            Paragraph::new(vec![
+        let home_lines = if !minimal {
+            vec![
                 Line::from(vec![" ⌂ ".fg(t.accent), "home".fg(t.muted)]),
                 needs,
-            ]),
-            layout.home.intersection(text),
-        );
+            ]
+        } else if shut {
+            vec![rail_home(self.queue.len(), t)]
+        } else if self.queue.is_empty() {
+            vec![Line::from(vec![" ⌂ ".fg(t.accent), "home".fg(t.muted)])]
+        } else {
+            needs.spans.insert(0, " ⌂".fg(t.accent));
+            vec![needs]
+        };
+        frame.render_widget(Paragraph::new(home_lines), layout.home.intersection(text));
         self.draw_more(frame, &layout);
+        let new = if shut { "" } else { "new" };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![" + ".fg(t.accent), "new".fg(t.muted)])),
+            Paragraph::new(Line::from(vec![" + ".fg(t.accent), new.fg(t.muted)])),
             layout.plus.intersection(text),
         );
         if self.tab_cursor == Some(tabs.len()) {
@@ -3427,8 +3583,18 @@ fn window(n: usize, focus: usize, fits: impl Fn(usize, usize) -> bool) -> (usize
     }
 }
 
-/// A tab wide enough for its name and its program line, within bounds.
-fn tab_width(s: &SessionInfo, panes: usize) -> u16 {
+/// Home on the shut rail: how many need you, else the house.
+fn rail_home(needing: usize, t: &Theme) -> Line<'static> {
+    if needing == 0 {
+        Line::from(" ⌂".fg(t.accent))
+    } else {
+        Line::from(format!(" ●{needing}").fg(t.needs).bold())
+    }
+}
+
+/// A tab wide enough for its name and its program line (minimal: its name, icon
+/// and pane count), within bounds.
+fn tab_width(s: &SessionInfo, panes: usize, minimal: bool) -> u16 {
     // Mark and number before the name; mark, " · ", icon and state after the program,
     // and `⊞2 ` before it on a split tab.
     let name = 3 + s.name.width();
@@ -3437,6 +3603,10 @@ fn tab_width(s: &SessionInfo, panes: usize) -> u16 {
     } else {
         0
     };
+    if minimal {
+        // Mark, number, icon and a space, the name, then ` ⊞2` on a split tab.
+        return ((5 + s.name.width() + split) as u16 + 1).clamp(MINIMAL_TAB_MIN, TAB_MAX);
+    }
     let detail = 1 + split + program(s).width() + 5 + s.status.state.label().width();
     (name.max(detail) as u16 + 1).clamp(TAB_MIN, TAB_MAX)
 }
@@ -3452,7 +3622,11 @@ fn detail_spans(
     t: &Theme,
 ) -> Vec<Span<'static>> {
     let detail = fit(&format!("{program} · {icon} {label}"), width);
-    let split = program.len().min(detail.len());
+    // Where the program ends, or where `fit` cut it short.
+    let mut split = program.len().min(detail.len());
+    while !detail.is_char_boundary(split) {
+        split -= 1;
+    }
     vec![
         detail[..split].to_string().fg(t.muted),
         detail[split..].to_string().fg(color),
@@ -3818,6 +3992,7 @@ fn attached_bar(
             ("d", "decisions"),
             ("r", "rename"),
             ("x", "close"),
+            ("m", "minimal"),
             (",", "settings"),
             ("esc", "back"),
         ],
@@ -5226,6 +5401,151 @@ mod tests {
         };
         app.on_mouse(ctrl).await;
         assert_eq!(opened(), ["https://example.com/x"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Minimal tabs, in every style. On top: one row each, the number, the state's
+    /// icon and the name, no program or state word. In a column: a rail of numbers
+    /// and icons that opens over the session, which keeps its size, in tab mode or
+    /// under the mouse. Clicks find the tabs either way; `m` in tab mode switches.
+    #[tokio::test]
+    async fn minimal_tabs_are_one_row_and_a_rail_at_the_side() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-mini-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings_file = dir.join("settings.toml");
+        app.settings = Settings::default();
+        app.settings.minimal_tabs = true;
+        app.sessions = (1..=3)
+            .map(|id| {
+                let mut s = info(id);
+                s.name = format!("proj{id}");
+                s.command = vec!["/usr/bin/fish".into()];
+                s
+            })
+            .collect();
+        app.sessions[1].status.agent = "claude".into();
+        app.sessions[1].status.state = AgentState::Working;
+        app.sessions[2].status.agent = "codex".into();
+        app.sessions[2].status.state = AgentState::NeedsInput;
+        app.queue = vec![queued(3)];
+        let mut view = Attached::new(2, "proj2".into(), None);
+        view.apply(update(true, vec![row(0, "inside session 2")]));
+        app.view = Some(view);
+
+        let body = Rect::new(0, 0, 100, 20);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        for side in TabSide::ALL.iter().copied() {
+            for style in TabStyle::ALL.iter().copied() {
+                for open in [false, true] {
+                    if open && side == TabSide::Top {
+                        continue;
+                    }
+                    app.settings.tab_side = side;
+                    app.settings.tabs = style;
+                    app.rail_hover = open;
+                    let (main, tabs) = app.split_body(body);
+                    let tabs = tabs.expect("room for the strip");
+                    match side {
+                        TabSide::Top => assert_eq!(tabs.height, style.rows(false) - 1),
+                        _ => {
+                            let width = if open { MINIMAL_SIDE_WIDTH } else { RAIL_WIDTH };
+                            assert_eq!(tabs.width, width);
+                            assert_eq!(main.width, 100 - RAIL_WIDTH, "the session keeps its size");
+                        }
+                    }
+                    terminal
+                        .draw(|frame| {
+                            render_rows(
+                                app.view.as_ref().unwrap().shown(),
+                                main,
+                                frame.buffer_mut(),
+                                None,
+                            );
+                            app.draw_tabs(frame, tabs);
+                        })
+                        .unwrap();
+                    let buffer = terminal.backend().buffer().clone();
+                    let open_name = if open { "-open" } else { "" };
+                    snapshot(
+                        &buffer,
+                        &format!("minimal-tabs-{}-{}{open_name}", side.name(), style.name()),
+                    );
+                    let at = |x: u16, y: u16| buffer[(x, y)].symbol().to_string();
+                    let text =
+                        |r: Rect, y: u16| (r.x..r.right()).map(|x| at(x, y)).collect::<String>();
+                    let strip: String = (tabs.y..tabs.bottom())
+                        .map(|y| text(tabs, y) + "\n")
+                        .collect();
+                    let what = format!("{side:?} {style:?} open={open}\n{strip}");
+                    let layout = app.tab_layout(tabs);
+                    let rects: Vec<Rect> = layout.tabs.iter().map(|&(_, r)| r).collect();
+                    assert_eq!(rects.len(), 3, "{what}");
+                    if side != TabSide::Top {
+                        assert_eq!(rects[1].y, rects[0].y + 1, "back to back: {what}");
+                    }
+                    let name_row = |r: Rect| {
+                        if style == TabStyle::Folder && side == TabSide::Top {
+                            r.y + 1
+                        } else {
+                            r.y
+                        }
+                    };
+                    let third = text(rects[2], name_row(rects[2]));
+                    if side == TabSide::Top || open {
+                        assert!(third.contains("3 ● proj3"), "{what}");
+                        assert!(strip.contains("⌂"), "{what}");
+                    } else {
+                        assert!(third.contains("3 ●") && !strip.contains("proj"), "{what}");
+                        assert!(strip.contains("●1"), "home says one needs you: {what}");
+                    }
+                    for gone in ["codex", "claude", "needs input", "working", "fish"] {
+                        assert!(!strip.contains(gone), "{gone}: {what}");
+                    }
+                    assert_eq!(
+                        app.tab_hit(tabs, rects[2].x + 2, name_row(rects[2])),
+                        Some(TabHit::Session(3)),
+                        "{what}"
+                    );
+                }
+            }
+        }
+
+        // The mouse on the rail opens it, and off it shuts it.
+        app.settings.tab_side = TabSide::Left;
+        app.rail_hover = false;
+        app.fixed_size = Some(Size {
+            cols: 100,
+            rows: 20,
+        });
+        let motion = |x, y| Mouse {
+            kind: MouseKind::Other,
+            code: 35,
+            x,
+            y,
+            release: false,
+        };
+        app.on_mouse(motion(2, 5)).await;
+        assert!(app.rail_hover && app.rail_open());
+        app.on_mouse(motion(12, 5)).await;
+        assert!(app.rail_hover, "still on the open rail");
+        app.on_mouse(motion(40, 5)).await;
+        assert!(!app.rail_open());
+        // Tab mode opens it too.
+        app.tab_cursor = Some(0);
+        assert!(app.rail_open());
+
+        app.tab_keys(b"m").await;
+        assert!(!app.settings.minimal_tabs);
+        assert_eq!(app.tab_cursor, Some(0), "still in tab mode");
+        let saved = std::fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(saved.contains("tab_detail = \"full\""), "{saved}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
