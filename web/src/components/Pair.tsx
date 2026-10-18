@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { parseCode } from "../lib/pair";
 import { saveToken, useApp } from "../store";
+import { Wordmark } from "./Logo";
 
 /** A name for this device in `valk web devices`: the platform, roughly. */
 function deviceName(): string {
@@ -59,10 +60,11 @@ export function Pair() {
 
   return (
     <main className="pair">
-      <div className="pair-mark" aria-hidden>
-        ◆
-      </div>
-      <h1>Valkyrie</h1>
+      <img className="pair-art" src="/icons/icon-512.png" alt="" />
+      <h1>
+        <Wordmark />
+      </h1>
+      <p className="pair-tagline">AI agent command center</p>
       {state === "pairing" ? (
         <p className="pair-lead">Pairing this {deviceName()}…</p>
       ) : (

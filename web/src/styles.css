@@ -38,7 +38,8 @@
   --ansi-14: #a4ffff;
   --ansi-15: #ffffff;
   --radius: 16px;
-  --font: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", Inter, Roboto, sans-serif;
+  --sans: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", Inter, Roboto, sans-serif;
+  --font: var(--sans);
   --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   color-scheme: dark;
 }
@@ -119,13 +120,38 @@ code {
 
 .brand {
   flex: 1;
-  font-weight: 700;
-  font-size: 18px;
-  letter-spacing: 0.2px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  container-type: inline-size;
 }
 
-.brand-mark {
-  color: var(--accent);
+/* A phone's top bar is too tight for the wordmark: the V alone, then. */
+@container (max-width: 180px) {
+  .topbar .brand .wordmark {
+    display: none;
+  }
+}
+
+/* The logo: the V mark and the wordmark (components/Logo.tsx). */
+.mark {
+  flex: none;
+  filter: drop-shadow(0 0 6px rgb(176 107 255 / 0.45));
+}
+
+.wordmark {
+  /* Sans under every look, as in the art, though valkyrie's text is mono. */
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 300;
+  letter-spacing: 0.32em;
+  white-space: nowrap;
+}
+
+.wordmark-rune {
+  color: #39ff7a;
+  text-shadow: 0 0 8px rgb(57 255 122 / 0.6);
 }
 
 .icon-btn {
@@ -753,15 +779,30 @@ code {
   text-align: center;
 }
 
-.pair-mark {
-  font-size: 46px;
-  color: var(--accent);
-  text-shadow: 0 0 30px color-mix(in srgb, var(--accent) 60%, transparent);
+.pair-art {
+  display: block;
+  width: 132px;
+  height: 132px;
+  margin: 0 auto 18px;
+  filter: drop-shadow(0 0 28px rgb(176 107 255 / 0.4));
 }
 
 .pair h1 {
-  margin: 4px 0 10px;
-  font-size: 30px;
+  margin: 0;
+  font-size: 26px;
+}
+
+/* The trailing tracking would push it off-center. */
+.pair .wordmark {
+  margin-right: -0.32em;
+}
+
+.pair-tagline {
+  margin: 8px 0 22px;
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, #b06bff 80%, var(--fg));
 }
 
 .pair-lead {
@@ -2074,17 +2115,15 @@ code {
   background: repeating-linear-gradient(to bottom, rgb(0 0 0 / 0.18) 0 1px, transparent 1px 3px);
 }
 
-[data-fx] .brand,
+[data-fx] .wordmark,
 [data-fx] .section-title,
 [data-fx] .calm-title {
   color: var(--accent);
   text-shadow: 0 0 6px rgb(var(--glow) / 0.55);
 }
 
-[data-fx] .brand-name {
+[data-fx] .wordmark {
   display: inline-block;
-  text-transform: uppercase;
-  letter-spacing: 2px;
   animation: glitch 4s steps(1) infinite;
 }
 
@@ -2143,7 +2182,7 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-fx] .brand-name,
+  [data-fx] .wordmark,
   [data-fx] .calm-title::after {
     animation: none;
   }

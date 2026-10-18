@@ -10,6 +10,7 @@ import { Proposals } from "./Decisions";
 import { NotifyButton, NotifyHint } from "./Notify";
 import { AddDeviceButton } from "./AddDevice";
 import { Rain } from "./Rain";
+import { Mark, Wordmark } from "./Logo";
 
 const go = (id: number) => {
   location.hash = `#/s/${id}`;
@@ -61,7 +62,8 @@ export function Inbox() {
       {look !== "default" && <Rain key={look} />}
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">◆</span> <span className="brand-name">Valkyrie</span>
+          <Mark size={26} />
+          <Wordmark />
         </div>
         <ConnectionPill />
         <NotifyButton />
