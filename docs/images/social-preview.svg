@@ -1,0 +1,20 @@
+<!-- GitHub's social preview for the repo, without the logo. Rebuild the PNG with:
+     rsvg-convert docs/images/social-preview.svg | magick - \( web/public/icons/icon-512.png -resize 320x320 \) \
+       -geometry +110+160 -composite docs/images/social-preview.png -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <radialGradient id="glow" cx="300" cy="320" r="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bd93f9" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#bd93f9" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="#191a21"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <!-- The logo goes at x=110 y=160, 320x320. -->
+  <g font-family="Ubuntu Nerd Font, DejaVu Sans, sans-serif">
+    <text x="500" y="270" font-size="96" font-weight="700" fill="#f8f8f2">Valkyrie</text>
+    <text x="502" y="345" font-size="36" fill="#b6bdd8">Run all your coding agents in one place,</text>
+    <text x="502" y="393" font-size="36" fill="#b6bdd8">and know which one needs you next.</text>
+    <text x="502" y="470" font-size="26" fill="#bd93f9">Claude Code · Codex · terminal and phone</text>
+  </g>
+</svg>
