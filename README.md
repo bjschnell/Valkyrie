@@ -24,11 +24,13 @@
 
 ## What is this?
 
-Running many agents at once results in a game of hide and seek trying to find the agent that needs input from you to continue. Balancing many agents turns into a juggling act making sure you don't leave any hanging. Valkyrie solves this by making sure your attention is automatically directed to where it is needed most. No more searching.
+Running many agents at once turns into a game of hide and seek: which one is
+waiting on you to continue? Valkyrie points your attention to where it's needed
+most. No more searching.
 
 Valkyrie runs every session under one background daemon. Its home screen is an
 inbox ranked by who needs you (`needs input`, then `blocked`, then `done`). When
-something new needs you, it chimes and tells you what the agent asked. 
+something new needs you, it chimes and tells you what the agent asked.
 
 Sessions keep running after you close the TUI, and `valk web` serves a phone app
 over your tailnet, so you can answer a prompt with one tap.
@@ -47,9 +49,10 @@ curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-rel
 irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
 ```
 
-**2. Start.** Enter the app easily from any terminal using the `valk` command.
-The home screen lets you quickly spawn a new AI agent session by pressing 'n'.
-Manage your fleet of agents easily from either the home screen, or the session lists UI
+**2. Start.** Run `valk` from any terminal to open the home screen. Press `n` for
+a new shell, then start `claude` or `codex` in it (or run
+`valk new -a -- claude`). Press `^]` to get back home, where the queue shows which
+agent needs you next.
 
 ```sh
 valk                       # open the home screen any time
@@ -87,20 +90,20 @@ cd ~/repos/valkyrie && ./install.sh
 ## Highlights
 
 - **An attention queue, not a grid of terminals.** The home screen lists the
-  sessions waiting on you. Jump easily to whichever AI agent needs you with `alt-n`.
-  Inside a session, tab mode (`^\`) peeks at the tab under its cursor,
-  and decisions waiting for review show in the bar.
+  sessions waiting on you. Jump to whichever agent needs you with `Alt-n`.
+  Inside a session, tab mode (`^\`) peeks at the tab under its cursor, and
+  decisions waiting for review show in the bar.
 - **Sessions that outlive the TUI.** The daemon owns every terminal. Close the TUI,
   SSH in from somewhere else, and every session is still running. Upgrades on Unix
   keep running sessions; Windows upgrades restart them and resume agent
   conversations. After a reboot, Claude and Codex conversations resume.
 - **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right,
   drawn as underlines, folders or cards. Split a tab into panes in any direction.
-- **Control your agents remotely.** `valk web` serves a PWA over your tailnet with an inbox, one-tap
-  answers to prompts, a chat view built from the agent's transcript, a review of
-  what an agent changed, new sessions, dictation, sending files and screenshots to
-  an agent, and notifications.
-- **Project based Memory.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
+- **Control your agents remotely.** `valk web` serves a PWA over your tailnet with
+  an inbox, one-tap answers to prompts, a chat view built from the agent's
+  transcript, a review of what an agent changed, new sessions, dictation, sending
+  files and screenshots to an agent, and notifications.
+- **Project memory.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
   in the repo starts with it.
 - **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so
   it can read state reliably and redraw the screen for a phone.
