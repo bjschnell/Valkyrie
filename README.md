@@ -96,7 +96,7 @@ cd ~/repos/valkyrie && ./install.sh
   conversations. After a reboot, Claude and Codex conversations resume.
 - **Tabs and splits.** Every session is a tab. Put the tabs on top, left or right,
   drawn as underlines, folders or cards. Split a tab into panes in any direction.
-- **Control your agents remotely.** `valk web` serves a PWA over your tailnet with am inbox, one-tap
+- **Control your agents remotely.** `valk web` serves a PWA over your tailnet with an inbox, one-tap
   answers to prompts, a chat view built from the agent's transcript, a review of
   what an agent changed, new sessions, dictation, sending files and screenshots to
   an agent, and notifications.
