@@ -1,7 +1,24 @@
-# Recording the demo
+# The demo
 
-The README's hero image should be a short recording that loops. Keep it under
-30 seconds and 5 MB, and save it as `docs/images/demo.gif`. An MP4 uploaded
+## The GIF in the README
+
+`docs/images/demo.gif` is drawn from the TUI itself, not recorded. The test
+`demo_walks_a_prompt_through_the_queue` renders four home screens with made-up
+sessions, and `frames.py` turns them into a looping GIF with a caption under each
+frame. To change it, edit the test or the captions, then:
+
+```sh
+VALK_SNAPSHOT_DIR=/tmp/valk-frames cargo test -p valkyrie-tui --lib demo_walks
+python3 docs/demo/frames.py /tmp/valk-frames docs/images/demo.gif
+```
+
+It needs rsvg-convert, ImageMagick and ffmpeg. It has no phone and no sound, so a
+real recording can replace it later.
+
+## Recording a real one
+
+A real recording would also show the phone and the chime. Keep it under 30
+seconds and 5 MB, and save it over `docs/images/demo.gif`. An MP4 uploaded
 through GitHub's editor and embedded by its URL works too.
 
 Use made-up sessions only. Keep anything from work out of it, including repo
@@ -9,7 +26,7 @@ names, branch names, prompts and file paths. `setup.sh` builds a fake repo
 (`acme-shop`) and runs a separate daemon for it, so your real sessions stay off
 screen.
 
-## Storyboard
+### Storyboard
 
 | # | Seconds | On screen |
 |---|---|---|
@@ -18,7 +35,7 @@ screen.
 | 3 | 12-22 | Cut to the phone: open the Valkyrie app, the prompt's answers are buttons in the inbox, tap **Yes**. |
 | 4 | 22-28 | Back on the terminal: `fix login` leaves the queue and goes back to work. Loop. |
 
-## Setup
+### Setup
 
 ```sh
 docs/demo/setup.sh            # demo daemon, fake repo, three sessions
@@ -33,7 +50,7 @@ the trust dialog instead of the test run. One way is to run
 
 When you're done: `docs/demo/setup.sh --stop`.
 
-## Terminal part
+### Terminal part
 
 Use vhs or asciinema. vhs is scripted, so every take comes out the same:
 
@@ -51,7 +68,7 @@ agg --theme dracula --font-size 18 /tmp/valk-demo/demo.cast docs/demo/terminal.g
 Neither records sound. If you want the chime in the MP4, record the terminal with
 OBS or your screen recorder instead.
 
-## Phone part
+### Phone part
 
 The phone has to talk to the demo daemon, not your real one. In the shell where
 you sourced `/tmp/valk-demo/env`:
@@ -66,7 +83,7 @@ Then screen-record the phone (iOS: Control Center → Screen Recording; Android:
 Quick Settings → Screen record) while you tap the answer to the `fix login`
 prompt. Afterwards, `tailscale serve --https=8443 off`.
 
-## Putting it together
+### Putting it together
 
 Cut the terminal and phone clips together (any editor; `ffmpeg` works), then make
 the GIF small:
@@ -77,5 +94,4 @@ ffmpeg -i demo.mp4 -vf "fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palette
 ls -lh docs/images/demo.gif   # must be under 5 MB; lower fps or width if not
 ```
 
-Finally, in the README, replace the `home.svg` hero with the commented-out
-`demo.gif` line just above it, and delete the TODO comment.
+The README already shows `docs/images/demo.gif`, so replacing the file is enough.

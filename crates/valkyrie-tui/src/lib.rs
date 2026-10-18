@@ -4929,6 +4929,142 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The README's demo: an agent stops on a permission prompt, rises to the top of
+    /// the queue, is answered and leaves it, and another finishes. With
+    /// `VALK_SNAPSHOT_DIR` set, each step is written as `demo-<n>.json` for
+    /// docs/demo/frames.py.
+    #[tokio::test]
+    async fn demo_walks_a_prompt_through_the_queue() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-demo-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let now = now_ms();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let session = |id, name: &str, cwd: &str| {
+            let mut s = info(id);
+            s.name = name.into();
+            s.command = vec!["claude".into()];
+            s.cwd = format!("{home}/repos/{cwd}").into();
+            s.status = AgentStatus {
+                agent: "claude".into(),
+                state: AgentState::Working,
+                since_ms: now - 300_000,
+                hooked: true,
+                ..AgentStatus::default()
+            };
+            s
+        };
+        app.sessions = vec![
+            session(1, "fix-login", "shop"),
+            session(2, "checkout-ui", "shop"),
+            session(3, "docs-pass", "shop"),
+            session(4, "db-migrate", "api"),
+        ];
+        let set = |app: &mut App, id: SessionId, state, summary: Option<&str>, ago: u64| {
+            let s = app.sessions.iter_mut().find(|s| s.id == id).unwrap();
+            s.status.state = state;
+            s.status.summary = summary.map(Into::into);
+            s.status.since_ms = now - ago * 1000;
+        };
+        let queue = |app: &mut App, ids: &[SessionId]| {
+            app.queue = ids
+                .iter()
+                .map(|&id| {
+                    let s = app.sessions.iter().find(|s| s.id == id).unwrap();
+                    QueueItem {
+                        session: s.id,
+                        name: s.name.clone(),
+                        cwd: s.cwd.clone(),
+                        status: s.status.clone(),
+                    }
+                })
+                .collect();
+        };
+        let render = |app: &App, name: &str| {
+            let mut terminal = Terminal::new(TestBackend::new(160, 22)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            snapshot(buffer, name);
+            buffer
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+        let working =
+            "● Adding a test for the login redirect\n  ⎿  Wrote tests/login.test.js (+18)";
+        let docs = "● Fixed 4 typos in README.md\n\n  Nothing else to change.";
+
+        // 1. Everyone working; one finished earlier waits in the queue.
+        set(
+            &mut app,
+            3,
+            AgentState::ReviewReady,
+            Some("Done: fixed 4 typos in README.md"),
+            240,
+        );
+        queue(&mut app, &[3]);
+        app.selected = 0;
+        app.preview = Some((3, docs.into()));
+        let text = render(&app, "demo-1");
+        assert!(text.contains("docs-pass") && text.contains("fixed 4 typos"));
+        assert!(!text.contains("needs input"));
+
+        // 2. fix-login stops on a permission prompt and goes to the top.
+        set(
+            &mut app,
+            1,
+            AgentState::NeedsInput,
+            Some("Permission: Bash npm test"),
+            2,
+        );
+        queue(&mut app, &[1, 3]);
+        app.selected = 0;
+        app.preview = Some((
+            1,
+            format!(
+                "{working}\n\n● Bash(npm test)\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+            ),
+        ));
+        let text = render(&app, "demo-2");
+        assert!(text.contains("1 needs input") && text.contains("npm test"));
+        assert!(text.contains("Do you want to proceed?"));
+
+        // 3. Answered: back to work, out of the queue.
+        set(&mut app, 1, AgentState::Working, None, 1);
+        queue(&mut app, &[3]);
+        app.selected = 0;
+        app.preview = Some((3, docs.into()));
+        let text = render(&app, "demo-3");
+        assert!(!text.contains("needs input") && !text.contains("Permission"));
+
+        // 4. checkout-ui finishes and joins the queue.
+        set(
+            &mut app,
+            2,
+            AgentState::ReviewReady,
+            Some("Done: cart totals update live"),
+            1,
+        );
+        queue(&mut app, &[2, 3]);
+        app.selected = 0;
+        app.preview = Some((
+            2,
+            "● Cart totals now update as items change\n  ⎿  2 files changed, 64 insertions, 9 deletions".into(),
+        ));
+        let text = render(&app, "demo-4");
+        assert!(text.contains("cart totals update live") && text.contains("2 done"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// An attached session under the tab strip: the session gets the rows left
     /// over, tabs show name then program and state, clicks land on the tabs drawn,
     /// and the keys move, jump, and rename.

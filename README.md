@@ -16,10 +16,7 @@
 
 <br>
 
-<!-- TODO(demo): swap this still for the looping demo once it's recorded.
-     See docs/demo/README.md. Target: docs/images/demo.gif, under 30 s and 5 MB:
-     <img src="docs/images/demo.gif" alt="Several agent sessions in valk; one needs input, chimes, and is answered from the phone" width="100%"> -->
-<img src="docs/images/home.svg" alt="The Valkyrie home screen: a queue of sessions that need you, a list of every session, and a preview of the selected one" width="100%">
+<img src="docs/images/demo.gif" alt="The Valkyrie home screen: an agent stops on a permission prompt and moves to the top of the queue, is answered and goes back to work, and another finishes" width="100%">
 
 </div>
 
