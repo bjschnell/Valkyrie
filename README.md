@@ -102,11 +102,12 @@ cd ~/repos/valkyrie && ./install.sh
 
 ## On your phone
 
-`valk web` serves Valkyrie as an app for your phone or any browser. It's built
-for watching and answering agents, not for typing into a remote terminal:
+`valk web` serves Valkyrie as an app for your phone or any browser. Instead of a
+terminal squeezed onto a small screen, you get an app made for keeping up with
+agents:
 
 - The inbox shows who needs you, with a prompt's answers as buttons. One tap
-  answers, and **Allow all** clears a run of plain yes prompts.
+  answers it, and **Allow all** clears a run of plain yes prompts.
 - Each agent's work reads as a chat, built from its transcript, with the live
   terminal a tab away.
 - When an agent finishes, **Review changes** shows its diff, and one tap asks it
