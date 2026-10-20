@@ -176,15 +176,63 @@ impl Pinger {
     }
 }
 
-/// Plays `kind` without blocking: a bell over SSH, else the sound file through the
+/// What a ping sounds like. Each is generated, in two forms (rising and falling,
+/// or double and single) so a request and a finish tell apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Noise {
+    /// A soft two-note chime, herdr's.
+    Chime,
+    /// Bubble pops.
+    Pop,
+    /// Two knocks on a marimba.
+    Wood,
+    /// A soft electronic beep.
+    Beep,
+    /// The rest are 8-bit, square waves like a NES's: a coin picked up.
+    Coin,
+    /// A power-up's quick arpeggio.
+    Powerup,
+    /// A laser's falling sweep.
+    Zap,
+    /// An extra life's jingle.
+    OneUp,
+}
+
+impl Noise {
+    pub const ALL: &[Noise] = &[
+        Noise::Chime,
+        Noise::Pop,
+        Noise::Wood,
+        Noise::Beep,
+        Noise::Coin,
+        Noise::Powerup,
+        Noise::Zap,
+        Noise::OneUp,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Noise::Chime => "chime",
+            Noise::Pop => "pop",
+            Noise::Wood => "wood",
+            Noise::Beep => "beep",
+            Noise::Coin => "coin",
+            Noise::Powerup => "powerup",
+            Noise::Zap => "zap",
+            Noise::OneUp => "1up",
+        }
+    }
+}
+
+/// Plays `kind` in `noise` without blocking: a bell over SSH, else the sound file through the
 /// first audio player that works. Failures are silent; a ping is never worth an error.
-pub fn play(kind: Kind) {
+pub fn play(noise: Noise, kind: Kind) {
     if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
         let mut out = std::io::stdout();
         let _ = out.write_all(b"\x07").and_then(|()| out.flush());
         return;
     }
-    let Some(file) = sound_file(&valkyrie_proto::state_dir().join("sounds"), kind) else {
+    let Some(file) = sound_file(&valkyrie_proto::state_dir().join("sounds"), noise, kind) else {
         return;
     };
     // Windows plays a WAV itself.
@@ -240,14 +288,19 @@ pub fn play(kind: Kind) {
     });
 }
 
-/// `<dir>/<kind>.wav`, written with the built-in chime when missing. Replace the
-/// file to use your own sound.
-fn sound_file(dir: &Path, kind: Kind) -> Option<PathBuf> {
-    let path = dir.join(format!("{}.wav", kind.name()));
+/// `<dir>/<noise>-<kind>.wav`, written with the generated sound when missing; the
+/// chime keeps the `<kind>.wav` earlier versions wrote. Replace a file to use your
+/// own sound.
+fn sound_file(dir: &Path, noise: Noise, kind: Kind) -> Option<PathBuf> {
+    let name = match noise {
+        Noise::Chime => kind.name().to_string(),
+        _ => format!("{}-{}", noise.name(), kind.name()),
+    };
+    let path = dir.join(format!("{name}.wav"));
     if !path.exists() {
         std::fs::create_dir_all(dir).ok()?;
-        let tmp = dir.join(format!(".{}.wav.tmp-{}", kind.name(), std::process::id()));
-        if std::fs::write(&tmp, chime(kind))
+        let tmp = dir.join(format!(".{name}.wav.tmp-{}", std::process::id()));
+        if std::fs::write(&tmp, sound(noise, kind))
             .and_then(|()| std::fs::rename(&tmp, &path))
             .is_err()
         {
@@ -260,28 +313,178 @@ fn sound_file(dir: &Path, kind: Kind) -> Option<PathBuf> {
 
 const RATE: u32 = 44_100;
 
-/// A soft two-note chime as a 16-bit mono WAV: rising for a request, falling for done.
-fn chime(kind: Kind) -> Vec<u8> {
-    // E5 and A5.
-    let notes: [f32; 2] = match kind {
-        Kind::Request => [659.25, 880.0],
-        Kind::Done => [880.0, 659.25],
-    };
-    let note_len = (RATE as f32 * 0.14) as usize;
-    let tail = (RATE as f32 * 0.22) as usize;
-    let mut samples = Vec::with_capacity(note_len + tail + note_len);
-    for (n, freq) in notes.iter().enumerate() {
-        let len = if n == 0 { note_len } else { note_len + tail };
-        for i in 0..len {
-            let t = i as f32 / RATE as f32;
-            // 5 ms attack, then an exponential decay; a quiet octave adds a bell tone.
-            let env = (t / 0.005).min(1.0) * (-t * 9.0).exp();
-            let wave = (std::f32::consts::TAU * freq * t).sin()
-                + 0.25 * (std::f32::consts::TAU * 2.0 * freq * t).sin();
-            samples.push((wave * env * 0.22 * i16::MAX as f32) as i16);
+/// `noise` for `kind` as a 16-bit mono WAV.
+fn sound(noise: Noise, kind: Kind) -> Vec<u8> {
+    let request = kind == Kind::Request;
+    let mut out = Vec::new();
+    // Peak level: a beep's square wave sounds louder than a sine at the same peak.
+    let level = match noise {
+        Noise::Chime => {
+            // E5 and A5, rising for a request, falling for done; a quiet octave adds
+            // a bell tone.
+            let (a, b) = if request {
+                (659.25, 880.0)
+            } else {
+                (880.0, 659.25)
+            };
+            let partials = [(1.0, 1.0, 9.0), (2.0, 0.25, 9.0)];
+            note(&mut out, a, 0.14, &partials);
+            note(&mut out, b, 0.36, &partials);
+            0.27
         }
-    }
+        Noise::Pop => {
+            // Pitch that rises as it pops; done is one lower pop that falls.
+            if request {
+                pop(&mut out, 400.0, 900.0, 0.07);
+                silence(&mut out, 0.05);
+                pop(&mut out, 500.0, 1100.0, 0.09);
+            } else {
+                pop(&mut out, 900.0, 350.0, 0.12);
+            }
+            0.3
+        }
+        Noise::Wood => {
+            // C5 and G5; a marimba bar's overtone sits near four times the note.
+            let (a, b) = if request {
+                (523.25, 783.99)
+            } else {
+                (783.99, 523.25)
+            };
+            let partials = [(1.0, 1.0, 22.0), (3.93, 0.3, 40.0)];
+            note(&mut out, a, 0.12, &partials);
+            note(&mut out, b, 0.3, &partials);
+            0.3
+        }
+        Noise::Beep => {
+            // A soft square wave: two short beeps for a request, one longer for done.
+            let partials = [(1.0, 1.0, 0.0), (3.0, 0.33, 0.0), (5.0, 0.2, 0.0)];
+            if request {
+                note(&mut out, 1046.5, 0.08, &partials);
+                silence(&mut out, 0.06);
+                note(&mut out, 1046.5, 0.08, &partials);
+            } else {
+                note(&mut out, 784.0, 0.18, &partials);
+            }
+            0.15
+        }
+        Noise::Coin => {
+            // B5 then a held E6, the game's; done is the same a fifth down.
+            let o = if request { 1.0 } else { 2.0 / 3.0 };
+            pulse(&mut out, 987.77 * o, 987.77 * o, 0.07, 0.5);
+            pulse(&mut out, 1318.51 * o, 1318.51 * o, 0.3, 0.5);
+            0.12
+        }
+        Noise::Powerup => {
+            // C E G C, up for a request, down for done.
+            let mut notes = [523.25, 659.25, 783.99, 1046.5];
+            if !request {
+                notes.reverse();
+            }
+            for freq in notes {
+                pulse(&mut out, freq, freq, 0.055, 0.5);
+            }
+            0.12
+        }
+        Noise::Zap => {
+            // Two quick falls for a request, one long fall for done.
+            if request {
+                pulse(&mut out, 1000.0, 250.0, 0.1, 0.5);
+                pulse(&mut out, 1000.0, 250.0, 0.1, 0.5);
+            } else {
+                pulse(&mut out, 800.0, 120.0, 0.25, 0.5);
+            }
+            0.12
+        }
+        Noise::OneUp => {
+            // E G E' C' D' G' for a request, an octave under the game's; done is a
+            // short C major fanfare.
+            let notes: &[(f32, f32)] = if request {
+                &[
+                    (659.25, 0.07),
+                    (783.99, 0.07),
+                    (1318.51, 0.07),
+                    (1046.5, 0.07),
+                    (1174.66, 0.07),
+                    (1567.98, 0.12),
+                ]
+            } else {
+                &[
+                    (523.25, 0.07),
+                    (659.25, 0.07),
+                    (783.99, 0.07),
+                    (1046.5, 0.25),
+                ]
+            };
+            for &(freq, secs) in notes {
+                pulse(&mut out, freq, freq, secs, 0.5);
+            }
+            0.1
+        }
+    };
+    let peak = out
+        .iter()
+        .fold(0.0f32, |m, s| m.max(s.abs()))
+        .max(f32::EPSILON);
+    let samples: Vec<i16> = out
+        .iter()
+        .map(|s| (s / peak * level * i16::MAX as f32) as i16)
+        .collect();
     wav(&samples)
+}
+
+/// How loud a note is `t` seconds into `secs`: a 5 ms attack and release, so it
+/// starts and stops without a click.
+fn edges(t: f32, secs: f32) -> f32 {
+    (t / 0.005).min(1.0) * ((secs - t) / 0.005).clamp(0.0, 1.0)
+}
+
+/// A struck note `secs` long: `partials` as (multiple of `freq`, level, decay per
+/// second).
+fn note(out: &mut Vec<f32>, freq: f32, secs: f32, partials: &[(f32, f32, f32)]) {
+    let len = (RATE as f32 * secs) as usize;
+    for i in 0..len {
+        let t = i as f32 / RATE as f32;
+        let wave: f32 = partials
+            .iter()
+            .map(|&(ratio, level, decay)| {
+                level * (-t * decay).exp() * (std::f32::consts::TAU * ratio * freq * t).sin()
+            })
+            .sum();
+        out.push(wave * edges(t, secs));
+    }
+}
+
+/// A sine gliding from `from` to `to` Hz, quickly at first, as it dies away.
+fn pop(out: &mut Vec<f32>, from: f32, to: f32, secs: f32) {
+    let len = (RATE as f32 * secs) as usize;
+    let mut phase = 0.0f32;
+    for i in 0..len {
+        let t = i as f32 / RATE as f32;
+        let freq = to + (from - to) * (-t * 30.0).exp();
+        phase += std::f32::consts::TAU * freq / RATE as f32;
+        out.push(phase.sin() * (-t * 40.0).exp() * edges(t, secs));
+    }
+}
+
+/// A pulse wave sliding from `from` to `to` Hz, high for `duty` of each cycle. A
+/// raw one pierces, so a low-pass takes the edge off its top harmonics and the note
+/// fades a little as it holds.
+fn pulse(out: &mut Vec<f32>, from: f32, to: f32, secs: f32, duty: f32) {
+    // One pole at 2.2 kHz.
+    let smooth = 1.0 - (-std::f32::consts::TAU * 2200.0 / RATE as f32).exp();
+    let len = (RATE as f32 * secs) as usize;
+    let (mut phase, mut level) = (0.0f32, 0.0f32);
+    for i in 0..len {
+        let t = i as f32 / RATE as f32;
+        phase = (phase + (from + (to - from) * t / secs) / RATE as f32).fract();
+        let wave = if phase < duty { 1.0 } else { -1.0 };
+        level += smooth * (wave - level);
+        out.push(level * (-t * 3.0).exp() * edges(t, secs));
+    }
+}
+
+fn silence(out: &mut Vec<f32>, secs: f32) {
+    out.extend(std::iter::repeat_n(0.0, (RATE as f32 * secs) as usize));
 }
 
 fn wav(samples: &[i16]) -> Vec<u8> {
@@ -447,36 +650,58 @@ mod tests {
     }
 
     #[test]
-    fn chimes_are_valid_wavs() {
-        for kind in [Kind::Request, Kind::Done] {
-            let bytes = chime(kind);
-            assert_eq!(&bytes[..4], b"RIFF");
-            assert_eq!(&bytes[8..16], b"WAVEfmt ");
-            let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
-            assert_eq!(bytes.len(), 44 + data);
-            assert_eq!(
-                u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
-                bytes.len() - 8
-            );
-            let peak = bytes[44..]
-                .chunks(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
-                .max()
-                .unwrap();
-            assert!(peak > 3000 && peak < i16::MAX as u16 / 2, "peak {peak}");
+    fn sounds_are_valid_wavs() {
+        let mut all = Vec::new();
+        for &noise in Noise::ALL {
+            for kind in [Kind::Request, Kind::Done] {
+                let bytes = sound(noise, kind);
+                assert_eq!(&bytes[..4], b"RIFF");
+                assert_eq!(&bytes[8..16], b"WAVEfmt ");
+                let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+                assert_eq!(bytes.len(), 44 + data);
+                assert_eq!(
+                    u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+                    bytes.len() - 8
+                );
+                let peak = bytes[44..]
+                    .chunks(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
+                    .max()
+                    .unwrap();
+                assert!(
+                    peak > 3000 && peak < i16::MAX as u16 / 2,
+                    "{noise:?} peak {peak}"
+                );
+                // Under a second, so pings don't pile up.
+                assert!(data < RATE as usize * 2, "{noise:?} {kind:?}");
+                all.push(bytes);
+            }
         }
-        assert_ne!(chime(Kind::Request), chime(Kind::Done));
+        // Every noise and kind sounds different.
+        for (i, a) in all.iter().enumerate() {
+            assert!(all[i + 1..].iter().all(|b| a != b));
+        }
     }
 
     #[test]
     fn sound_files_are_written_once_and_can_be_replaced() {
         let dir = std::env::temp_dir().join(format!("valkyrie-ping-{}", std::process::id()));
-        let path = sound_file(&dir, Kind::Done).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), chime(Kind::Done));
+        let path = sound_file(&dir, Noise::Chime, Kind::Done).unwrap();
+        // The chime keeps the name earlier versions wrote, so a replaced one stays.
+        assert_eq!(path, dir.join("done.wav"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            sound(Noise::Chime, Kind::Done)
+        );
         std::fs::write(&path, b"mine").unwrap();
-        assert_eq!(sound_file(&dir, Kind::Done).unwrap(), path);
+        assert_eq!(sound_file(&dir, Noise::Chime, Kind::Done).unwrap(), path);
         assert_eq!(std::fs::read(&path).unwrap(), b"mine");
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&dir).unwrap();
+        let coin = sound_file(&dir, Noise::Coin, Kind::Request).unwrap();
+        assert_eq!(coin, dir.join("coin-request.wav"));
+        assert_eq!(
+            std::fs::read(&coin).unwrap(),
+            sound(Noise::Coin, Kind::Request)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

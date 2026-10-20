@@ -1448,6 +1448,10 @@ impl App {
         if field == Field::Updates {
             self.look_for_updates();
         }
+        // So you hear what you picked.
+        if field == Field::Sound && self.settings.sound {
+            ping::play(self.settings.noise, Kind::Request);
+        }
         let strip = |s: &Settings| (s.tabs, s.tab_side, s.minimal_tabs);
         if strip(&before) != strip(&self.settings) {
             self.relayout();
@@ -1915,7 +1919,11 @@ impl App {
                 self.clamp_selection();
                 self.update_preview().await;
             }
-            HomeKey::Sound => self.change(Field::Sound, 1),
+            HomeKey::Sound => {
+                // Mute or unmute, keeping the noise: a step of 0 changes nothing else.
+                self.settings.sound = !self.settings.sound;
+                self.change(Field::Sound, 0);
+            }
             HomeKey::Theme => self.change(Field::Theme, 1),
             HomeKey::Settings => self.settings_cursor = Some(0),
             HomeKey::Top => {
@@ -2183,7 +2191,7 @@ impl App {
             return;
         };
         if ping.sound && self.settings.sound {
-            ping::play(ping.kind);
+            ping::play(self.settings.noise, ping.kind);
         }
         // A fresh request stays up over a later finish.
         if self.toast().is_some_and(|t| t.kind == Kind::Request) && ping.kind == Kind::Done {

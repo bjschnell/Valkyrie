@@ -1,12 +1,13 @@
 //! What the TUI looks and sounds like: the theme and whether sessions take its
-//! colors, how the tabs are drawn and on which side, pings on or off, whether to
-//! look for a newer release, and the direct keys (`keys`, which `K` remaps). Kept in
+//! colors, how the tabs are drawn and on which side, which sound pings make
+//! (or none), whether to look for a newer release, and the direct keys (`keys`, which `K` remaps). Kept in
 //! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
 //! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
 //! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_TAB_DETAIL`, `$VALK_SOUND`,
 //! `$VALK_PROJECT_CONTEXT` and `$VALK_UPDATES` win over it.
 
 use crate::keys::Keymap;
+use crate::ping::Noise;
 use crate::theme::{DRACULA, THEMES, Theme};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -78,7 +79,10 @@ pub struct Settings {
     /// Each tab is one row, its state's icon and its name, with no program or
     /// state word: the peek still has those.
     pub minimal_tabs: bool,
+    /// Pings make a sound, `noise`; off is `none` in the panel. `noise` stays as
+    /// it was, so `m` brings it back.
     pub sound: bool,
+    pub noise: Noise,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
     /// The home screen says when a newer release is out (release builds; GitHub is
@@ -96,6 +100,7 @@ impl PartialEq for Settings {
             self.tab_side,
             self.minimal_tabs,
             self.sound,
+            self.noise,
             self.context,
             self.updates,
             self.keys,
@@ -106,6 +111,7 @@ impl PartialEq for Settings {
             other.tab_side,
             other.minimal_tabs,
             other.sound,
+            other.noise,
             other.context,
             other.updates,
             other.keys,
@@ -128,6 +134,7 @@ impl Default for Settings {
             tab_side: TabSide::Top,
             minimal_tabs: false,
             sound: true,
+            noise: Noise::Chime,
             context: true,
             updates: true,
             keys: Keymap::default(),
@@ -217,7 +224,7 @@ impl Settings {
             Field::Tabs => kept.tabs = self.tabs,
             Field::TabSide => kept.tab_side = self.tab_side,
             Field::TabDetail => kept.minimal_tabs = self.minimal_tabs,
-            Field::Sound => kept.sound = self.sound,
+            Field::Sound => (kept.sound, kept.noise) = (self.sound, self.noise),
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
         });
@@ -248,7 +255,7 @@ impl Settings {
              tabs = \"{}\"      # {}\n\
              tab_side = \"{}\"  # {}\n\
              tab_detail = \"{}\"  # full | minimal: a row per tab, its state and name\n\
-             sound = {}\n\
+             sound = \"{}\"     # none | {}\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
              # Direct keys, where they differ from the defaults: `K` on the home screen.\n\
@@ -261,7 +268,8 @@ impl Settings {
             self.tab_side.name(),
             names(TabSide::ALL.iter().map(|s| s.name())),
             self.value(Field::TabDetail),
-            self.sound,
+            self.value(Field::Sound),
+            names(Noise::ALL.iter().map(|n| n.name())),
             self.context,
             self.updates,
             self.keys.to_toml(),
@@ -309,10 +317,15 @@ impl Settings {
                 "minimal" => self.minimal_tabs = true,
                 _ => {}
             },
+            // Older files say on or off.
             "sound" => match value {
                 "true" | "on" => self.sound = true,
-                "false" | "off" => self.sound = false,
-                _ => {}
+                "false" | "off" | "none" => self.sound = false,
+                _ => {
+                    if let Some(&noise) = find(Noise::ALL, value, |n| n.name()) {
+                        (self.sound, self.noise) = (true, noise);
+                    }
+                }
             },
             "context" => match value {
                 "true" | "on" => self.context = true,
@@ -366,7 +379,13 @@ impl Settings {
                     "full"
                 }
             }
-            Field::Sound => on_off(self.sound),
+            Field::Sound => {
+                if self.sound {
+                    self.noise.name()
+                } else {
+                    "none"
+                }
+            }
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
         }
@@ -382,7 +401,17 @@ impl Settings {
             }
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::TabDetail => self.minimal_tabs = !self.minimal_tabs,
-            Field::Sound => self.sound = !self.sound,
+            // None, then each noise.
+            Field::Sound => {
+                let choices: Vec<Option<Noise>> = std::iter::once(None)
+                    .chain(Noise::ALL.iter().copied().map(Some))
+                    .collect();
+                let current = self.value(Field::Sound);
+                match *step(&choices, current, by, |c| c.map_or("none", |n| n.name())) {
+                    Some(noise) => (self.sound, self.noise) = (true, noise),
+                    None => self.sound = false,
+                }
+            }
             Field::Context => self.context = !self.context,
             Field::Updates => self.updates = !self.updates,
         }
@@ -446,7 +475,7 @@ mod tests {
         s.cycle(Field::Tabs, 1);
         s.cycle(Field::TabSide, -1);
         s.cycle(Field::TabDetail, 1);
-        s.cycle(Field::Sound, 1);
+        s.cycle(Field::Sound, -1);
         s.cycle(Field::SessionColors, 1);
         s.cycle(Field::Context, 1);
         s.cycle(Field::Updates, 1);
@@ -462,6 +491,7 @@ mod tests {
         );
         assert!(back.minimal_tabs);
         assert!(!back.sound);
+        assert_eq!(s.value(Field::Sound), "none", "-1 from chime is none");
         assert!(!back.themed_sessions);
         assert!(!back.context);
         assert!(!back.updates);
@@ -477,6 +507,28 @@ mod tests {
         assert!(!s.context);
         s.apply("context = \"on\"\n");
         assert!(s.context);
+    }
+
+    #[test]
+    fn sound_is_a_noise_or_none() {
+        let mut s = Settings::default();
+        s.apply("sound = \"zap\"\n");
+        assert_eq!((s.sound, s.noise), (true, Noise::Zap));
+        // Off keeps the noise, so `m` brings it back.
+        s.apply("sound = off\n");
+        assert_eq!(
+            (s.sound, s.noise, s.value(Field::Sound)),
+            (false, Noise::Zap, "none")
+        );
+        s.apply("sound = on\n");
+        assert_eq!(s.value(Field::Sound), "zap");
+        let mut back = Settings::default();
+        back.apply(&s.to_toml());
+        assert_eq!(back.value(Field::Sound), "zap");
+        s.cycle(Field::Sound, 1);
+        assert_eq!(s.value(Field::Sound), "1up");
+        s.cycle(Field::Sound, 1);
+        assert_eq!(s.value(Field::Sound), "none", "the last wraps to none");
     }
 
     #[test]
@@ -498,7 +550,7 @@ mod tests {
         // Started with VALK_THEME=cyberpunk, then muted: only sound is saved.
         let mut running = Settings::kept(&file);
         running.set("theme", "cyberpunk");
-        running.cycle(Field::Sound, 1);
+        running.sound = false;
         running.save_field(Field::Sound, &file);
         let kept = Settings::kept(&file);
         assert_eq!(kept.theme.name, "dracula");
@@ -516,11 +568,8 @@ mod tests {
                 Field::Theme => THEMES.len(),
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
-                Field::SessionColors
-                | Field::TabDetail
-                | Field::Sound
-                | Field::Context
-                | Field::Updates => 2,
+                Field::Sound => Noise::ALL.len() + 1,
+                Field::SessionColors | Field::TabDetail | Field::Context | Field::Updates => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);

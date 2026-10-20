@@ -198,7 +198,8 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
   your terminal's, the tab style (`underline`, `folder` or `cards`), which side the
   tabs are on (`top`, `left`, `right`), how much each tab shows (`full`, or `minimal`:
   one row, its state icon and name, and at the side a rail of icons that opens under
-  the mouse; `m` in tab mode switches it), sound, and whether to say when a newer release
+  the mouse; `m` in tab mode switches it), the ping sound (`chime`, `pop`,
+  `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`, `1up`, or `none`), and whether to say when a newer release
   is out. They are kept in
   `~/.config/valkyrie/settings.toml` (`%APPDATA%\Valkyrie\settings.toml` on Windows),
   which you can also edit by hand. `VALK_THEME`,

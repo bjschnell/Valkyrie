@@ -243,7 +243,8 @@ Press `,` to open the settings panel. You can change:
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
   and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
   and state icons that opens over the session under the mouse or in tab mode)
-- sound, and project context
+- the ping sound (`chime`, `pop`, `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`,
+  `1up`, or `none`), and project context
 
 With `theme` colors, a session's background, default text and 16 ANSI colors come
 from the theme. Colors a program picks exactly (256-color or RGB) stay as it drew

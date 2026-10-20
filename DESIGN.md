@@ -119,10 +119,10 @@ Web push for PWA; TUI bell/OS notification. Rate-limited and deduped: queue is t
 - **What fires a ping.** Each queue push is diffed against the previous one by `(session, seq)`. A new transition into `needs_input` or `blocked` plays the `request` sound, and a new transition into `review_ready` plays `done`. The first queue after a connect, or after reconnecting to a restarted daemon, only primes. An upgrade keeps ids and seqs, so pings that happened during it still fire. `interrupted?`/`stale` never ping, because they are guesses.
 - **What stays quiet.** No ping for the attached session, or for anything already `seen`, which includes anything another client is attached to. A transition must hold for 1.5 s before it pings. Codex reports a permission request before its auto-reviewer takes it, and that must not ring. A new seq in the same state, which is only a summary update, doesn't ping again. A request still sounds right after a `done`.
 - **Sound.** At most one sound per second, with a toast in the bar for 6 s. The toast carries the session's summary after its name (`✓ api finished  Fixed the login redirect`), cut to 60 columns and read when drawn, since the summary can land after the ping.
-  - The sounds are generated two-note chimes, written once to `<state dir>/sounds/{request,done}.wav`. Replace the files to use your own sounds.
+  - The sounds are generated. The settings panel picks one (`sound`: `none`, `chime`, `pop`, `wood`, `beep`, or the 8-bit square-wave `coin`, `powerup`, `zap`, `1up`), and changing it plays the new one. Each is written once to `<state dir>/sounds/<sound>-{request,done}.wav`, the chime to `{request,done}.wav` as before. Replace the files to use your own sounds.
   - They play through `pw-play`, then `paplay`, then `aplay`. A player still running after 5 s is killed; herdr's hung for 15 s on a dead audio server.
 - **Over SSH** (`SSH_CONNECTION`/`SSH_TTY` set), the TUI rings the outer terminal's bell instead, so the ping reaches the machine you sit at.
-- **Mute.** `m` toggles sounds, or the settings panel (`,`); the choice is kept in `settings.toml`, and `VALK_SOUND=on|off` overrides it.
+- **Mute.** `m` toggles sounds, bringing back the one picked, or set `none` in the settings panel (`,`); the choice is kept in `settings.toml`, and `VALK_SOUND=on|off|<sound>` overrides it.
 - **Limits.** Pings come from the client, so none sound without a TUI open, and each open TUI pings. Desktop notifications (herdr's `ui.toast` terminal/system delivery) are a follow-up.
 
 ### 5.5 herdr logic reuse
