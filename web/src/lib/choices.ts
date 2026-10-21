@@ -16,6 +16,8 @@ export interface Choice {
 const CURSOR = "[❯›>▶→]";
 const NUMBERED = new RegExp(`^(\\s*)(${CURSOR})?\\s*(\\d)[.)]\\s+(.+?)\\s*$`, "u");
 const POINTED = new RegExp(`^(\\s*)${CURSOR}\\s+(\\S.*?)\\s*$`, "u");
+const CURSOR_LINE = new RegExp(`^\\s*${CURSOR}(\\s|$)`, "u");
+const RULE = /^\s*[─━═]{8,}\s*$/u;
 
 /**
  * The prompt in the screen's bottom lines: at least two choices, one under the
@@ -68,11 +70,16 @@ function findNumbered(lines: string[]): Choice[] {
   return best;
 }
 
-/** Unnumbered options: the cursor's line and its neighbors aligned with it. */
+/**
+ * Unnumbered options: the cursor's line and its neighbors aligned with it. Only
+ * the bottom cursor counts: above an agent's input prompt (`❯` in Claude, `›` in
+ * Codex) sit the messages you sent, echoed the same way, wrapped lines aligned.
+ */
 function findPointed(lines: string[]): Choice[] {
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (!CURSOR_LINE.test(lines[i])) continue;
     const m = POINTED.exec(lines[i]);
-    if (!m) continue;
+    if (!m) return [];
     // The option text starts at the same column on every line.
     const column = lines[i].indexOf(m[2]);
     const option = (j: number) => {
@@ -86,7 +93,8 @@ function findPointed(lines: string[]): Choice[] {
     const below: string[] = [];
     for (let j = i + 1; option(j); j++) below.push(option(j)!);
     const labels = [...above, m[2], ...below];
-    if (labels.length < 2) return [];
+    // Text typed into Claude's input box, wrapped, with the box's border under it.
+    if (labels.length < 2 || RULE.test(lines[i + below.length + 1] ?? "")) return [];
     return labels.map((label, k) => ({
       label: clean(label),
       selected: k === above.length,

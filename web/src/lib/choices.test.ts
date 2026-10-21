@@ -40,6 +40,22 @@ describe("findChoices", () => {
     expect(findChoices(fixture("codex_idle.txt"))).toEqual([]);
   });
 
+  it("ignores a sent message Claude echoes above its input box, wrapped", () => {
+    const rule = "─".repeat(80);
+    const echoed = [
+      "❯ Oh I should say the glitching logo should definitely be in netrunner and the digital rain is cool so let's keep it.",
+      "  But on the actual session panels that's where I want to refine the UI and ux for the HUD mode",
+      "",
+      "✽ Drizzling… (8s · ↓ 140 tokens)",
+      "",
+    ];
+    expect(findChoices([...echoed, rule, "❯", rule, "  ? for shortcuts"])).toEqual([]);
+    // Typed into the input box itself and wrapped there.
+    expect(findChoices([rule, "❯ a long message typed in the terminal that", "  wraps onto a second line", rule])).toEqual(
+      [],
+    );
+  });
+
   it("ignores a numbered list with no cursor on it", () => {
     expect(findChoices(["Plan:", "1. build", "2. test", "3. ship", "$ "])).toEqual([]);
   });
