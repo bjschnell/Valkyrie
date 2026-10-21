@@ -1,8 +1,8 @@
-//! The effects of the themes with rain (matrix, violet, cyberpunk, valkyrie): code
-//! or runes falling through the home screen's empty rows, a logo that glitches into
-//! the same glyphs, and a blinking cursor. All of it is stateless: a
-//! column's speed, trail and phase come from a hash of its x, so a frame depends
-//! only on the clock.
+//! The effects of the themes with rain (matrix, violet, cyberpunk, valkyrie,
+//! netrunner): code, hex or runes falling through the home screen's empty rows, a
+//! logo that glitches into the same glyphs, and a blinking cursor. All of it is
+//! stateless: a column's speed, trail and phase come from a hash of its x, so a
+//! frame depends only on the clock.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

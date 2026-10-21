@@ -3,7 +3,7 @@ import { STATE_LABEL, program, type QueueItem, type SessionInfo } from "../proto
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
 import { answer, answerAll, markSeen, useApp } from "../store";
-import { hasRain, nextLook, setLook, useLook } from "../lib/theme";
+import { nextLook, setLook, useLook } from "../lib/theme";
 import { Chevron, Plus, Prompt } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
@@ -59,7 +59,7 @@ export function Inbox() {
 
   return (
     <div className="page">
-      {hasRain(look) && <Rain key={look} />}
+      {look !== "default" && <Rain key={look} />}
       <header className="topbar">
         <div className="brand">
           <Mark size={26} />

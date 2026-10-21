@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
 
 const GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
+/** Breach protocol's codes. */
+const HEX = "0123456789ABCDEF";
 const CELL = 16;
 const FRAME_MS = 60;
 
-const pick = () => GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
+const pick = (from: string) => from[Math.floor(Math.random() * from.length)];
 
 /**
  * Elder Futhark runes as strokes in a unit cell, x right and y down: drawn rather
@@ -60,14 +62,16 @@ export function Rain() {
     const css = getComputedStyle(document.documentElement);
     const head = css.getPropertyValue("--rain-head").trim() || "#fff";
     const trail = css.getPropertyValue("--rain-trail").trim() || "#888";
-    const runes = css.getPropertyValue("--rain-glyphs").trim() === "runes";
+    const kind = css.getPropertyValue("--rain-glyphs").trim();
+    const runes = kind === "runes";
+    const glyphs = kind === "hex" ? HEX : GLYPHS;
     const glyph = (color: string, x: number, y: number) => {
       if (runes) {
         ctx.strokeStyle = color;
         drawRune(ctx, x, y);
       } else {
         ctx.fillStyle = color;
-        ctx.fillText(pick(), x, y);
+        ctx.fillText(pick(glyphs), x, y);
       }
     };
     const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;

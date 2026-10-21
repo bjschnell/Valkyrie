@@ -29,7 +29,7 @@ pub struct Theme {
     pub interrupted: Color,
     pub idle: Color,
     /// Digital rain in these colors falls through the home screen's empty rows,
-    /// and the header glitches: the effects of matrix, violet, cyberpunk and valkyrie.
+    /// and the header glitches: the effects of matrix, violet, cyberpunk, valkyrie and netrunner.
     pub rain: Option<Rain>,
     /// The 16 ANSI colors a session's programs draw with: black, red, green,
     /// yellow, blue, magenta, cyan, white, then their bright versions.
@@ -46,6 +46,8 @@ pub struct Rain {
 
 /// Code rain: one column wide in every coding font.
 const CODE: &str = "0123456789ABCDEFXZ$#@%&*+=<>:;|";
+/// Breach protocol's codes.
+const HEX: &str = "0123456789ABCDEF";
 /// The Elder Futhark, falling. One column wide too, from the font's own runes or
 /// the terminal's fallback.
 const RUNES: &str = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛊᛏᛒᛖᛗᛚᛜᛞᛟ";
@@ -473,7 +475,7 @@ pub const VALKYRIE: Theme = Theme {
 
 /// A netrunner's heads-up display, after Cyberpunk 2077: teal-black glass, cyan for
 /// what you can act on, red for the chrome. Working and idle agents stay dim so only
-/// what needs you lights up. No rain: a HUD keeps out of the way.
+/// what needs you lights up. Breach protocol's hex codes fall in cyan.
 pub const NETRUNNER: Theme = Theme {
     name: "netrunner",
     bg: hex(0x05080a),
@@ -492,7 +494,11 @@ pub const NETRUNNER: Theme = Theme {
     working: hex(0x1f8f99),
     interrupted: hex(0xff9e3d),
     idle: hex(0x34494d),
-    rain: None,
+    rain: Some(Rain {
+        glyphs: HEX,
+        head: hex(0xe6fdff),
+        trail: [hex(0x5ef6ff), hex(0x1f8f99), hex(0x0f3a40)],
+    }),
     ansi: [
         hex(0x0f191e),
         hex(0xf75049),
