@@ -2085,6 +2085,122 @@ code {
   --rain-glyphs: runes;
 }
 
+/* Netrunner: a heads-up display after Cyberpunk 2077. Cyan is what you can act
+   on, red is the chrome, and only states that need you are bright: working and idle
+   stay dim. Cut corners and thin lines instead of rain, glow and scanlines. */
+
+:root[data-theme="netrunner"] {
+  --page: #05080a;
+  --surface: #0a1014;
+  --card: #0f191e;
+  --raised: #10292f;
+  --line: #1e3a42;
+  --fg: #d6e9ea;
+  --muted: #4f6b70;
+  --soft: #8fb3b6;
+  --accent: #5ef6ff;
+  --accent2: #f75049;
+  --needs: #fcee0a;
+  --blocked: #ff2a3d;
+  --done: #d0ed57;
+  --working: #1f8f99;
+  --interrupted: #ff9e3d;
+  --idle: #34494d;
+  --term-bg: #030607;
+  --term-fg: #d6e9ea;
+  --on-accent: #001417;
+  --radius: 2px;
+  --ansi-0: #0f191e;
+  --ansi-1: #f75049;
+  --ansi-2: #d0ed57;
+  --ansi-3: #fcee0a;
+  --ansi-4: #3d8bff;
+  --ansi-5: #ff3d8b;
+  --ansi-6: #5ef6ff;
+  --ansi-7: #c4d6d8;
+  --ansi-8: #4f6b70;
+  --ansi-9: #ff7a6e;
+  --ansi-10: #e2ff7a;
+  --ansi-11: #fff56b;
+  --ansi-12: #7aaeff;
+  --ansi-13: #ff7ab0;
+  --ansi-14: #a0fbff;
+  --ansi-15: #ffffff;
+  --cut: 10px;
+}
+
+[data-theme="netrunner"] .topbar {
+  border-bottom-color: color-mix(in srgb, var(--accent2) 45%, transparent);
+}
+
+[data-theme="netrunner"] .section-title,
+[data-theme="netrunner"] .card-state,
+[data-theme="netrunner"] .calm-title,
+[data-theme="netrunner"] .primary {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+[data-theme="netrunner"] .section-title {
+  color: var(--accent2);
+  font-weight: 500;
+}
+
+[data-theme="netrunner"] .section-title::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: var(--accent2);
+}
+
+[data-theme="netrunner"] .count {
+  border-radius: 0;
+  background: none;
+  border: 1px solid currentColor;
+  color: var(--accent2);
+}
+
+/* Cards and buttons lose a corner, top right and bottom left. */
+[data-theme="netrunner"] .card,
+[data-theme="netrunner"] .card-under,
+[data-theme="netrunner"] .primary {
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--cut)) 0,
+    100% var(--cut),
+    100% 100%,
+    var(--cut) 100%,
+    0 calc(100% - var(--cut))
+  );
+}
+
+[data-theme="netrunner"] .card {
+  box-shadow: none;
+  border-color: color-mix(in srgb, var(--state, var(--line)) 35%, var(--line));
+}
+
+[data-theme="netrunner"] .card::before {
+  width: 2px;
+  box-shadow: 0 0 8px var(--state, transparent);
+}
+
+[data-theme="netrunner"] .primary {
+  --cut: 7px;
+  border-radius: 0;
+  font-size: 13px;
+}
+
+[data-theme="netrunner"] .calm {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+[data-theme="netrunner"] .calm-title {
+  color: var(--done);
+  font-weight: 500;
+}
+
 .rain {
   position: fixed;
   inset: 0;

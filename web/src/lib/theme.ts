@@ -3,9 +3,13 @@ import { useSyncExternalStore } from "react";
 /**
  * The look: the default Dracula palette, or matrix (green), violet (pale purple) or
  * valkyrie (the app icon's neon), all mono with digital rain; valkyrie's is runes.
+ * Or netrunner, a quiet heads-up display after Cyberpunk 2077, with no rain.
  */
-export type Look = "default" | "matrix" | "violet" | "valkyrie";
-const LOOKS: Look[] = ["default", "matrix", "violet", "valkyrie"];
+export type Look = "default" | "matrix" | "violet" | "valkyrie" | "netrunner";
+const LOOKS: Look[] = ["default", "matrix", "violet", "valkyrie", "netrunner"];
+
+/** Whether the look has digital rain and the effects that go with it. */
+export const hasRain = (l: Look): boolean => l !== "default" && l !== "netrunner";
 
 const KEY = "valk.look";
 const listeners = new Set<() => void>();
@@ -27,7 +31,8 @@ const apply = () => {
     delete root.fx;
   } else {
     root.theme = look;
-    root.fx = "";
+    if (hasRain(look)) root.fx = "";
+    else delete root.fx;
   }
 };
 apply();

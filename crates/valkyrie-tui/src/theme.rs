@@ -471,6 +471,48 @@ pub const VALKYRIE: Theme = Theme {
     ],
 };
 
+/// A netrunner's heads-up display, after Cyberpunk 2077: teal-black glass, cyan for
+/// what you can act on, red for the chrome. Working and idle agents stay dim so only
+/// what needs you lights up. No rain: a HUD keeps out of the way.
+pub const NETRUNNER: Theme = Theme {
+    name: "netrunner",
+    bg: hex(0x05080a),
+    panel: hex(0x0a1014),
+    strip: hex(0x020405),
+    card: hex(0x0f191e),
+    selection: hex(0x10292f),
+    border: hex(0x1e3a42),
+    fg: hex(0xd6e9ea),
+    muted: hex(0x4f6b70),
+    accent: hex(0x5ef6ff),
+    accent2: hex(0xf75049),
+    needs: hex(0xfcee0a),
+    blocked: hex(0xff2a3d),
+    done: hex(0xd0ed57),
+    working: hex(0x1f8f99),
+    interrupted: hex(0xff9e3d),
+    idle: hex(0x34494d),
+    rain: None,
+    ansi: [
+        hex(0x0f191e),
+        hex(0xf75049),
+        hex(0xd0ed57),
+        hex(0xfcee0a),
+        hex(0x3d8bff),
+        hex(0xff3d8b),
+        hex(0x5ef6ff),
+        hex(0xc4d6d8),
+        hex(0x4f6b70),
+        hex(0xff7a6e),
+        hex(0xe2ff7a),
+        hex(0xfff56b),
+        hex(0x7aaeff),
+        hex(0xff7ab0),
+        hex(0xa0fbff),
+        hex(0xffffff),
+    ],
+};
+
 pub const THEMES: &[&Theme] = &[
     &DRACULA,
     &CYBERPUNK,
@@ -482,6 +524,7 @@ pub const THEMES: &[&Theme] = &[
     &MATRIX,
     &VIOLET,
     &VALKYRIE,
+    &NETRUNNER,
 ];
 
 impl Theme {
