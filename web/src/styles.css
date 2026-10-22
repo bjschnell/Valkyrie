@@ -2304,9 +2304,13 @@ code {
   }
 }
 
+/* Over the reduced-motion rule that stops every animation: picking a look with
+   rain asks for its effects, as in the TUI. */
 @media (prefers-reduced-motion: reduce) {
-  [data-fx] .wordmark,
+  [data-fx] .wordmark {
+    animation: glitch 4s steps(1) infinite !important;
+  }
   [data-fx] .calm-title::after {
-    animation: none;
+    animation: blink 1.06s steps(1) infinite !important;
   }
 }

@@ -49,7 +49,8 @@ function drawRune(ctx: CanvasRenderingContext2D, x: number, y: number) {
 
 /**
  * Digital rain behind the page: one drop per column, each leaving a fading trail.
- * Still under reduced motion, and paused while the tab is hidden.
+ * It falls under reduced motion too, as in the TUI: picking a look with rain asks
+ * for it. Paused while the tab is hidden.
  */
 export function Rain() {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -74,7 +75,6 @@ export function Rain() {
         ctx.fillText(pick(glyphs), x, y);
       }
     };
-    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let drops: number[] = [];
     let speeds: number[] = [];
 
@@ -91,8 +91,15 @@ export function Rain() {
       const rows = Math.ceil(innerHeight / CELL);
       const cols = Math.ceil(innerWidth / CELL);
       // Spread over the screen and above it, so it's raining from the first frame.
-      drops = Array.from({ length: cols }, () => Math.floor(Math.random() * rows * 1.5) - rows / 2);
-      speeds = Array.from({ length: cols }, () => 0.4 + Math.random() * 0.8);
+      // Drops already falling keep going: a phone resizes as its address bar
+      // slides in and out.
+      const start = drops.length;
+      drops = drops.slice(0, cols);
+      speeds = speeds.slice(0, cols);
+      for (let i = start; i < cols; i++) {
+        drops.push(Math.floor(Math.random() * rows * 1.5) - rows / 2);
+        speeds.push(0.4 + Math.random() * 0.8);
+      }
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, innerWidth, innerHeight);
     };
@@ -115,10 +122,6 @@ export function Rain() {
     };
 
     size();
-    if (still) {
-      for (let i = 0; i < 80; i++) step();
-      return;
-    }
     let last = 0;
     let raf = 0;
     const loop = (t: number) => {
