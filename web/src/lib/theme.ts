@@ -2,8 +2,8 @@ import { useSyncExternalStore } from "react";
 
 /**
  * The look: the default Dracula palette, or matrix (green), violet (pale purple),
- * valkyrie (the app icon's neon) or netrunner (Cyberpunk 2077's HUD), all mono with
- * digital rain; valkyrie's is runes, netrunner's hex.
+ * valkyrie (the app icon's neon) or netrunner (an 80s hacker's neon HUD), all mono
+ * with digital rain; valkyrie's is runes, netrunner's hex.
  */
 export type Look = "default" | "matrix" | "violet" | "valkyrie" | "netrunner";
 const LOOKS: Look[] = ["default", "matrix", "violet", "valkyrie", "netrunner"];

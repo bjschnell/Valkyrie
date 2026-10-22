@@ -2085,53 +2085,54 @@ code {
   --rain-glyphs: runes;
 }
 
-/* Netrunner: a heads-up display after Cyberpunk 2077. Cyan is what you can act
-   on, red is the chrome, and only states that need you are bright: working and idle
-   stay dim. Cut corners and thin lines, over the shared effects with hex rain. */
+/* Netrunner: an 80s hacker's heads-up display. Pure black; neon cyan is what you
+   can act on, neon pink is the chrome, yellow and red are what needs you, and
+   working and idle stay dim. Cut corners and thin lines, over the shared effects
+   with hex rain falling cyan into pink. */
 
 :root[data-theme="netrunner"] {
-  --page: #05080a;
-  --surface: #0a1014;
-  --card: #0f191e;
-  --raised: #10292f;
-  --line: #1e3a42;
-  --fg: #d6e9ea;
-  --muted: #4f6b70;
-  --soft: #8fb3b6;
-  --accent: #5ef6ff;
-  --accent2: #f75049;
-  --needs: #fcee0a;
-  --blocked: #ff2a3d;
-  --done: #d0ed57;
-  --working: #1f8f99;
-  --interrupted: #ff9e3d;
-  --idle: #34494d;
-  --term-bg: #030607;
-  --term-fg: #d6e9ea;
-  --on-accent: #001417;
+  --page: #000000;
+  --surface: #07070b;
+  --card: #0d0d14;
+  --raised: #16162a;
+  --line: #2a2a3d;
+  --fg: #f4f4fa;
+  --muted: #6e6e88;
+  --soft: #b4b4cc;
+  --accent: #00f0ff;
+  --accent2: #ff2bd6;
+  --needs: #fff700;
+  --blocked: #ff1e3c;
+  --done: #39ff14;
+  --working: #8a5cff;
+  --interrupted: #ff8a00;
+  --idle: #45455a;
+  --term-bg: #000000;
+  --term-fg: #f4f4fa;
+  --on-accent: #000000;
   --radius: 2px;
-  --ansi-0: #0f191e;
-  --ansi-1: #f75049;
-  --ansi-2: #d0ed57;
-  --ansi-3: #fcee0a;
-  --ansi-4: #3d8bff;
-  --ansi-5: #ff3d8b;
-  --ansi-6: #5ef6ff;
-  --ansi-7: #c4d6d8;
-  --ansi-8: #4f6b70;
-  --ansi-9: #ff7a6e;
-  --ansi-10: #e2ff7a;
-  --ansi-11: #fff56b;
-  --ansi-12: #7aaeff;
-  --ansi-13: #ff7ab0;
-  --ansi-14: #a0fbff;
+  --ansi-0: #0d0d14;
+  --ansi-1: #ff1e3c;
+  --ansi-2: #39ff14;
+  --ansi-3: #fff700;
+  --ansi-4: #3d5cff;
+  --ansi-5: #ff2bd6;
+  --ansi-6: #00f0ff;
+  --ansi-7: #d4d4e0;
+  --ansi-8: #6e6e88;
+  --ansi-9: #ff5c75;
+  --ansi-10: #7aff5c;
+  --ansi-11: #fffa7a;
+  --ansi-12: #7a8cff;
+  --ansi-13: #ff7ae6;
+  --ansi-14: #7af7ff;
   --ansi-15: #ffffff;
   --font: var(--mono);
-  --glow: 94 246 255;
-  --glitch-a: #f75049;
-  --glitch-b: #5ef6ff;
-  --rain-head: #e6fdff;
-  --rain-trail: #1fb8c4;
+  --glow: 0 240 255;
+  --glitch-a: #ff2bd6;
+  --glitch-b: #00f0ff;
+  --rain-head: #00f0ff;
+  --rain-trail: #ff2bd6;
   --rain-glyphs: hex;
   --cut: 10px;
 }
@@ -2152,6 +2153,7 @@ code {
 :root[data-theme="netrunner"] .section-title {
   color: var(--accent2);
   font-weight: 500;
+  text-shadow: 0 0 6px rgb(255 43 214 / 0.6);
 }
 
 :root[data-theme="netrunner"] .section-title::before {
