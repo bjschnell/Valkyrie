@@ -296,20 +296,6 @@ code {
   position: relative;
 }
 
-.card-under {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--done) 18%, var(--surface));
-  color: var(--done);
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  font-size: 12px;
-}
-
 .card {
   position: relative;
   padding: 14px 14px 10px 16px;
@@ -2172,7 +2158,6 @@ code {
 
 /* Cards and buttons lose a corner, top right and bottom left. */
 :root[data-theme="netrunner"] .card,
-:root[data-theme="netrunner"] .card-under,
 :root[data-theme="netrunner"] .primary {
   clip-path: polygon(
     0 0,

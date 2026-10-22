@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { STATE_LABEL, program, type QueueItem, type SessionInfo } from "../proto";
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
-import { answer, answerAll, markSeen, useApp } from "../store";
+import { answer, answerAll, useApp } from "../store";
 import { nextLook, setLook, useLook } from "../lib/theme";
 import { Chevron, Plus, Prompt } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
@@ -26,10 +26,9 @@ export function Inbox() {
   // What j/k move through: the cards, then the session rows.
   const order = [...queue.map((q) => q.session), ...sessions.map((s) => s.id)];
   const selected = order[sel] ?? null;
-  const selectedCard = sel < queue.length ? sel : -1;
 
   // n starts a session; j/k pick a card or row, Enter opens it, r reviews its
-  // changes, s marks a card seen.
+  // changes.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -45,7 +44,6 @@ export function Inbox() {
         Enter: () => selected !== null && go(selected),
         o: () => selected !== null && go(selected),
         r: () => selected !== null && (location.hash = `#/s/${selected}/review`),
-        s: () => selectedCard >= 0 && void markSeen(queue[selectedCard]),
       };
       const action = actions[e.key];
       if (action) {
@@ -127,9 +125,6 @@ export function Inbox() {
   );
 }
 
-/** Swipe it aside to mark it seen. */
-const SWIPE_PX = 90;
-
 /**
  * Several prompts waiting at once, each with a plain yes: allow them in one go,
  * after seeing what each one is. Only the first choice, and only when it is a
@@ -208,46 +203,10 @@ function QueueCard({ item, info, picked }: { item: QueueItem; info?: SessionInfo
   const now = useApp((s) => s.now);
   const prompt = useApp((s) => s.prompts[item.session]);
   const s = item.status;
-  const [dx, setDx] = useState(0);
-  const start = useRef<{ x: number; y: number } | null>(null);
-  const swiping = useRef(false);
-
-  const onTouchStart = (e: React.TouchEvent) => {
-    start.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    swiping.current = false;
-  };
-  const onTouchMove = (e: React.TouchEvent) => {
-    if (!start.current) return;
-    const x = e.touches[0].clientX - start.current.x;
-    const y = e.touches[0].clientY - start.current.y;
-    // Mostly sideways is a swipe; mostly down is the page scrolling.
-    if (!swiping.current && Math.abs(x) > 12 && Math.abs(x) > Math.abs(y) * 1.5) swiping.current = true;
-    if (swiping.current) setDx(x);
-  };
-  const onTouchEnd = () => {
-    if (Math.abs(dx) > SWIPE_PX) {
-      navigator.vibrate?.(10);
-      setDx(dx > 0 ? 600 : -600);
-      void markSeen(item);
-    } else {
-      setDx(0);
-    }
-    start.current = null;
-  };
-
   const choices = prompt?.choices ?? [];
   return (
     <div className={`card-slot ${picked ? "picked" : ""}`} data-pick>
-      <div className="card-under" style={{ opacity: Math.min(1, Math.abs(dx) / SWIPE_PX) }}>
-        seen
-      </div>
-      <article
-        className={`card state-${s.state}`}
-        style={{ transform: `translateX(${dx}px)`, transition: start.current ? "none" : undefined }}
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-      >
+      <article className={`card state-${s.state}`}>
         <button className="card-head" onClick={() => go(item.session)}>
           <StateIcon state={s.state} />
           <span className="card-name">{item.name}</span>
@@ -283,9 +242,6 @@ function QueueCard({ item, info, picked }: { item: QueueItem; info?: SessionInfo
               Review changes
             </button>
           )}
-          <button className="ghost" onClick={() => void markSeen(item)}>
-            Seen
-          </button>
         </div>
       </article>
     </div>

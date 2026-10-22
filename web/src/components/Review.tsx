@@ -58,6 +58,12 @@ export function ReviewView({ id }: { id: number }) {
       const r = await getJson<Review>(token, `/api/review/${id}`);
       setReview(r);
       setError(null);
+      // Reading the changes is looking at them: a finished item leaves the queue,
+      // as it does when the session is opened.
+      const s = useApp.getState().sessions.find((x) => x.id === id);
+      if (s && s.status.state === "review_ready" && !s.status.seen) {
+        void markSeen({ session: id, name: s.name, cwd: s.cwd, status: s.status });
+      }
       setOpen((was) => (was.size ? was : firstOpen(r.files)));
     } catch (e) {
       setError((e as Error).message);
@@ -127,7 +133,6 @@ export function ReviewView({ id }: { id: number }) {
       removed: files.reduce((n, f) => n + f.removed, 0),
     };
   }, [review]);
-  const unseen = info && info.status.state === "review_ready" && !info.status.seen;
 
   return (
     <div className="page session review-page">
@@ -180,11 +185,6 @@ export function ReviewView({ id }: { id: number }) {
 
       <footer className="dock">
         <div className="quick">
-          {unseen && (
-            <button className="choice" onClick={() => info && void markSeen({ session: id, name: info.name, cwd: info.cwd, status: info.status })}>
-              Mark seen
-            </button>
-          )}
           {QUICK.map((q) => (
             <button key={q.label} className="choice" onClick={() => send(q.text)}>
               {q.label}
