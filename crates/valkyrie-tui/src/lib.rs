@@ -24,7 +24,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
-use ratatui::layout::{Alignment, Constraint, Layout, Margin, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{self, Modifier, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -1452,7 +1452,7 @@ impl App {
         if field == Field::Sound && self.settings.sound {
             ping::play(self.settings.noise, Kind::Request);
         }
-        let strip = |s: &Settings| (s.tabs, s.tab_side, s.minimal_tabs, s.hud);
+        let strip = |s: &Settings| (s.tabs, s.tab_side, s.minimal_tabs);
         if strip(&before) != strip(&self.settings) {
             self.relayout();
             // The rail wants plain motion, to open under the mouse.
@@ -2145,25 +2145,17 @@ impl App {
                         BarMode::Session
                     };
                     let t = self.settings.theme;
-                    let hud = self.settings.hud && matches!(mode, BarMode::Session);
-                    let mut line = if hud {
-                        hud_bar(view, self.proposals.len(), t)
-                    } else {
-                        attached_bar(view, mode, self.proposals.len(), t, &self.settings.keys)
-                    };
+                    let mut line =
+                        attached_bar(view, mode, self.proposals.len(), t, &self.settings.keys);
                     if let Some(toast) = self.toast() {
                         line.spans
                             .extend(toast_spans(toast, self.toast_summary(toast), t));
                     }
-                    let bg = if hud { self.page_bg() } else { t.panel };
-                    frame
-                        .render_widget(Paragraph::new(line).style(style::Style::new().bg(bg)), bar);
-                    if hud {
-                        frame.render_widget(
-                            Paragraph::new(self.hud_alerts()).alignment(Alignment::Right),
-                            bar,
-                        );
-                    }
+                    frame.render_widget(
+                        Paragraph::new(line)
+                            .style(style::Style::new().bg(self.settings.theme.panel)),
+                        bar,
+                    );
                 }
                 None => self.draw_home(frame, body, bar),
             }
@@ -2213,50 +2205,6 @@ impl App {
             .as_ref()
             .filter(|(_, at)| at.elapsed() < TOAST_FOR)
             .map(|(ping, _)| ping)
-    }
-
-    /// The right of a heads-up display's bar: the first session elsewhere that
-    /// needs you and the key that goes there, how many others are working, and the
-    /// key for tab mode.
-    fn hud_alerts(&self) -> Line<'static> {
-        let t = self.settings.theme;
-        let map = &self.settings.keys;
-        let here = self.pane_ids();
-        let mut spans = Vec::new();
-        let waiting: Vec<&QueueItem> = self
-            .queue
-            .iter()
-            .filter(|q| !here.contains(&q.session))
-            .collect();
-        if let Some(q) = waiting.first() {
-            let color = t.state(q.status.state);
-            spans.push(
-                format!("▲ {} {} ", q.name, q.status.state.label())
-                    .fg(color)
-                    .bold(),
-            );
-            if waiting.len() > 1 {
-                spans.push(format!("+{} ", waiting.len() - 1).fg(color));
-            }
-            if let Some(key) = map.get(Action::Needing) {
-                spans.push(format!("{} ", key.label()).fg(t.accent));
-            }
-            spans.push("· ".fg(t.muted));
-        }
-        let working = self
-            .sessions
-            .iter()
-            .filter(|s| !here.contains(&s.id) && s.status.state == AgentState::Working)
-            .count();
-        if working > 0 {
-            spans.push(format!("{working} working · ").fg(t.muted));
-        }
-        if let Some(key) = map.get(Action::Tabs) {
-            spans.push(key.label().fg(t.accent));
-            spans.push(" tabs ".fg(t.muted));
-        }
-        spans.push("◣ ".fg(t.accent));
-        Line::from(spans)
     }
 
     /// What the pinged session needs or finished, as it is now: a summary can
@@ -2782,18 +2730,6 @@ struct TabLayout {
 impl App {
     /// The attached session's area and, when shown, the tab strip's, within `body`.
     fn split_body(&self, body: Rect) -> (Rect, Option<Rect>) {
-        if self.settings.hud {
-            // The session keeps the whole body; the strip lies over it while tab
-            // mode, a drag or a rename works on the tabs, as an open rail does.
-            let (_, tabs) = self.strip_body(body);
-            return (body, tabs.filter(|_| self.tabs_busy()));
-        }
-        self.strip_body(body)
-    }
-
-    /// The body split between the session and the tab strip, as when it's always
-    /// shown.
-    fn strip_body(&self, body: Rect) -> (Rect, Option<Rect>) {
         let side = |at| Layout::horizontal(at).areas::<2>(body);
         let width = match (self.rail(), self.settings.minimal_tabs) {
             (true, _) => RAIL_WIDTH,
@@ -2843,14 +2779,11 @@ impl App {
     /// The rail opens to names over the session while the mouse is on it, and
     /// while tab mode, a drag or a rename works on the tabs.
     fn rail_open(&self) -> bool {
-        self.rail() && (self.rail_hover || self.tabs_busy())
-    }
-
-    /// Tab mode, a drag or a rename is working on the tabs.
-    fn tabs_busy(&self) -> bool {
-        self.tab_cursor.is_some()
-            || self.tab_drag.is_some()
-            || (self.renaming.is_some() && self.view.is_some())
+        self.rail()
+            && (self.rail_hover
+                || self.tab_cursor.is_some()
+                || self.tab_drag.is_some()
+                || (self.renaming.is_some() && self.view.is_some()))
     }
 
     /// The rail shut: icons only.
@@ -4086,50 +4019,6 @@ fn attached_bar(
 
 /// The bar's hints under a session: the keys as mapped, most used first. The tab
 /// keys show as one hint while they are Alt and the digits.
-/// The bar of a heads-up display while you work: where you are and its state, and
-/// what's waiting on you here. No key hints; `App::hud_alerts` fills the right.
-fn hud_bar(view: &Attached, proposals: usize, t: &Theme) -> Line<'static> {
-    let mut spans = vec![
-        " ◢ ".fg(t.accent).bold(),
-        format!("{} ", view.name).fg(t.fg).bold(),
-    ];
-    match (view.exited, &view.status) {
-        (Some(code), _) => {
-            let code = code.map(|c| format!(" {c}")).unwrap_or_default();
-            spans.push(
-                format!("× exited{code} · any key returns ")
-                    .fg(t.blocked)
-                    .bold(),
-            );
-        }
-        (None, Some(s)) => {
-            spans.push(
-                format!("{} {} ", state_icon(s.state, 0), s.state.label()).fg(t.state(s.state)),
-            );
-        }
-        (None, None) => {}
-    }
-    if proposals > 0 {
-        spans.push(format!(" ◇ {proposals} to review ").fg(t.accent2).bold());
-    }
-    if let Some(page) = &view.scroll {
-        let up = page.history - page.from_top;
-        spans.push(
-            format!(" ↑ {up}/{} lines back ", page.history)
-                .fg(t.bg)
-                .bg(t.accent2)
-                .bold(),
-        );
-        spans.push(" q live ".fg(t.muted));
-    }
-    if let Some((notice, at)) = &view.notice
-        && at.elapsed() < NOTICE_FOR
-    {
-        spans.push(format!(" {notice} ").fg(t.done).bold());
-    }
-    Line::from(spans)
-}
-
 fn session_hints(map: &Keymap) -> Vec<(String, &'static str)> {
     let mut hints = Vec::new();
     let digits = (0..9).all(|i| map.get(Action::Tab(i)) == Some(Key::Alt(b'1' + i)));
@@ -5801,61 +5690,6 @@ mod tests {
         assert_eq!(app.tab_cursor, Some(0), "still in tab mode");
         let saved = std::fs::read_to_string(dir.join("settings.toml")).unwrap();
         assert!(saved.contains("tab_detail = \"full\""), "{saved}");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A HUD: the session keeps the whole screen, the strip comes up over it in tab
-    /// mode, and the bar says where you are and what needs you elsewhere.
-    #[tokio::test]
-    async fn a_hud_keeps_the_session_whole_and_says_what_needs_you() {
-        let dir = std::env::temp_dir().join(format!("valkyrie-tui-hud-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let socket = dir.join("s.sock");
-        valkyrie_proto::ensure_private_dir(&dir).unwrap();
-        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
-        let (client, _) = Client::connect(&socket).await.unwrap();
-        let mut app = App::new(client, PathBuf::new());
-        app.settings = Settings::default();
-        app.sessions = (1..=3).map(info).collect();
-        app.sessions[1].status.state = AgentState::Working;
-        app.sessions[2].status.state = AgentState::NeedsInput;
-        let mut waiting = queued(3);
-        waiting.name = "web".into();
-        waiting.status.state = AgentState::NeedsInput;
-        app.queue = vec![waiting];
-        app.view = Some(Attached::new(1, "api".into(), None));
-
-        // The strip takes rows from the session, unless it's a HUD's: then it
-        // only lies over the session, and only in tab mode.
-        let body = Rect::new(0, 0, 100, 20);
-        assert_ne!(app.split_body(body).0, body);
-        app.settings.hud = true;
-        assert_eq!(app.split_body(body), (body, None));
-        app.tab_cursor = Some(0);
-        let (main, tabs) = app.split_body(body);
-        assert_eq!(main, body);
-        assert!(tabs.is_some_and(|t| t.y == 0 && t.height > 0));
-        app.tab_cursor = None;
-
-        let text = |line: Line| {
-            line.spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>()
-        };
-        let t = app.settings.theme;
-        let left = text(hud_bar(app.view.as_ref().unwrap(), 0, t));
-        assert!(left.contains("api"), "{left}");
-        assert!(!left.contains("VALKYRIE"), "{left}");
-        let right = text(app.hud_alerts());
-        assert!(right.contains("▲ web needs input"), "{right}");
-        assert!(right.contains("alt n"), "{right}");
-        assert!(right.contains("1 working"), "{right}");
-        assert!(right.contains("tabs"), "{right}");
-
-        // Here, it isn't waiting elsewhere.
-        app.view = Some(Attached::new(3, "web".into(), None));
-        assert!(!text(app.hud_alerts()).contains('▲'));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

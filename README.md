@@ -243,9 +243,6 @@ Press `,` to open the settings panel. You can change:
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
   and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
   and state icons that opens over the session under the mouse or in tab mode)
-- HUD mode (`on`/`off`): while you work there's no tab strip or key hints, just the
-  session, its state, and what needs you elsewhere. Tab mode brings the strip up over
-  the session. In splits, the panes you aren't typing in are dimmed
 - the ping sound (`chime`, `pop`, `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`,
   `1up`, or `none`), and project context
 
