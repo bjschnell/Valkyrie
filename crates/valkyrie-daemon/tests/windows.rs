@@ -2,13 +2,29 @@
 //! client. The unix suite (`daemon.rs`) leans on `sh`; these use `cmd.exe`.
 #![cfg(windows)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{Size, SpawnSpec};
 
-async fn start() -> (Client, Pushes, PathBuf) {
+/// A per-test temp dir, removed when the test ends so runs don't pile up in /tmp.
+struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn start() -> (Client, Pushes, TempDir) {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "valkyrie-test-{}-{}",
@@ -16,6 +32,7 @@ async fn start() -> (Client, Pushes, PathBuf) {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&dir);
+    let dir = TempDir(dir);
     let socket = dir.join("run").join("o.sock");
     let state = dir.join("state");
     let serve_socket = socket.clone();

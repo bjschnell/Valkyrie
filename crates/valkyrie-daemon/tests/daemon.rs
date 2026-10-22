@@ -1,13 +1,29 @@
 //! End-to-end: real daemon on a temp socket, real PTYs, the public client.
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{ScreenUpdate, ServerMsg, Size, SpawnSpec};
 
-async fn start() -> (Client, Pushes, PathBuf) {
+/// A per-test temp dir, removed when the test ends so runs don't pile up in /tmp.
+struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn start() -> (Client, Pushes, TempDir) {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "valkyrie-test-{}-{}",
@@ -15,6 +31,7 @@ async fn start() -> (Client, Pushes, PathBuf) {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&dir);
+    let dir = TempDir(dir);
     start_in(&dir, "run/o.sock").await;
     let (client, pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
     (client, pushes, dir)
@@ -688,7 +705,7 @@ async fn a_fresh_daemon_restores_agents_and_shells() {
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let spawn = |command: &[&str], name: &str| SpawnSpec {
         command: command.iter().map(|s| s.to_string()).collect(),
-        cwd: Some(dir.clone()),
+        cwd: Some(dir.to_path_buf()),
         name: Some(name.into()),
         size: SIZE,
         env: Vec::new(),
@@ -977,7 +994,7 @@ async fn splits_come_back_after_a_restart() {
     let (client, _pushes, dir) = start().await;
     let shell = |name: &str| SpawnSpec {
         command: vec!["sh".into()],
-        cwd: Some(dir.clone()),
+        cwd: Some(dir.to_path_buf()),
         name: Some(name.into()),
         size: SIZE,
         env: Vec::new(),
@@ -1187,5 +1204,4 @@ async fn spawn_can_start_in_a_new_worktree() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(!broken.exists(), "the failed session's worktree stayed");
-    let _ = std::fs::remove_dir_all(&dir);
 }
