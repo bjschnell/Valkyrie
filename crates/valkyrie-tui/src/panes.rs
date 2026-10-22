@@ -11,6 +11,10 @@ use ratatui::style;
 use valkyrie_proto::layout::{Area, Divider};
 use valkyrie_proto::{SessionId, Side, Size, SpawnSpec};
 
+/// How far a HUD's reticle reaches along a divider from each corner of the focused
+/// pane.
+const RETICLE: u16 = 2;
+
 /// Sent to a program that asked for focus events (1004) as its pane gains or loses
 /// the keyboard.
 const FOCUS_IN: &[u8] = b"\x1b[I";
@@ -576,11 +580,16 @@ impl App {
         let focused = self.view.as_ref().map(|v| v.id);
         let themed = self.settings.themed_sessions.then_some(self.settings.theme);
         let buf = frame.buffer_mut();
+        let hud = self.settings.hud && panes.len() > 1;
         for (id, r) in &panes {
             let Some(pane) = self.pane(*id) else { continue };
             crate::render_rows(pane.shown(), *r, buf, themed);
             if let Some(sel) = &pane.selection {
                 crate::highlight(sel, *r, buf);
+            }
+            // A HUD dims the panes you aren't driving.
+            if hud && Some(*id) != focused {
+                buf.set_style(*r, style::Style::new().add_modifier(style::Modifier::DIM));
             }
         }
         let t = self.settings.theme;
@@ -603,6 +612,17 @@ impl App {
                         );
                         across.contains(Position::new(x, y))
                     });
+                    // A HUD lights only the focused pane's corners, as a reticle.
+                    let near = near
+                        && (!hud
+                            || lit.is_some_and(|f| match d.axis {
+                                valkyrie_proto::Axis::Columns => {
+                                    y < f.y + RETICLE || y + RETICLE >= f.bottom()
+                                }
+                                valkyrie_proto::Axis::Rows => {
+                                    x < f.x + RETICLE || x + RETICLE >= f.right()
+                                }
+                            }));
                     let color = if near && self.layout.is_some() {
                         t.accent
                     } else {
