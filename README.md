@@ -199,7 +199,7 @@ or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you
 |---|---|---|
 | Home | `↩` | open the selected session |
 | | `n` · `x` · `R` | new shell · kill · rename |
-| | `,` · `t` · `.` | settings · theme · keys |
+| | `,` · `.` | settings · keys |
 | Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
 | | `Alt-n` | each session that needs you, then back where you started |

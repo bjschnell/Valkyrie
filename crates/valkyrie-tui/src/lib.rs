@@ -1918,7 +1918,6 @@ impl App {
                 self.clamp_selection();
                 self.update_preview().await;
             }
-            HomeKey::Theme => self.change(Field::Theme, 1),
             HomeKey::Settings => self.settings_cursor = Some(0),
             HomeKey::Rename => {
                 if let Some(id) = selected {
@@ -3860,7 +3859,6 @@ fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'
     };
     let general = [
         ("n", "new"),
-        ("t", "theme"),
         (",", "settings"),
         (".", "keys"),
         ("p", "pair"),
@@ -4343,8 +4341,6 @@ enum HomeKey {
     NewShell,
     Kill,
     Refresh,
-    /// Cycle the color theme.
-    Theme,
     /// Open the settings panel.
     Settings,
     Rename,
@@ -4398,7 +4394,6 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             b'n' => keys.push(HomeKey::NewShell),
             b'x' => keys.push(HomeKey::Kill),
             b'r' => keys.push(HomeKey::Refresh),
-            b't' => keys.push(HomeKey::Theme),
             b',' => keys.push(HomeKey::Settings),
             b'R' => keys.push(HomeKey::Rename),
             b'.' => keys.push(HomeKey::Keys),
@@ -4873,7 +4868,7 @@ mod tests {
                 "backfill",
                 "web-ui",
                 "Do you want to proceed?",
-                "theme",
+                "settings",
             ] {
                 // The logos of themes with rain glitch a letter now and then.
                 if theme.rain.is_some() && want == "VALKYRIE" {
