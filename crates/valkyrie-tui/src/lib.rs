@@ -1907,8 +1907,7 @@ impl App {
     }
 
     async fn on_home_key(&mut self, key: HomeKey) {
-        let (selected, item) = self.selection();
-        let item = item.map(|i| (i.session, i.status.seq));
+        let (selected, _) = self.selection();
         match key {
             HomeKey::Up => {
                 self.selected = self.selected.saturating_sub(1);
@@ -1921,19 +1920,6 @@ impl App {
             }
             HomeKey::Theme => self.change(Field::Theme, 1),
             HomeKey::Settings => self.settings_cursor = Some(0),
-            HomeKey::Seen => {
-                if let Some((id, seq)) = item {
-                    self.mark_seen(&[(id, seq)]).await;
-                }
-            }
-            HomeKey::SeenAll => {
-                let all: Vec<_> = self
-                    .queue
-                    .iter()
-                    .map(|i| (i.session, i.status.seq))
-                    .collect();
-                self.mark_seen(&all).await;
-            }
             HomeKey::Rename => {
                 if let Some(id) = selected {
                     let name = self
@@ -1986,14 +1972,6 @@ impl App {
             ),
             Err(e) => format!("can't add a device: {e}"),
         };
-    }
-
-    async fn mark_seen(&mut self, items: &[(SessionId, u64)]) {
-        for &(id, seq) in items {
-            if let Err(e) = self.client.mark_seen(id, seq).await {
-                self.status = format!("mark seen failed: {e:#}");
-            }
-        }
     }
 
     /// Returns whether the queue or the proposals changed.
@@ -3878,12 +3856,7 @@ fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'
     } else if proposal {
         &[("a", "accept"), ("d", "reject"), ("↩", "read")]
     } else {
-        &[
-            ("↩", "open"),
-            ("s/S", "seen"),
-            ("x", "kill"),
-            ("R", "rename"),
-        ]
+        &[("↩", "open"), ("x", "kill"), ("R", "rename")]
     };
     let general = [
         ("n", "new"),
@@ -4367,8 +4340,6 @@ enum HomeKey {
     Up,
     Down,
     Enter,
-    Seen,
-    SeenAll,
     NewShell,
     Kill,
     Refresh,
@@ -4424,8 +4395,6 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             b'k' => keys.push(HomeKey::Up),
             b'j' => keys.push(HomeKey::Down),
             b'\r' | b'\n' => keys.push(HomeKey::Enter),
-            b's' => keys.push(HomeKey::Seen),
-            b'S' => keys.push(HomeKey::SeenAll),
             b'n' => keys.push(HomeKey::NewShell),
             b'x' => keys.push(HomeKey::Kill),
             b'r' => keys.push(HomeKey::Refresh),
@@ -4491,15 +4460,13 @@ mod tests {
     #[test]
     fn parses_home_keys() {
         assert_eq!(
-            home_keys_default(b"j\x1b[Ak\x1bOB\rsS.q"),
+            home_keys_default(b"j\x1b[Ak\x1bOB\r.q"),
             vec![
                 HomeKey::Down,
                 HomeKey::Up,
                 HomeKey::Up,
                 HomeKey::Down,
                 HomeKey::Enter,
-                HomeKey::Seen,
-                HomeKey::SeenAll,
                 HomeKey::Keys,
                 HomeKey::Quit
             ]
