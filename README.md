@@ -187,7 +187,7 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
 
 ### Keybinds
 
-A few keys get you started: `↩` on the home screen attaches to a session, `^]`
+A few keys get you started: `↩` on the home screen opens a session, `^]`
 or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you.
 
 <details>
@@ -197,10 +197,10 @@ or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you
 
 | Where | Key | Does |
 |---|---|---|
-| Home | `↩` / `⇥` | attach to the selected session / the top of the queue |
+| Home | `↩` | open the selected session |
 | | `n` · `x` · `R` | new shell · kill · rename |
 | | `s` / `S` | mark seen / all seen |
-| | `,` · `t` · `m` · `K` | settings · theme · sound · keys |
+| | `,` · `t` · `.` | settings · theme · keys |
 | Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
 | | `Alt-n` | each session that needs you, then back where you started |
@@ -214,7 +214,7 @@ or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you
 | | `m` | minimal tabs: one row each; at the side, a rail of icons that opens under the mouse |
 | | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
 
-**Remapping.** Press `K` on the home screen (or in the settings panel), then `↩`
+**Remapping.** Press `.` on the home screen (or in the settings panel), then `↩`
 and the new key. `⌫` clears a key, `r` puts back its default, and `R` twice puts
 back every default. A key can be Alt and almost any key, or Ctrl and a letter,
 apart from the ones programs need (Ctrl-C, Ctrl-D, Ctrl-Z, …). `^]` always goes

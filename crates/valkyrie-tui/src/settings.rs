@@ -1,6 +1,6 @@
 //! What the TUI looks and sounds like: the theme and whether sessions take its
 //! colors, how the tabs are drawn and on which side, which sound pings make
-//! (or none), whether to look for a newer release, and the direct keys (`keys`, which `K` remaps). Kept in
+//! (or none), whether to look for a newer release, and the direct keys (`keys`, which `.` remaps). Kept in
 //! `settings.toml` in Valkyrie's config directory, which `,` edits (or any editor:
 //! it is plain `key = value`). At start `$VALK_THEME`, `$VALK_SESSION_COLORS`,
 //! `$VALK_TABS`, `$VALK_TAB_SIDE`, `$VALK_TAB_DETAIL`, `$VALK_SOUND`,
@@ -83,7 +83,7 @@ pub struct Settings {
     /// theirs either way.
     pub hints: bool,
     /// Pings make a sound, `noise`; off is `none` in the panel. `noise` stays as
-    /// it was, so `m` brings it back.
+    /// it was, so `sound = on` brings it back.
     pub sound: bool,
     pub noise: Noise,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
@@ -270,7 +270,7 @@ impl Settings {
              sound = \"{}\"     # none | {}\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
-             # Direct keys, where they differ from the defaults: `K` on the home screen.\n\
+             # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
              {}",
             self.theme.name,
             names(THEMES.iter().map(|t| t.name)),
@@ -534,7 +534,7 @@ mod tests {
         let mut s = Settings::default();
         s.apply("sound = \"zap\"\n");
         assert_eq!((s.sound, s.noise), (true, Noise::Zap));
-        // Off keeps the noise, so `m` brings it back.
+        // Off keeps the noise, so on brings it back.
         s.apply("sound = off\n");
         assert_eq!(
             (s.sound, s.noise, s.value(Field::Sound)),

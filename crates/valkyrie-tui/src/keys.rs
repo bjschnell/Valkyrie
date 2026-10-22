@@ -1,5 +1,5 @@
 //! The keys that act straight past the program in a session, and on the home
-//! screen: which key does what, as `K` on the home screen remaps it. Kept in
+//! screen: which key does what, as `.` on the home screen remaps it. Kept in
 //! `settings.toml` as `keys.<action> = "<key>"`, only where it differs from the
 //! default; `"none"` unbinds.
 //!

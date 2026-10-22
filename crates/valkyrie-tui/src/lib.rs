@@ -187,7 +187,7 @@ struct App {
     newer_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
     /// The settings panel is open, its cursor on this field.
     settings_cursor: Option<usize>,
-    /// The keys page is open (`K` on the home screen).
+    /// The keys page is open (`.` on the home screen).
     keys_page: Option<KeysPage>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
@@ -1496,7 +1496,7 @@ impl App {
                 b"l" | b"\x1b[C" | b"\x1bOC" | b"\r" | b" " => self.change(Field::ALL[cursor], 1),
                 b"\x1b" if whole => self.settings_cursor = None,
                 b"," | b"q" | [0x03] => self.settings_cursor = None,
-                b"K" => {
+                b"." => {
                     self.settings_cursor = None;
                     self.keys_page = Some(KeysPage::default());
                     return;
@@ -1565,7 +1565,7 @@ impl App {
                     self.say("R again puts every key back to its default".into());
                 }
                 b"\x1b" if whole => self.keys_page = None,
-                b"q" | b"K" | [0x03] => self.keys_page = None,
+                b"q" | b"." | [0x03] => self.keys_page = None,
                 _ => {}
             }
         }
@@ -1919,19 +1919,8 @@ impl App {
                 self.clamp_selection();
                 self.update_preview().await;
             }
-            HomeKey::Sound => {
-                // Mute or unmute, keeping the noise: a step of 0 changes nothing else.
-                self.settings.sound = !self.settings.sound;
-                self.change(Field::Sound, 0);
-            }
             HomeKey::Theme => self.change(Field::Theme, 1),
             HomeKey::Settings => self.settings_cursor = Some(0),
-            HomeKey::Top => {
-                if let Some(top) = self.queue.first() {
-                    let id = top.session;
-                    self.attach(id).await;
-                }
-            }
             HomeKey::Seen => {
                 if let Some((id, seq)) = item {
                     self.mark_seen(&[(id, seq)]).await;
@@ -2415,7 +2404,6 @@ impl App {
             Some((id, typed)) => rename_line(*id, typed, t),
             None => footer_line(
                 &self.status,
-                self.settings.sound,
                 in_proposals,
                 self.proposal().is_some_and(|d| d.fresh.review.is_some()),
                 t,
@@ -3471,7 +3459,7 @@ impl App {
             "choose ".fg(t.muted),
             " ←→ ".fg(t.accent).bold(),
             "change ".fg(t.muted),
-            " K ".fg(t.accent).bold(),
+            " . ".fg(t.accent).bold(),
             "keys ".fg(t.muted),
             " esc ".fg(t.accent).bold(),
             "done ".fg(t.muted),
@@ -3879,13 +3867,7 @@ fn rename_line(id: SessionId, typed: &str, t: &Theme) -> Line<'static> {
 
 /// The status message, then key hints as chips: a proposal's own keys while the
 /// cursor is on one.
-fn footer_line(
-    status: &str,
-    sound: bool,
-    proposal: bool,
-    flagged: bool,
-    t: &Theme,
-) -> Line<'static> {
+fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
@@ -3897,8 +3879,7 @@ fn footer_line(
         &[("a", "accept"), ("d", "reject"), ("↩", "read")]
     } else {
         &[
-            ("↩", "attach"),
-            ("⇥", "top"),
+            ("↩", "open"),
             ("s/S", "seen"),
             ("x", "kill"),
             ("R", "rename"),
@@ -3908,9 +3889,8 @@ fn footer_line(
         ("n", "new"),
         ("t", "theme"),
         (",", "settings"),
-        ("K", "keys"),
+        (".", "keys"),
         ("p", "pair"),
-        ("m", if sound { "sound" } else { "muted" }),
         ("q", "quit"),
     ];
     for &(key, what) in context.iter().chain(&general) {
@@ -4387,8 +4367,6 @@ enum HomeKey {
     Up,
     Down,
     Enter,
-    /// Attach to the top of the queue.
-    Top,
     Seen,
     SeenAll,
     NewShell,
@@ -4398,8 +4376,6 @@ enum HomeKey {
     Theme,
     /// Open the settings panel.
     Settings,
-    /// Ping sounds on/off.
-    Sound,
     Rename,
     /// A key that works the same attached (`keys::Action`).
     Direct(Action),
@@ -4448,7 +4424,6 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             b'k' => keys.push(HomeKey::Up),
             b'j' => keys.push(HomeKey::Down),
             b'\r' | b'\n' => keys.push(HomeKey::Enter),
-            b'\t' => keys.push(HomeKey::Top),
             b's' => keys.push(HomeKey::Seen),
             b'S' => keys.push(HomeKey::SeenAll),
             b'n' => keys.push(HomeKey::NewShell),
@@ -4456,9 +4431,8 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             b'r' => keys.push(HomeKey::Refresh),
             b't' => keys.push(HomeKey::Theme),
             b',' => keys.push(HomeKey::Settings),
-            b'm' => keys.push(HomeKey::Sound),
             b'R' => keys.push(HomeKey::Rename),
-            b'K' => keys.push(HomeKey::Keys),
+            b'.' => keys.push(HomeKey::Keys),
             b'a' => keys.push(HomeKey::Accept),
             b'd' => keys.push(HomeKey::Reject),
             b'p' => keys.push(HomeKey::AddDevice),
@@ -4517,21 +4491,21 @@ mod tests {
     #[test]
     fn parses_home_keys() {
         assert_eq!(
-            home_keys_default(b"j\x1b[Ak\x1bOB\r\tsSq"),
+            home_keys_default(b"j\x1b[Ak\x1bOB\rsS.q"),
             vec![
                 HomeKey::Down,
                 HomeKey::Up,
                 HomeKey::Up,
                 HomeKey::Down,
                 HomeKey::Enter,
-                HomeKey::Top,
                 HomeKey::Seen,
                 HomeKey::SeenAll,
+                HomeKey::Keys,
                 HomeKey::Quit
             ]
         );
-        // Mouse reports arriving after a detach are not keys (`m` would toggle sound,
-        // an X10 report's raw bytes could be `q` or `x`).
+        // Mouse reports arriving after a detach are not keys (an X10 report's raw
+        // bytes could be `q` or `x`).
         assert_eq!(home_keys_default(b"\x1b[<0;5;3m\x1b[Mqxj"), []);
         assert_eq!(home_keys_default(b"\x1b[<0;5;3mj"), [HomeKey::Down]);
         // Nor is the terminal's answer to an image command.
@@ -4792,7 +4766,7 @@ mod tests {
         // On a session, its own keys again.
         app.selected = 10;
         let text = render(&app);
-        assert!(text.contains("attach") && !text.contains("accept"));
+        assert!(text.contains("open") && !text.contains("accept"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -5305,7 +5279,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// `K` on the home screen opens the keys page. Enter waits for a key and maps
+    /// `.` on the home screen opens the keys page. Enter waits for a key and maps
     /// it, taking it from whoever had it; the map is kept in the settings file, and
     /// `r`, Backspace and `R R` reset, clear and reset everything.
     #[tokio::test]
@@ -5322,7 +5296,7 @@ mod tests {
         app.settings = Settings::default();
         app.settings_file = dir.join("settings.toml");
 
-        app.on_input(b"K".to_vec()).await;
+        app.on_input(b".".to_vec()).await;
         assert_eq!(app.keys_page, Some(KeysPage::default()));
         // Home is the second row: give it Alt-p, which Last had.
         app.on_input(b"j\r".to_vec()).await;
