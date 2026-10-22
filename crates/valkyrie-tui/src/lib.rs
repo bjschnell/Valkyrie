@@ -1930,7 +1930,6 @@ impl App {
                 }
             }
             HomeKey::Quit => self.quit = true,
-            HomeKey::Refresh => self.refresh().await,
             HomeKey::Enter => {
                 if let Some(id) = selected {
                     self.attach(id).await;
@@ -3855,7 +3854,7 @@ fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'
     } else if proposal {
         &[("a", "accept"), ("d", "reject"), ("↩", "read")]
     } else {
-        &[("↩", "open"), ("x", "kill"), ("R", "rename")]
+        &[("↩", "open"), ("x", "kill"), ("r", "rename")]
     };
     let general = [
         ("n", "new"),
@@ -4340,7 +4339,6 @@ enum HomeKey {
     Enter,
     NewShell,
     Kill,
-    Refresh,
     /// Open the settings panel.
     Settings,
     Rename,
@@ -4393,9 +4391,8 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             b'\r' | b'\n' => keys.push(HomeKey::Enter),
             b'n' => keys.push(HomeKey::NewShell),
             b'x' => keys.push(HomeKey::Kill),
-            b'r' => keys.push(HomeKey::Refresh),
             b',' => keys.push(HomeKey::Settings),
-            b'R' => keys.push(HomeKey::Rename),
+            b'r' => keys.push(HomeKey::Rename),
             b'.' => keys.push(HomeKey::Keys),
             b'a' => keys.push(HomeKey::Accept),
             b'd' => keys.push(HomeKey::Reject),
