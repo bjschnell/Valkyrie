@@ -243,6 +243,8 @@ Press `,` to open the settings panel. You can change:
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
   and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
   and state icons that opens over the session under the mouse or in tab mode)
+- key hints (`on`/`off`): whether the bar under a session lists its keys. Tab
+  mode shows its keys either way
 - the ping sound (`chime`, `pop`, `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`,
   `1up`, or `none`), and project context
 

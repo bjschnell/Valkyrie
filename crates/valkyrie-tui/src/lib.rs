@@ -2145,8 +2145,14 @@ impl App {
                         BarMode::Session
                     };
                     let t = self.settings.theme;
-                    let mut line =
-                        attached_bar(view, mode, self.proposals.len(), t, &self.settings.keys);
+                    let mut line = attached_bar(
+                        view,
+                        mode,
+                        self.proposals.len(),
+                        self.settings.hints,
+                        t,
+                        &self.settings.keys,
+                    );
                     if let Some(toast) = self.toast() {
                         line.spans
                             .extend(toast_spans(toast, self.toast_summary(toast), t));
@@ -3915,7 +3921,6 @@ fn footer_line(
     Line::from(spans).style(style::Style::new().bg(t.panel))
 }
 
-/// The bar under an attached session.
 /// What the attached bar's key hints are for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BarMode {
@@ -3926,15 +3931,17 @@ enum BarMode {
     Reviewing,
 }
 
+/// The bar under an attached session. Without `hints` it shows no keys until
+/// you're in tab mode, a menu or a rename.
 fn attached_bar(
     view: &Attached,
     mode: BarMode,
     proposals: usize,
+    hints: bool,
     t: &Theme,
     map: &Keymap,
 ) -> Line<'static> {
     let mut spans = vec![
-        " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
         format!(" {} ", view.name).fg(t.fg).bold(),
         format!("#{} ", view.id).fg(t.muted),
     ];
@@ -3983,6 +3990,7 @@ fn attached_bar(
     }
     let session = session_hints(map);
     let keys: &[(&str, &str)] = match mode {
+        BarMode::Session if !hints => &[],
         BarMode::Session => &session
             .iter()
             .map(|(k, w)| (k.as_str(), *w))
@@ -5134,6 +5142,7 @@ mod tests {
                             view,
                             BarMode::Session,
                             0,
+                            app.settings.hints,
                             app.settings.theme,
                             &app.settings.keys,
                         )),
@@ -5548,6 +5557,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The bar under a session starts with its name, no `VALKYRIE` label. Its keys
+    /// show unless `hints` is off; tab mode shows its keys either way.
+    #[test]
+    fn the_session_bar_shows_keys_only_with_hints() {
+        let view = Attached::new(2, "proj2".into(), None);
+        let settings = Settings::default();
+        let bar = |mode, hints| {
+            attached_bar(&view, mode, 0, hints, settings.theme, &settings.keys)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let on = bar(BarMode::Session, true);
+        assert!(on.starts_with(" proj2 #2"), "{on}");
+        assert!(!on.contains("VALKYRIE"), "{on}");
+        assert!(on.contains("alt 1-9"), "{on}");
+        let off = bar(BarMode::Session, false);
+        assert_eq!(off.trim(), "proj2 #2", "{off}");
+        assert!(bar(BarMode::Tabs, false).contains("switch"));
+    }
+
     /// Minimal tabs, in every style. On top: one row each, the number, the state's
     /// icon and the name, no program or state word. In a column: a rail of numbers
     /// and icons that opens over the session, which keeps its size, in tab mode or
@@ -5943,6 +5974,7 @@ mod tests {
                         view,
                         BarMode::Session,
                         app.proposals.len(),
+                        app.settings.hints,
                         app.settings.theme,
                         &app.settings.keys,
                     );

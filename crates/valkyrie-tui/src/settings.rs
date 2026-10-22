@@ -79,6 +79,9 @@ pub struct Settings {
     /// Each tab is one row, its state's icon and its name, with no program or
     /// state word: the peek still has those.
     pub minimal_tabs: bool,
+    /// The bar under a session shows its keys. Tab mode, menus and renames show
+    /// theirs either way.
+    pub hints: bool,
     /// Pings make a sound, `noise`; off is `none` in the panel. `noise` stays as
     /// it was, so `m` brings it back.
     pub sound: bool,
@@ -99,6 +102,7 @@ impl PartialEq for Settings {
             self.tabs,
             self.tab_side,
             self.minimal_tabs,
+            self.hints,
             self.sound,
             self.noise,
             self.context,
@@ -110,6 +114,7 @@ impl PartialEq for Settings {
             other.tabs,
             other.tab_side,
             other.minimal_tabs,
+            other.hints,
             other.sound,
             other.noise,
             other.context,
@@ -133,6 +138,7 @@ impl Default for Settings {
             tabs: TabStyle::Underline,
             tab_side: TabSide::Top,
             minimal_tabs: false,
+            hints: true,
             sound: true,
             noise: Noise::Chime,
             context: true,
@@ -150,6 +156,7 @@ pub enum Field {
     Tabs,
     TabSide,
     TabDetail,
+    Hints,
     Sound,
     Context,
     Updates,
@@ -162,6 +169,7 @@ impl Field {
         Field::Tabs,
         Field::TabSide,
         Field::TabDetail,
+        Field::Hints,
         Field::Sound,
         Field::Context,
         Field::Updates,
@@ -174,6 +182,7 @@ impl Field {
             Field::Tabs => "Tab style",
             Field::TabSide => "Tabs on",
             Field::TabDetail => "Tab detail",
+            Field::Hints => "Key hints",
             Field::Sound => "Sound",
             Field::Context => "Context",
             Field::Updates => "Updates",
@@ -192,6 +201,7 @@ impl Settings {
             ("tabs", "VALK_TABS"),
             ("tab_side", "VALK_TAB_SIDE"),
             ("tab_detail", "VALK_TAB_DETAIL"),
+            ("hints", "VALK_HINTS"),
             ("sound", "VALK_SOUND"),
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
@@ -224,6 +234,7 @@ impl Settings {
             Field::Tabs => kept.tabs = self.tabs,
             Field::TabSide => kept.tab_side = self.tab_side,
             Field::TabDetail => kept.minimal_tabs = self.minimal_tabs,
+            Field::Hints => kept.hints = self.hints,
             Field::Sound => (kept.sound, kept.noise) = (self.sound, self.noise),
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
@@ -255,6 +266,7 @@ impl Settings {
              tabs = \"{}\"      # {}\n\
              tab_side = \"{}\"  # {}\n\
              tab_detail = \"{}\"  # full | minimal: a row per tab, its state and name\n\
+             hints = {}        # the bar under a session shows its keys\n\
              sound = \"{}\"     # none | {}\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
@@ -268,6 +280,7 @@ impl Settings {
             self.tab_side.name(),
             names(TabSide::ALL.iter().map(|s| s.name())),
             self.value(Field::TabDetail),
+            self.hints,
             self.value(Field::Sound),
             names(Noise::ALL.iter().map(|n| n.name())),
             self.context,
@@ -326,6 +339,11 @@ impl Settings {
                         (self.sound, self.noise) = (true, noise);
                     }
                 }
+            },
+            "hints" => match value {
+                "true" | "on" => self.hints = true,
+                "false" | "off" => self.hints = false,
+                _ => {}
             },
             "context" => match value {
                 "true" | "on" => self.context = true,
@@ -386,6 +404,7 @@ impl Settings {
                     "none"
                 }
             }
+            Field::Hints => on_off(self.hints),
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
         }
@@ -401,6 +420,7 @@ impl Settings {
             }
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::TabDetail => self.minimal_tabs = !self.minimal_tabs,
+            Field::Hints => self.hints = !self.hints,
             // None, then each noise.
             Field::Sound => {
                 let choices: Vec<Option<Noise>> = std::iter::once(None)
@@ -569,7 +589,11 @@ mod tests {
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
                 Field::Sound => Noise::ALL.len() + 1,
-                Field::SessionColors | Field::TabDetail | Field::Context | Field::Updates => 2,
+                Field::SessionColors
+                | Field::TabDetail
+                | Field::Hints
+                | Field::Context
+                | Field::Updates => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);
