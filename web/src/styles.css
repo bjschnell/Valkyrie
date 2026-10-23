@@ -476,6 +476,40 @@ code {
   border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
 }
 
+/* A session row over its Close button, which a swipe left uncovers. */
+.row-slot {
+  position: relative;
+  overflow: hidden;
+}
+
+.row-slot + .row-slot {
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.row-slot > .row {
+  position: relative;
+  background: var(--surface);
+  touch-action: pan-y;
+  transition: transform 0.2s ease;
+}
+
+.row-slot > .row:active {
+  background: var(--card);
+}
+
+.row-slot > .row.dragging {
+  transition: none;
+}
+
+.row-close {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 88px;
+  background: var(--blocked);
+  color: var(--surface);
+  font-weight: 700;
+}
+
 .row:active {
   background: var(--card);
 }

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { STATE_LABEL, program, type QueueItem, type SessionInfo } from "../proto";
+import { useEffect, useRef, useState } from "react";
+import { STATE_LABEL, program, type QueueItem, type SessionId, type SessionInfo } from "../proto";
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
-import { answer, answerAll, useApp } from "../store";
+import { answer, answerAll, kill, useApp } from "../store";
 import { useLook } from "../lib/theme";
 import { Chevron, Gear, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
@@ -22,6 +22,8 @@ export function Inbox() {
   const look = useLook();
   const working = sessions.filter((s) => s.exited === null && s.status.state === "working").length;
   const [sel, setSel] = useState(-1);
+  // The one row swiped open to show its Close button.
+  const [swiped, setSwiped] = useState<SessionId | null>(null);
   // What j/k move through: the cards, then the session rows.
   const order = [...queue.map((q) => q.session), ...sessions.map((s) => s.id)];
   const selected = order[sel] ?? null;
@@ -108,7 +110,14 @@ export function Inbox() {
           </h2>
           <div className="list">
             {sessions.map((s, i) => (
-              <SessionRow key={s.id} s={s} n={i + 1} picked={sel === queue.length + i} />
+              <SessionRow
+                key={s.id}
+                s={s}
+                n={i + 1}
+                picked={sel === queue.length + i}
+                swiped={swiped === s.id}
+                onSwipe={(open) => setSwiped((was) => (open ? s.id : was === s.id ? null : was))}
+              />
             ))}
             {sessions.length === 0 && <div className="empty">No sessions yet.</div>}
           </div>
@@ -241,23 +250,98 @@ function QueueCard({ item, info, picked }: { item: QueueItem; info?: SessionInfo
   );
 }
 
-function SessionRow({ s, n, picked }: { s: SessionInfo; n: number; picked: boolean }) {
+/** How far a row slides to show its Close button. */
+const REVEAL = 88;
+
+/**
+ * A session in the list. Swiped left on a touch screen it shows Close, which
+ * ends the session; tapping the row again slides it back.
+ */
+function SessionRow({
+  s,
+  n,
+  picked,
+  swiped,
+  onSwipe,
+}: {
+  s: SessionInfo;
+  n: number;
+  picked: boolean;
+  swiped: boolean;
+  onSwipe: (open: boolean) => void;
+}) {
   const now = useApp((st) => st.now);
   const queued = useApp((st) => st.queue.some((q) => q.session === s.id));
   const state = s.exited !== null ? "exited" : s.status.state;
+  // Where the row is while a finger drags it; null when it rests.
+  const [drag, setDrag] = useState<number | null>(null);
+  // Null until the finger has moved far enough to tell a swipe from a scroll.
+  const gesture = useRef<{ x: number; y: number; sideways: boolean | null } | null>(null);
+  // A swipe ends in a click on some browsers, which must not open the session.
+  const swallow = useRef(false);
+  const rest = swiped ? -REVEAL : 0;
+  const x = drag ?? rest;
+
+  const end = () => {
+    const sideways = gesture.current?.sideways;
+    gesture.current = null;
+    if (!sideways || drag === null) return setDrag(null);
+    swallow.current = true;
+    setDrag(null);
+    const open = drag < -REVEAL / 2;
+    if (open && !swiped) navigator.vibrate?.(10);
+    onSwipe(open);
+  };
+
   return (
-    <button className={`row ${queued ? "queued" : ""} ${picked ? "picked" : ""}`} data-pick onClick={() => go(s.id)}>
-      <span className="row-n">{n}</span>
-      <StateIcon state={state} />
-      <span className="row-main">
-        <span className={`row-name state-text-${queued ? state : "plain"}`}>{s.name}</span>
-        <span className="row-sub">
-          {program(s)} · {state === "exited" ? `exited ${s.exited ?? ""}` : STATE_LABEL[state]}
-          {s.status.summary ? ` · ${s.status.summary}` : ""}
+    <div className="row-slot" data-pick>
+      <button className="row-close" tabIndex={swiped ? 0 : -1} aria-hidden={!swiped} onClick={() => void kill(s.id)}>
+        {state === "exited" ? "Remove" : "Close"}
+      </button>
+      <button
+        className={`row ${queued ? "queued" : ""} ${picked ? "picked" : ""} ${drag !== null ? "dragging" : ""}`}
+        style={x ? { transform: `translateX(${x}px)` } : undefined}
+        onPointerDown={(e) => {
+          swallow.current = false;
+          if (e.pointerType !== "mouse") gesture.current = { x: e.clientX, y: e.clientY, sideways: null };
+        }}
+        onPointerMove={(e) => {
+          const g = gesture.current;
+          if (!g) return;
+          const dx = e.clientX - g.x;
+          const dy = e.clientY - g.y;
+          if (g.sideways === null) {
+            if (Math.hypot(dx, dy) < 8) return;
+            g.sideways = Math.abs(dx) > Math.abs(dy);
+            // Up or down: the page scrolls, and this was never a swipe.
+            if (!g.sideways) return void (gesture.current = null);
+            e.currentTarget.setPointerCapture(e.pointerId);
+          }
+          setDrag(Math.max(-REVEAL * 1.4, Math.min(0, rest + dx)));
+        }}
+        onPointerUp={end}
+        onPointerCancel={() => {
+          gesture.current = null;
+          setDrag(null);
+        }}
+        onClick={() => {
+          if (swallow.current) return void (swallow.current = false);
+          if (swiped) return onSwipe(false);
+          go(s.id);
+        }}
+      >
+        <span className="row-n">{n}</span>
+        <StateIcon state={state} />
+        <span className="row-main">
+          <span className={`row-name state-text-${queued ? state : "plain"}`}>{s.name}</span>
+          <span className="row-sub">
+            {program(s)} · {state === "exited" ? `exited ${s.exited ?? ""}` : STATE_LABEL[state]}
+            {s.status.summary ? ` · ${s.status.summary}` : ""}
+          </span>
         </span>
-      </span>
-      <span className="row-age">{age(s.status.since_ms, now)}</span>
-      <Chevron />
-    </button>
+        <span className="row-age">{age(s.status.since_ms, now)}</span>
+        <Chevron />
+      </button>
+    </div>
   );
 }
