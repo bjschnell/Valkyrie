@@ -6,6 +6,12 @@ on:
     branches: ["**"]
   pull_request:
   workflow_call:
+    inputs:
+      # What to test: release.yml passes the tag, which can be older than the push
+      # that called it.
+      ref:
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -15,6 +21,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # release-please reads commit subjects to pick the next version (docs/releasing.md).
+  commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Conventional Commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          # A squash merge lands the title as the commit on main.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s\n' "$TITLE" > "$RUNNER_TEMP/msg"
+          .githooks/commit-msg "$RUNNER_TEMP/msg" || status=1
+          status=${status:-0}
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            git log -1 --format=%B "$sha" > "$RUNNER_TEMP/msg"
+            .githooks/commit-msg "$RUNNER_TEMP/msg" || status=1
+          done
+          exit "$status"
   rust:
     strategy:
       fail-fast: false
@@ -24,13 +53,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked --no-fail-fast
       - name: Validate shell installers
         if: runner.os == 'Linux'
-        run: shellcheck install.sh install-release.sh
+        run: shellcheck install.sh install-release.sh .githooks/commit-msg
       - name: Validate PowerShell installers
         if: runner.os == 'Windows'
         shell: pwsh
@@ -47,6 +78,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.89"
@@ -60,6 +93,8 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22

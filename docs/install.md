@@ -60,8 +60,8 @@ for a tag other than the latest), checks the checksum, and hands a running daemo
 the new binary. To update, run `valk upgrade` ([Updating](#updating)). Ubuntu puts `~/.local/bin` on PATH at
 login once it exists, so open a new shell after the first install.
 
-To cut a release, from a checkout: `git tag v0.0.2 && git push origin v0.0.2`. The
-`release` workflow builds and publishes it in a few minutes.
+Releases are cut by merging release-please's pull request; see
+[Versions and releases](releasing.md).
 
 ## Windows (native)
 
@@ -181,8 +181,7 @@ it). On Windows an open TUI reconnects, and only a newer protocol needs a restar
 - `valk upgrade --check` only says whether a newer release is out.
 - `valk upgrade --tag v0.0.2` installs that release instead of the latest.
 - `valk upgrade --local` downloads nothing and hands the daemon to this binary.
-- Releases are told apart by the commit they were built from, so a release that is
-  replaced under the same tag is still picked up.
+- Releases are told apart by the commit they were built from, not only the tag.
 
 A `valk` built from a checkout never downloads a release over itself: `git pull &&
 ./install.sh` rebuilds it and hands the daemon over. `valk upgrade` on such a build only

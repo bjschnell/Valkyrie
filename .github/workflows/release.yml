@@ -1,15 +1,22 @@
 # Builds `valk` and attaches it to a GitHub release, so a machine can install
-# the binary without the source (docs/install.md). Push a tag to cut one:
-#   git tag v0.0.2 && git push origin v0.0.2
+# the binary without the source (docs/install.md). release-please.yml calls it when
+# a release pull request is merged (docs/releasing.md); a pushed `v*` tag or a
+# manual run does the same by hand. The release stays a draft until every build
+# is up, so `releases/latest` never points at one without binaries.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to create or update, e.g. v0.0.2"
+        description: "Release tag to create or update, e.g. v0.1.0"
         required: true
 
 permissions:
@@ -18,6 +25,8 @@ permissions:
 jobs:
   validate:
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ inputs.tag || github.ref_name }}
 
   # The release first, so each build uploads to it directly: no Actions
   # artifacts, which count against the account's storage quota.
@@ -33,9 +42,13 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+        # A draft gets no tag until it is published, and the builds check the tag
+        # out, so a manual run with a new tag makes the tag first.
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          gh release view "$TAG" >/dev/null 2>&1 && exit 0
+          git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null \
+            || gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes --draft
 
   build:
     needs: release
@@ -99,4 +112,17 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}
-        run: gh release upload "$TAG" install-release.sh install.ps1 install-wsl.ps1 --clobber
+        run: |
+          gh release upload "$TAG" install-release.sh install.ps1 install-wsl.ps1 --clobber
+      # Publish once. `valk upgrade` installs whatever is latest, so a backport or a
+      # re-run for an older tag must not become it.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" = true ] || exit 0
+          newest=$( { gh release list --exclude-drafts --json tagName -q '.[].tagName'; echo "$TAG"; } \
+            | sort -V | tail -n 1)
+          latest=false
+          [ "$newest" = "$TAG" ] && latest=true
+          gh release edit "$TAG" --draft=false --latest="$latest"
