@@ -245,6 +245,7 @@ impl Mapper {
                 }
                 let mut out = Vec::new();
                 let mut typed = Vec::new();
+                let mut images = 0usize;
                 for block in content(event) {
                     match block["type"].as_str() {
                         Some("tool_result") => {
@@ -267,10 +268,16 @@ impl Mapper {
                                 typed.push(text.to_owned());
                             }
                         }
-                        Some("image") => typed.push("[image]".into()),
+                        Some("image") => images += 1,
                         _ => {}
                     }
                 }
+                // Claude's prompt already says `[Image #1]` for each image it attached.
+                let marked = typed.iter().map(|t| t.matches("[Image #").count()).sum();
+                typed.extend(std::iter::repeat_n(
+                    "[image]".to_owned(),
+                    images.saturating_sub(marked),
+                ));
                 if !typed.is_empty() {
                     out.push(Item::User {
                         id: uuid.to_owned(),
@@ -957,6 +964,25 @@ mod tests {
         assert_eq!(detail.file.as_deref(), Some("src/x.rs"));
         assert!(detail.diff.as_deref().unwrap().contains("-b\n+c"));
         assert_eq!(detail.result.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn a_claude_image_shows_once() {
+        let image = json!({"type":"image","source":{"type":"base64","data":"…"}});
+        let items = feed(
+            Agent::Claude,
+            &[
+                json!({"type":"user","uuid":"u1","message":{"content":[
+                    {"type":"text","text":"[Image #1] [Image #2] look"}, image, image]}}),
+                json!({"type":"user","uuid":"u2","isMeta":true,"message":{"content":[
+                    {"type":"text","text":"[Image: source: /p/1.png]"}]}}),
+                json!({"type":"user","uuid":"u3","message":{"content":[image]}}),
+            ],
+        );
+        assert_eq!(
+            kinds(&items),
+            ["user [Image #1] [Image #2] look", "user [image]"]
+        );
     }
 
     #[test]
