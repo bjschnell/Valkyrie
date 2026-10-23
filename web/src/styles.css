@@ -167,6 +167,11 @@ code {
   background: var(--raised);
 }
 
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
 .title {
   flex: 1;
   min-width: 0;
@@ -500,6 +505,47 @@ code {
 
 .row-age {
   font-size: 12.5px;
+}
+
+/* Settings: a section's body, on the same surface as the session list. */
+.settings-card {
+  padding: 12px 14px 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.settings-card .panel-text {
+  margin-top: 0;
+}
+
+.look-check {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  color: var(--accent);
+}
+
+.row[aria-checked="true"] .row-name {
+  color: var(--accent);
+}
+
+.title-edit {
+  width: 100%;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 650;
+}
+
+button.title-name {
+  display: block;
+  max-width: 100%;
+  text-align: left;
 }
 
 .empty {
@@ -892,12 +938,6 @@ code {
 
 /* Notifications -------------------------------------------------------- */
 
-/* Not positioned: a topbar button's panel hangs from the bar's right edge, so it
-   stays on screen wherever the button sits. */
-.notify {
-  position: static;
-}
-
 .icon-btn.lit {
   color: var(--accent);
 }
@@ -914,12 +954,6 @@ code {
 .primary:active {
   transform: scale(0.97);
   filter: brightness(0.92);
-}
-
-.menu.panel {
-  right: 10px;
-  width: min(330px, calc(100vw - 24px));
-  padding: 14px 14px 12px;
 }
 
 .panel-title {
@@ -955,16 +989,6 @@ code {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.menu.panel .panel-actions button {
-  display: inline-block;
-  width: auto;
-  text-align: center;
-}
-
-.menu.panel .panel-actions .primary {
-  padding: 9px 16px;
 }
 
 .device-code {

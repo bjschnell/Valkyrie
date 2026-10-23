@@ -255,8 +255,8 @@ answers them together, after showing you each one.
 
 **Install it and get notifications.** On iPhone, open the link in Safari, tap Share →
 Add to Home Screen, and open Valkyrie from the Home Screen. iOS only offers
-notifications to an installed app. On Android, use Chrome's Install app. Then tap the
-bell in the app and turn notifications on. You'll get one when an agent needs you,
+notifications to an installed app. On Android, use Chrome's Install app. Then open
+Settings (the gear) in the app and turn notifications on. You'll get one when an agent needs you,
 finishes or stops while you're away: no typing at any session for 90 seconds, and the
 app not open. Notifications need the HTTPS address, and `valk web` has to keep running to send
 them.

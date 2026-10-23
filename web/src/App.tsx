@@ -4,20 +4,23 @@ import { Launcher } from "./components/Launcher";
 import { Pair } from "./components/Pair";
 import { ReviewView } from "./components/Review";
 import { SessionView } from "./components/SessionView";
+import { Settings } from "./components/Settings";
 import { Toast } from "./components/Toast";
 import { close, connect, open, useApp } from "./store";
 
 type Route =
   | { page: "inbox" }
   | { page: "new" }
+  | { page: "settings" }
   | { page: "session"; id: number }
   | { page: "review"; id: number };
 
-/** `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher. */
+/** `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher, `#/settings` settings. */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
   if (m) return { page: m[2] ? "review" : "session", id: Number(m[1]) };
   if (location.hash === "#/new") return { page: "new" };
+  if (location.hash === "#/settings") return { page: "settings" };
   return { page: "inbox" };
 }
 
@@ -48,6 +51,7 @@ export function App() {
     <>
       {at.page === "inbox" && <Inbox />}
       {at.page === "new" && <Launcher />}
+      {at.page === "settings" && <Settings />}
       {at.page === "session" && <SessionView id={at.id} />}
       {at.page === "review" && <ReviewView id={at.id} />}
       <Toast />

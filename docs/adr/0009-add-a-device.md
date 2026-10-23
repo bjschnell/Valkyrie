@@ -16,7 +16,7 @@ terminal to run `valk web pair`.
 
 Any trusted device can add another by showing a short code that the new device types.
 
-- **Add a device** in a paired web app, `p` in the TUI, or `valk web pair` makes a short code (e.g.
+- **Add a device** in a paired web app's settings, `p` in the TUI, or `valk web pair` makes a short code (e.g.
   `KQ7-4M2`). It works once, for 5 minutes, and dies after 5 wrong tries in total,
   so its shortness doesn't make it guessable. Wrong tries don't count against
   pairing links, whose 256-bit codes can't be guessed. The CLI's QR link stays as

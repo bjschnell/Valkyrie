@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import type { PushState } from "../lib/push";
 import { install, sendTestPush, turnOffPush, turnOnPush, useApp } from "../store";
-import { Bell, BellOff } from "./icons";
+import { Bell } from "./icons";
 
 const HINT_KEY = "valk.pushHint";
 
@@ -30,53 +30,38 @@ function TurnOn() {
   );
 }
 
-/** The topbar's bell, and the panel it opens. */
-export function NotifyButton() {
+/** Settings' notifications section: whether they're on, and turning them on or off. */
+export function NotifySettings() {
   const push = useApp((s) => s.push);
   const canInstall = useApp((s) => s.canInstall);
-  const [open, setOpen] = useState(false);
   if (push === "unknown") return null;
   return (
-    <div className="notify">
-      <button
-        className={`icon-btn ${push === "on" ? "lit" : ""}`}
-        aria-label="Notifications"
-        onClick={() => setOpen((o) => !o)}
-      >
-        {push === "on" ? <Bell /> : <BellOff />}
-      </button>
-      {open && (
-        <>
-          <div className="scrim" onClick={() => setOpen(false)} />
-          <div className="menu panel" role="dialog" aria-label="Notifications">
-            <div className="panel-title">
-              Notifications <span className={`panel-state ${push}`}>{push === "on" ? "on" : "off"}</span>
-            </div>
-            <p className="panel-text">{TEXT[push]}</p>
-            <div className="panel-actions">
-              {push === "off" && (
-                <TurnOn />
-              )}
-              {push === "on" && (
-                <>
-                  <button className="primary" onClick={() => void sendTestPush()}>
-                    Send a test
-                  </button>
-                  <button className="ghost" onClick={() => void turnOffPush()}>
-                    Turn off
-                  </button>
-                </>
-              )}
-              {canInstall && (
-                <button className="ghost" onClick={() => void install()}>
-                  Install app
-                </button>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
+    <section>
+      <h2 className="section-title">
+        Notifications <span className={`panel-state ${push}`}>{push === "on" ? "on" : "off"}</span>
+      </h2>
+      <div className="settings-card">
+        <p className="panel-text">{TEXT[push]}</p>
+        <div className="panel-actions">
+          {push === "off" && <TurnOn />}
+          {push === "on" && (
+            <>
+              <button className="primary" onClick={() => void sendTestPush()}>
+                Send a test
+              </button>
+              <button className="ghost" onClick={() => void turnOffPush()}>
+                Turn off
+              </button>
+            </>
+          )}
+          {canInstall && (
+            <button className="ghost" onClick={() => void install()}>
+              Install app
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 

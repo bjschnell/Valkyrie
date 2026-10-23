@@ -3,12 +3,11 @@ import { STATE_LABEL, program, type QueueItem, type SessionInfo } from "../proto
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
 import { answer, answerAll, useApp } from "../store";
-import { nextLook, setLook, useLook } from "../lib/theme";
-import { Chevron, Plus, Prompt } from "./icons";
+import { useLook } from "../lib/theme";
+import { Chevron, Gear, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
-import { NotifyButton, NotifyHint } from "./Notify";
-import { AddDeviceButton } from "./AddDevice";
+import { NotifyHint } from "./Notify";
 import { Rain } from "./Rain";
 import { Mark, Wordmark } from "./Logo";
 
@@ -28,7 +27,7 @@ export function Inbox() {
   const selected = order[sel] ?? null;
 
   // n starts a session; j/k pick a card or row, Enter opens it, r reviews its
-  // changes.
+  // changes, `,` opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -39,6 +38,7 @@ export function Inbox() {
       };
       const actions: Record<string, () => void> = {
         n: () => (location.hash = "#/new"),
+        ",": () => (location.hash = "#/settings"),
         j: () => pick(sel + 1),
         k: () => pick(sel - 1),
         Enter: () => selected !== null && go(selected),
@@ -64,15 +64,8 @@ export function Inbox() {
           <Wordmark />
         </div>
         <ConnectionPill />
-        <NotifyButton />
-        <AddDeviceButton />
-        <button
-          className={`icon-btn ${look !== "default" ? "lit" : ""}`}
-          aria-label={`Look: ${look}`}
-          title={`Look: ${look}`}
-          onClick={() => setLook(nextLook(look))}
-        >
-          <Prompt />
+        <button className="icon-btn" aria-label="Settings" title="Settings" onClick={() => (location.hash = "#/settings")}>
+          <Gear />
         </button>
         <button className="icon-btn" aria-label="New session" onClick={() => (location.hash = "#/new")}>
           <Plus />

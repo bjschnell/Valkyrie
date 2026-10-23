@@ -6,7 +6,16 @@ import { useSyncExternalStore } from "react";
  * with digital rain; valkyrie's is runes, netrunner's hex.
  */
 export type Look = "default" | "matrix" | "violet" | "valkyrie" | "netrunner";
-const LOOKS: Look[] = ["default", "matrix", "violet", "valkyrie", "netrunner"];
+export const LOOKS: Look[] = ["default", "matrix", "violet", "valkyrie", "netrunner"];
+
+/** Each look's name and a few words on it, for the settings page. */
+export const LOOK_TEXT: Record<Look, { name: string; about: string }> = {
+  default: { name: "Dracula", about: "The default: dark, soft colors" },
+  matrix: { name: "Matrix", about: "Green on black, with digital rain" },
+  violet: { name: "Violet", about: "Pale purple, with digital rain" },
+  valkyrie: { name: "Valkyrie", about: "The icon's neon, with falling runes" },
+  netrunner: { name: "Netrunner", about: "Black and neon, with falling hex" },
+};
 
 const KEY = "valk.look";
 const listeners = new Set<() => void>();
@@ -42,11 +51,6 @@ export function setLook(next: Look): void {
   }
   apply();
   listeners.forEach((f) => f());
-}
-
-/** The one after `l`, for a button that cycles through them. */
-export function nextLook(l: Look): Look {
-  return LOOKS[(LOOKS.indexOf(l) + 1) % LOOKS.length];
 }
 
 export function useLook(): Look {

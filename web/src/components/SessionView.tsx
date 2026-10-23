@@ -40,6 +40,13 @@ export function SessionView({ id }: { id: number }) {
   const [view, setView] = useState(defaultView);
   const [chosen, setChosen] = useState(savedMode);
   const [menu, setMenu] = useState(false);
+  // The name while you're editing it; null when you aren't.
+  const [naming, setNaming] = useState<string | null>(null);
+  const cancelled = useRef(false);
+  const startNaming = () => {
+    cancelled.current = false;
+    setNaming(info?.name ?? "");
+  };
   const scroller = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const choices = useMemo(() => openChoices(screen), [screen]);
@@ -100,7 +107,33 @@ export function SessionView({ id }: { id: number }) {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">{info?.name ?? `#${id}`}</div>
+          {naming === null ? (
+            <button className="title-name" title="Rename" onClick={startNaming}>
+              {info?.name ?? `#${id}`}
+            </button>
+          ) : (
+            <input
+              className="title-edit"
+              aria-label="Session name"
+              placeholder="Blank: its folder's name"
+              autoFocus
+              value={naming}
+              onChange={(e) => setNaming(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              // Enter or tapping away saves (a phone's usual way out); Esc doesn't.
+              onBlur={() => {
+                if (!cancelled.current && naming !== (info?.name ?? "")) void rename(id, naming.trim() || null);
+                setNaming(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                else if (e.key === "Escape") {
+                  cancelled.current = true;
+                  setNaming(null);
+                }
+              }}
+            />
+          )}
           <div className="title-sub">
             <StateIcon state={state} />
             {info ? program(info) : ""} · {STATE_LABEL[state]}
@@ -116,7 +149,14 @@ export function SessionView({ id }: { id: number }) {
         <button className="icon-btn" aria-label="Session menu" onClick={() => setMenu((m) => !m)}>
           <Dots />
         </button>
-        {menu && <SessionMenu id={id} name={info?.name ?? ""} agent={info ? program(info) : ""} onClose={() => setMenu(false)} />}
+        {menu && (
+          <SessionMenu
+            id={id}
+            agent={info ? program(info) : ""}
+            onRename={startNaming}
+            onClose={() => setMenu(false)}
+          />
+        )}
       </header>
 
       {hasChat && (
@@ -371,7 +411,17 @@ function Composer({ id, area }: { id: number; area: RefObject<HTMLTextAreaElemen
   );
 }
 
-function SessionMenu({ id, name, agent, onClose }: { id: number; name: string; agent: string; onClose: () => void }) {
+function SessionMenu({
+  id,
+  agent,
+  onRename,
+  onClose,
+}: {
+  id: number;
+  agent: string;
+  onRename: () => void;
+  onClose: () => void;
+}) {
   const [confirm, setConfirm] = useState(false);
   return (
     <>
@@ -381,8 +431,7 @@ function SessionMenu({ id, name, agent, onClose }: { id: number; name: string; a
           role="menuitem"
           onClick={() => {
             onClose();
-            const next = prompt("Name this session (blank: its folder)", name);
-            if (next !== null) void rename(id, next.trim() || null);
+            onRename();
           }}
         >
           Rename

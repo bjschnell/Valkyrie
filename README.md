@@ -135,8 +135,8 @@ Scan the QR code it prints. The code works once, for ten minutes; the device
 stays paired until you revoke it.
 
 To add another device, such as the app installed on your Home Screen (on iPhone
-it can't open the QR link) or a laptop, tap **Add a device** in an app that's
-already paired, or press `p` in `valk`. Type the short code it shows into the
+it can't open the QR link) or a laptop, open **Settings → Add a device** (the gear)
+in an app that's already paired, or press `p` in `valk`. Type the short code it shows into the
 new device's pairing screen.
 
 ```sh
