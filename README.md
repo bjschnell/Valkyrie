@@ -155,8 +155,9 @@ bar at the bottom has the keys, and the number of decisions waiting for you.
 
 <img src="docs/images/session.svg" alt="An attached Claude Code session under a tab strip showing four sessions and their states" width="100%">
 
-**Themes.** Dracula, Cyberpunk, Blackout, Catppuccin, Nord, Gruvbox and Tokyo
-Night, plus Matrix and Violet, whose home screens have digital rain.
+**Themes.** Dracula, Blackout, Catppuccin, Nord, Gruvbox and Tokyo Night, plus
+Cyberpunk, Matrix, Violet, Valkyrie and Netrunner, whose home screens have
+digital rain.
 
 <img src="docs/images/themes.png" alt="The home screen in the tokyonight, matrix, cyberpunk and gruvbox themes" width="100%">
 
