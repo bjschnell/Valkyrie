@@ -189,7 +189,7 @@ impl App {
         self.divider_drag = None;
         // The snapshots only rewrite modes that differ from the defaults; the mouse
         // capture has to start now.
-        self.captured = None;
+        self.captured = false;
         self.update_capture();
         for &pane in &ids {
             self.report_cell(Some(pane));
@@ -384,18 +384,13 @@ impl App {
         }
     }
 
-    /// The mouse wants the program's or Valkyrie's mode: both use SGR reports, and
-    /// plain motion only while some pane asked for it, or the rail of minimal tabs
-    /// is up (moving onto it opens it).
+    /// Takes the mouse while attached: SGR reports, and plain motion, so a tab
+    /// under the mouse peeks and the rail of minimal tabs opens. A pane only gets
+    /// the motion it asked for (see `mouse::encode`). Written once per attach,
+    /// since rewriting the modes mid-drag can lose the drag.
     pub(crate) fn update_capture(&mut self) {
-        let motion = self.rail()
-            || self
-                .view
-                .iter()
-                .chain(&self.others)
-                .any(|p| p.modes.mouse_motion);
-        if self.captured != Some(motion) {
-            self.captured = Some(motion);
+        if !self.captured {
+            self.captured = true;
             let mut out = std::io::stdout();
             let _ = std::io::Write::write_all(
                 &mut out,
@@ -403,7 +398,7 @@ impl App {
                     "{}{}{}",
                     mouse::CAPTURE_OFF,
                     mouse::CAPTURE_ON,
-                    if motion { mouse::MOTION_ON } else { "" }
+                    mouse::MOTION_ON
                 )
                 .as_bytes(),
             );

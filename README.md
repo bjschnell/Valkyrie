@@ -191,6 +191,9 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
 
 A few keys get you started: `↩` on the home screen opens a session, `^]`
 or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you.
+Rest the mouse on a tab for a peek at its agent's state, summary and screen.
+In a session, `^\` is actions, for what the Alt keys don't do: split, rename,
+decisions. The bar under a session lists these keys, and you can click them.
 
 <details>
 <summary><b>All default keys, remapping, and the mouse</b></summary>
@@ -206,12 +209,10 @@ or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
 | | `Alt-n` | each session that needs you, then back where you started |
 | | `Alt-t` · `Alt-w` · `Alt-o` | new shell tab · close tab · next pane |
-| Attached | `^\` | tab mode (below) |
+| Attached | `^\` | actions (below) |
 | | `^]` | back home |
-| Tab mode | `h`/`l` (or `j`/`k`) · `H`/`L` | move between tabs · reorder |
-| | `1`–`9` · `0` · `⇥` | jump to a tab · home · next one needing you |
-| | `s` / `v` · `o` | split · move between panes |
-| | `n` · `r` · `x` · `,` | new tab · rename · close · settings |
+| Actions | `s` / `v` · `p` | split below / beside · the pane's menu |
+| | `r` · `,` | rename the tab · settings |
 | | `m` | minimal tabs: one row each; at the side, a rail of icons that opens under the mouse |
 | | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
 
@@ -224,10 +225,11 @@ home, so a remap can't lock you out. Changes are kept in `settings.toml` as
 
 **On a Mac,** set your terminal to send Option as Meta for the Alt keys
 (Terminal.app: Settings → Profiles → Keyboard; iTerm2: Profiles → Keys → Left
-Option key → Esc+). Tab mode works without it.
+Option key → Esc+), or remap the keys you use to Ctrl and a letter.
 
-**The mouse.** Click a tab, drag it to reorder, right-click it for a menu,
-right-click a pane to split it, and drag a divider to resize. Click a link in a
+**The mouse.** Rest the pointer on a tab to peek at it. Click a tab, drag it to reorder, right-click it for a menu, right-click a pane to split
+it, and drag a divider to resize. The key chips on the bar under a session, and
+`◇ N to review`, click like the keys. Click a link in a
 session to open it in your browser (Ctrl+click over a program that takes the mouse,
 such as vim). Over SSH, the link is copied to your clipboard instead.
 
@@ -243,9 +245,9 @@ Press `,` to open the settings panel. You can change:
   (`terminal`)
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
   and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
-  and state icons that opens over the session under the mouse or in tab mode)
-- key hints (`on`/`off`): whether the bar under a session lists its keys. Tab
-  mode shows its keys either way
+  and state icons that opens over the session under the mouse)
+- key hints (`on`/`off`): whether the bar under a session lists its keys.
+  Actions (`^\`) show their keys either way
 - the ping sound (`chime`, `pop`, `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`,
   `1up`, or `none`), and project context
 

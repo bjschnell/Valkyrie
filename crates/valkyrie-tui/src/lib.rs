@@ -202,16 +202,16 @@ struct App {
     toast: Option<(Ping, Instant)>,
     /// The start of a mouse report the last read cut off.
     partial: Vec<u8>,
-    /// The tab strip has the keyboard, its cursor on this tab (one past the sessions
-    /// is "+").
-    tab_cursor: Option<usize>,
+    /// Tab mode: the next key acts on the attached tab (split, rename, …) rather
+    /// than going to the program.
+    tab_mode: bool,
     /// The tab attached before this one, for Alt-p.
     previous: Option<SessionId>,
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
     renaming: Option<(SessionId, String)>,
-    /// A tab's menu, opened with a right click or `x` in tab mode.
+    /// A tab's menu, opened with a right click or Alt-w.
     menu: Option<Menu>,
     /// The decisions to review, opened over a session with `d` in tab mode, its
     /// cursor on this proposal.
@@ -220,6 +220,8 @@ struct App {
     tab_drag: Option<SessionId>,
     /// The mouse is over the minimal tabs' rail, which opens it.
     rail_hover: bool,
+    /// The tab under the mouse, and since when: resting there peeks at it.
+    hover_tab: Option<(usize, Instant)>,
     /// The attached tab's other panes, when it is split; `view` is the focused one.
     others: Vec<Attached>,
     /// The attached tab's split layout (`None`: one pane).
@@ -230,8 +232,8 @@ struct App {
     divider_drag: Option<(valkyrie_proto::layout::Divider, u16)>,
     /// The pane a button went down in: its drag and release go there too.
     mouse_owner: Option<SessionId>,
-    /// The mouse capture written to the terminal: whether plain motion is on.
-    captured: Option<bool>,
+    /// Whether the mouse capture has been written to the terminal.
+    captured: bool,
     /// Tests draw at this size (terminal minus the bar) instead of the terminal's.
     fixed_size: Option<Size>,
 }
@@ -333,7 +335,7 @@ impl App {
             pinger: Pinger::default(),
             toast: None,
             partial: Vec::new(),
-            tab_cursor: None,
+            tab_mode: false,
             previous: None,
             needing: None,
             renaming: None,
@@ -341,12 +343,13 @@ impl App {
             reviewing: None,
             tab_drag: None,
             rail_hover: false,
+            hover_tab: None,
             others: Vec::new(),
             layout: None,
             layouts: Vec::new(),
             divider_drag: None,
             mouse_owner: None,
-            captured: None,
+            captured: false,
             fixed_size: None,
         }
     }
@@ -435,6 +438,9 @@ impl App {
                 _ = sleep_until(self.pinger.next_due()), if self.pinger.next_due().is_some() => {
                     self.fire_pings();
                 }
+                _ = sleep_until(self.peek_due()), if self.peek_due().is_some() => {
+                    self.update_preview().await;
+                }
             }
         }
         Ok(())
@@ -516,18 +522,33 @@ impl App {
             self.preview = None;
             return;
         };
-        // Keys wait on this in tab mode: a slow daemon leaves the last one.
+        // A slow daemon leaves the last one, rather than holding up the keys.
         let dump = tokio::time::timeout(PREVIEW_WAIT, self.client.dump(id)).await;
         if let Ok(text) = dump {
             self.preview = text.ok().map(|text| (id, text));
         }
     }
 
-    /// The tab the strip's cursor is on, when it is another session than the
-    /// attached tab's: tab mode shows a peek at it.
+    /// The tab the mouse rests on, when it is another session than the attached
+    /// tab's: a peek at it shows over the session.
     fn peeked(&self) -> Option<&SessionInfo> {
-        let s = self.tab_session(self.tab_cursor?)?;
+        let s = self.tab_session(self.peek_tab()?)?;
         (!self.pane_ids().contains(&s.id)).then_some(s)
+    }
+
+    /// The tab under the mouse, once it has rested there `HOVER_DELAY`: a pointer
+    /// on its way to a click doesn't flash a peek.
+    fn peek_tab(&self) -> Option<usize> {
+        self.hover_tab
+            .filter(|(_, at)| at.elapsed() >= HOVER_DELAY)
+            .map(|(i, _)| i)
+    }
+
+    /// When the peek under the mouse is due, until it shows.
+    fn peek_due(&self) -> Option<Instant> {
+        self.hover_tab
+            .map(|(_, at)| at + HOVER_DELAY)
+            .filter(|&due| due > Instant::now())
     }
 
     async fn refresh(&mut self) {
@@ -592,7 +613,8 @@ impl App {
         self.layout = None;
         self.mouse_owner = None;
         self.divider_drag = None;
-        self.tab_cursor = None;
+        self.tab_mode = false;
+        self.hover_tab = None;
         self.menu = None;
         self.reviewing = None;
         let _ = reset_terminal_modes();
@@ -623,6 +645,10 @@ impl App {
             }
             let inputs = mouse::split(&bytes);
             for input in inputs {
+                // A key closes a peek the mouse opened, as it would a tooltip.
+                if matches!(input, Input::Bytes(_)) {
+                    self.hover_tab = None;
+                }
                 match (&self.view, input) {
                     // Detached mid-read: the rest belongs to the home screen.
                     (None, Input::Bytes(rest)) => {
@@ -638,7 +664,7 @@ impl App {
                     (Some(view), Input::Bytes(keys))
                         if view.exited.is_some()
                             && view.scroll.is_none()
-                            && self.tab_cursor.is_none()
+                            && !self.tab_mode
                             && self.renaming.is_none()
                             && self.menu.is_none()
                             && self.reviewing.is_none()
@@ -674,7 +700,7 @@ impl App {
         if self.reviewing.is_some() {
             return self.review_keys(&bytes).await;
         }
-        if self.tab_cursor.is_some() {
+        if self.tab_mode {
             return self.tab_keys(&bytes).await;
         }
         let Some(view) = &mut self.view else { return };
@@ -702,7 +728,7 @@ impl App {
                 }
                 let after = &rest[i + len..];
                 if action == Action::Tabs {
-                    self.tab_cursor = Some(self.attached_index().unwrap_or(0));
+                    self.tab_mode = true;
                     // Keys typed right after ^\ in the same read belong to the strip.
                     return Box::pin(self.tab_keys(after)).await;
                 }
@@ -830,97 +856,49 @@ impl App {
         Some(&self.sessions[self.face(tab)])
     }
 
-    /// Keys while the tab strip has the keyboard. Keys after the one that hands the
-    /// keyboard back go to the session.
+    /// Keys in tab mode: one acts on the attached tab, then the keyboard goes back
+    /// to the session. Getting around (tabs, home, panes, what needs you) is the
+    /// direct keys' (`keys`), so tab mode keeps only what they don't do. Keys after
+    /// the one that hands the keyboard back go to the session.
     async fn tab_keys(&mut self, mut keys: &[u8]) {
         let toggle = self.settings.keys.get(Action::Tabs).map(Key::bytes);
-        while let Some(cursor) = self.tab_cursor
-            && !keys.is_empty()
-        {
+        while self.tab_mode && !keys.is_empty() {
             // Tab mode's own key gives the keyboard back.
             if let Some(toggle) = &toggle
                 && keys.starts_with(toggle)
             {
                 keys = &keys[toggle.len()..];
-                self.tab_cursor = None;
+                self.tab_mode = false;
                 continue;
             }
             let key = next_key(keys);
             // A lone Esc is a key; Esc with more after it is Alt plus that key.
             let whole = key.len() == keys.len();
             keys = &keys[key.len()..];
-            let last = self.tabs().len();
             match key {
-                // Across a strip on top, down a column; either works for either.
-                b"h" | b"k" | b"\x1b[D" | b"\x1bOD" | b"\x1b[A" | b"\x1bOA" => {
-                    self.tab_cursor = Some(cursor.saturating_sub(1))
-                }
-                b"l" | b"j" | b"\x1b[C" | b"\x1bOC" | b"\x1b[B" | b"\x1bOB" => {
-                    self.tab_cursor = Some((cursor + 1).min(last))
-                }
                 b"," => {
-                    self.tab_cursor = None;
+                    self.tab_mode = false;
                     self.settings_cursor = Some(0);
                     return self.settings_keys(keys);
                 }
                 // The strip stays in tab mode, so you see the change and can undo it.
                 b"m" => self.change(Field::TabDetail, 1),
-                b"\r" | b"\n" => {
-                    self.tab_cursor = None;
-                    match self.tab_session(cursor).map(|s| s.id) {
-                        Some(id) => self.switch_to(id).await,
-                        None => self.new_shell(self.attached_cwd()).await,
-                    }
-                }
-                b"0" => {
-                    self.tab_cursor = None;
-                    self.detach().await;
-                    return;
-                }
-                b"H" | b"L" | b"K" | b"J" => {
-                    if let Some(id) = self.tab_session(cursor).map(|s| s.id) {
-                        let to = if matches!(key, b"H" | b"K") {
-                            cursor.saturating_sub(1)
-                        } else {
-                            cursor + 1
-                        };
-                        self.move_tab(id, to).await;
-                    }
-                }
-                [d @ b'1'..=b'9'] => {
-                    let i = (d - b'1') as usize;
-                    if let Some(id) = self.tab_session(i).map(|s| s.id) {
-                        self.tab_cursor = None;
-                        self.switch_to(id).await;
-                    }
-                }
-                b"\t" => {
-                    self.tab_cursor = None;
-                    self.next_needing().await;
-                }
-                b"n" => {
-                    self.tab_cursor = None;
-                    self.new_shell(self.attached_cwd()).await;
-                }
                 b"r" => {
-                    if let Some(s) = self.tab_session(cursor) {
-                        let renaming = Some((s.id, s.name.clone()));
-                        self.tab_cursor = None;
-                        self.renaming = renaming;
+                    if let Some(view) = &self.view {
+                        let name = self
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == view.id)
+                            .map_or_else(|| view.name.clone(), |s| s.name.clone());
+                        self.renaming = Some((view.id, name));
+                        self.tab_mode = false;
                         // What follows `r` in the same read is the new name.
                         return Box::pin(self.rename_keys(keys)).await;
                     }
                 }
-                b"x" => {
-                    if let Some(id) = self.tab_session(cursor).map(|s| s.id) {
-                        self.tab_cursor = None;
-                        self.open_menu(id, MENU_CLOSE);
-                        return Box::pin(self.menu_keys(keys)).await;
-                    }
-                }
                 // Splits of the focused pane, vim's way round: `s` below, `v` beside.
                 b"s" | b"v" | b"S" | b"V" => {
-                    self.tab_cursor = None;
+                    self.tab_mode = false;
                     let side = match key {
                         b"s" => Side::Down,
                         b"v" => Side::Right,
@@ -929,17 +907,13 @@ impl App {
                     };
                     self.split(side).await;
                 }
-                b"o" | b"O" => {
-                    self.tab_cursor = None;
-                    self.cycle_focus(if key == b"o" { 1 } else { -1 });
-                }
                 b"p" => {
-                    self.tab_cursor = None;
+                    self.tab_mode = false;
                     self.open_focused_pane_menu();
                     return Box::pin(self.menu_keys(keys)).await;
                 }
                 b"d" => {
-                    self.tab_cursor = None;
+                    self.tab_mode = false;
                     if self.proposals.is_empty() {
                         if let Some(view) = &mut self.view {
                             view.notice("no decisions to review".into());
@@ -950,19 +924,14 @@ impl App {
                     }
                 }
                 [DETACH_KEY] => {
-                    self.tab_cursor = None;
+                    self.tab_mode = false;
                     self.detach().await;
                     return;
                 }
-                b"q" => self.tab_cursor = None,
-                b"\x1b" if whole => self.tab_cursor = None,
+                b"q" => self.tab_mode = false,
+                b"\x1b" if whole => self.tab_mode = false,
                 _ => {}
             }
-        }
-        // The tick keeps it fresh; a move to another tab can't wait for that.
-        let peeked = self.peeked().map(|s| s.id);
-        if peeked.is_some() && peeked != self.preview.as_ref().map(|(id, _)| *id) {
-            self.update_preview().await;
         }
         if !keys.is_empty() && self.view.is_some() {
             Box::pin(self.on_keys(keys.to_vec())).await;
@@ -1124,25 +1093,72 @@ impl App {
             }
             (MouseKind::Release, _) => self.tab_drag = None,
             (MouseKind::Press, Some(TabHit::Home)) => {
-                self.tab_cursor = None;
+                self.tab_mode = false;
                 self.detach().await;
             }
             (MouseKind::Press, Some(TabHit::Session(id))) => {
-                self.tab_cursor = None;
+                self.tab_mode = false;
                 // A click on the attached tab keeps the pane you were in.
                 if !self.pane_ids().contains(&id) {
                     self.switch_to(id).await;
                 }
             }
             (MouseKind::Press, Some(TabHit::New)) => {
-                self.tab_cursor = None;
+                self.tab_mode = false;
                 self.new_shell(self.attached_cwd()).await;
             }
             (MouseKind::RightPress, Some(TabHit::Session(id))) => {
-                self.tab_cursor = None;
+                self.tab_mode = false;
                 self.open_menu(id, MENU_RENAME);
             }
             _ => {}
+        }
+    }
+
+    /// The bar under `view`, the attached session.
+    fn bar(&self, view: &Attached) -> Bar {
+        let mode = if self.renaming.is_some() {
+            BarMode::Renaming
+        } else if self.menu.is_some() {
+            BarMode::Menu
+        } else if self.reviewing.is_some() {
+            BarMode::Reviewing
+        } else if self.tab_mode {
+            BarMode::Tabs
+        } else {
+            BarMode::Session
+        };
+        attached_bar(
+            view,
+            mode,
+            self.proposals.len(),
+            self.settings.hints,
+            self.settings.theme,
+            &self.settings.keys,
+        )
+    }
+
+    /// A click on the bar under a session: a key's chip does what the key does, and
+    /// `◇ N to review` lists the decisions.
+    async fn bar_click(&mut self, x: u16) {
+        let Some(view) = &self.view else { return };
+        let bar = self.bar(view);
+        let Some(&(_, _, click)) = bar
+            .clicks
+            .iter()
+            .find(|&&(from, to, _)| (from..to).contains(&x))
+        else {
+            return;
+        };
+        match click {
+            BarClick::Review => {
+                self.tab_mode = false;
+                self.reviewing = Some(0);
+            }
+            BarClick::Action(Action::Tabs) => {
+                self.tab_mode = true;
+            }
+            BarClick::Action(action) => self.on_direct(action).await,
         }
     }
 
@@ -1168,9 +1184,6 @@ impl App {
             .flatten()
             .filter_map(|&i| old[i].take())
             .collect();
-        if self.tab_cursor.is_some() {
-            self.tab_cursor = Some(to);
-        }
         if let Err(e) = self.client.move_session(id, to).await {
             self.say(format!("move failed: {e:#}"));
         }
@@ -1466,10 +1479,6 @@ impl App {
         let strip = |s: &Settings| (s.tabs, s.tab_side, s.minimal_tabs);
         if strip(&before) != strip(&self.settings) {
             self.relayout();
-            // The rail wants plain motion, to open under the mouse.
-            if self.view.is_some() {
-                self.update_capture();
-            }
         }
         self.status = format!(
             "{}: {}",
@@ -1609,14 +1618,26 @@ impl App {
         if self.menu.is_some() {
             return self.menu_click(m).await;
         }
-        // On the rail it opens; anywhere else it shuts.
-        if self.rail() {
-            let over = self
-                .tabs_area()
-                .is_some_and(|tabs| tabs.contains(Position::new(m.x, m.y)));
-            self.rail_hover = over;
+        if m.kind == MouseKind::Press && self.screen().is_ok_and(|s| m.y == s.rows) {
+            return self.bar_click(m.x).await;
         }
         let tabs = self.tabs_area();
+        let on_strip = tabs.filter(|tabs| tabs.contains(Position::new(m.x, m.y)));
+        // On the rail it opens; anywhere else it shuts.
+        if self.rail() {
+            self.rail_hover = on_strip.is_some();
+        }
+        // Resting on a tab peeks at it, after a moment, so a quick click doesn't
+        // flash one; anything else, or anywhere else, ends that.
+        let hover = on_strip.filter(|_| m.is_motion()).and_then(|tabs| {
+            match self.tab_hit(tabs, m.x, m.y) {
+                Some(TabHit::Session(id)) => self.tab_of(id),
+                _ => None,
+            }
+        });
+        if hover != self.hover_tab.map(|(i, _)| i) {
+            self.hover_tab = hover.map(|i| (i, Instant::now()));
+        }
         let Some(view) = &self.view else { return };
         if let Some(tabs) = tabs {
             // A drag that strays over the strip still selects (or moves a divider).
@@ -2089,7 +2110,7 @@ impl App {
             match &self.view {
                 Some(view) => {
                     let (main, tabs) = self.split_body(body);
-                    let cursor = self.tab_cursor.is_none()
+                    let cursor = !self.tab_mode
                         && self.renaming.is_none()
                         && self.menu.is_none()
                         && self.reviewing.is_none()
@@ -2109,26 +2130,8 @@ impl App {
                     if let Some(cursor) = self.reviewing {
                         self.draw_reviews(frame, main, cursor);
                     }
-                    let mode = if self.renaming.is_some() {
-                        BarMode::Renaming
-                    } else if self.menu.is_some() {
-                        BarMode::Menu
-                    } else if self.reviewing.is_some() {
-                        BarMode::Reviewing
-                    } else if self.tab_cursor.is_some() {
-                        BarMode::Tabs
-                    } else {
-                        BarMode::Session
-                    };
                     let t = self.settings.theme;
-                    let mut line = attached_bar(
-                        view,
-                        mode,
-                        self.proposals.len(),
-                        self.settings.hints,
-                        t,
-                        &self.settings.keys,
-                    );
+                    let mut line = self.bar(view).line;
                     if let Some(toast) = self.toast() {
                         line.spans
                             .extend(toast_spans(toast, self.toast_summary(toast), t));
@@ -2154,6 +2157,8 @@ impl App {
 
 /// How long a preview waits for the daemon's copy of a screen.
 const PREVIEW_WAIT: Duration = Duration::from_millis(300);
+/// How long the mouse rests on a tab before it peeks.
+const HOVER_DELAY: Duration = Duration::from_secs(1);
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
 
@@ -2495,8 +2500,8 @@ impl App {
 }
 
 impl App {
-    /// A look at the tab the strip's cursor is on, over the attached session, next
-    /// to that tab.
+    /// A look at the tab the mouse rests on, over the attached session, next to
+    /// that tab, saying what a click does.
     fn draw_peek(
         &self,
         frame: &mut ratatui::Frame,
@@ -2511,7 +2516,7 @@ impl App {
             let tab = layout
                 .tabs
                 .iter()
-                .find(|&&(i, _)| Some(i) == self.tab_cursor);
+                .find(|&&(i, _)| Some(i) == self.peek_tab());
             tab.map(|&(_, r)| r)
         });
         let (x, y) = match (self.settings.tab_side, tab) {
@@ -2527,6 +2532,28 @@ impl App {
         let rect = Rect::new(x.max(main.x), y.max(main.y), width, height).intersection(main);
         frame.render_widget(ratatui::widgets::Clear, rect);
         self.draw_session_preview(frame, rect, session, true);
+        if rect.height < 3 {
+            return;
+        }
+        let t = self.settings.theme;
+        let keys = [("click", "switch"), ("right-click", "rename · close")];
+        let hints = Line::from(
+            keys.iter()
+                .flat_map(|(key, what)| {
+                    [
+                        format!(" {key} ").fg(t.accent).bold(),
+                        format!("{what} ").fg(t.muted),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        let bottom = Rect::new(
+            rect.x + 1,
+            rect.bottom() - 1,
+            rect.width.saturating_sub(2),
+            1,
+        );
+        frame.render_widget(Paragraph::new(hints.centered()), bottom);
     }
 
     /// The decisions to review, over the attached session: the list, then the one
@@ -2758,11 +2785,10 @@ impl App {
     }
 
     /// The rail opens to names over the session while the mouse is on it, and
-    /// while tab mode, a drag or a rename works on the tabs.
+    /// while a drag or a rename works on the tabs.
     fn rail_open(&self) -> bool {
         self.rail()
             && (self.rail_hover
-                || self.tab_cursor.is_some()
                 || self.tab_drag.is_some()
                 || (self.renaming.is_some() && self.view.is_some()))
     }
@@ -2829,11 +2855,7 @@ impl App {
                 )
             })
             .collect();
-        let focus = self
-            .tab_cursor
-            .filter(|&i| i < widths.len())
-            .or_else(|| self.attached_index())
-            .unwrap_or(0);
+        let focus = self.attached_index().unwrap_or(0);
         // One column between tabs; the arrows take one each when shown.
         let fits = |start: usize, end: usize| {
             let arrows = u16::from(start > 0) + u16::from(end < widths.len());
@@ -2874,11 +2896,7 @@ impl App {
         let home = row(strip.y, height);
         let first = home.bottom() + 1;
         let n = self.tabs().len();
-        let focus = self
-            .tab_cursor
-            .filter(|&i| i < n)
-            .or_else(|| self.attached_index())
-            .unwrap_or(0);
+        let focus = self.attached_index().unwrap_or(0);
         // Each tab and the row after it; the marks and "+" a row each.
         let room = strip.bottom().saturating_sub(first);
         let fits = |start: usize, end: usize| {
@@ -2984,7 +3002,7 @@ impl App {
             let tab = &tabs[i];
             let s = &self.sessions[self.face(tab)];
             let here = Some(i) == attached;
-            let cursor = self.tab_cursor == Some(i);
+            let cursor = self.tab_mode && here;
             let (state, label) = match s.exited {
                 None => (s.status.state, s.status.state.label()),
                 Some(_) => (AgentState::Exited, "exited"),
@@ -3102,9 +3120,6 @@ impl App {
         let plus = Paragraph::new(Line::from(vec![" + ".fg(t.accent).bold(), new.fg(t.fg)]))
             .style(style::Style::new().bg(t.card));
         frame.render_widget(plus, layout.plus);
-        if self.tab_cursor == Some(tabs.len()) {
-            frame.buffer_mut().set_style(layout.plus, lit);
-        }
     }
 
     /// Flat tabs on the page over a thin rule; the attached tab is bright and
@@ -3282,7 +3297,7 @@ impl App {
                 vec![top, Line::from(bottom)]
             };
             frame.render_widget(Paragraph::new(lines), rect.intersection(text));
-            if self.tab_cursor == Some(i) {
+            if self.tab_mode && here {
                 lift(frame, rect);
                 underline(frame, rect, t.accent2);
             } else if here {
@@ -3353,10 +3368,6 @@ impl App {
             Paragraph::new(Line::from(vec![" + ".fg(t.accent), new.fg(t.muted)])),
             layout.plus.intersection(text),
         );
-        if self.tab_cursor == Some(tabs.len()) {
-            lift(frame, layout.plus);
-            underline(frame, layout.plus, t.accent2);
-        }
     }
 }
 
@@ -3892,6 +3903,19 @@ enum BarMode {
     Reviewing,
 }
 
+/// What a click on the bar under a session does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarClick {
+    Action(Action),
+    Review,
+}
+
+/// The bar under a session, and the columns (from, to) its chips are clicked in.
+struct Bar {
+    line: Line<'static>,
+    clicks: Vec<(u16, u16, BarClick)>,
+}
+
 /// The bar under an attached session. Without `hints` it shows no keys until
 /// you're in tab mode, a menu or a rename.
 fn attached_bar(
@@ -3901,7 +3925,9 @@ fn attached_bar(
     hints: bool,
     t: &Theme,
     map: &Keymap,
-) -> Line<'static> {
+) -> Bar {
+    let width = |spans: &[Span]| spans.iter().map(|s| s.width() as u16).sum::<u16>();
+    let mut clicks = Vec::new();
     let mut spans = vec![
         format!(" {} ", view.name).fg(t.fg).bold(),
         format!("#{} ", view.id).fg(t.muted),
@@ -3926,12 +3952,14 @@ fn attached_bar(
         (None, None) => {}
     }
     if proposals > 0 {
+        let from = width(&spans);
         spans.push(
             format!(" ◇ {proposals} to review ")
                 .fg(t.bg)
                 .bg(t.accent2)
                 .bold(),
         );
+        clicks.push((from, width(&spans), BarClick::Review));
         spans.push(" ".into());
     }
     if let Some(page) = &view.scroll {
@@ -3949,26 +3977,17 @@ fn attached_bar(
     {
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
-    let session = session_hints(map);
+    let session = match mode {
+        BarMode::Session if hints => session_hints(map),
+        _ => Vec::new(),
+    };
     let keys: &[(&str, &str)] = match mode {
-        BarMode::Session if !hints => &[],
-        BarMode::Session => &session
-            .iter()
-            .map(|(k, w)| (k.as_str(), *w))
-            .collect::<Vec<_>>(),
+        BarMode::Session => &[],
         BarMode::Tabs => &[
-            ("h/l", "move"),
-            ("H/L", "reorder"),
-            ("↩", "switch"),
-            ("1-9", "jump"),
-            ("0", "home"),
-            ("⇥", "next ●"),
-            ("n", "new"),
             ("s/v", "split"),
-            ("o", "pane"),
-            ("d", "decisions"),
+            ("p", "pane menu"),
             ("r", "rename"),
-            ("x", "close"),
+            ("d", "decisions"),
             ("m", "minimal"),
             (",", "settings"),
             ("esc", "back"),
@@ -3978,35 +3997,52 @@ fn attached_bar(
         // The list's own border has its keys.
         BarMode::Reviewing => &[],
     };
-    for (key, what) in keys {
+    let keys = session
+        .iter()
+        .map(|(k, w, a)| (k.as_str(), *w, *a))
+        .chain(keys.iter().map(|&(k, w)| (k, w, None)));
+    for (key, what, action) in keys {
         spans.push(" ".into());
+        let from = width(&spans);
         spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
         spans.push(format!(" {what}").fg(t.muted));
-    }
-    Line::from(spans).style(style::Style::new().bg(t.panel))
-}
-
-/// The bar's hints under a session: the keys as mapped, most used first. The tab
-/// keys show as one hint while they are Alt and the digits.
-fn session_hints(map: &Keymap) -> Vec<(String, &'static str)> {
-    let mut hints = Vec::new();
-    let digits = (0..9).all(|i| map.get(Action::Tab(i)) == Some(Key::Alt(b'1' + i)));
-    if digits {
-        hints.push(("alt 1-9".to_string(), "tab"));
-    }
-    for (action, what) in [
-        (Action::NextTab, "next"),
-        (Action::PrevTab, "prev"),
-        (Action::Needing, "next ●"),
-        (Action::Last, "last"),
-        (Action::NewTab, "new"),
-        (Action::Home, "home"),
-        (Action::Tabs, "more"),
-    ] {
-        if let Some(key) = map.get(action) {
-            hints.push((key.label(), what));
+        if let Some(action) = action {
+            clicks.push((from, width(&spans), BarClick::Action(action)));
         }
     }
+    Bar {
+        line: Line::from(spans).style(style::Style::new().bg(t.panel)),
+        clicks,
+    }
+}
+
+/// The bar's hints under a session: the keys as mapped, tab mode first, since it
+/// leads to the rest and works in every terminal (Alt needs Option as Meta on a
+/// Mac), then the most used. The tab keys show as one hint while they are Alt and
+/// the digits. Each but that one is clicked as its key is pressed.
+fn session_hints(map: &Keymap) -> Vec<(String, &'static str, Option<Action>)> {
+    let hint = |(action, what): (Action, &'static str)| {
+        map.get(action).map(|key| (key.label(), what, Some(action)))
+    };
+    let mut hints: Vec<_> = [(Action::Tabs, "actions"), (Action::Needing, "next ●")]
+        .into_iter()
+        .filter_map(hint)
+        .collect();
+    let digits = (0..9).all(|i| map.get(Action::Tab(i)) == Some(Key::Alt(b'1' + i)));
+    if digits {
+        hints.push(("alt 1-9".to_string(), "tab", None));
+    }
+    hints.extend(
+        [
+            (Action::Home, "home"),
+            (Action::NextTab, "next"),
+            (Action::PrevTab, "prev"),
+            (Action::Last, "last"),
+            (Action::NewTab, "new"),
+        ]
+        .into_iter()
+        .filter_map(hint),
+    );
     hints
 }
 
@@ -5082,14 +5118,17 @@ mod tests {
                     render_rows(view.shown(), main, frame.buffer_mut(), None);
                     app.draw_tabs(frame, tabs.unwrap());
                     frame.render_widget(
-                        Paragraph::new(attached_bar(
-                            view,
-                            BarMode::Session,
-                            0,
-                            app.settings.hints,
-                            app.settings.theme,
-                            &app.settings.keys,
-                        )),
+                        Paragraph::new(
+                            attached_bar(
+                                view,
+                                BarMode::Session,
+                                0,
+                                app.settings.hints,
+                                app.settings.theme,
+                                &app.settings.keys,
+                            )
+                            .line,
+                        ),
                         bar,
                     );
                 })
@@ -5107,13 +5146,13 @@ mod tests {
             app.settings.theme = theme;
             draw(&app, &mut terminal);
             snapshot(terminal.backend().buffer(), &format!("tabs-{}", theme.name));
-            app.tab_cursor = Some(0);
+            app.tab_mode = true;
             draw(&app, &mut terminal);
             snapshot(
                 terminal.backend().buffer(),
                 &format!("tabs-cursor-{}", theme.name),
             );
-            app.tab_cursor = None;
+            app.tab_mode = false;
         }
         app.settings.theme = theme::THEMES[0];
         let lines = draw(&app, &mut terminal);
@@ -5150,21 +5189,17 @@ mod tests {
         assert!(first.x >= HOME_WIDTH);
         assert_eq!(app.tab_hit(tabs, 119, 0), None, "past the +");
 
-        // ^\ puts the cursor on the attached tab; ←/→ stop at "+" and the first.
+        // ^\ is tab mode; getting around is the direct keys', so h/l, ↩ and the
+        // digits do nothing there, and Esc hands the keyboard back.
         app.on_keys(vec![TABS_KEY]).await;
-        assert_eq!(app.tab_cursor, Some(1));
-        app.on_keys(b"llll".to_vec()).await;
-        assert_eq!(app.tab_cursor, Some(3));
-        app.on_keys(b"\x1b[Dhhhh".to_vec()).await;
-        assert_eq!(app.tab_cursor, Some(0));
-        app.on_keys(b"\x1b".to_vec()).await;
-        assert_eq!(app.tab_cursor, None);
-        // Jumping to the tab already attached just hands the keyboard back.
-        app.on_keys(vec![TABS_KEY, b'2']).await;
-        assert_eq!(app.tab_cursor, None);
+        assert!(app.tab_mode);
+        app.on_keys(b"l2\r".to_vec()).await;
+        assert!(app.tab_mode);
         assert_eq!(app.view.as_ref().map(|v| v.id), Some(2));
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert!(!app.tab_mode);
 
-        // r renames the tab under the cursor; typing edits, Esc cancels.
+        // r renames the attached tab; typing edits, Esc cancels.
         app.on_keys(vec![TABS_KEY, b'r']).await;
         assert_eq!(app.renaming, Some((2, "proj2".into())));
         app.on_keys(b"\x7f\x7f\x7f\x7f\x7fapi \xc3\xa9".to_vec())
@@ -5193,8 +5228,9 @@ mod tests {
         assert_eq!(app.renaming, Some((3, "proj3".into())));
         app.on_keys(b"\x1b".to_vec()).await;
         // Close on an agent's tab asks first; Esc keeps the session.
-        app.on_keys(vec![TABS_KEY, b'l', b'x']).await;
-        let menu = app.menu.expect("x opens the menu on Close");
+        app.tab_click(tabs, right).await;
+        app.on_keys(b"[B".to_vec()).await;
+        let menu = app.menu.expect("the menu, on Close");
         assert_eq!(
             (menu.session, menu.cursor, menu.confirm),
             (3, MENU_CLOSE, false)
@@ -5509,6 +5545,7 @@ mod tests {
         let settings = Settings::default();
         let bar = |mode, hints| {
             attached_bar(&view, mode, 0, hints, settings.theme, &settings.keys)
+                .line
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -5520,13 +5557,18 @@ mod tests {
         assert!(on.contains("alt 1-9"), "{on}");
         let off = bar(BarMode::Session, false);
         assert_eq!(off.trim(), "proj2 #2", "{off}");
-        assert!(bar(BarMode::Tabs, false).contains("switch"));
+        let tabs = bar(BarMode::Tabs, false);
+        assert!(tabs.contains("split") && tabs.contains("rename"), "{tabs}");
+        // Getting around is the direct keys', not tab mode's.
+        for gone in ["switch", "jump", "reorder", "next ●", " o "] {
+            assert!(!tabs.contains(gone), "{gone}: {tabs}");
+        }
     }
 
     /// Minimal tabs, in every style. On top: one row each, the number, the state's
     /// icon and the name, no program or state word. In a column: a rail of numbers
-    /// and icons that opens over the session, which keeps its size, in tab mode or
-    /// under the mouse. Clicks find the tabs either way; `m` in tab mode switches.
+    /// and icons that opens over the session, which keeps its size, under the
+    /// mouse. Clicks find the tabs either way; `m` in tab mode switches.
     #[tokio::test]
     async fn minimal_tabs_are_one_row_and_a_rail_at_the_side() {
         use ratatui::Terminal;
@@ -5656,13 +5698,13 @@ mod tests {
         assert!(app.rail_hover, "still on the open rail");
         app.on_mouse(motion(40, 5)).await;
         assert!(!app.rail_open());
-        // Tab mode opens it too.
-        app.tab_cursor = Some(0);
-        assert!(app.rail_open());
+        // Tab mode leaves it shut: it no longer moves along the tabs.
+        app.tab_mode = true;
+        assert!(!app.rail_open());
 
         app.tab_keys(b"m").await;
         assert!(!app.settings.minimal_tabs);
-        assert_eq!(app.tab_cursor, Some(0), "still in tab mode");
+        assert!(app.tab_mode, "still in tab mode");
         let saved = std::fs::read_to_string(dir.join("settings.toml")).unwrap();
         assert!(saved.contains("tab_detail = \"full\""), "{saved}");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -5857,7 +5899,7 @@ mod tests {
         let layout = app.tab_layout(area);
         assert_eq!(layout.tabs[0].0, 0);
         assert!(layout.more_after.is_some() && layout.more_before.is_none());
-        app.tab_cursor = Some(17);
+        app.view = Some(Attached::new(18, "proj18".into(), None));
         let layout = app.tab_layout(area);
         assert!(layout.tabs.iter().any(|(i, _)| *i == 17));
         assert!(layout.more_before.is_some());
@@ -5921,7 +5963,8 @@ mod tests {
                         app.settings.hints,
                         app.settings.theme,
                         &app.settings.keys,
-                    );
+                    )
+                    .line;
                     frame.render_widget(Paragraph::new(line), bar);
                 })
                 .unwrap();
@@ -5940,23 +5983,98 @@ mod tests {
         assert!(lines[23].contains("◇ 2 to review"), "{}", lines[23]);
         assert!(!lines.join("\n").contains("all 41 passed"));
 
-        // On its own tab the strip's cursor peeks at nothing: you're looking at it.
-        app.on_keys(vec![TABS_KEY]).await;
-        assert!(app.peeked().is_none());
-        // On another tab: its state, its summary and the bottom of its screen.
-        app.on_keys(b"h".to_vec()).await;
+        // The mouse resting on another tab peeks at it: its state, its summary and
+        // the bottom of its screen, and what a click does. Not at once, so a quick
+        // click doesn't flash one.
+        app.fixed_size = Some(Size {
+            cols: 120,
+            rows: 23,
+        });
+        let tabs = app.tabs_area().unwrap();
+        let (_, first) = app.tab_layout(tabs).tabs[0];
+        let motion = |x, y| Mouse {
+            kind: MouseKind::Other,
+            code: 35,
+            x,
+            y,
+            release: false,
+        };
+        let rested = |app: &mut App| {
+            app.hover_tab = app.hover_tab.map(|(i, at)| (i, at - HOVER_DELAY));
+        };
+        app.on_mouse(motion(first.x + 2, first.y)).await;
+        assert!(app.peeked().is_none() && app.peek_due().is_some());
+        // Moving along the same tab doesn't start the wait over.
+        let since = app.hover_tab;
+        app.on_mouse(motion(first.x + 3, first.y)).await;
+        assert_eq!(app.hover_tab, since);
+        rested(&mut app);
         assert_eq!(app.peeked().map(|s| s.id), Some(1));
+        assert!(app.peek_due().is_none());
         let screen = draw(&app, &mut terminal).join("\n");
         assert!(screen.contains("proj1 #1"), "{screen}");
         assert!(screen.contains("Fixed the login"), "{screen}");
         assert!(screen.contains("all 41 passed"), "{screen}");
-        // Leaving tab mode closes it.
-        app.on_keys(b"\x1b".to_vec()).await;
+        assert!(screen.contains("click switch"), "{screen}");
+        // Its own tab peeks at nothing: you're looking at it.
+        let (_, own) = app.tab_layout(tabs).tabs[1];
+        app.on_mouse(motion(own.x + 2, own.y)).await;
+        rested(&mut app);
         assert!(app.peeked().is_none());
+        // Off the strip it closes, and so does a key.
+        app.on_mouse(motion(first.x + 2, first.y)).await;
+        rested(&mut app);
+        app.on_mouse(motion(first.x + 2, 15)).await;
+        assert!(app.peeked().is_none());
+        app.on_mouse(motion(first.x + 2, first.y)).await;
+        rested(&mut app);
+        assert!(app.peeked().is_some());
+        app.on_input(b"x".to_vec()).await;
+        assert!(app.peeked().is_none());
+
+        // The bar's chips click as their keys press: tab mode, and the decisions.
+        let click = |x| Mouse {
+            kind: MouseKind::Press,
+            code: 0,
+            x,
+            y: 23,
+            release: false,
+        };
+        let chip = |app: &App, want: BarClick| {
+            let bar = app.bar(app.view.as_ref().unwrap());
+            let lead = bar
+                .line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>();
+            assert!(
+                lead.contains("◇ 2 to review    ^\\  actions  alt n"),
+                "actions lead: {lead}"
+            );
+            bar.clicks
+                .iter()
+                .find(|c| c.2 == want)
+                .map(|c| c.0 + 1)
+                .unwrap()
+        };
+        app.on_mouse(click(chip(&app, BarClick::Action(Action::Tabs))))
+            .await;
+        assert!(app.tab_mode);
+        app.on_keys(b"\x1b".to_vec()).await;
+        app.on_mouse(click(chip(&app, BarClick::Review))).await;
+        assert_eq!(app.reviewing, Some(0));
+        app.on_keys(b"\x1b".to_vec()).await;
+        app.on_mouse(click(0)).await;
+        assert_eq!(
+            (app.reviewing, app.tab_mode),
+            (None, false),
+            "the name isn't a chip"
+        );
 
         // `d` in tab mode lists the decisions over the session, the first one open.
         app.on_keys(vec![TABS_KEY, b'd']).await;
-        assert_eq!((app.tab_cursor, app.reviewing), (None, Some(0)));
+        assert_eq!((app.tab_mode, app.reviewing), (false, Some(0)));
         let screen = draw(&app, &mut terminal).join("\n");
         assert!(screen.contains("decisions to review"), "{screen}");
         assert!(
@@ -6158,11 +6276,14 @@ mod tests {
         assert_eq!(app.pane_mut(1).unwrap().size, Size { cols: 20, rows: 21 });
         app.divider_drag = None;
 
-        // `o` cycles focus through the panes (the right click above focused 2).
+        // Alt-o cycles focus through the panes (the right click above focused 2).
         app.focus(1);
-        app.on_keys(vec![TABS_KEY, b'o']).await;
+        app.on_keys(b"\x1bo".to_vec()).await;
         assert_eq!(app.view.as_ref().unwrap().id, 2);
-        app.on_keys(vec![TABS_KEY, b'O']).await;
+        app.on_keys(b"\x1bo".to_vec()).await;
+        assert_eq!(app.view.as_ref().unwrap().id, 1);
+        // Tab mode leaves getting around to the direct keys.
+        app.on_keys(vec![TABS_KEY, b'o', b'\x1b']).await;
         assert_eq!(app.view.as_ref().unwrap().id, 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }

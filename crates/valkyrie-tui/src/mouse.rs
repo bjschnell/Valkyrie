@@ -1,5 +1,5 @@
-//! The mouse while attached. The TUI always takes SGR reports (1002 + 1006, and 1003
-//! while a pane wants motion), so it can see which pane a report is over. A program
+//! The mouse while attached. The TUI always takes SGR reports (1002 + 1006) and plain
+//! motion (1003), so it can see which pane or tab a report is over. A program
 //! that asked for the mouse gets each report over its pane, moved into its own cells
 //! and encoded as it asked (`encode`). Otherwise the wheel scrolls back, a drag
 //! selects, and the selection is copied to the outer terminal's clipboard (OSC 52, so
@@ -14,7 +14,8 @@ use valkyrie_proto::{Modes, Row};
 
 /// Turns on button and drag reports, SGR-encoded.
 pub const CAPTURE_ON: &str = "\x1b[?1002h\x1b[?1006h";
-/// Plain motion reports too, for a program that asked for them (1003).
+/// Plain motion reports too (1003): a tab under the mouse peeks, and a program
+/// that asked for motion gets it.
 pub const MOTION_ON: &str = "\x1b[?1003h";
 /// Every mouse mode off, whoever turned it on.
 pub const CAPTURE_OFF: &str = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?1005l";

@@ -12,7 +12,7 @@
 /// What a direct key does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// The tab strip takes the keyboard (tab mode).
+    /// Tab mode: the next key splits, renames, … the attached tab.
     Tabs,
     Home,
     NewTab,
@@ -75,7 +75,7 @@ impl Action {
     /// What it does, for the keys page.
     pub fn label(self) -> String {
         match self {
-            Action::Tabs => "Tab mode".into(),
+            Action::Tabs => "Actions".into(),
             Action::Home => "Home".into(),
             Action::NewTab => "New tab".into(),
             Action::Last => "Last tab".into(),
