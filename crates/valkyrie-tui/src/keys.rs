@@ -116,6 +116,71 @@ pub enum Key {
 /// Ctrl-] — home, always; no map takes it.
 pub const HOME_KEY: u8 = 0x1d;
 
+/// What a Mac's Option and a key type on a US layout when the terminal doesn't send
+/// Option as Meta, and the key each stands for. Letters of other languages (`å`, `ç`,
+/// `ø`, `œ`, `ß`) are left out; Option-e, -i, -n, -u and -` are dead keys that type
+/// nothing alone.
+const OPTION_CHARS: &[(char, u8)] = &[
+    ('¡', b'1'),
+    ('™', b'2'),
+    ('£', b'3'),
+    ('¢', b'4'),
+    ('∞', b'5'),
+    ('§', b'6'),
+    ('¶', b'7'),
+    ('•', b'8'),
+    ('ª', b'9'),
+    ('º', b'0'),
+    ('∫', b'b'),
+    ('∂', b'd'),
+    ('ƒ', b'f'),
+    ('©', b'g'),
+    ('˙', b'h'),
+    ('∆', b'j'),
+    ('˚', b'k'),
+    ('¬', b'l'),
+    ('µ', b'm'),
+    ('π', b'p'),
+    ('®', b'r'),
+    ('†', b't'),
+    ('√', b'v'),
+    ('∑', b'w'),
+    ('≈', b'x'),
+    ('¥', b'y'),
+    ('Ω', b'z'),
+];
+
+/// The key a whole read stands for, if it is one character a Mac's Option types in
+/// place of Alt and that key (see `OPTION_CHARS`).
+pub fn option_typed(bytes: &[u8]) -> Option<u8> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut chars = text.chars();
+    let (c, None) = (chars.next()?, chars.next()) else {
+        return None;
+    };
+    OPTION_CHARS.iter().find(|(o, _)| *o == c).map(|(_, k)| *k)
+}
+
+/// Where to make Option send Alt, in the terminal `var` (the environment) names.
+/// Over SSH only `TERM` comes along, and often iTerm2's `LC_TERMINAL`.
+pub fn option_fix(var: impl Fn(&str) -> Option<String>) -> &'static str {
+    let program = var("TERM_PROGRAM").unwrap_or_default();
+    let term = var("TERM").unwrap_or_default();
+    if program == "Apple_Terminal" {
+        "Terminal: Settings → Profiles → Keyboard → Use Option as Meta key"
+    } else if program == "iTerm.app" || var("LC_TERMINAL").as_deref() == Some("iTerm2") {
+        "iTerm2: Settings → Profiles → Keys → Left Option key: Esc+"
+    } else if program == "ghostty" || term == "xterm-ghostty" {
+        "Ghostty: add macos-option-as-alt = left to its config"
+    } else if term == "xterm-kitty" {
+        "kitty: add macos_option_as_alt left to kitty.conf"
+    } else if program == "WezTerm" {
+        "WezTerm: set send_composed_key_when_left_alt_is_pressed = false"
+    } else {
+        "set your terminal to send Option as Meta (README: On a Mac)"
+    }
+}
+
 /// Names for the characters `settings.toml` can't hold as they are.
 const NAMED: &[(u8, &str)] = &[
     (b' ', "space"),
@@ -318,6 +383,35 @@ mod tests {
         map.bind(Action::Home, None);
         assert_eq!(map.at(&[HOME_KEY]), Some((Action::Home, 1)));
         assert_eq!(map.at(b"\x1bh"), None);
+    }
+
+    /// One Option character alone is a key; in text, or a letter of a language, it
+    /// isn't.
+    #[test]
+    fn option_characters_stand_for_their_keys() {
+        assert_eq!(option_typed("˙".as_bytes()), Some(b'h'));
+        assert_eq!(option_typed("¡".as_bytes()), Some(b'1'));
+        assert_eq!(option_typed("ª".as_bytes()), Some(b'9'));
+        for text in ["π r", "ø", "ß", "h", "", "\x1bh"] {
+            assert_eq!(option_typed(text.as_bytes()), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn option_fix_names_the_terminal() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert!(option_fix(env(&[("TERM_PROGRAM", "Apple_Terminal")])).starts_with("Terminal:"));
+        // Over SSH from iTerm2, only LC_TERMINAL says so.
+        assert!(option_fix(env(&[("LC_TERMINAL", "iTerm2")])).starts_with("iTerm2:"));
+        assert!(option_fix(env(&[("TERM", "xterm-ghostty")])).starts_with("Ghostty:"));
+        assert!(option_fix(env(&[("TERM", "xterm-256color")])).contains("README"));
     }
 
     #[test]

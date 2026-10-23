@@ -220,6 +220,9 @@ struct App {
     tab_drag: Option<SessionId>,
     /// The mouse is over the minimal tabs' rail, which opens it.
     rail_hover: bool,
+    /// An Alt key has come through, so the terminal sends Option as Meta, or isn't
+    /// a Mac's: no hint about it is needed.
+    alt_works: bool,
     /// The tab under the mouse, and since when: resting there peeks at it.
     hover_tab: Option<(usize, Instant)>,
     /// The attached tab's other panes, when it is split; `view` is the focused one.
@@ -255,7 +258,7 @@ struct Attached {
     /// Text dragged over with the mouse; stays highlighted until the next key or click.
     selection: Option<Selection>,
     selecting: bool,
-    /// A short message for the bar (`copied 42 chars`), and when it was set.
+    /// A short message for the bar (`copied 42 chars`), and until when it shows.
     notice: Option<(String, Instant)>,
     /// The size last asked of the daemon for this pane.
     size: Size,
@@ -276,6 +279,8 @@ const CLEAR_IMAGES: &str = "\x1b_Ga=d,d=A,q=2\x1b\\";
 const WHEEL_LINES: i64 = 3;
 /// How long a notice stays in the attached bar.
 const NOTICE_FOR: Duration = Duration::from_secs(3);
+/// How long the hint about Option stays: long enough to follow it.
+const OPTION_HINT_FOR: Duration = Duration::from_secs(15);
 
 impl Attached {
     fn new(id: SessionId, name: String, status: Option<AgentStatus>) -> Self {
@@ -307,7 +312,11 @@ impl Attached {
     }
 
     fn notice(&mut self, text: String) {
-        self.notice = Some((text, Instant::now()));
+        self.notice_for(text, NOTICE_FOR);
+    }
+
+    fn notice_for(&mut self, text: String, time: Duration) {
+        self.notice = Some((text, Instant::now() + time));
     }
 }
 
@@ -343,6 +352,7 @@ impl App {
             reviewing: None,
             tab_drag: None,
             rail_hover: false,
+            alt_works: false,
             hover_tab: None,
             others: Vec::new(),
             layout: None,
@@ -684,6 +694,7 @@ impl App {
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
         }
+        self.option_hint(&bytes);
         for key in home_keys(&bytes, &self.settings.keys) {
             self.on_home_key(key).await;
         }
@@ -703,6 +714,7 @@ impl App {
         if self.tab_mode {
             return self.tab_keys(&bytes).await;
         }
+        self.option_hint(&bytes);
         let Some(view) = &mut self.view else { return };
         view.selection = None;
         let page = view.rows.len().max(2) as i64 - 1;
@@ -1020,6 +1032,26 @@ impl App {
             while name.chars().count() > NAME_MAX {
                 name.pop();
             }
+        }
+    }
+
+    /// A Mac's Option typed a character where an Alt key was meant (the terminal
+    /// doesn't send Option as Meta): says where to change that, until an Alt key has
+    /// come through. The character still goes to the program.
+    fn option_hint(&mut self, bytes: &[u8]) {
+        // Alt keys are two bytes, Esc and the key; control keys one.
+        if let Some((_, 2)) = self.settings.keys.at(bytes) {
+            self.alt_works = true;
+        }
+        let meant = keys::option_typed(bytes).and_then(|k| self.settings.keys.action(Key::Alt(k)));
+        if self.alt_works || meant.is_none() {
+            return;
+        }
+        let fix = keys::option_fix(|var| std::env::var(var).ok());
+        let text = format!("⌥ isn't alt in this terminal · {fix}");
+        match &mut self.view {
+            Some(view) => view.notice_for(text, OPTION_HINT_FOR),
+            None => self.status = text,
         }
     }
 
@@ -3972,8 +4004,8 @@ fn attached_bar(
         );
         spans.push(" q live ".fg(t.muted));
     }
-    if let Some((notice, at)) = &view.notice
-        && at.elapsed() < NOTICE_FOR
+    if let Some((notice, until)) = &view.notice
+        && Instant::now() < *until
     {
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
@@ -5249,6 +5281,42 @@ mod tests {
         app.on_mouse(Mouse::at(MouseKind::Press, 100, 15)).await;
         assert_eq!((app.menu, app.renaming.is_none()), (None, true));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Option-h from a Mac terminal that doesn't send Option as Meta says how to fix
+    /// it; once an Alt key has come through, it no longer does.
+    #[tokio::test]
+    async fn option_typed_as_a_character_says_how_to_fix_it() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-option-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = (1..=2).map(info).collect();
+        app.view = Some(Attached::new(2, "two".into(), None));
+        let notice = |app: &App| app.view.as_ref().unwrap().notice.clone().map(|n| n.0);
+
+        // `ø` is a letter, not a key: no hint.
+        app.on_keys("ø".as_bytes().to_vec()).await;
+        assert_eq!(notice(&app), None);
+        app.on_keys("˙".as_bytes().to_vec()).await;
+        assert!(notice(&app).unwrap().starts_with("⌥ isn't alt"));
+
+        app.view.as_mut().unwrap().notice = None;
+        app.on_keys(b"\x1b9".to_vec()).await;
+        app.view.as_mut().unwrap().notice = None;
+        app.on_keys("˙".as_bytes().to_vec()).await;
+        assert_eq!(notice(&app), None, "Alt works here");
+
+        // On the home screen it goes in the status line.
+        app.view = None;
+        app.alt_works = false;
+        app.on_input("∆".as_bytes().to_vec()).await;
+        assert!(app.status.starts_with("⌥ isn't alt"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Direct keys that need no switch: Alt-w opens the menu on Close, a missing

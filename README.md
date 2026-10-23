@@ -223,9 +223,17 @@ apart from the ones programs need (Ctrl-C, Ctrl-D, Ctrl-Z, …). `^]` always goe
 home, so a remap can't lock you out. Changes are kept in `settings.toml` as
 `keys.<action> = "<key>"`.
 
-**On a Mac,** set your terminal to send Option as Meta for the Alt keys
-(Terminal.app: Settings → Profiles → Keyboard; iTerm2: Profiles → Keys → Left
-Option key → Esc+), or remap the keys you use to Ctrl and a letter.
+**On a Mac,** the Alt keys are Option, once your terminal sends Option as Meta.
+Until it does, Option types `˙` and friends, and the bar says where to change it.
+Setting only the left Option key keeps the right one for `é`, `€` and the like.
+
+| Terminal | Setting |
+|---|---|
+| Terminal.app | Settings → Profiles → Keyboard → Use Option as Meta key |
+| iTerm2 | Settings → Profiles → Keys → Left Option key: Esc+ |
+| Ghostty | `macos-option-as-alt = left` |
+| kitty | `macos_option_as_alt left` |
+| WezTerm | `send_composed_key_when_left_alt_is_pressed = false` |
 
 **The mouse.** Rest the pointer on a tab to peek at it. Click a tab, drag it to reorder, right-click it for a menu, right-click a pane to split
 it, and drag a divider to resize. The key chips on the bar under a session, and
