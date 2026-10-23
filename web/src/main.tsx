@@ -25,7 +25,10 @@ if (view) {
     const root = document.documentElement;
     root.style.setProperty("--app-height", `${view.height}px`);
     root.classList.toggle("keyboard", view.height < tallest * 0.8);
-    if (view.offsetTop) window.scrollTo(0, 0);
+    // iOS scrolls the page to show a focused box; a full-height page should never
+    // scroll. Pages that do scroll (the inbox) report an offset while bouncing
+    // at the bottom too, so leave those alone.
+    if (view.offsetTop && document.querySelector(".page.session, .launcher-page")) window.scrollTo(0, 0);
   };
   view.addEventListener("resize", fit);
   view.addEventListener("scroll", fit);

@@ -2229,14 +2229,11 @@ button.title-name {
   pointer-events: none;
 }
 
-[data-fx] .page:has(> .rain) > :not(.rain) {
+/* Lift the page over the rain. Not the top bar: it stays sticky and above the
+   content, or its menus end up under the cards. */
+[data-fx] .page:has(> .rain) > :not(.rain, .topbar) {
   position: relative;
   z-index: 1;
-}
-
-[data-fx] .topbar {
-  position: sticky;
-  z-index: 10;
 }
 
 /* CRT scanlines over everything. */
