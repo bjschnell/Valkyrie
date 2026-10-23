@@ -15,6 +15,20 @@ python3 docs/demo/frames.py /tmp/valk-frames docs/images/demo.gif
 It needs rsvg-convert, ImageMagick and ffmpeg. It has no phone and no sound, so a
 real recording can replace it later.
 
+## The phone screenshot
+
+`docs/images/phone.png` is the built web app in headless Chromium at phone size.
+`phone.mjs` stands in for the daemon on the app's WebSocket with made-up
+sessions, a decision and a chat, so it needs no pairing. After a web change:
+
+```sh
+cd web && npm run build
+npm i --no-save playwright && npx playwright install chromium
+node ../docs/demo/phone.mjs ../docs/images/phone.png
+```
+
+It needs ImageMagick too.
+
 ## Recording a real one
 
 A real recording would also show the phone and the chime. Keep it under 30
