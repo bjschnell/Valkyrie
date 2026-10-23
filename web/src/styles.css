@@ -227,6 +227,13 @@ code {
 .conn-outdated .pill-dot {
   background: var(--blocked);
 }
+.conn-updated {
+  color: var(--fg);
+}
+.conn-updated .pill-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
 
 .session .pill {
   display: none;

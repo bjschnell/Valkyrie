@@ -14,7 +14,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use valkyrie_proto::client::Client;
+use valkyrie_proto::client::{Client, DaemonInfo};
 use valkyrie_proto::{AgentState, AskKind, Decision, QueueItem, ServerMsg, SessionId};
 
 /// How long without a keypress before you count as away.
@@ -248,16 +248,28 @@ fn last_line(screen: &str) -> Option<String> {
 /// upgrade or restart.
 pub(crate) async fn run(app: Arc<App>) {
     let mut watch = Watch::default();
+    let mut daemon = None;
     loop {
-        if let Err(e) = watch_daemon(&app, &mut watch).await {
+        if let Err(e) = watch_daemon(&app, &mut watch, &mut daemon).await {
             tracing::debug!("queue watch: {e:#}");
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
-async fn watch_daemon(app: &Arc<App>, watch: &mut Watch) -> Result<()> {
+async fn watch_daemon(
+    app: &Arc<App>,
+    watch: &mut Watch,
+    daemon: &mut Option<DaemonInfo>,
+) -> Result<()> {
     let (client, mut pushes) = Client::connect(&app.socket).await?;
+    let info = client.hello_info().await?;
+    if daemon
+        .replace(info)
+        .is_some_and(|before| info.upgraded_from(&before))
+    {
+        app.upgraded.notify_one();
+    }
     client.watch_queue().await?;
     let mut tick = tokio::time::interval(TICK);
     loop {

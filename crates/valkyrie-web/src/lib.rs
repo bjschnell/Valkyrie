@@ -22,8 +22,8 @@ use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use valkyrie_proto::ClientMsg;
 use valkyrie_proto::codec::{read_frame, write_frame};
@@ -50,7 +50,38 @@ pub struct Options {
     /// Print a pairing code at startup: only when a human started it, since a
     /// paired device can do whatever the user can (ADR-0007 §4).
     pub pair: bool,
+    /// Restarted as the upgraded binary: no pairing code, whoever started it.
+    pub restarted: bool,
 }
+
+/// `run` ends with this once the daemon has been upgraded: this server's binary
+/// was replaced, and with it the app it serves. The caller restarts as the new one.
+#[derive(Debug)]
+pub struct Upgraded;
+
+impl std::fmt::Display for Upgraded {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "the daemon was upgraded; restart valk web")
+    }
+}
+
+impl std::error::Error for Upgraded {}
+
+/// Names this build of the app: the hashed files its page loads. The page reads
+/// the same off itself, and reloads when `Hello` brings a different one.
+static BUILD: LazyLock<String> = LazyLock::new(|| {
+    let html = DIST
+        .get_file("index.html")
+        .and_then(|f| f.contents_utf8())
+        .unwrap_or_default();
+    let mut files: Vec<&str> = html
+        .split('"')
+        .filter(|s| s.starts_with("/assets/"))
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    files.join(" ")
+});
 
 pub(crate) struct App {
     store: auth::Store,
@@ -59,6 +90,8 @@ pub(crate) struct App {
     push: Option<push::Sender>,
     /// Connected web apps on screen right now.
     visible: AtomicUsize,
+    /// Told when the daemon comes back from an upgrade.
+    upgraded: tokio::sync::Notify,
 }
 
 impl App {
@@ -94,7 +127,9 @@ pub async fn run(opts: Options) -> Result<()> {
             println!("  {}", tailscale::CERTS_HELP);
         }
     }
-    if opts.pair {
+    if opts.restarted {
+        println!("  restarted after an upgrade");
+    } else if opts.pair {
         print_pairing(&store, &url, false)?;
     } else {
         println!(
@@ -113,8 +148,10 @@ pub async fn run(opts: Options) -> Result<()> {
         socket: opts.socket,
         push,
         visible: AtomicUsize::new(0),
+        upgraded: tokio::sync::Notify::new(),
     });
     tokio::spawn(notify::run(app.clone()));
+    let watch = app.clone();
     let router = Router::new()
         .route("/api/pair", post(pair))
         .route("/api/pair/code", post(new_short_code))
@@ -130,8 +167,10 @@ pub async fn run(opts: Options) -> Result<()> {
         .route("/ws", get(ws))
         .fallback(get(asset))
         .with_state(app);
-    axum::serve(listener, router).await?;
-    Ok(())
+    tokio::select! {
+        served = axum::serve(listener, router) => Ok(served?),
+        _ = watch.upgraded.notified() => Err(Upgraded.into()),
+    }
 }
 
 /// A link that pairs whichever browser opens it, once, with a fresh code.
@@ -608,7 +647,12 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
             }
             frame = read_frame::<_, serde_json::Value>(&mut from_daemon) => {
                 match frame? {
-                    Some(frame) => ws.send(Message::Text(frame.to_string().into())).await?,
+                    Some(mut frame) => {
+                        if frame["t"] == "ok" && frame["reply"]["t"] == "hello" {
+                            frame["reply"]["web"] = BUILD.as_str().into();
+                        }
+                        ws.send(Message::Text(frame.to_string().into())).await?
+                    }
                     None => {
                         let _ = ws.send(Message::Close(None)).await;
                         return Ok(());
@@ -750,5 +794,15 @@ mod tests {
             "text/javascript; charset=utf-8"
         );
         assert!(DIST.get_file("index.html").is_some());
+    }
+
+    /// The build is named the way the page names itself (web/src/lib/build.ts):
+    /// its `/assets/` files, sorted.
+    #[test]
+    fn the_build_is_the_pages_hashed_files() {
+        let files: Vec<&str> = BUILD.split(' ').collect();
+        assert!(files.iter().any(|f| f.ends_with(".js")), "{files:?}");
+        assert!(files.iter().all(|f| f.starts_with("/assets/")), "{files:?}");
+        assert!(files.is_sorted());
     }
 }

@@ -6,8 +6,10 @@
 // (Shape borrowed from Alice's socket.ts.)
 
 import { PROTOCOL, type Notice, type Reply, type Request, type ServerMsg } from "../proto";
+import { pageBuild } from "../lib/build";
 
-export type Status = "connecting" | "open" | "reconnecting" | "offline" | "unpaired" | "outdated";
+/** `updated`: the server now has a newer build of this app (after an upgrade). */
+export type Status = "connecting" | "open" | "reconnecting" | "offline" | "unpaired" | "outdated" | "updated";
 
 const SUBPROTOCOL = "valk.v1";
 const CLOSE_UNPAIRED = 4401;
@@ -24,6 +26,23 @@ export interface ConnOptions {
   onStatus: (status: Status) => void;
   /** Called on every (re)connect once the daemon answered: resubscribe here. */
   onReady: () => void;
+}
+
+const RELOADED_KEY = "valk.reloaded";
+
+/**
+ * Whether this tab hasn't yet reloaded for `build`, noting that it now will. One
+ * try each: should the page and the server ever disagree on a build's name, the
+ * page carries on as it is instead of reloading forever.
+ */
+function firstTry(build: string): boolean {
+  try {
+    if (sessionStorage.getItem(RELOADED_KEY) === build) return false;
+    sessionStorage.setItem(RELOADED_KEY, build);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export class Conn {
@@ -141,6 +160,14 @@ export class Conn {
   private async handshake(): Promise<void> {
     try {
       const hello = await this.request({ t: "hello" });
+      // Before the protocol: a newer app is the cure for a newer daemon.
+      const build = pageBuild();
+      if (hello.t === "hello" && hello.web && build && hello.web !== build && firstTry(hello.web)) {
+        this.stopped = true;
+        this.setStatus("updated");
+        this.ws?.close(1000);
+        return;
+      }
       if (hello.t !== "hello" || hello.protocol !== PROTOCOL) {
         this.stopped = true;
         this.setStatus("outdated");

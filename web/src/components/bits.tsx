@@ -28,12 +28,21 @@ const LABEL = {
   offline: "offline",
   unpaired: "unpaired",
   outdated: "update valk",
+  updated: "reload",
 } as const;
 
 export function ConnectionPill() {
   const status = useApp((s) => s.status);
+  if (status === "updated") {
+    return (
+      <button className="pill conn-updated" title="Valkyrie was upgraded: reload for the new app" onClick={() => location.reload()}>
+        <span className="pill-dot" />
+        {LABEL[status]}
+      </button>
+    );
+  }
   return (
-    <span className={`pill conn-${status}`} title={status === "outdated" ? "This app and the daemon speak different protocols: run install.sh, then valk upgrade" : undefined}>
+    <span className={`pill conn-${status}`} title={status === "outdated" ? "This app and the daemon speak different protocols: restart valk web (valk setup web does it)" : undefined}>
       <span className="pill-dot" />
       {LABEL[status]}
     </span>

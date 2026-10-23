@@ -14,6 +14,9 @@ use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{SessionId, Size, SpawnSpec};
 
+/// Set when `valk web` restarts itself as the upgraded binary.
+const WEB_RESTARTED: &str = "VALK_WEB_RESTARTED";
+
 #[derive(Parser)]
 #[command(
     name = "valk",
@@ -432,17 +435,40 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         }) => match action {
             None => {
                 init_logging();
+                // Now, while it names this binary: an upgrade renames a new one over it.
+                let exe = std::env::current_exe();
+                // Set across the restart below. By then the process may have left the
+                // terminal (or agent) that started it, so whether to print a pairing
+                // code was decided at the first start: never again after.
+                let restarted = std::env::var_os(WEB_RESTARTED).is_some();
                 // The daemon must be up, and speak this protocol, before phones arrive.
                 let (client, _) = connect(&socket).await?;
-                let pair = client.vouch("pairing a phone").await.is_ok();
+                let pair = !restarted && client.vouch("pairing a phone").await.is_ok();
                 drop(client);
-                valkyrie_web::run(valkyrie_web::Options {
+                let result = valkyrie_web::run(valkyrie_web::Options {
                     listen,
                     socket,
                     url,
                     pair,
+                    restarted,
                 })
-                .await
+                .await;
+                // Upgraded: carry on as the new binary, which serves the new app.
+                #[cfg(unix)]
+                if let Err(e) = &result
+                    && e.downcast_ref::<valkyrie_web::Upgraded>().is_some()
+                    && let Ok(exe) = exe
+                {
+                    use std::os::unix::process::CommandExt;
+                    let failed = std::process::Command::new(&exe)
+                        .args(std::env::args_os().skip(1))
+                        .env(WEB_RESTARTED, "1")
+                        .exec();
+                    bail!("{e}; restarting as {} failed: {failed}", exe.display());
+                }
+                #[cfg(windows)]
+                let _ = exe;
+                result
             }
             Some(WebCmd::Pair) => {
                 // A paired device can accept decisions; an agent mustn't pair one.

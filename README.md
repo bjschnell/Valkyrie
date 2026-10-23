@@ -61,7 +61,8 @@ Codex, run `valk setup codex` once.
 
 **Updating.** Run `valk upgrade`. It downloads the latest release, swaps it in,
 and hands the running daemon to it, so every session keeps running (Windows
-restarts them). The home screen says when a newer release is out. From v0.0.1,
+restarts them). An open TUI, `valk web` and the web app switch to the new version
+by themselves. The home screen says when a newer release is out. From v0.0.1,
 rerun the install line once to get `valk upgrade`.
 
 **Windows.** The PowerShell installer puts a native `valk` on your user PATH and

@@ -176,7 +176,8 @@ export type Notice =
 
 export type Reply =
   | { t: "done" }
-  | { t: "hello"; protocol: number; generation: number; boot: number }
+  /** `web`: the build of the app `valk web` serves (see lib/build.ts). */
+  | { t: "hello"; protocol: number; generation: number; boot: number; web?: string }
   | { t: "session"; info: SessionInfo }
   | { t: "sessions"; sessions: SessionInfo[] }
   | { t: "text"; text: string }

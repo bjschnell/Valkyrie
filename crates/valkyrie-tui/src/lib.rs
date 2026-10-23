@@ -39,7 +39,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use theme::{Theme, state_icon};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use valkyrie_proto::client::{Client, Pushes};
+use valkyrie_proto::client::{Client, DaemonInfo, Pushes};
 use valkyrie_proto::{
     AgentState, AgentStatus, Color, CursorShape, Decision, Modes, Pane, QueueItem, ReviewAction,
     Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId, SessionInfo, Side, Size, SpawnSpec,
@@ -136,11 +136,12 @@ pub async fn run(
     result
 }
 
-/// The daemon came back from an upgrade on a protocol this TUI doesn't speak. On Unix
-/// `run` then restarts the TUI as the binary it was started from, which `valk
-/// upgrade` replaced, on the same session.
+/// The daemon came back from an upgrade: `valk upgrade` replaced the binary this
+/// TUI was started from, and this one is out of date even when it still speaks the
+/// protocol. On Unix `run` then restarts the TUI as that binary, on the same session.
 #[derive(Debug)]
 struct Restart {
+    /// The protocol the daemon now speaks.
     protocol: u32,
     #[cfg_attr(windows, allow(dead_code))]
     attach: Option<SessionId>,
@@ -148,12 +149,16 @@ struct Restart {
 
 impl std::fmt::Display for Restart {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "the daemon now speaks protocol {}, this valk {}; run the new valk",
-            self.protocol,
-            valkyrie_proto::PROTOCOL
-        )
+        if self.protocol == valkyrie_proto::PROTOCOL {
+            write!(f, "the daemon was upgraded; run the new valk")
+        } else {
+            write!(
+                f,
+                "the daemon now speaks protocol {}, this valk {}; run the new valk",
+                self.protocol,
+                valkyrie_proto::PROTOCOL
+            )
+        }
     }
 }
 
@@ -162,8 +167,9 @@ impl std::error::Error for Restart {}
 struct App {
     client: Client,
     socket: PathBuf,
-    /// The daemon's identity (`Hello::boot`): an upgrade keeps it, a restart doesn't.
-    boot: Option<u64>,
+    /// What the daemon said when this TUI connected: an upgrade keeps its `boot`
+    /// and raises its `generation`, a restart changes its `boot`.
+    daemon: Option<DaemonInfo>,
     /// The ranked attention queue, as last pushed by the daemon.
     queue: Vec<QueueItem>,
     sessions: Vec<SessionInfo>,
@@ -308,7 +314,7 @@ impl App {
         Self {
             client,
             socket,
-            boot: None,
+            daemon: None,
             queue: Vec::new(),
             sessions: Vec::new(),
             proposals: Vec::new(),
@@ -357,7 +363,7 @@ impl App {
         // Only redraws, for the working spinner; runs while one is on screen.
         let mut anim = tokio::time::interval(SPIN_EVERY);
         anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        self.boot = self.client.hello_info().await.ok().map(|info| info.boot);
+        self.daemon = self.client.hello_info().await.ok();
         self.report_cell(None);
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
@@ -446,7 +452,12 @@ impl App {
                 continue;
             };
             let info = match client.hello_info().await {
-                Ok(info) if info.protocol == valkyrie_proto::PROTOCOL => info,
+                Ok(info)
+                    if info.protocol == valkyrie_proto::PROTOCOL
+                        && !self.daemon.is_some_and(|d| info.upgraded_from(&d)) =>
+                {
+                    info
+                }
                 Ok(info) => {
                     return Err(Restart {
                         protocol: info.protocol,
@@ -459,11 +470,11 @@ impl App {
             self.client = client;
             // Session ids start over in a restarted daemon: re-attaching by id could
             // land in an unrelated program.
-            let same = self.boot == Some(info.boot);
+            let same = self.daemon.is_some_and(|d| d.boot == info.boot);
             if !same {
                 self.pinger.reset();
             }
-            self.boot = Some(info.boot);
+            self.daemon = Some(info);
             self.status = if same {
                 "reconnected to the daemon".into()
             } else {

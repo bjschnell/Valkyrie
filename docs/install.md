@@ -168,9 +168,10 @@ Cascadia Mono.
 `valk upgrade` updates everything at once: it downloads the latest release for your
 platform, checks its checksum, puts it in place of the `valk` you ran, and hands the
 running daemon to it. On Linux and macOS every session keeps running; on Windows they
-restart as described above. An open TUI reconnects by itself, and if the new daemon
-speaks a newer protocol it restarts into the new `valk` on the same tab (Linux and
-macOS). Run it from a shell tab inside Valkyrie or from any terminal.
+restart as described above. On Linux and macOS everything else follows: an open TUI
+restarts into the new `valk` on the same tab, `valk web` restarts itself as the new
+binary, and an open web app reloads (if you're typing in a field, once you leave
+it). On Windows an open TUI reconnects, and only a newer protocol needs a restart. Run it from a shell tab inside Valkyrie or from any terminal.
 
 - The home screen says so too, at the right of its header (`↑ v0.0.2 (abc1234)
   valk upgrade`). It asks GitHub at most once a day and keeps the answer in
@@ -218,8 +219,8 @@ valk setup web --url https://valk.example.com   # behind your own proxy or tunne
 
 That runs `valk web` in the background as a service (systemd on Linux, launchd on
 macOS, Task Scheduler on Windows) that starts again at login, and prints a QR code
-that pairs your phone. Run it again after upgrading to restart the service;
-`valk setup web --remove` takes it away. On Linux, `loginctl enable-linger` keeps the
+that pairs your phone. It follows `valk upgrade` on its own (on Windows, run
+`valk setup web` again after upgrading); `valk setup web --remove` takes it away. On Linux, `loginctl enable-linger` keeps the
 service running while you're logged out. To run it by hand instead: `valk web`.
 
 - **Tailscale.** If Tailscale runs on this machine, `valk setup web` puts the app

@@ -77,6 +77,15 @@ pub struct DaemonInfo {
     pub boot: u64,
 }
 
+impl DaemonInfo {
+    /// Whether this is the daemon `before` was, handed off to a new binary since:
+    /// the same `boot` on a later `generation`. A client started from the old
+    /// binary is then out of date, even on the same protocol.
+    pub fn upgraded_from(&self, before: &DaemonInfo) -> bool {
+        self.boot == before.boot && self.generation > before.generation
+    }
+}
+
 impl Client {
     pub async fn connect(path: &Path) -> Result<(Client, Pushes)> {
         if let Some(dir) = path.parent() {
@@ -422,5 +431,24 @@ impl Client {
         self.out
             .send(ClientMsg::Resize { session, size })
             .map_err(|_| anyhow!("daemon connection closed"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A handoff to a new binary is an upgrade; a reconnect to the same daemon, or
+    /// to a restarted one, isn't.
+    #[test]
+    fn an_upgrade_is_a_later_generation_of_the_same_daemon() {
+        let at = |boot, generation| DaemonInfo {
+            protocol: crate::PROTOCOL,
+            generation,
+            boot,
+        };
+        assert!(at(7, 1).upgraded_from(&at(7, 0)));
+        assert!(!at(7, 1).upgraded_from(&at(7, 1)));
+        assert!(!at(8, 0).upgraded_from(&at(7, 1)));
     }
 }

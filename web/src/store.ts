@@ -98,12 +98,32 @@ export function forgetToken(): void {
   set({ token: null, status: "unpaired" });
 }
 
+/**
+ * Loads the server's newer app: now, unless you're typing into a field (a rename,
+ * a decision being edited), else as soon as you leave it or the app. The pill
+ * offers a reload meanwhile.
+ */
+function reloadWhenSafe(): void {
+  const tryNow = () => {
+    const el = document.activeElement;
+    const editing = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+    if (!editing || document.visibilityState === "hidden") location.reload();
+  };
+  tryNow();
+  // After focus has moved on, so activeElement is the new one.
+  document.addEventListener("focusout", () => window.setTimeout(tryNow, 0));
+  document.addEventListener("visibilitychange", tryNow);
+}
+
 export function connect(): void {
   const token = get().token;
   if (!token || conn) return;
   conn = new Conn({
     token,
-    onStatus: (status) => set({ status }),
+    onStatus: (status) => {
+      set({ status });
+      if (status === "updated") reloadWhenSafe();
+    },
     onPush,
     onReady: () => {
       reportVisible();
