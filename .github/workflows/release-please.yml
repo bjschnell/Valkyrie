@@ -1,0 +1,38 @@
+# Keeps a "release x.y.z" pull request open that collects the Conventional Commits
+# since the last release, bumps the version in Cargo.toml and Cargo.lock and writes
+# CHANGELOG.md (docs/releasing.md). Merging it tags a draft release, and release.yml
+# builds, uploads and publishes it.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  # Its `autorelease:` labels.
+  issues: write
+
+concurrency:
+  group: release-please
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v5
+
+  # Called, not triggered: a tag pushed with GITHUB_TOKEN starts no workflow. Giving
+  # release-please a personal token instead would also fire release.yml's tag
+  # trigger, and the two runs would race.
+  release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag }}

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Rejects a commit whose subject isn't a Conventional Commit (docs/releasing.md),
+# since release-please reads them to pick the next version. Turn it on once per
+# clone: git config core.hooksPath .githooks
+# The first line git keeps: comments and leading blank lines are dropped later.
+subject=$(grep -v '^#' "$1" | grep -m 1 . || true)
+case $subject in
+  "Merge "* | "Revert \""* | "fixup! "* | "squash! "* | "amend! "*) exit 0 ;;
+esac
+if printf '%s\n' "$subject" |
+  grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([a-z0-9-]+\))?!?: [^ ]'; then
+  exit 0
+fi
+cat >&2 <<MSG
+commit subject isn't a Conventional Commit:
+  $subject
+Write it as  type(scope): what changed  , for example
+  feat(tui): peek at a tab on hover
+  fix(web): keep the inbox scrolled where it was
+Types: feat fix perf refactor docs test build ci chore style revert. Add ! after
+the type or scope for a breaking change. See docs/releasing.md.
+MSG
+exit 1

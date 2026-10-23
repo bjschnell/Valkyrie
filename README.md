@@ -354,8 +354,9 @@ cd web && npm ci && npm test       # web tests; `npm run build` refreshes web/di
 ```
 
 [DESIGN.md](DESIGN.md) is the design and its history, and [docs/adr](docs/adr)
-holds the architecture decisions. Pushing a `v*` tag builds the release binaries
-(`.github/workflows/release.yml`).
+holds the architecture decisions. Commits follow Conventional Commits, and versions
+follow semver; [docs/releasing.md](docs/releasing.md) says how both work and how a
+release is cut.
 
 ## License
 

@@ -2,6 +2,9 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
+    commit-message:
+      prefix: chore
+      include: scope
     schedule:
       interval: weekly
     groups:
@@ -10,6 +13,9 @@ updates:
         update-types: [minor, patch]
   - package-ecosystem: npm
     directory: /web
+    commit-message:
+      prefix: chore
+      include: scope
     schedule:
       interval: weekly
     groups:
@@ -18,5 +24,8 @@ updates:
         update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
+    commit-message:
+      prefix: ci
+      include: scope
     schedule:
       interval: weekly

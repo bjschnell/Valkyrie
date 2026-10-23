@@ -17,8 +17,9 @@ pub const VERSION: &str = env!("VALK_LONG_VERSION");
 
 struct Release {
     tag: String,
-    /// What the tag points at. A release is replaced by moving its tag, so the
-    /// commit, not the name, says whether this binary is the release's.
+    /// What the tag points at. Releases before semver were replaced by moving
+    /// their tag, so the commit, not the name, says whether this binary is the
+    /// release's.
     commit: String,
 }
 
@@ -135,8 +136,8 @@ fn install(release: &Release) -> Result<Next> {
         .with_context(|| format!("can't write beside {}", exe.display()))?;
     let result = fetch(release, &work).and_then(|new| {
         let version = version_of(&new)?;
-        // The tag moves before the release's builds are uploaded: for a few minutes
-        // it can still serve the build this already is.
+        // A tag moved under an old release (before semver, which never moves one)
+        // can still serve the build this already is until its builds are uploaded.
         if version == VERSION {
             println!(
                 "{}'s builds for {} aren't up yet, so this is still the newest; \
