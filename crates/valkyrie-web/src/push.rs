@@ -12,7 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hkdf::Hkdf;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -63,7 +63,7 @@ impl Sender {
         // reqwest is built without a default TLS provider; this picks ring.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let secret = SecretKey::from_slice(secret).context("VAPID key")?;
-        let public = URL_SAFE_NO_PAD.encode(secret.public_key().to_encoded_point(false));
+        let public = URL_SAFE_NO_PAD.encode(secret.public_key().to_sec1_point(false));
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
@@ -140,7 +140,7 @@ fn encrypt_with(
 ) -> Result<Vec<u8>> {
     anyhow::ensure!(plaintext.len() <= MAX_PAYLOAD, "push message too long");
     let ua_key = PublicKey::from_sec1_bytes(ua_public).context("browser push key")?;
-    let as_public = as_secret.public_key().to_encoded_point(false);
+    let as_public = as_secret.public_key().to_sec1_point(false);
     let shared = p256::ecdh::diffie_hellman(as_secret.to_nonzero_scalar(), ua_key.as_affine());
 
     // IKM = HKDF(auth, ecdh, "WebPush: info\0" || ua_public || as_public)
@@ -163,7 +163,7 @@ fn encrypt_with(
     let mut record = plaintext.to_vec();
     record.push(2);
     let sealed = Aes128Gcm::new(&cek.into())
-        .encrypt(Nonce::from_slice(&nonce), record.as_slice())
+        .encrypt(&Nonce::from(nonce), record.as_slice())
         .map_err(|e| anyhow!("encrypt: {e}"))?;
 
     let mut out = Vec::with_capacity(86 + sealed.len());
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn too_long_a_message_is_refused() {
         let ua = SecretKey::from_slice(&new_secret().unwrap()).unwrap();
-        let ua_public = ua.public_key().to_encoded_point(false);
+        let ua_public = ua.public_key().to_sec1_point(false);
         assert!(encrypt(ua_public.as_bytes(), &[0; 16], &vec![b'x'; MAX_PAYLOAD]).is_ok());
         assert!(encrypt(ua_public.as_bytes(), &[0; 16], &vec![b'x'; MAX_PAYLOAD + 1]).is_err());
     }
