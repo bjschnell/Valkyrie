@@ -4,6 +4,7 @@
 
 use anyhow::{Result, bail};
 use std::process::{Command, Stdio};
+use valkyrie_proto::NoWindow;
 
 /// This machine on its tailnet.
 #[derive(Debug, PartialEq)]
@@ -28,7 +29,7 @@ pub fn command() -> Command {
         "tailscale"
     };
     let mut command = Command::new(program);
-    command.stdin(Stdio::null());
+    command.stdin(Stdio::null()).no_window();
     command
 }
 

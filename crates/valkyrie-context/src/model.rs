@@ -8,6 +8,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use valkyrie_proto::NoWindow;
 
 /// No tools, no hooks, no MCP servers, no settings or CLAUDE.md, no saved session:
 /// the model only reads the prompt. Your own login, unlike `--bare`, which never
@@ -56,6 +57,7 @@ pub fn ask(command: &[String], prompt: &str, dir: &Path, timeout: Duration) -> R
     let (program, args) = command.split_first().context("no model command")?;
     let mut command = Command::new(program);
     command
+        .no_window()
         .args(args)
         .current_dir(dir)
         // Not one of Valkyrie's sessions: no hooks reaching the daemon.
@@ -124,6 +126,7 @@ fn kill_tree(group: i32) {
 #[cfg(windows)]
 fn kill_tree(pid: i32) {
     let _ = Command::new("taskkill")
+        .no_window()
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

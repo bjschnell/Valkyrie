@@ -438,6 +438,32 @@ pub fn hostname() -> String {
     }
 }
 
+/// Keeps a child process off the screen on Windows. The daemon has no console, so a
+/// console program it runs (`git`, `taskkill`) would get a window of its own that
+/// flashes up for as long as it runs. Does nothing elsewhere.
+pub trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+
+impl NoWindow for std::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(
+            self,
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
+        self
+    }
+}
+
+impl NoWindow for tokio::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        self.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        self
+    }
+}
+
 /// Creates the socket's directory if needed and refuses to use it unless it is a real
 /// directory (not a symlink) owned by us with no group/other access. Whoever controls
 /// that directory controls which daemon our keystrokes go to.

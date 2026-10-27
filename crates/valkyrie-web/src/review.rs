@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
+use valkyrie_proto::NoWindow;
 
 /// Patch text sent per file; a bigger one is cut, and says so.
 const MAX_FILE_PATCH: usize = 200 * 1024;
@@ -107,6 +108,7 @@ pub async fn review(cwd: &Path) -> Result<Review> {
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let run = Command::new("git")
+        .no_window()
         .arg("-C")
         .arg(dir)
         .args(args)
