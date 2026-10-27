@@ -218,6 +218,8 @@ struct App {
     reviewing: Option<usize>,
     /// The tab being dragged to a new place.
     tab_drag: Option<SessionId>,
+    /// The tab last pressed, and when: a second press soon after renames it.
+    tab_press: Option<(SessionId, Instant)>,
     /// The mouse is over the minimal tabs' rail, which opens it.
     rail_hover: bool,
     /// An Alt key has come through, so the terminal sends Option as Meta, or isn't
@@ -350,6 +352,7 @@ impl App {
             renaming: None,
             menu: None,
             reviewing: None,
+            tab_press: None,
             tab_drag: None,
             rail_hover: false,
             alt_works: false,
@@ -1100,7 +1103,7 @@ impl App {
     }
 
     /// A click on the tab strip: switch to that session or start a new shell; a
-    /// right click renames.
+    /// double click renames, a right click opens the tab's menu.
     async fn tab_click(&mut self, tabs: Rect, m: Mouse) {
         // While dragging, only along the strip matters: the pointer may stray off it.
         let (x, y) = match (self.tab_drag.is_some(), self.settings.tab_side) {
@@ -1130,6 +1133,14 @@ impl App {
             }
             (MouseKind::Press, Some(TabHit::Session(id))) => {
                 self.tab_mode = false;
+                // Terminals don't report double clicks: two presses close together are one.
+                let double = self
+                    .tab_press
+                    .is_some_and(|(last, at)| last == id && at.elapsed() < DOUBLE_CLICK);
+                self.tab_press = (!double).then(|| (id, Instant::now()));
+                if double {
+                    return self.start_rename(id);
+                }
                 // A click on the attached tab keeps the pane you were in.
                 if !self.pane_ids().contains(&id) {
                     self.switch_to(id).await;
@@ -1316,6 +1327,16 @@ impl App {
         }
     }
 
+    /// Opens the rename prompt on a tab, starting from its name.
+    fn start_rename(&mut self, id: SessionId) {
+        let name = self
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.clone());
+        self.renaming = Some((id, name.unwrap_or_default()));
+    }
+
     /// Does what a menu item says. Closing a session that runs an agent asks first.
     async fn pick(&mut self, item: usize) {
         let Some(menu) = &mut self.menu else { return };
@@ -1326,13 +1347,7 @@ impl App {
         }
         if menu.kind == MenuKind::Tab && item == MENU_RENAME {
             self.menu = None;
-            let name = self
-                .sessions
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| s.name.clone());
-            self.renaming = Some((id, name.unwrap_or_default()));
-            return;
+            return self.start_rename(id);
         }
         // Closing a tab closes every pane in it.
         let ids = match menu.kind {
@@ -2191,6 +2206,8 @@ impl App {
 const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 /// How long the mouse rests on a tab before it peeks.
 const HOVER_DELAY: Duration = Duration::from_secs(1);
+/// How soon a second press on a tab makes a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
 
@@ -5280,6 +5297,16 @@ mod tests {
         app.tab_click(tabs, right).await;
         app.on_mouse(Mouse::at(MouseKind::Press, 100, 15)).await;
         assert_eq!((app.menu, app.renaming.is_none()), (None, true));
+        // A double click on a tab starts the prompt too; one too slow doesn't. The
+        // attached tab, since switching would wait on a daemon this test lacks.
+        let left = Mouse::at(MouseKind::Press, attached.x + 1, 0);
+        app.tab_click(tabs, left).await;
+        app.tab_press = app.tab_press.map(|(id, at)| (id, at - DOUBLE_CLICK));
+        app.tab_click(tabs, left).await;
+        assert_eq!(app.renaming, None);
+        app.tab_click(tabs, left).await;
+        assert_eq!(app.renaming, Some((2, "proj2".into())));
+        app.on_keys(b"\x1b".to_vec()).await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
