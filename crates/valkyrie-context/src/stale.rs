@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use valkyrie_proto::{Decision, DecisionStatus};
+use valkyrie_proto::{Decision, DecisionStatus, NoWindow};
 
 /// Review interval, in days, for decisions about versions and endpoints.
 pub const VOLATILE_DAYS: u32 = 30;
@@ -110,6 +110,7 @@ pub fn churn(root: &Path, d: &Decision) -> Option<String> {
     }
     let commit = d.provenance.commit.as_deref().filter(|c| valid_commit(c))?;
     let out = Command::new("git")
+        .no_window()
         .args([
             "diff",
             "--numstat",

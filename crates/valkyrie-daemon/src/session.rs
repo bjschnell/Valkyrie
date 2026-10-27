@@ -34,10 +34,10 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, broadcast};
 use valkyrie_agents::{Adapter, AgentEvent, Screen, Tracker};
-use valkyrie_proto::AgentStatus;
 use valkyrie_proto::{
     AgentState, Reply, ScrollAnchor, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec,
 };
+use valkyrie_proto::{AgentStatus, NoWindow};
 use valkyrie_term::{Signal, VtScreen, graphics};
 
 /// Server pushes for one session. Lagging receivers resync from a fresh snapshot.
@@ -1305,6 +1305,7 @@ fn screen_label(verdict: &Option<Screen>) -> Value {
 /// `uncommitted: 2 files +10 -3` for a git working tree with changes, else `None`.
 fn diff_stat(cwd: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
+        .no_window()
         .arg("-C")
         .arg(cwd)
         .args(["diff", "--shortstat", "HEAD"])

@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use valkyrie_context::project;
+use valkyrie_proto::NoWindow;
 
 /// A worktree made for a session that hasn't started yet.
 #[derive(Debug)]
@@ -131,6 +132,7 @@ fn has_branch(checkout: &Path, branch: &str) -> bool {
 /// Runs `git` in `dir`, failing with what it printed.
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
     let out = Command::new("git")
+        .no_window()
         .args(args)
         .current_dir(dir)
         .stdin(std::process::Stdio::null())

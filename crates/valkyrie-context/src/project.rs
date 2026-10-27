@@ -2,6 +2,7 @@
 //! running `git`: the injection hook runs on every session start.
 
 use std::path::{Path, PathBuf};
+use valkyrie_proto::NoWindow;
 
 /// The project holding `dir`: the main worktree's root of the git repository it is
 /// in, so every worktree of a repo shares one project; outside git, `dir` itself.
@@ -34,6 +35,7 @@ pub fn checkout(dir: &Path) -> PathBuf {
 /// `HEAD` of the checkout at `dir`, short; `None` outside git.
 pub fn head(dir: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
+        .no_window()
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")

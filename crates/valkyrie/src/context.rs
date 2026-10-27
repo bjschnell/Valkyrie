@@ -5,7 +5,7 @@ use clap::Subcommand;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use valkyrie_proto::client::Client;
-use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, NewDecision, ReviewAction};
+use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, NewDecision, NoWindow, ReviewAction};
 
 #[derive(Subcommand)]
 pub enum DecisionsCmd {
@@ -238,6 +238,7 @@ fn print_health(root: &Path, list: &[Decision]) {
 /// `HEAD` of the checkout `dir` is in, short; `None` outside git.
 fn head_commit(dir: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
+        .no_window()
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -428,6 +429,7 @@ pub async fn handoff(
 /// `branch @ commit` of the checkout `dir` is in.
 fn git_where(dir: &Path) -> Option<String> {
     let branch = std::process::Command::new("git")
+        .no_window()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
