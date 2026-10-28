@@ -351,12 +351,22 @@ export async function answer(session: SessionId, choices: Choice[], choice: Choi
   navigator.vibrate?.(10);
   if (moves === null) {
     // No cursor to move: the number picks it.
-    input(session, [...new TextEncoder().encode(String(choice.n ?? to + 1))]);
+    if (!input(session, [...new TextEncoder().encode(String(choice.n ?? to + 1))])) return;
   } else {
     for (const [i, key] of keys.entries()) {
       if (i) await new Promise((r) => setTimeout(r, KEY_GAP_MS));
       if (!input(session, keyBytes(key, modes))) return;
     }
+  }
+  // Keystrokes are fire-and-forget, and a phone just back from sleep can hold a
+  // socket that says it's open but is dead. The daemon handles a connection's
+  // messages in order, so a reply to this means the keys reached the program.
+  try {
+    if (!conn) throw new Error("not connected");
+    await conn.request({ t: "hello" });
+  } catch {
+    toast("Didn't go through; try again");
+    return;
   }
   // Answered: drop the buttons until the screen says otherwise.
   const prompts = { ...get().prompts };
