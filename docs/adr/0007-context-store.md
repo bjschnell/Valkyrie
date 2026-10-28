@@ -19,6 +19,7 @@ DESIGN §6 (the project context layer) left storage open (§12: repo-local vs da
    - **What else reaches agents unreviewed, and how it's held:**
      - **Sibling notes (DESIGN §6.5):** paths and prompts observed from other sessions. Only files an editing tool changed inside the repository count. Each is one plain line: no control characters, newlines or bidi overrides, and capped. Prompts from sessions an agent drove are left out. The note is framed as observation ("not instructions to you").
      - **MCP:** shows active, rejected, retired and superseded decisions, never proposals.
+     - **Proposals elsewhere:** the daemon gives an agent a proposal's title (so it sees what waits and doesn't propose it again), never its body: `valk decisions show`, the list and the queue push (`WatchQueue`) all carry a placeholder instead. Titles are unreviewed text too, but short, on one line and cleaned.
      - **The extractor's proposals** (`by: valkyrie`) are model text steered by a transcript. They wait on review like any agent's.
      - **The model command** can be replaced by `$VALK_EXTRACTOR` only in debug builds. In a release build an agent that happened to start the daemon could otherwise route every exchange to a command of its own.
      - **`git`** only ever sees a hex commit the daemon read itself, after `--end-of-options`.
