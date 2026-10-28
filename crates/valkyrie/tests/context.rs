@@ -504,21 +504,26 @@ fn agents_hear_about_their_siblings() {
             .unwrap();
         path
     };
+    // `a` says when its hooks are in, and `b` asks only then: a fixed sleep lost
+    // the race on a loaded CI runner, where each `valk hook` starts slowly.
+    let a_ready = out.join("a-ready");
     let a = script(
         "a",
         format!(
-            "{start}{}{}",
+            "{start}{}{}touch {}\n",
             hook(
                 serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"refactor the auth module","cwd":repo_s})
             ),
             edit("src/auth.rs") + &edit("src/db.rs"),
+            a_ready.display(),
         ),
     );
     let b = script(
         "b",
         format!(
-            "{start}{}sleep 1\n{}{}echo done > {}\n",
+            "{start}{}while [ ! -e {} ]; do sleep 0.1; done\n{}{}echo done > {}\n",
             edit("src/auth.rs"),
+            a_ready.display(),
             ask("first"),
             ask("second"),
             out.join("b-done").display()
