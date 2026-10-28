@@ -1,6 +1,6 @@
 //! The context layer with the real binary (DESIGN §6, ADR-0007): an agent can only
-//! propose decisions, corrections become proposals, agents hear about each other,
-//! and handoffs.
+//! propose decisions, corrections and failures become proposals, agents hear about
+//! each other, and handoffs.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -316,6 +316,143 @@ fn corrections_become_proposals() {
     assert!(
         said.starts_with("off:") || said.contains("is for the user"),
         "{said}"
+    );
+    drop(daemon);
+}
+
+/// ADR-0010: a turn that ended after a tool failed gets a retro. The failed call
+/// and what worked next become a proposal, its signature is recorded, and a turn
+/// with no new failure isn't read again.
+#[test]
+fn failures_become_proposals() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-retro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join(".git"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+
+    let model = bin.join("model");
+    std::fs::write(
+        &model,
+        format!(
+            "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
+             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
+            calls = out.join("calls").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&model, exec.clone()).unwrap();
+
+    // The agent's transcript: `pkill -f` failed, `kill <pid>` worked.
+    let transcript = out.join("t.jsonl");
+    let call = |id: &str, command: &str| {
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":command}}]}}).to_string()
+    };
+    let result = |id: &str, error: Option<&str>| {
+        serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error.is_some(),"content":error.unwrap_or("ok")}]}}).to_string()
+    };
+    let lines = [
+        call("1", "pkill -f 'valk daemon'"),
+        result("1", Some("Exit code 144\nTerminated")),
+        call("2", "kill 4242"),
+        result("2", None),
+    ];
+    std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    let hook = |event: &str| {
+        format!(
+            "echo '{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"c1\",\"tool_name\":\"Bash\",\"transcript_path\":\"{}\"}}' | valk hook claude\n",
+            transcript.display()
+        )
+    };
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            hook("SessionStart"),
+            hook("PostToolUseFailure"),
+            hook("Stop"),
+            // No failure since: no retro.
+            hook("Stop"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, exec).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let valk = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env("VALK_EXTRACTOR", model.to_str().unwrap())
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    valk(&[
+        "new",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--",
+        agent.to_str().unwrap(),
+    ]);
+    let start = Instant::now();
+    let mut listed = String::new();
+    while start.elapsed() < Duration::from_secs(10) && !listed.contains("pkill") {
+        std::thread::sleep(Duration::from_millis(100));
+        listed = valk(&["decisions"]);
+    }
+    assert!(
+        listed.contains("#1  gotcha     Kill exact pids, never pkill -f (proposed)"),
+        "{listed}"
+    );
+    let shown = valk(&["decisions", "show", "1"]);
+    assert!(
+        shown.contains("by: valkyrie")
+            && shown.contains("From a failure: `pkill -f 'valk daemon'` → Terminated"),
+        "{shown}"
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    let calls = std::fs::read_to_string(out.join("calls")).unwrap();
+    assert_eq!(calls.matches("---").count(), 1, "{calls}");
+    assert!(
+        calls.contains("Call: pkill -f 'valk daemon'")
+            && calls.contains("Next that worked: kill 4242")
+            && calls.contains("seen_before=\"0\""),
+        "{calls}"
+    );
+    let state = dir.join("state/valkyrie/context");
+    let sigs = std::fs::read_dir(&state)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("failures.jsonl"))
+        .find(|p| p.exists())
+        .expect("failures recorded");
+    let sigs = std::fs::read_to_string(sigs).unwrap();
+    assert_eq!(sigs.lines().count(), 2, "{sigs}");
+    assert!(
+        sigs.contains("\"call\":\"1\"") && sigs.contains("\"decision\":1"),
+        "{sigs}"
     );
     drop(daemon);
 }

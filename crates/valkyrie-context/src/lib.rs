@@ -9,10 +9,11 @@ pub mod inject;
 pub mod mine;
 pub mod model;
 pub mod project;
+pub mod retro;
 pub mod stale;
 
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use valkyrie_proto::{Decision, DecisionStatus, NewDecision, Provenance, ReviewAction};
 
@@ -22,6 +23,20 @@ pub use file::{name as file_name, parse, render};
 pub const MAX_TITLE: usize = 200;
 /// Longest body kept; a decision is a few sentences, not a design doc.
 pub const MAX_BODY: usize = 4000;
+
+/// How long a failure counts (ADR-0010 §2).
+pub const FAILURE_DAYS: u64 = 90;
+/// Size past which `failures.jsonl` drops what no longer counts.
+const FAILURES_COMPACT: u64 = 1 << 20;
+
+/// What a project's sessions' failures have been (ADR-0010 §2).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Failures {
+    /// How often each signature was seen.
+    pub seen: HashMap<u64, usize>,
+    /// The failed calls recorded, so none counts twice (a restart, a resume).
+    pub calls: HashSet<String>,
+}
 
 /// Every project's decisions, under one directory (`<state dir>/context`).
 pub struct Store {
@@ -276,6 +291,95 @@ impl Store {
         Ok(())
     }
 
+    /// What `root`'s sessions' failures have been (ADR-0010 §2) over the last
+    /// [`FAILURE_DAYS`] days.
+    pub fn failures(&self, root: &Path, now: u64) -> Failures {
+        let mut out = Failures::default();
+        let text = std::fs::read_to_string(self.failures_file(root)).unwrap_or_default();
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let at = v["at"].as_u64().unwrap_or(0);
+            let Some(sig) = v["sig"]
+                .as_str()
+                .and_then(|s| u64::from_str_radix(s, 16).ok())
+            else {
+                continue;
+            };
+            if now.saturating_sub(at) > FAILURE_DAYS * 86_400 {
+                continue;
+            }
+            // A proposal's line has no call, so it isn't a failure.
+            if let Some(call) = v["call"].as_str()
+                && out.calls.insert(call.to_owned())
+            {
+                *out.seen.entry(sig).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
+    /// Records failed calls (`(signature, call id)`) seen in `root`'s sessions.
+    pub fn record_failures(&self, root: &Path, seen: &[(u64, &str)], now: u64) -> Result<()> {
+        let lines: Vec<String> = seen
+            .iter()
+            .map(|(sig, call)| {
+                serde_json::json!({"sig": format!("{sig:016x}"), "at": now, "call": call})
+                    .to_string()
+            })
+            .collect();
+        self.append_failures(root, &lines, now)
+    }
+
+    /// Records that decision `id` was proposed from failures with signature `sig`.
+    pub fn record_proposal(&self, root: &Path, sig: u64, id: u32, now: u64) -> Result<()> {
+        let line = serde_json::json!({"sig": format!("{sig:016x}"), "at": now, "decision": id})
+            .to_string();
+        self.append_failures(root, &[line], now)
+    }
+
+    fn failures_file(&self, root: &Path) -> PathBuf {
+        self.base.join(project::key(root)).join("failures.jsonl")
+    }
+
+    /// Appends `lines`. Past [`FAILURES_COMPACT`] bytes, what's older than
+    /// [`FAILURE_DAYS`] is dropped first, since it no longer counts.
+    fn append_failures(&self, root: &Path, lines: &[String], now: u64) -> Result<()> {
+        use std::io::Write;
+        if lines.is_empty() {
+            return Ok(());
+        }
+        self.mark_project(root)?;
+        let path = self.failures_file(root);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| {
+                    serde_json::from_str::<serde_json::Value>(l).is_ok_and(|v| {
+                        now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+                    })
+                })
+                .map(|l| format!("{l}\n"))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        file.write_all(
+            lines
+                .iter()
+                .map(|l| format!("{l}\n"))
+                .collect::<String>()
+                .as_bytes(),
+        )?;
+        Ok(())
+    }
+
     /// Notes which root a project directory is for, so `projects` can list it.
     fn mark_project(&self, root: &Path) -> Result<()> {
         let dir = self.base.join(project::key(root));
@@ -405,6 +509,31 @@ mod tests {
             by: who.into(),
             ..Provenance::default()
         }
+    }
+
+    #[test]
+    fn failures_count_once_and_only_lately() {
+        let f = Fixture::new("failures");
+        let day = 86_400;
+        assert_eq!(f.store.failures(&f.repo, day), Failures::default());
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c1"), (0xabc, "c2"), (0xdef, "c3")], day)
+            .unwrap();
+        // Read again after a restart: not counted twice.
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c1")], day)
+            .unwrap();
+        f.store.record_proposal(&f.repo, 0xabc, 4, 2 * day).unwrap();
+        let got = f.store.failures(&f.repo, 2 * day);
+        assert_eq!(got.seen, HashMap::from([(0xabc, 2), (0xdef, 1)]));
+        assert!(got.calls.contains("c3"));
+        // A project with only failures is still a project.
+        assert_eq!(f.store.projects(), std::slice::from_ref(&f.repo));
+        // Long after, none of it counts.
+        assert_eq!(
+            f.store.failures(&f.repo, (FAILURE_DAYS + 3) * day),
+            Failures::default()
+        );
     }
 
     #[test]
