@@ -773,6 +773,44 @@ fn only_a_dev_daemon_says_so_and_an_upgrade_keeps_its_mode() {
     }
 }
 
+/// A `valk web` with no terminal and no parents (double-forked and `setsid`) may
+/// have been started by anyone, an agent included, so it must not print a pairing
+/// link: the bridge counts as human only for the devices already paired.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "uses setsid(1)")]
+fn a_detached_web_server_prints_no_pairing_link() {
+    let d = Daemon::start("detached-web");
+    let out = d.dir.join("web.out");
+    // The shell leaves at once, so the server is an orphan in a session of its own.
+    let pid = Command::new("sh")
+        .arg("-c")
+        .arg(r#"setsid "$0" web --listen 127.0.0.1:0 >"$1" 2>&1 </dev/null & echo $!"#)
+        .arg(BIN)
+        .arg(&out)
+        .env("VALK_SOCKET", &d.socket)
+        .env("XDG_STATE_HOME", &d.dir)
+        .env("XDG_CONFIG_HOME", d.dir.join("config"))
+        .env_remove("VALK_SESSION")
+        .output()
+        .unwrap();
+    let pid = String::from_utf8_lossy(&pid.stdout).trim().to_owned();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&out).unwrap_or_default();
+        if text.contains("pair") {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "web server said nothing:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = Command::new("kill").arg(&pid).status();
+    assert!(!text.contains("#pair="), "printed a pairing link:\n{text}");
+    assert!(text.contains("no pairing code"), "{text}");
+}
+
 /// Review finding: input queued for a program that isn't reading (its tty buffer is
 /// full) used to be dropped by the exec. It must cross the handoff in full.
 #[test]
