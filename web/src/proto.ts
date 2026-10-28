@@ -170,9 +170,29 @@ export interface Item {
   boot: number;
   branch?: string;
   checkout?: string;
+  /** Handoffs left on it, oldest first. */
+  notes?: ItemNote[];
   /** Seconds since the epoch. */
   created: number;
   updated: number;
+}
+
+export interface ItemNote {
+  /** Seconds since the epoch. */
+  at: number;
+  /** `human`, or the agent that left it. */
+  by: string;
+  text: string;
+}
+
+/** What an item's checkout holds, from git. */
+export interface ItemFacts {
+  branch: string;
+  ahead: number;
+  commits: string[];
+  /** `git diff --shortstat`; empty when nothing changed. */
+  diff: string;
+  dirty: number;
 }
 
 export interface NewItem {
@@ -206,6 +226,8 @@ export type Request =
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
   | { t: "delete_item"; id: number }
+  | { t: "note_item"; id: number; text: string }
+  | { t: "item_facts"; id: number }
   | { t: "launch_item"; id: number; agent: "claude" | "codex"; worktree: boolean; size: Size; env: [string, string | null][] };
 
 /** Fire-and-forget messages. */
@@ -228,7 +250,8 @@ export type Reply =
   | { t: "decisions"; decisions: Decision[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
-  | { t: "items"; items: Item[] };
+  | { t: "items"; items: Item[] }
+  | { t: "item_facts"; facts: ItemFacts | null };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }

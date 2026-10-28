@@ -5,13 +5,17 @@
 use crate::{MAX_TITLE, file, project, shown, write_atomic};
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
-use valkyrie_proto::{Item, ItemChange, ItemKind, ItemStatus, NewItem, SessionId};
+use valkyrie_proto::{Item, ItemChange, ItemKind, ItemNote, ItemStatus, NewItem, SessionId};
 
 /// Longest body kept: room for a bug report with its logs, not a whole file.
 pub const MAX_BODY: usize = 20_000;
 /// Largest attachment copied, the web app's upload limit.
 pub const MAX_ATTACHMENT: u64 = 50 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 20;
+/// Longest handoff note: what changed and what's left, not a transcript.
+pub const MAX_NOTE: usize = 4000;
+/// Notes kept per item, the newest.
+const MAX_NOTES: usize = 20;
 
 pub struct Backlog {
     base: PathBuf,
@@ -88,9 +92,32 @@ impl Backlog {
             boot: 0,
             branch: None,
             checkout: None,
+            notes: Vec::new(),
             created: now,
             updated: now,
         };
+        self.write(&item)?;
+        Ok(item)
+    }
+
+    /// Leaves a handoff note on item `id`. Who may is the daemon's to check.
+    pub fn note(&self, id: u32, by: &str, text: &str, now: u64) -> Result<Item> {
+        let text = shown(text, true).trim().to_owned();
+        if text.is_empty() {
+            bail!("say what happened");
+        }
+        if text.chars().count() > MAX_NOTE {
+            bail!("a note is at most {MAX_NOTE} characters: what changed and what's left");
+        }
+        let mut item = self.get(id)?;
+        item.notes.push(ItemNote {
+            at: now,
+            by: by.to_owned(),
+            text,
+        });
+        let over = item.notes.len().saturating_sub(MAX_NOTES);
+        item.notes.drain(..over);
+        item.updated = now;
         self.write(&item)?;
         Ok(item)
     }
@@ -303,8 +330,16 @@ pub fn brief(item: &Item) -> String {
             text.push_str(&format!("- {}\n", a.display()));
         }
     }
+    if !item.notes.is_empty() {
+        // Written by the user, or by an agent on an earlier launch of this item.
+        text.push_str("\nNotes from earlier work on this, oldest first:\n");
+        for n in &item.notes {
+            let by = if n.by == "human" { "me" } else { &n.by };
+            text.push_str(&format!("- {by}: {}\n", n.text.replace('\n', "\n  ")));
+        }
+    }
     text.push_str(&format!(
-        "\n(This is item #{} in my Valkyrie backlog. Anything else you find along the way goes in with `valk todo add`, not into this change.)\n",
+        "\n(This is item #{} in my Valkyrie backlog. Anything else you find along the way goes in with `valk todo add`, not into this change. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         item.id
     ));
     text
@@ -485,6 +520,32 @@ mod tests {
     }
 
     #[test]
+    fn notes_are_kept_newest_last_and_go_into_the_next_brief() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        b.add(&new("crash", "", ItemKind::Bug), "human", 1).unwrap();
+        assert!(b.note(1, "claude", " \n", 2).is_err());
+        assert!(b.note(1, "claude", &"x".repeat(MAX_NOTE + 1), 2).is_err());
+        b.note(1, "claude", "fixed the parser\nstill flaky on Windows", 2)
+            .unwrap();
+        let item = b.note(1, "human", "check the Windows CI", 3).unwrap();
+        assert_eq!(item.notes.len(), 2);
+        assert_eq!((item.notes[0].by.as_str(), item.updated), ("claude", 3));
+        let text = brief(&item);
+        assert!(
+            text.contains(
+                "- claude: fixed the parser\n  still flaky on Windows\n- me: check the Windows CI\n"
+            ),
+            "{text}"
+        );
+        for n in 0..30 {
+            b.note(1, "claude", &n.to_string(), 4).unwrap();
+        }
+        let notes = b.get(1).unwrap().notes;
+        assert_eq!((notes.len(), notes[19].text.as_str()), (MAX_NOTES, "29"));
+    }
+
+    #[test]
     fn a_deleted_item_takes_its_files_and_its_number_isnt_given_out_again() {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
@@ -537,6 +598,7 @@ mod tests {
             boot: 0,
             branch: None,
             checkout: None,
+            notes: Vec::new(),
             created: 0,
             updated: 0,
         };
@@ -557,6 +619,6 @@ mod tests {
         assert!(b.starts_with("Fix this bug"));
         assert!(b.contains("# crash\n\nsteps\n"));
         assert!(b.contains("- /s/1-shot.png\n"));
-        assert!(b.ends_with("not into this change.)\n"));
+        assert!(b.ends_with("anything I should check>\"`.)\n"));
     }
 }

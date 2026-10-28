@@ -94,9 +94,37 @@ pub struct Item {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<PathBuf>,
+    /// Handoffs left on it, oldest first: what an agent did and what's left, or
+    /// the user's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<ItemNote>,
     /// Seconds since the epoch.
     pub created: u64,
     pub updated: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemNote {
+    /// Seconds since the epoch.
+    pub at: u64,
+    /// `human`, or the agent that left it.
+    pub by: String,
+    pub text: String,
+}
+
+/// What an item's checkout holds, read from git rather than taken from the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemFacts {
+    pub branch: String,
+    /// Commits on it that the repository's own checkout doesn't have.
+    pub ahead: u32,
+    /// The newest of them, `<short hash> <subject>`, at most ten.
+    pub commits: Vec<String>,
+    /// `git diff --shortstat` against where it started, e.g. `3 files changed, 40
+    /// insertions(+), 2 deletions(-)`; empty when nothing changed.
+    pub diff: String,
+    /// Files changed or untracked but not committed.
+    pub dirty: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

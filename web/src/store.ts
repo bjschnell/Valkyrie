@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
-import type { Decision, Item, ItemChange, Modes, NewItem, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
+import type { Decision, Item, ItemChange, ItemFacts, Modes, NewItem, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
@@ -477,6 +477,25 @@ export async function deleteItem(id: number): Promise<boolean> {
     toast((e as Error).message);
     return false;
   }
+}
+
+/** Leaves a handoff note on a backlog item. */
+export async function noteItem(id: number, text: string): Promise<boolean> {
+  if (!conn) return false;
+  try {
+    await conn.request({ t: "note_item", id, text });
+    return true;
+  } catch (e) {
+    toast((e as Error).message);
+    return false;
+  }
+}
+
+/** What a backlog item's checkout holds now; null without one. */
+export async function itemFacts(id: number): Promise<ItemFacts | null> {
+  if (!conn) return null;
+  const reply = await conn.request({ t: "item_facts", id });
+  return reply.t === "item_facts" ? reply.facts : null;
 }
 
 /** Starts an agent on a backlog item, in a worktree of its own; the session's id. */

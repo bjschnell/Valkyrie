@@ -1007,6 +1007,8 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 (req, registry.change_item(id, change, peer).await)
             }
             ClientMsg::DeleteItem { req, id } => (req, registry.delete_item(id, peer).await),
+            ClientMsg::NoteItem { req, id, text } => (req, registry.note_item(id, &text, peer)),
+            ClientMsg::ItemFacts { req, id } => (req, registry.item_facts(id).await),
             ClientMsg::LaunchItem {
                 req,
                 id,

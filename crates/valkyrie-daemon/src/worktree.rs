@@ -158,6 +158,46 @@ fn has_branch(checkout: &Path, branch: &str) -> bool {
     git(checkout, &["rev-parse", "--verify", "--quiet", &reference]).is_ok()
 }
 
+/// What a backlog item's checkout holds against the repository's own checkout:
+/// its commits, its whole change with what isn't committed yet, and how much
+/// isn't. `None` when the checkout is gone or isn't a worktree of `repo`.
+pub fn facts(repo: &Path, checkout: &Path) -> Option<valkyrie_proto::ItemFacts> {
+    if !checkout.is_dir() || project::checkout(checkout) == project::checkout(repo) {
+        return None;
+    }
+    let out = |dir: &Path, args: &[&str]| git_out(dir, args).ok();
+    let main = out(repo, &["rev-parse", "HEAD"])?;
+    let range = format!("{main}..HEAD");
+    let base = out(checkout, &["merge-base", &main, "HEAD"])?;
+    Some(valkyrie_proto::ItemFacts {
+        branch: out(checkout, &["rev-parse", "--abbrev-ref", "HEAD"])?,
+        ahead: out(checkout, &["rev-list", "--count", &range])?
+            .parse()
+            .ok()?,
+        commits: out(checkout, &["log", "-n", "10", "--format=%h %s", &range])?
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        diff: out(checkout, &["diff", "--shortstat", &base])?,
+        dirty: out(checkout, &["status", "--porcelain"])?.lines().count() as u32,
+    })
+}
+
+/// Runs `git` in `dir`, returning what it printed, trimmed.
+fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .no_window()
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("couldn't run git")?;
+    if !out.status.success() {
+        bail!("git {} failed", args.first().unwrap_or(&""));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
 /// Runs `git` in `dir`, failing with what it printed.
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
     let out = Command::new("git")
@@ -366,5 +406,45 @@ mod tests {
             !gone && repo.main().exists(),
             "the main checkout is never taken"
         );
+    }
+
+    #[test]
+    fn facts_count_commits_and_what_isnt_committed() {
+        let repo = Repo::new("facts");
+        assert!(facts(&repo.main(), &repo.main()).is_none());
+        let at = create(&repo.main(), "fix/4-w", None).unwrap().start;
+        let fresh = facts(&repo.main(), &at).unwrap();
+        assert_eq!(
+            (
+                fresh.branch.as_str(),
+                fresh.ahead,
+                fresh.diff.as_str(),
+                fresh.dirty
+            ),
+            ("fix/4-w", 0, "", 0)
+        );
+        std::fs::write(at.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-am",
+            "add a",
+        ];
+        git(&at, &commit).unwrap();
+        std::fs::write(at.join("new.txt"), "wip\n").unwrap();
+        let f = facts(&repo.main(), &at).unwrap();
+        assert_eq!((f.ahead, f.dirty), (1, 1));
+        assert!(f.commits[0].ends_with(" add a"), "{:?}", f.commits);
+        assert!(
+            f.diff.starts_with("1 file changed, 1 insertion"),
+            "{}",
+            f.diff
+        );
+        std::fs::remove_dir_all(&at).unwrap();
+        assert!(facts(&repo.main(), &at).is_none());
     }
 }
