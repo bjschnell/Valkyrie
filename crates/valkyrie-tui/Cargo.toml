@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 valkyrie-proto.workspace = true
-ratatui.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 tokio.workspace = true
 anyhow.workspace = true
 base64 = "0.23"

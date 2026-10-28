@@ -1208,3 +1208,78 @@ async fn spawn_can_start_in_a_new_worktree() {
     }
     assert!(!broken.exists(), "the failed session's worktree stayed");
 }
+
+/// ADR-0010 §6: a skill no agent read while the project was worked in is asked
+/// about, and retired once the question has gone unanswered for long; a skill
+/// read lately is left alone. Counting only, no model.
+#[tokio::test]
+async fn unread_skills_are_flagged_then_retired() {
+    use valkyrie_proto::Provenance;
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir = TempDir(std::env::temp_dir().join(format!(
+        "valkyrie-test-idle-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )));
+    let _ = std::fs::remove_dir_all(&*dir);
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let repo = std::fs::canonicalize(repo).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let day = 86_400;
+    let store = valkyrie_context::Store::new(dir.join("state/context"));
+    let skill = |title: &str, days_ago: u64| {
+        let new = NewDecision {
+            cwd: repo.clone(),
+            title: title.into(),
+            body: "1. Do it.".into(),
+            kind: DecisionKind::Skill,
+            propose: false,
+            supersedes: None,
+            review_every: None,
+            session: None,
+        };
+        let by = Provenance {
+            by: "human".into(),
+            ..Default::default()
+        };
+        store.decide(&new, by, now - days_ago * day).unwrap()
+    };
+    let old = skill("Cut a release", 100);
+    let idle = skill("Rotate the keys", 100);
+    let used = skill("Verify a change", 100);
+    store
+        .update_skill_use(&repo, now - 100 * day, |u| {
+            // Ten sessions worked here lately; one read a skill.
+            for i in 0..10 {
+                u.sessions.insert(format!("s{i}"), now - day - i);
+            }
+            u.reads.insert(used.id, now - day);
+            // The oldest was asked about 50 days ago, and nobody answered.
+            u.flagged.insert((old.id, old.updated), now - 50 * day);
+        })
+        .unwrap();
+
+    let (client, _pushes) = start_in(&dir, "run/o.sock").await;
+    let list = client.decisions(Some(repo.clone())).await.unwrap();
+    let get = |id: u32| list.iter().find(|d| d.id == id).unwrap();
+    assert_eq!(get(old.id).status, DecisionStatus::Retired);
+    assert!(
+        get(idle.id).fresh.review.as_deref().is_some_and(|why| why
+            .contains("no agent read it in 100 days of work here")
+            && why.contains("retired in 45 days")),
+        "{:?}",
+        get(idle.id).fresh
+    );
+    assert_eq!(get(used.id).status, DecisionStatus::Active);
+    assert_eq!(get(used.id).fresh.review, None);
+    // When it was first asked about is kept, so a restart doesn't skip the wait.
+    let asked = store.skill_use(&repo).flagged;
+    assert_eq!(
+        asked.keys().copied().collect::<Vec<_>>(),
+        [(idle.id, idle.updated)]
+    );
+}

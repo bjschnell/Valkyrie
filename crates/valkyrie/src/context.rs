@@ -565,10 +565,29 @@ pub fn hook(agent: &str, ambient: bool) {
                 &valk_command(),
             )
         }
-        "UserPromptSubmit" => match siblings() {
-            Some(text) if !text.is_empty() => text,
-            _ => return,
-        },
+        "UserPromptSubmit" => {
+            let prompt = payload["prompt"].as_str().unwrap_or("");
+            let root = valkyrie_context::project::root(&cwd);
+            let known = valkyrie_context::Store::new(store_base()).load(&root);
+            let skills = valkyrie_context::skill::about(prompt, &known);
+            let mut text = siblings().unwrap_or_default();
+            for d in skills {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!(
+                    "Skill #{} “{}” looks like what this asks for: read it first with `{} decisions show {}`.",
+                    d.id,
+                    d.title,
+                    valk_command(),
+                    d.id
+                ));
+            }
+            if text.is_empty() {
+                return;
+            }
+            text
+        }
         _ => return,
     };
     println!("{}", valkyrie_context::inject::hook_output(event, &text));

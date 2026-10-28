@@ -29,7 +29,7 @@ const MAX_WORDS: usize = 30;
 const HEAD_LINES: usize = 256;
 /// Words too common to tell two sentences apart ("can you check the tests" isn't
 /// "can you check the logs").
-const STOPWORDS: &[&str] = &[
+pub(crate) const STOPWORDS: &[&str] = &[
     "the", "and", "you", "can", "for", "this", "that", "with", "are", "was", "but", "have", "has",
     "let", "lets", "please", "yeah", "yep", "now", "just", "then", "also", "its", "what", "how",
     "all", "out", "our", "your", "from", "into", "there", "they", "them", "will", "would", "could",

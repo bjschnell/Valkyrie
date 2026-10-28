@@ -51,7 +51,9 @@ pub fn set_mode(context_dir: &Path, mode: AutoMode) -> anyhow::Result<()> {
 pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedReceiver<SessionId>) {
     let command = valkyrie_context::model::command(extract::SYSTEM);
     let retro_command = valkyrie_context::model::command(retro::SYSTEM);
+    let learn_command = valkyrie_context::model::command(skill::SYSTEM);
     let mut last: HashMap<SessionId, u64> = HashMap::new();
+
     let mut calls: VecDeque<(Instant, SessionId)> = VecDeque::new();
     while let Some(id) = turns.recv().await {
         tokio::time::sleep(SETTLE).await;
@@ -63,6 +65,8 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
             }
         }
         for id in ids {
+            // Which skills it read: on this machine only, so whatever `auto` says.
+            track_use(registry.clone(), id).await;
             let mode = mode(&registry.host.context_dir);
             if mode == AutoMode::Off {
                 // So failures don't pile up for when reading is back on.
@@ -91,6 +95,9 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
             // A retro that doesn't run now leaves its failures for the next turn's end.
             let failed = registry.get(id).map(|s| s.failures()).unwrap_or(0);
             if failed > 0 && room(&calls) && reflect(&registry, id, mode, &retro_command).await {
+                calls.push_back((Instant::now(), id));
+            }
+            if room(&calls) && learn(&registry, id, mode, &learn_command).await {
                 calls.push_back((Instant::now(), id));
             }
         }
@@ -367,6 +374,160 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
     }
     if proposed > 0 {
         registry.refresh_proposals();
+    }
+    true
+}
+
+/// Records that a session worked in its project, and which of its active skills
+/// it read, by the transcript's time (ADR-0010 §6), so one nobody reads is found.
+async fn track_use(registry: Arc<Registry>, id: SessionId) {
+    let Ok(session) = registry.get(id) else {
+        return;
+    };
+    let info = session.info();
+    let Some(chat) = info.chat.clone() else {
+        return;
+    };
+    let who = session
+        .conversation()
+        .unwrap_or_else(|| format!("session-{id}"));
+    // Files, and the store's lock: off the async threads.
+    let _ = tokio::task::spawn_blocking(move || {
+        let root = valkyrie_context::project::root(&info.cwd);
+        let store = registry.context.lock().unwrap();
+        let known = store.load(&root);
+        let active: Vec<u32> =
+            skill::active(&known, &known.iter().map(|d| d.id).collect::<Vec<_>>());
+        // A project without skills has nothing to measure.
+        if active.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let read: Vec<(u32, u64)> = skill::read_at(&read_tail(&chat))
+            .into_iter()
+            .filter(|(id, _)| active.contains(id))
+            .map(|(id, at)| (id, at.unwrap_or(now).min(now)))
+            .collect();
+        let recorded = store.update_skill_use(&root, now, |used| {
+            used.sessions.insert(who, now);
+            for (id, at) in read {
+                let last = used.reads.entry(id).or_insert(0);
+                *last = (*last).max(at);
+            }
+        });
+        if let Err(e) = recorded {
+            tracing::warn!(session = id, "couldn't record skill use: {e:#}");
+        }
+    })
+    .await;
+}
+
+/// When the last message you typed in a session approved a long job, asks the
+/// model for the procedure in it, as a skill or a fix to one (ADR-0010 §5).
+/// Returns whether the model was asked.
+async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[String]) -> bool {
+    let Ok(session) = registry.get(id) else {
+        return false;
+    };
+    let info = session.info();
+    // Codex rollouts aren't read as a digest yet.
+    if !mode.reads(&info.status.agent) || info.status.agent != "claude" {
+        return false;
+    }
+    let Some(chat) = info.chat.clone() else {
+        return false;
+    };
+    let root = valkyrie_context::project::root(&info.cwd);
+    if !root.join(".git").exists() {
+        return false;
+    }
+    let Ok(tail) = tokio::task::spawn_blocking(move || read_tail(&chat)).await else {
+        return false;
+    };
+    let Some((work, said, approval)) = skill::finished(&tail) else {
+        return false;
+    };
+    if work < skill::LEARN_MIN_CALLS {
+        return false;
+    }
+    // The same approval ends several turns (the commit and push it asked for),
+    // and is still the last one after a restart: learned from once.
+    {
+        let store = registry.context.lock().unwrap();
+        if store.skill_use(&root).learned.contains(&approval) {
+            return false;
+        }
+        let noted = store.update_skill_use(&root, now_secs(), |used| {
+            used.learned.push(approval.clone());
+        });
+        if let Err(e) = noted {
+            tracing::warn!(session = id, "couldn't note the approval: {e:#}");
+            return false;
+        }
+    }
+    let known = registry.context.lock().unwrap().load(&root);
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (prompt, shown) = skill::prompt(&name, &known, &skill::digest(&tail), None);
+    let dir = registry.host.context_dir.clone();
+    let command = command.to_vec();
+    let asked = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::ensure_private_dir(&dir)?;
+        valkyrie_context::model::ask(&command, &prompt, &dir, MODEL_TIMEOUT)
+    })
+    .await;
+    let reply = match asked.map_err(anyhow::Error::from).and_then(|r| r) {
+        Ok(reply) => reply,
+        Err(e) => {
+            tracing::warn!(session = id, "learning failed: {e:#}");
+            return true;
+        }
+    };
+    let Some((found, patch)) = skill::parse_reply(&reply, &shown) else {
+        return true;
+    };
+    if patch.is_none() && extract::already_known(&found.title, &known) {
+        return true;
+    }
+    let new = NewDecision {
+        cwd: info.cwd.clone(),
+        title: found.title,
+        body: format!(
+            "{}\n\nLearned from the session {} after you said “{}”.",
+            found.body,
+            info.name,
+            valkyrie_context::mine::quote(&said)
+        ),
+        kind: valkyrie_proto::DecisionKind::Skill,
+        propose: true,
+        supersedes: patch,
+        review_every: None,
+        session: Some(id),
+    };
+    let provenance = Provenance {
+        by: "valkyrie".into(),
+        session: Some(info.name.clone()),
+        conversation: session.conversation(),
+        commit: None,
+        cwd: Some(info.cwd.clone()),
+    };
+    let decided = registry
+        .context
+        .lock()
+        .unwrap()
+        .decide(&new, provenance, now_secs());
+    match decided {
+        Ok(d) => {
+            tracing::info!(
+                session = id,
+                id = d.id,
+                "skill proposed from a finished job"
+            );
+            registry.refresh_proposals();
+        }
+        Err(e) => tracing::warn!(session = id, "couldn't propose a skill: {e:#}"),
     }
     true
 }
