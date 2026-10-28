@@ -207,7 +207,7 @@ fn corrections_become_proposals() {
         &model,
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
-             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"constraint\\\",\\\"title\\\":\\\"Use pnpm, never npm\\\",\\\"body\\\":\\\"The repo is pnpm.\\\"}}]}}\"}}'\n",
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"constraint\\\",\\\"title\\\":\\\"Use pnpm, never npm\\\",\\\"body\\\":\\\"The repo is pnpm.\\\"}}]}}\"}}'\n",
             calls = out.join("calls").display()
         ),
     )
@@ -346,7 +346,7 @@ fn failures_become_proposals() {
         &model,
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
-             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
             calls = out.join("calls").display()
         ),
     )
@@ -495,9 +495,9 @@ fn skills_are_indexed_patched_learned_and_exported() {
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
              if [ $(grep -c -- --- {calls}) = 1 ]; then\n\
-             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"patch\\\":1,\\\"title\\\":\\\"Cut a release\\\",\\\"body\\\":\\\"1. Set the upstream.\\\\n2. Push the tag.\\\"}}]}}\"}}'\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"patch\\\":1,\\\"title\\\":\\\"Cut a release\\\",\\\"body\\\":\\\"1. Set the upstream.\\\\n2. Push the tag.\\\"}}]}}\"}}'\n\
              else\n\
-             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"skill\\\",\\\"title\\\":\\\"Verify a release build\\\",\\\"body\\\":\\\"1. Build.\\\"}}]}}\"}}'\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"skill\\\",\\\"title\\\":\\\"Verify a release build\\\",\\\"body\\\":\\\"1. Build.\\\"}}]}}\"}}'\n\
              fi\n",
             calls = calls.display()
         ),
