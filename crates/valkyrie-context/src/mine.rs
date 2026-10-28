@@ -436,6 +436,9 @@ mod tests {
         let mine = write(claude.join("projects/-repo/a.jsonl"), &repo, false);
         write(claude.join("projects/-other/b.jsonl"), &other, false);
         let rollout = write(codex.join("sessions/2026/10/27/r.jsonl"), &repo, true);
+        // As the CLI has it: canonical (macOS's temp dir is behind /var's symlink,
+        // Windows' gets a `\\?\` prefix).
+        let repo = crate::project::root(&repo);
         let epoch = SystemTime::UNIX_EPOCH;
         assert_eq!(
             transcripts(&repo, &claude, None, epoch),
