@@ -607,7 +607,9 @@ fn skills_are_indexed_patched_learned_and_exported() {
     }
     assert!(
         listed.contains("#2  skill      Cut a release (proposed)"),
-        "{listed}"
+        "{listed}\n--- model calls:\n{}\n--- daemon log:\n{}",
+        std::fs::read_to_string(out.join("calls")).unwrap_or_default(),
+        std::fs::read_to_string(dir.join("state/valkyrie/daemon.log")).unwrap_or_default()
     );
     let shown = valk(&["decisions", "show", "2"]);
     assert!(
