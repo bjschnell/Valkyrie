@@ -3,6 +3,14 @@
 Releases from 0.1.0 on follow [Semantic Versioning](https://semver.org) and are
 written by release-please from [Conventional Commits](docs/releasing.md).
 
+## [0.2.1](https://github.com/bjschnell/Valkyrie/compare/v0.2.0...v0.2.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **context:** never give an agent a proposal's body ([53e5e93](https://github.com/bjschnell/Valkyrie/commit/53e5e93d6b8bbecab417bfdfc303c787c2226891))
+* **context:** never give an agent a proposal's body ([3338174](https://github.com/bjschnell/Valkyrie/commit/33381742b0e7d1ce101348024d5acaa323056ea3))
+
 ## [0.2.0](https://github.com/bjschnell/Valkyrie/compare/v0.1.1...v0.2.0) (2026-10-28)
 
 
