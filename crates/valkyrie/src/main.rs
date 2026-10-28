@@ -1,3 +1,4 @@
+mod alias;
 mod bench;
 mod context;
 mod hook;
@@ -218,6 +219,16 @@ enum WebCmd {
 
 #[derive(Subcommand)]
 enum SetupCmd {
+    /// Add `v` as a short name for `valk`, beside it on your PATH. Only when nothing
+    /// else on your PATH is called `v`.
+    Alias {
+        /// Print what it would do instead.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove the `v` instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Add Valkyrie's hooks to ~/.codex/hooks.json (then trust them once with /hooks).
     Codex {
         /// Print the resulting hooks.json instead of writing it.
@@ -611,6 +622,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         Some(Cmd::Decisions { all, action }) => {
             context::decisions(&connect(&socket).await?.0, all, action).await
         }
+        Some(Cmd::Setup(SetupCmd::Alias { dry_run, remove })) => alias::run(remove, dry_run),
         Some(Cmd::Setup(SetupCmd::Codex {
             dry_run,
             remove,

@@ -76,7 +76,8 @@ pub fn agent_running(pid: i32) -> Option<&'static str> {
     cmdline(pid).and_then(|argv| agent_of(&argv))
 }
 
-/// Whether `pid` runs `valk web`, the phone app's bridge (`valk [--socket S] web …`).
+/// Whether `pid` runs `valk web`, the phone app's bridge (`valk [--socket S] web …`),
+/// also by the `v` that `valk setup alias` adds.
 pub fn is_web_bridge(pid: i32) -> bool {
     cmdline_n(pid, 8).is_some_and(|argv| bridge_argv(&argv))
 }
@@ -85,7 +86,7 @@ fn bridge_argv(argv: &[String]) -> bool {
     let Some((program, args)) = argv.split_first() else {
         return false;
     };
-    if valkyrie_agents::program_name(program) != Some("valk") {
+    if !matches!(valkyrie_agents::program_name(program), Some("valk" | "v")) {
         return false;
     }
     let mut args = args.iter();
@@ -701,6 +702,7 @@ mod tests {
             "127.0.0.1:1"
         ]));
         assert!(yes(&["valk", "--socket=/s", "web"]));
+        assert!(yes(&["/home/u/.local/bin/v", "web"]));
         assert!(!yes(&["valk", "web", "pair"]));
         assert!(!yes(&["valk", "new", "--", "web"]));
         assert!(!yes(&["sh", "web"]));

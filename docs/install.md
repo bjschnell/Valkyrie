@@ -193,6 +193,10 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
 - `valk` opens the TUI. `valk new -a -- claude` starts an agent and attaches.
 - `valk setup codex` once, if you use Codex: it adds Valkyrie's hooks, for accurate
   states. Claude Code needs nothing, because its hooks are added per session.
+- `valk setup alias` adds `v` as a short name for `valk` (Linux, macOS, WSL), as a
+  link beside it. It does nothing if anything else on your PATH is already called
+  `v`; `--remove` takes it away. A shell alias or function named `v` still wins
+  over it, since the shell checks those before PATH.
 - To update, run `valk upgrade` ([Updating](#updating)).
 - `,` opens the settings: the theme, whether sessions take the theme's colors or
   your terminal's, the tab style (`underline`, `folder` or `cards`), which side the
