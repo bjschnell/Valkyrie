@@ -100,9 +100,11 @@ pub fn create(dir: &Path, branch: &str, name: Option<&str>) -> Result<Made> {
         (branch.to_owned(), path, existing)
     };
 
+    // From the checkout's top the rest is empty, and `join("")` would add a `/`.
     let start = dir
         .strip_prefix(&checkout)
         .ok()
+        .filter(|r| !r.as_os_str().is_empty())
         .map(|r| path.join(r))
         .filter(|d| d.is_dir())
         .unwrap_or_else(|| path.clone());
@@ -261,6 +263,12 @@ mod tests {
             .unwrap()
             .start;
         assert_eq!(again, repo.0.join("app-fix-the-login-bug-2"));
+        // As text: `Path`'s `==` ignores a trailing `/`, which a session's `PWD`
+        // keeps, and which `sh` (dash) then prints as the folder it's in.
+        assert_eq!(
+            again.to_str(),
+            repo.0.join("app-fix-the-login-bug-2").to_str()
+        );
     }
 
     #[test]
