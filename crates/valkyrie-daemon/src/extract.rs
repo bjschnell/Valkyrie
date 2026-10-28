@@ -214,19 +214,21 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
     let Ok(session) = registry.get(id) else {
         return false;
     };
-    session.take_failures();
     let info = session.info();
     if !mode.reads(&info.status.agent) {
         return false;
     }
+    // Not known yet (its first hook is still on the way): kept for the next turn.
     let Some(chat) = info.chat.clone() else {
         return false;
     };
     // Outside a repository there's no project to learn for.
     let root = valkyrie_context::project::root(&info.cwd);
     if !root.join(".git").exists() {
+        session.take_failures();
         return false;
     }
+    session.take_failures();
     let Ok(tail) = tokio::task::spawn_blocking(move || read_tail(&chat)).await else {
         return false;
     };

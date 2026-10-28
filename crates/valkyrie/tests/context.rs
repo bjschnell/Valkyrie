@@ -534,9 +534,12 @@ fn skills_are_indexed_patched_learned_and_exported() {
     std::fs::write(
         &agent,
         format!(
-            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
             hook("SessionStart"),
             hook("PostToolUseFailure"),
+            hook("Stop"),
+            // Each hook is its own process, so on a slow machine the Stop may land
+            // before the failure: the next turn's end reads it then, as in use.
             hook("Stop"),
         ),
     )
