@@ -29,6 +29,8 @@ pub struct Activity {
     prompt: Option<(String, u64)>,
     /// What this session's agent was last told, so it isn't told again.
     told: Option<u64>,
+    /// Tool calls that failed since the last retro (ADR-0010).
+    failures: u32,
 }
 
 impl Activity {
@@ -57,6 +59,7 @@ impl Activity {
                     self.prompt = Some((prompt, now));
                 }
             }
+            Some("PostToolUseFailure") => self.failures += 1,
             Some("SessionStart") => self.told = None,
             _ => {}
         }
@@ -74,6 +77,22 @@ impl Activity {
 
     fn last_edit(&self) -> Option<u64> {
         self.edits.back().map(|(_, at)| *at)
+    }
+
+    /// How many tool calls failed since the last retro.
+    pub fn failures(&self) -> u32 {
+        self.failures
+    }
+
+    /// The same, for a retro that reads them now.
+    pub fn take_failures(&mut self) -> u32 {
+        std::mem::take(&mut self.failures)
+    }
+
+    /// Keeps the next turn's end in for a retro: a failure nothing has worked
+    /// after yet may be answered then.
+    pub fn arm(&mut self) {
+        self.failures = self.failures.max(1);
     }
 
     /// Whether `text` is news to this agent; remembers it either way.
@@ -325,6 +344,23 @@ mod tests {
             6,
         );
         assert_eq!(a.prompt.as_ref().unwrap().0, "fix the login bug");
+    }
+
+    #[test]
+    fn counts_failures_until_asked() {
+        let mut a = Activity::default();
+        for _ in 0..2 {
+            a.note(
+                &json!({"hook_event_name":"PostToolUseFailure","tool_name":"Bash"}),
+                1,
+            );
+        }
+        tool(&mut a, "Bash", json!({"command": "ls"}), 2);
+        assert_eq!(a.failures(), 2);
+        assert_eq!(a.take_failures(), 2);
+        assert_eq!(a.take_failures(), 0);
+        a.arm();
+        assert_eq!(a.failures(), 1);
     }
 
     #[test]

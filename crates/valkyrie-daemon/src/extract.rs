@@ -3,6 +3,10 @@
 //! like a correction, a locked-down `claude -p --model haiku` is asked for the
 //! lasting rule in it, which is then proposed for you to review. Never anything
 //! more: its proposals wait on you like an agent's.
+//!
+//! A turn that ended after a tool failed also gets a retro (ADR-0010): the failed
+//! calls and what worked next are read for the lasting lesson in them, under the
+//! same limits.
 
 use crate::Registry;
 use std::collections::{HashMap, VecDeque};
@@ -10,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use valkyrie_context::extract;
+use valkyrie_context::{extract, retro};
 use valkyrie_proto::{AutoMode, NewDecision, Provenance, SessionId};
 
 /// How much of a transcript's end is read: a few exchanges.
@@ -46,6 +50,7 @@ pub fn set_mode(context_dir: &Path, mode: AutoMode) -> anyhow::Result<()> {
 /// Takes `Stop`s (session ids) and proposes what it finds, one at a time.
 pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedReceiver<SessionId>) {
     let command = valkyrie_context::model::command(extract::SYSTEM);
+    let retro_command = valkyrie_context::model::command(retro::SYSTEM);
     let mut last: HashMap<SessionId, u64> = HashMap::new();
     let mut calls: VecDeque<(Instant, SessionId)> = VecDeque::new();
     while let Some(id) = turns.recv().await {
@@ -60,6 +65,10 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
         for id in ids {
             let mode = mode(&registry.host.context_dir);
             if mode == AutoMode::Off {
+                // So failures don't pile up for when reading is back on.
+                if let Ok(s) = registry.get(id) {
+                    s.take_failures();
+                }
                 continue;
             }
             while calls
@@ -68,12 +77,20 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
             {
                 calls.pop_front();
             }
-            let theirs = calls.iter().filter(|(_, s)| *s == id).count();
-            if calls.len() >= PER_HOUR || theirs >= PER_SESSION_HOUR {
+            let room = |calls: &VecDeque<(Instant, SessionId)>| {
+                let theirs = calls.iter().filter(|(_, s)| *s == id).count();
+                calls.len() < PER_HOUR && theirs < PER_SESSION_HOUR
+            };
+            if !room(&calls) {
                 tracing::debug!(session = id, "extraction skipped: hourly limit");
                 continue;
             }
             if look(&registry, id, mode, &command, &mut last).await {
+                calls.push_back((Instant::now(), id));
+            }
+            // A retro that doesn't run now leaves its failures for the next turn's end.
+            let failed = registry.get(id).map(|s| s.failures()).unwrap_or(0);
+            if failed > 0 && room(&calls) && reflect(&registry, id, mode, &retro_command).await {
                 calls.push_back((Instant::now(), id));
             }
         }
@@ -188,6 +205,159 @@ async fn look(
         registry.refresh_proposals();
     }
     true
+}
+
+/// The retro of one session's latest turns: reads its failed calls and what
+/// worked next, records the ones not recorded before, and asks the model about
+/// those. Returns whether the model was asked.
+async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[String]) -> bool {
+    let Ok(session) = registry.get(id) else {
+        return false;
+    };
+    session.take_failures();
+    let info = session.info();
+    if !mode.reads(&info.status.agent) {
+        return false;
+    }
+    let Some(chat) = info.chat.clone() else {
+        return false;
+    };
+    // Outside a repository there's no project to learn for.
+    let root = valkyrie_context::project::root(&info.cwd);
+    if !root.join(".git").exists() {
+        return false;
+    }
+    let Ok(tail) = tokio::task::spawn_blocking(move || read_tail(&chat)).await else {
+        return false;
+    };
+    let now = now_secs();
+    let before = registry.context.lock().unwrap().failures(&root, now);
+    let (mut moments, waiting): (Vec<_>, Vec<_>) = retro::moments(&tail)
+        .into_iter()
+        .filter(|m| !before.calls.contains(&m.id))
+        .partition(retro::Moment::answered);
+    if !waiting.is_empty() {
+        session.arm_retro();
+    }
+    if moments.is_empty() {
+        return false;
+    }
+    let sigs: Vec<(u64, &str)> = moments
+        .iter()
+        .map(|m| (m.signature, m.id.as_str()))
+        .collect();
+    if let Err(e) = registry
+        .context
+        .lock()
+        .unwrap()
+        .record_failures(&root, &sigs, now)
+    {
+        tracing::warn!(session = id, "couldn't record failures: {e:#}");
+    }
+    let seen = before.seen;
+    // Traps seen before first, then the newest.
+    moments.reverse();
+    moments.sort_by_key(|m| std::cmp::Reverse(seen.get(&m.signature).copied().unwrap_or(0)));
+    moments.truncate(retro::MAX_MOMENTS);
+    let moments: Vec<_> = moments
+        .into_iter()
+        .map(|m| {
+            let count = seen.get(&m.signature).copied().unwrap_or(0);
+            (m, count)
+        })
+        .collect();
+    let mut known = registry.context.lock().unwrap().load(&root);
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prompt = retro::prompt(&name, &known, &moments);
+    let dir = registry.host.context_dir.clone();
+    let command = command.to_vec();
+    let asked = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::ensure_private_dir(&dir)?;
+        valkyrie_context::model::ask(&command, &prompt, &dir, MODEL_TIMEOUT)
+    })
+    .await;
+    let reply = match asked.map_err(anyhow::Error::from).and_then(|r| r) {
+        Ok(reply) => reply,
+        Err(e) => {
+            tracing::warn!(session = id, "retro failed: {e:#}");
+            return true;
+        }
+    };
+    let mut proposed = 0;
+    for (f, n) in retro::parse_reply(&reply, moments.len()) {
+        if extract::already_known(&f.title, &known) {
+            continue;
+        }
+        let (m, count) = &moments[n];
+        let error = m
+            .error
+            .lines()
+            .find(|l| !l.starts_with("(exit "))
+            .unwrap_or("");
+        let seen = if *count > 0 {
+            format!(", seen {} times before", count)
+        } else {
+            String::new()
+        };
+        let new = NewDecision {
+            cwd: info.cwd.clone(),
+            title: f.title,
+            body: format!(
+                "{}\n\nFrom a failure{seen}: `{}` → {}",
+                f.body,
+                retro::quote(&m.input),
+                retro::quote(error)
+            ),
+            kind: f.kind,
+            propose: true,
+            supersedes: None,
+            review_every: None,
+            session: Some(id),
+        };
+        let provenance = Provenance {
+            by: "valkyrie".into(),
+            session: Some(info.name.clone()),
+            conversation: session.conversation(),
+            commit: None,
+            cwd: Some(info.cwd.clone()),
+        };
+        let decided = registry
+            .context
+            .lock()
+            .unwrap()
+            .decide(&new, provenance, now);
+        match decided {
+            Ok(d) => {
+                tracing::info!(session = id, id = d.id, "proposed from a failure");
+                let recorded =
+                    registry
+                        .context
+                        .lock()
+                        .unwrap()
+                        .record_proposal(&root, m.signature, d.id, now);
+                if let Err(e) = recorded {
+                    tracing::warn!(session = id, "couldn't record the proposal: {e:#}");
+                }
+                known.push(d);
+                proposed += 1;
+            }
+            Err(e) => tracing::warn!(session = id, "couldn't propose: {e:#}"),
+        }
+    }
+    if proposed > 0 {
+        registry.refresh_proposals();
+    }
+    true
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn read_tail(path: &Path) -> String {

@@ -1167,6 +1167,20 @@ impl Session {
         self.state.lock().unwrap().activity.clone()
     }
 
+    /// How many tool calls failed since the last retro (see `Activity::failures`).
+    pub fn failures(&self) -> u32 {
+        self.state.lock().unwrap().activity.failures()
+    }
+
+    pub fn take_failures(&self) -> u32 {
+        self.state.lock().unwrap().activity.take_failures()
+    }
+
+    /// See `Activity::arm`.
+    pub fn arm_retro(&self) {
+        self.state.lock().unwrap().activity.arm()
+    }
+
     /// Whether `text` is news to this session's agent (see `Activity::tell`).
     pub fn tell(&self, text: &str) -> bool {
         self.state.lock().unwrap().activity.tell(text)
