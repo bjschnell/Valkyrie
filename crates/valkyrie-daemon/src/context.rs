@@ -34,6 +34,8 @@ pub(crate) struct Caller {
     /// `None`: a human.
     pub(crate) agent: Option<String>,
     pub(crate) session: Option<Arc<Session>>,
+    /// A human only as the `valk web` bridge: for its paired devices, not itself.
+    pub(crate) bridge: bool,
 }
 
 impl Caller {
@@ -41,6 +43,7 @@ impl Caller {
         Caller {
             agent: Some(name.into()),
             session: None,
+            bridge: false,
         }
     }
 }
@@ -99,16 +102,24 @@ impl Registry {
         {
             session = sessions.iter().find(|s| s.tty() == Some(tty)).cloned();
         }
+        let mut bridge = false;
         let agent = match &session {
             Some(s) => seen_agent.or_else(|| s.agent_behind()),
             None if seen_agent.is_some() => seen_agent,
             // A terminal of its own: someone at a keyboard.
             None if tty.is_some() => None,
-            None if foreground::is_web_bridge(peer.pid) => None,
+            None if foreground::is_web_bridge(peer.pid) => {
+                bridge = true;
+                None
+            }
             // No terminal and no session: daemonized, so whoever started it is unknown.
             None => Some("detached".into()),
         };
-        Caller { agent, session }
+        Caller {
+            agent,
+            session,
+            bridge,
+        }
     }
 
     /// What's waiting on review: proposals, then active decisions flagged as
@@ -165,10 +176,26 @@ impl Registry {
         })
     }
 
-    /// Only a human may act on decisions, or vouch for a new phone.
+    /// Only a human may act on decisions; through the `valk web` bridge, that is
+    /// one of the devices they paired.
     pub(crate) fn vouch(&self, peer: Option<Peer>, what: &str) -> Result<()> {
         if let Some(agent) = self.caller(peer).agent {
             bail!("{what} is for the user, not {agent}: run it from your own terminal");
+        }
+        Ok(())
+    }
+
+    /// A human at this process's own terminal, as `Vouch` asks before a pairing code
+    /// is shown. The bridge's exemption is for its devices, not for `valk web`
+    /// itself: one started detached (`setsid valk web`) has no terminal and no
+    /// agent above it, yet anyone may have started it.
+    pub(crate) fn vouch_in_person(&self, peer: Option<Peer>, what: &str) -> Result<()> {
+        let caller = self.caller(peer);
+        if let Some(agent) = caller.agent {
+            bail!("{what} is for the user, not {agent}: run it from your own terminal");
+        }
+        if caller.bridge {
+            bail!("{what} is for the user, not a detached process: run it from your own terminal");
         }
         Ok(())
     }

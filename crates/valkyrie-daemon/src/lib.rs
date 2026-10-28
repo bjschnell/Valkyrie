@@ -987,9 +987,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             }
             ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
             ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
-            ClientMsg::Vouch { req, what } => {
-                (req, registry.vouch(peer, &what).map(|()| Reply::Done))
-            }
+            ClientMsg::Vouch { req, what } => (
+                req,
+                registry.vouch_in_person(peer, &what).map(|()| Reply::Done),
+            ),
             ClientMsg::Upgrade { req, exe } => (req, upgrade(&registry, exe).await),
             ClientMsg::List { req } => {
                 let sessions = registry.listed().iter().map(|s| s.info()).collect();
