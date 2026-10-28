@@ -58,6 +58,17 @@ fn flag(
     (*updated == d.updated).then(|| why.clone())
 }
 
+/// Unreviewed text never reaches an agent (ADR-0007 §4): it sees that a proposal
+/// waits, by its title, not the body it would follow.
+pub(crate) fn withhold(d: &mut valkyrie_proto::Decision) {
+    if d.status == valkyrie_proto::DecisionStatus::Proposed {
+        d.body = WITHHELD.into();
+    }
+}
+
+const WITHHELD: &str = "(A proposal the user hasn't reviewed yet: its text isn't shown to agents. \
+                        Read it in the TUI, the web app or your own terminal.)";
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -300,7 +311,8 @@ impl Registry {
     }
 
     /// The decisions of the project holding `cwd`, or of every project.
-    pub(crate) fn decisions(&self, cwd: Option<PathBuf>) -> Reply {
+    pub(crate) fn decisions(&self, cwd: Option<PathBuf>, peer: Option<Peer>) -> Reply {
+        let agent = self.caller(peer).agent.is_some();
         let store = self.context.lock().unwrap();
         let decisions = match cwd {
             Some(cwd) => store.load(&valkyrie_context::project::root(&cwd)),
@@ -315,6 +327,9 @@ impl Registry {
             .into_iter()
             .map(|mut d| {
                 d.fresh.review = flag(&stale, &d);
+                if agent {
+                    withhold(&mut d);
+                }
                 d
             })
             .collect();
@@ -438,5 +453,33 @@ impl Registry {
             }
         }
         self.refresh_proposals();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use valkyrie_proto::{Decision, DecisionStatus};
+
+    fn decision(status: &str) -> Decision {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "project": "/r", "title": "Cut a release", "body": "1. run it",
+            "kind": "skill", "status": status, "created": 1, "updated": 1,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn agents_get_a_proposals_title_but_not_its_body() {
+        let mut proposed = decision("proposed");
+        withhold(&mut proposed);
+        assert_eq!(proposed.title, "Cut a release");
+        assert_eq!(proposed.body, WITHHELD);
+        for status in ["active", "retired"] {
+            let mut d = decision(status);
+            withhold(&mut d);
+            assert_eq!(d.body, "1. run it");
+            assert_eq!(d.status, DecisionStatus::parse(status).unwrap());
+        }
     }
 }

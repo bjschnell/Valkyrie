@@ -929,10 +929,13 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                     let rx = registry.queue.subscribe();
                     let proposals = registry.proposals.subscribe();
                     let items = registry.items.subscribe();
+                    // Proposals as `Decisions` gives them: an agent sees their titles.
+                    let agent = registry.caller(peer).agent.is_some();
                     queue_watch = Some(tokio::spawn(forward_queue(
                         rx,
                         proposals,
                         items,
+                        agent,
                         out.clone(),
                     )));
                 }
@@ -951,7 +954,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 // few minutes.
                 let root = cwd.as_deref().map(valkyrie_context::project::root);
                 registry.check_stale(root, Duration::from_secs(30)).await;
-                (req, Ok(registry.decisions(cwd)))
+                (req, Ok(registry.decisions(cwd, peer)))
             }
             ClientMsg::MarkSeen { req, session, seq } => (
                 req,
@@ -1280,14 +1283,21 @@ async fn forward_queue(
     mut rx: watch::Receiver<Queue>,
     mut proposals: watch::Receiver<Proposals>,
     mut backlog: watch::Receiver<backlog::Items>,
+    agent: bool,
     out: Out,
 ) {
     let send = async |msg| out.send(Arc::new(msg)).await.is_ok();
+    let held = |mut items: Vec<valkyrie_proto::Decision>| {
+        if agent {
+            items.iter_mut().for_each(context::withhold);
+        }
+        items
+    };
     let items = (**rx.borrow_and_update()).clone();
     if !send(ServerMsg::Queue { items }).await {
         return;
     }
-    let items = (**proposals.borrow_and_update()).clone();
+    let items = held((**proposals.borrow_and_update()).clone());
     if !send(ServerMsg::Proposals { items }).await {
         return;
     }
@@ -1302,7 +1312,7 @@ async fn forward_queue(
                 Err(_) => return,
             },
             changed = proposals.changed() => match changed {
-                Ok(()) => ServerMsg::Proposals { items: (**proposals.borrow_and_update()).clone() },
+                Ok(()) => ServerMsg::Proposals { items: held((**proposals.borrow_and_update()).clone()) },
                 Err(_) => return,
             },
             changed = backlog.changed() => match changed {

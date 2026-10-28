@@ -36,6 +36,15 @@ impl Drop for Daemon {
     }
 }
 
+/// Decision `id` as the daemon stored it. `valk decisions show` withholds a
+/// proposal's body from agents, and a test may run under one.
+fn stored(dir: &Path, repo: &Path, id: u32) -> String {
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let all = store.load(&valkyrie_context::project::root(repo));
+    let d = all.iter().find(|d| d.id == id);
+    valkyrie_context::render(d.unwrap_or_else(|| panic!("no decision #{id}: {all:?}")))
+}
+
 fn wait_for(path: &Path) -> String {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
@@ -80,6 +89,7 @@ fn agents_only_propose_and_never_review() {
              cd {repo}\n\
              valk decide 'Agent idea' 'from the agent' > {a} 2>&1\n\
              valk decisions accept 1 > {s} 2>&1\n\
+             valk decisions show 1 > {shown} 2>&1\n\
              env -u VALK_SESSION valk decide 'No env' > {e} 2>&1\n\
              (valk decide 'Forked' > {f} 2>&1 &)\n\
              valk new --cwd {repo} -- sh -c \"valk decide 'Laundered' > {l} 2>&1; sleep 30\" > /dev/null\n\
@@ -89,6 +99,7 @@ fn agents_only_propose_and_never_review() {
             repo = repo.display(),
             a = o("agent"),
             s = o("self-accept"),
+            shown = o("agent-show"),
             e = o("no-env"),
             f = o("forked"),
             l = o("laundered"),
@@ -149,6 +160,20 @@ fn agents_only_propose_and_never_review() {
         read("laundered")
     );
     assert!(read("pair").contains("is for the user"), "{}", read("pair"));
+    // An agent sees what waits on the user, never the unreviewed text; the user does.
+    let shown = read("agent-show");
+    assert!(
+        shown.contains("# Agent idea")
+            && shown.contains("isn't shown to agents")
+            && !shown.contains("from the agent"),
+        "{shown}"
+    );
+    human(&format!("valk decisions show 1 > {} 2>&1", o("human-show")));
+    assert!(
+        read("human-show").contains("from the agent"),
+        "{}",
+        read("human-show")
+    );
 
     // A human's own decision is active at once, and a human can accept.
     human(&format!(
@@ -286,7 +311,7 @@ fn corrections_become_proposals() {
         listed.contains("#1  constraint Use pnpm, never npm (proposed)"),
         "{listed}"
     );
-    let shown = valk(&["decisions", "show", "1"]);
+    let shown = stored(&dir, &repo, 1);
     assert!(
         shown.contains("by: valkyrie")
             && shown.contains("From your message: “no, we use pnpm here, never npm”"),
@@ -426,7 +451,7 @@ fn failures_become_proposals() {
         listed.contains("#1  gotcha     Kill exact pids, never pkill -f (proposed)"),
         "{listed}"
     );
-    let shown = valk(&["decisions", "show", "1"]);
+    let shown = stored(&dir, &repo, 1);
     assert!(
         shown.contains("by: valkyrie")
             && shown.contains("From a failure: `pkill -f 'valk daemon'` → Terminated"),
@@ -613,7 +638,7 @@ fn skills_are_indexed_patched_learned_and_exported() {
         std::fs::read_to_string(out.join("calls")).unwrap_or_default(),
         std::fs::read_to_string(dir.join("state/valkyrie/daemon.log")).unwrap_or_default()
     );
-    let shown = valk(&["decisions", "show", "2"]);
+    let shown = stored(&dir, &repo, 2);
     assert!(
         shown.contains("supersedes: 1")
             && shown.contains("1. Set the upstream.\n2. Push the tag.")
@@ -640,7 +665,7 @@ fn skills_are_indexed_patched_learned_and_exported() {
             && learn.contains("! (exit 128) | fatal: no upstream branch\n"),
         "{learn}"
     );
-    assert!(valk(&["decisions", "show", "3"]).contains("Learned from the session"));
+    assert!(stored(&dir, &repo, 3).contains("Learned from the session"));
 
     // The agent read skill #1: that's recorded, so it isn't retired as unused.
     let used = std::fs::read_dir(dir.join("state/valkyrie/context"))
@@ -735,9 +760,7 @@ fn skills_are_indexed_patched_learned_and_exported() {
         listed.contains("#4  skill      Ship the web bundle (proposed)"),
         "{listed}"
     );
-    assert!(
-        valk(&["decisions", "show", "4"]).contains("after you said “Perfect, commit and push”")
-    );
+    assert!(stored(&dir, &repo, 4).contains("after you said “Perfect, commit and push”"));
     std::thread::sleep(Duration::from_millis(1000));
     let asked = std::fs::read_to_string(out.join("calls")).unwrap();
     assert_eq!(asked.matches("---").count(), 3, "{asked}");
