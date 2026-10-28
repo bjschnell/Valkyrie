@@ -29,7 +29,7 @@ pub struct Activity {
     prompt: Option<(String, u64)>,
     /// What this session's agent was last told, so it isn't told again.
     told: Option<u64>,
-    /// Tool calls that failed since the last retro (ADR-0010).
+    /// Tool calls that failed since the last retro (ADR-0011).
     failures: u32,
 }
 

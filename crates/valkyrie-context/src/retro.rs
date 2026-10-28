@@ -1,4 +1,4 @@
-//! Learning from what went wrong in a session (ADR-0010). When an agent's turn
+//! Learning from what went wrong in a session (ADR-0011). When an agent's turn
 //! ends after a tool failed, the daemon reads the transcript for moments: a failed
 //! call and what worked next, or a call that was refused. Each has a signature, so
 //! the same trap is recognized when it comes back. A small model is asked for the

@@ -4,7 +4,7 @@
 //! lasting rule in it, which is then proposed for you to review. Never anything
 //! more: its proposals wait on you like an agent's.
 //!
-//! A turn that ended after a tool failed also gets a retro (ADR-0010): the failed
+//! A turn that ended after a tool failed also gets a retro (ADR-0011): the failed
 //! calls and what worked next are read for the lasting lesson in them, under the
 //! same limits.
 
@@ -379,7 +379,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
 }
 
 /// Records that a session worked in its project, and which of its active skills
-/// it read, by the transcript's time (ADR-0010 §6), so one nobody reads is found.
+/// it read, by the transcript's time (ADR-0011 §6), so one nobody reads is found.
 async fn track_use(registry: Arc<Registry>, id: SessionId) {
     let Ok(session) = registry.get(id) else {
         return;
@@ -423,7 +423,7 @@ async fn track_use(registry: Arc<Registry>, id: SessionId) {
 }
 
 /// When the last message you typed in a session approved a long job, asks the
-/// model for the procedure in it, as a skill or a fix to one (ADR-0010 §5).
+/// model for the procedure in it, as a skill or a fix to one (ADR-0011 §5).
 /// Returns whether the model was asked.
 async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[String]) -> bool {
     let Ok(session) = registry.get(id) else {

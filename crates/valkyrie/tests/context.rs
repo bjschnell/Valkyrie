@@ -345,7 +345,7 @@ fn corrections_become_proposals() {
     drop(daemon);
 }
 
-/// ADR-0010: a turn that ended after a tool failed gets a retro. The failed call
+/// ADR-0011: a turn that ended after a tool failed gets a retro. The failed call
 /// and what worked next become a proposal, its signature is recorded, and a turn
 /// with no new failure isn't read again.
 #[test]
@@ -482,7 +482,7 @@ fn failures_become_proposals() {
     drop(daemon);
 }
 
-/// ADR-0010 §3–5: a skill is listed by title, read in full, rewritten when a
+/// ADR-0011 §3–5: a skill is listed by title, read in full, rewritten when a
 /// session that followed it fails, distilled from a session on request, and
 /// exported where Claude Code loads it.
 #[test]

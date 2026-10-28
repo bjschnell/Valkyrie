@@ -372,7 +372,7 @@ impl Registry {
             return;
         }
         let now = now_secs();
-        // Skills no agent read while the project was worked in (ADR-0010 §6):
+        // Skills no agent read while the project was worked in (ADR-0011 §6):
         // asked about first, and retired only once the question went unanswered
         // for long, so they don't pile up. Counting only: no model.
         let mut idle = Vec::new();
