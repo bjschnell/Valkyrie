@@ -324,9 +324,14 @@ How it works:
    needed. Skills come from you (`valk decide -k skill "Cut a release" -` with the
    steps on stdin), from agents, from `valk decisions mine` when what you repeat is
    a procedure, and from `valk decisions learn <session>`, which reads what a
-   session did. When a session that followed a skill hits a failure, the retro may
-   propose the skill rewritten; accepting it replaces the old one. `valk decisions
-   export` writes active skills to `.claude/skills/` where Claude Code loads them.
+   session did. The daemon does that by itself when you approve a long job ("perfect,
+   ship it" after 15+ tool calls). When a prompt asks for what a skill covers, the
+   agent is told to read it first. When a session that followed a skill hits a
+   failure, the retro may propose the skill rewritten; accepting it replaces the old
+   one. A skill no agent has read in 45 days asks whether it's still needed, and is
+   retired at 90. `valk decisions export` writes active skills to `.claude/skills/`
+   where Claude Code loads them. In the TUI, PgUp/PgDn scrolls a long proposal;
+   a skill is accepted once you've read it to the end.
 7. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently

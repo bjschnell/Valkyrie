@@ -38,6 +38,74 @@ const FAILURES_COMPACT: u64 = 1 << 20;
 /// health says it isn't working.
 pub const RECURRED: usize = 2;
 
+/// How a project's skills are used (ADR-0010 §6), so one nobody needs is found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SkillUse {
+    /// When this started being recorded: nothing before it is known.
+    pub since: u64,
+    /// When each skill was last read by an agent.
+    pub reads: BTreeMap<u32, u64>,
+    /// Each session's (conversation's) last turn in the project.
+    pub sessions: BTreeMap<String, u64>,
+    /// When an idle skill was first asked about, by id and the `updated` it had.
+    pub flagged: BTreeMap<(u32, u64), u64>,
+    /// The approvals a skill was already learned from (their transcript ids).
+    pub learned: Vec<String>,
+}
+
+impl SkillUse {
+    /// Sessions with a turn after `at`.
+    pub fn sessions_since(&self, at: u64) -> usize {
+        self.sessions.values().filter(|t| **t > at).count()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "since": self.since,
+            "reads": self.reads.iter().map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<_, _>>(),
+            "sessions": self.sessions,
+            "flagged": self.flagged.iter().map(|((id, u), at)| (format!("{id}:{u}"), *at)).collect::<BTreeMap<_, _>>(),
+            "learned": self.learned,
+        })
+    }
+
+    fn from_json(v: &serde_json::Value) -> Self {
+        let map = |key: &str| -> Vec<(String, u64)> {
+            v[key]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_u64()?)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Self {
+            since: v["since"].as_u64().unwrap_or(0),
+            reads: map("reads")
+                .into_iter()
+                .filter_map(|(k, at)| Some((k.parse().ok()?, at)))
+                .collect(),
+            sessions: map("sessions").into_iter().collect(),
+            flagged: map("flagged")
+                .into_iter()
+                .filter_map(|(k, at)| {
+                    let (id, u) = k.split_once(':')?;
+                    Some(((id.parse().ok()?, u.parse().ok()?), at))
+                })
+                .collect(),
+            learned: v["learned"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// What a project's sessions' failures have been (ADR-0010 §2).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Failures {
@@ -421,6 +489,39 @@ impl Store {
             }
         }
         out
+    }
+
+    /// How `root`'s skills are used (ADR-0010 §6); empty before anything was
+    /// recorded.
+    pub fn skill_use(&self, root: &Path) -> SkillUse {
+        let path = self.base.join(project::key(root)).join("skill-use.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .map(|v| SkillUse::from_json(&v))
+            .unwrap_or_default()
+    }
+
+    /// Changes how `root`'s skills are used with `f`, from `now` on if nothing
+    /// was recorded before. Sessions quiet for [`FAILURE_DAYS`] are forgotten.
+    pub fn update_skill_use(
+        &self,
+        root: &Path,
+        now: u64,
+        f: impl FnOnce(&mut SkillUse),
+    ) -> Result<()> {
+        let mut used = self.skill_use(root);
+        if used.since == 0 {
+            used.since = now;
+        }
+        f(&mut used);
+        used.sessions
+            .retain(|_, at| now.saturating_sub(*at) <= FAILURE_DAYS * 86_400);
+        let keep = used.learned.len().saturating_sub(100);
+        used.learned.drain(..keep);
+        self.mark_project(root)?;
+        let path = self.base.join(project::key(root)).join("skill-use.json");
+        write_atomic(&path, &format!("{}\n", used.to_json()))
     }
 
     fn failures_file(&self, root: &Path) -> PathBuf {
@@ -966,6 +1067,35 @@ mod tests {
             .review(&f.repo, d.id, &ReviewAction::Confirm, None, None, 50)
             .unwrap();
         assert!(f.store.recurred(&f.repo, &all()).is_empty());
+    }
+
+    #[test]
+    fn skill_use_round_trips_and_forgets_quiet_sessions() {
+        let f = Fixture::new("skill-use");
+        assert_eq!(f.store.skill_use(&f.repo), SkillUse::default());
+        let day = 86_400;
+        f.store
+            .update_skill_use(&f.repo, 10 * day, |u| {
+                u.reads.insert(1, 9 * day);
+                u.sessions.insert("old".into(), day);
+                u.sessions.insert("s1".into(), 10 * day);
+                u.flagged.insert((2, 77), 10 * day);
+                u.learned.push("uuid-1".into());
+            })
+            .unwrap();
+        let got = f.store.skill_use(&f.repo);
+        assert_eq!(got.since, 10 * day);
+        assert_eq!(got.reads, BTreeMap::from([(1, 9 * day)]));
+        assert_eq!(got.flagged, BTreeMap::from([((2, 77), 10 * day)]));
+        assert_eq!(got.learned, ["uuid-1"]);
+        assert_eq!(got.sessions_since(5 * day), 1);
+        // A later update keeps when it started; a session quiet for long goes.
+        f.store
+            .update_skill_use(&f.repo, (FAILURE_DAYS + 5) * day, |_| {})
+            .unwrap();
+        let got = f.store.skill_use(&f.repo);
+        assert_eq!(got.since, 10 * day);
+        assert!(!got.sessions.contains_key("old"));
     }
 
     #[test]

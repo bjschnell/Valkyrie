@@ -183,9 +183,12 @@ struct App {
     /// A flagged decision `d` was pressed on once: retiring has no undo, so it
     /// takes a second `d`.
     retire_armed: Option<(PathBuf, u32)>,
-    /// The proposal preview's inner size when last drawn: a skill longer than it
-    /// can't be read whole here, so it isn't accepted here.
-    preview_size: std::cell::Cell<(u16, u16)>,
+    /// How far down the shown proposal's text is scrolled: whose it is, the top
+    /// row, and how many rows show. Drawing keeps it in range.
+    proposal_scroll: std::cell::Cell<ProposalScroll>,
+    /// The last proposal scrolled to its end (project, id, `updated`): a skill is
+    /// accepted only once read whole.
+    proposal_read: std::cell::RefCell<Option<(PathBuf, u32, u64)>>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
     view: Option<Attached>,
@@ -342,7 +345,8 @@ impl App {
             items: Vec::new(),
             backlog: None,
             retire_armed: None,
-            preview_size: std::cell::Cell::new((0, 0)),
+            proposal_scroll: Default::default(),
+            proposal_read: Default::default(),
             selected: 0,
             view: None,
             status: String::new(),
@@ -1883,21 +1887,69 @@ impl App {
             .checked_sub(self.proposals.len() + self.queue.len())
     }
 
-    /// Whether a proposal's text fits the preview, so what's accepted here was
-    /// seen whole. Only a skill gets long enough not to.
-    fn fits(&self, d: &Decision) -> bool {
-        if d.kind != valkyrie_proto::DecisionKind::Skill {
-            return true;
+    /// Whether a proposal was read whole here, so what's accepted was seen: a
+    /// skill must have been scrolled to its end. Others are a few sentences.
+    fn read_whole(&self, d: &Decision) -> bool {
+        d.kind != valkyrie_proto::DecisionKind::Skill
+            || *self.proposal_read.borrow() == Some((d.project.clone(), d.id, d.updated))
+    }
+
+    /// Scrolls the shown proposal's text by `pages` (a page less a row, so the
+    /// last row stays in sight).
+    fn scroll_proposal(&self, pages: i32) {
+        let mut at = self.proposal_scroll.get();
+        let page = i32::from(at.rows.saturating_sub(1).max(1));
+        at.top = (i32::from(at.top) + pages * page).clamp(0, i32::from(u16::MAX)) as u16;
+        self.proposal_scroll.set(at);
+    }
+
+    /// A proposal's text in `area`, scrolled as `proposal_scroll` says, with how
+    /// much is left below. Notes when it has been read to its end.
+    fn draw_proposal_text(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        d: &Decision,
+        lines: Vec<Line<'static>>,
+    ) {
+        let t = self.settings.theme;
+        let mut at = self.proposal_scroll.get();
+        // Another proposal, or a new version of this one, starts at its top.
+        let whose = (fnv_path(&d.project), d.id, d.updated);
+        if at.whose != Some(whose) {
+            at = ProposalScroll {
+                whose: Some(whose),
+                ..Default::default()
+            };
         }
-        let (width, height) = self.preview_size.get();
-        let width = usize::from(width.max(1));
-        // The kind line and the note that it doesn't fit.
-        let rows: usize = 2 + d
-            .body
-            .lines()
-            .map(|l| l.chars().count().div_ceil(width).max(1))
-            .sum::<usize>();
-        rows <= usize::from(height)
+        if area.width == 0 || area.height == 0 {
+            // Nothing shows, so nothing is read.
+            return;
+        }
+        let text = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let total = u16::try_from(text.line_count(area.width)).unwrap_or(u16::MAX);
+        let last = total.saturating_sub(area.height);
+        at.top = at.top.min(last);
+        at.rows = area.height;
+        self.proposal_scroll.set(at);
+        if at.top >= last {
+            *self.proposal_read.borrow_mut() = Some((d.project.clone(), d.id, d.updated));
+        }
+        frame.render_widget(text.scroll((at.top, 0)), area);
+        if at.top < last && area.height > 0 {
+            let more = format!(" ↓ {} more rows · PgDn ", last - at.top);
+            let width = (more.chars().count() as u16).min(area.width);
+            let row = Rect::new(
+                area.x + area.width - width,
+                area.y + area.height - 1,
+                width,
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new(more.fg(t.accent2).bold()).style(style::Style::new().bg(t.panel)),
+                row,
+            );
+        }
     }
 
     /// The proposal under the cursor.
@@ -1973,10 +2025,8 @@ impl App {
             self.retire_armed = Some((project, id));
             return Some(format!("d again to retire #{id}; agents stop getting it"));
         }
-        if !flagged && yes && !self.fits(d) {
-            return Some(format!(
-                "#{id} is longer than the preview: read it whole with `valk decisions show {id}` or in the web app, and accept it there"
-            ));
+        if !flagged && yes && !self.read_whole(d) {
+            return Some(format!("read #{id} to its end first: PgDn scrolls it"));
         }
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
@@ -2014,6 +2064,8 @@ impl App {
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.reviewing = Some(cursor.saturating_sub(1)),
                 b"j" | b"\x1b[B" | b"\x1bOB" => self.reviewing = Some((cursor + 1).min(last)),
+                b"\x1b[6~" | b" " => self.scroll_proposal(1),
+                b"\x1b[5~" => self.scroll_proposal(-1),
                 b"a" | b"d" => {
                     let said = self.review_at(cursor, key == b"a").await;
                     if let (Some(said), Some(view)) = (said, &mut self.view) {
@@ -2064,6 +2116,8 @@ impl App {
             }
             HomeKey::Accept => self.review(true).await,
             HomeKey::Reject => self.review(false).await,
+            HomeKey::PageDown => self.scroll_proposal(1),
+            HomeKey::PageUp => self.scroll_proposal(-1),
             HomeKey::Kill => {
                 if let Some(id) = selected {
                     if let Err(e) = self.client.kill(id).await {
@@ -2686,22 +2740,11 @@ impl App {
                 )
                 .fg(t.muted),
             )];
-            self.preview_size
-                .set((area.width.saturating_sub(2), area.height.saturating_sub(2)));
-            if !self.fits(d) {
-                lines.push(Line::from(
-                    format!(
-                        "longer than this panel: read it whole with `valk decisions show {}` or in the web app, and accept it there",
-                        d.id
-                    )
-                    .fg(t.accent2),
-                ));
-            }
             lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
-            let body = Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(panel(title, t, false));
-            frame.render_widget(body, area);
+            let block = panel(title, t, false);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            self.draw_proposal_text(frame, inner, d, lines);
             return;
         }
         let (selected, _) = self.selection();
@@ -2855,6 +2898,7 @@ impl App {
         } else {
             &[
                 ("j/k", "move"),
+                ("pgup/dn", "scroll"),
                 ("a", "accept"),
                 ("d", "reject"),
                 ("esc", "back"),
@@ -2906,8 +2950,26 @@ impl App {
             ));
         }
         lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+        self.draw_proposal_text(frame, body, d, lines);
     }
+}
+
+/// Where a proposal's text is scrolled to (`App::proposal_scroll`).
+#[derive(Clone, Copy, Default)]
+struct ProposalScroll {
+    /// Its project (hashed, to stay `Copy`), id and version; another resets it.
+    whose: Option<(u64, u32, u64)>,
+    top: u16,
+    rows: u16,
+}
+
+fn fnv_path(path: &std::path::Path) -> u64 {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        })
 }
 
 /// A peek's smallest size, when the session leaves room for it.
@@ -4665,6 +4727,9 @@ enum HomeKey {
     Accept,
     /// Reject the selected proposal.
     Reject,
+    /// Scroll the shown proposal's text.
+    PageUp,
+    PageDown,
     /// A short code that pairs another device with the web app.
     AddDevice,
     /// Open the backlog page.
@@ -4701,6 +4766,8 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             match key {
                 b"\x1b[A" | b"\x1bOA" => keys.push((HomeKey::Up, i + len)),
                 b"\x1b[B" | b"\x1bOB" => keys.push((HomeKey::Down, i + len)),
+                b"\x1b[6~" => keys.push((HomeKey::PageDown, i + len)),
+                b"\x1b[5~" => keys.push((HomeKey::PageUp, i + len)),
                 _ => {}
             }
             i += len;
@@ -6329,6 +6396,65 @@ mod tests {
         for (_, r) in &layout.tabs {
             assert!(r.right() <= layout.plus.x, "tabs overlap the +");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A skill longer than the review panel scrolls, and is accepted only once
+    /// it has been read to its end.
+    #[tokio::test]
+    async fn a_long_skill_is_read_whole_before_it_is_accepted() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-skill-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let mut skill = proposed("/r/api", 1, "Cut a release");
+        skill.kind = valkyrie_proto::DecisionKind::Skill;
+        skill.body = (1..=40).map(|i| format!("{i}. step {i}\n")).collect();
+        app.proposals = vec![skill];
+        app.reviewing = Some(0);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut draw = |app: &App| {
+            terminal
+                .draw(|frame| app.draw_reviews(frame, frame.area(), 0))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        let text = draw(&app);
+        assert!(
+            text.contains("1. step 1") && text.contains("more rows · PgDn"),
+            "{text}"
+        );
+        assert!(!app.read_whole(&app.proposals[0]));
+        let said = app.review_at(0, true).await.unwrap();
+        assert!(said.contains("read #1 to its end first"), "{said}");
+        // Page by page to the end; the last step shows and the note goes.
+        for _ in 0..10 {
+            app.review_keys(b"\x1b[6~").await;
+            draw(&app);
+        }
+        let text = draw(&app);
+        assert!(
+            text.contains("40. step 40") && !text.contains("more rows"),
+            "{text}"
+        );
+        assert!(app.read_whole(&app.proposals[0]));
+        // Changed since (an edit elsewhere): read it again, from its top.
+        app.proposals[0].updated = 9;
+        assert!(!app.read_whole(&app.proposals[0]));
+        let text = draw(&app);
+        assert!(
+            text.contains("1. step 1") && text.contains("more rows"),
+            "{text}"
+        );
+        assert!(!app.read_whole(&app.proposals[0]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

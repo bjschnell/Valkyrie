@@ -356,13 +356,62 @@ impl Registry {
         if roots.is_empty() {
             return;
         }
-        let active: Vec<_> = roots
-            .iter()
-            .flat_map(|(root, _)| self.context.lock().unwrap().load(root))
-            .filter(|d| d.status == valkyrie_proto::DecisionStatus::Active)
-            .collect();
-        let found = tokio::task::spawn_blocking(move || {
-            let now = now_secs();
+        let now = now_secs();
+        // Skills no agent read while the project was worked in (ADR-0010 §6):
+        // asked about first, and retired only once the question went unanswered
+        // for long, so they don't pile up. Counting only: no model.
+        let mut idle = Vec::new();
+        let mut active = Vec::new();
+        {
+            use valkyrie_context::skill;
+            let store = self.context.lock().unwrap();
+            for (root, _) in &roots {
+                let used = store.skill_use(root);
+                let mut flagged = std::collections::BTreeMap::new();
+                let mut gone = Vec::new();
+                for d in store.load(root) {
+                    if let Some(days) = skill::idle(&d, &used, now) {
+                        if skill::retire_due(&d, &used, now) {
+                            gone.push(d);
+                            continue;
+                        }
+                        let asked = used.flagged.get(&(d.id, d.updated)).copied().unwrap_or(now);
+                        flagged.insert((d.id, d.updated), asked);
+                        let left =
+                            (asked + skill::ASKED_DAYS * 86_400).saturating_sub(now) / 86_400;
+                        idle.push((
+                            (d.project.clone(), d.id),
+                            (
+                                format!(
+                                    "no agent read it in {days} days of work here; keep it, or retire it (retired in {left} days if left unread)"
+                                ),
+                                d.updated,
+                            ),
+                        ));
+                    }
+                    if d.status == valkyrie_proto::DecisionStatus::Active {
+                        active.push(d);
+                    }
+                }
+                for d in &gone {
+                    match store.review(root, d.id, &ReviewAction::Retire, None, None, now) {
+                        Ok(_) => tracing::info!(id = d.id, "retired a skill no agent read"),
+                        Err(e) => {
+                            tracing::warn!(id = d.id, "couldn't retire an unread skill: {e:#}")
+                        }
+                    }
+                }
+                // Only what's idle now stays flagged: a read, a confirmation or an
+                // edit asks afresh next time.
+                if used.since != 0 && used.flagged != flagged {
+                    let saved = store.update_skill_use(root, now, |u| u.flagged = flagged);
+                    if let Err(e) = saved {
+                        tracing::warn!("couldn't note idle skills: {e:#}");
+                    }
+                }
+            }
+        }
+        let mut found = tokio::task::spawn_blocking(move || {
             active
                 .into_iter()
                 .filter_map(|d| {
@@ -373,6 +422,12 @@ impl Registry {
         })
         .await
         .unwrap_or_default();
+        // A skill both changed and unread: the staleness says more.
+        for (key, why) in idle {
+            if !found.iter().any(|(k, _)| *k == key) {
+                found.push((key, why));
+            }
+        }
         {
             let mut stale = self.stale.lock().unwrap();
             stale.retain(|(root, _), _| !roots.iter().any(|(r, _)| r == root));

@@ -496,8 +496,10 @@ fn skills_are_indexed_patched_learned_and_exported() {
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
              if [ $(grep -c -- --- {calls}) = 1 ]; then\n\
              printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"patch\\\":1,\\\"title\\\":\\\"Cut a release\\\",\\\"body\\\":\\\"1. Set the upstream.\\\\n2. Push the tag.\\\"}}]}}\"}}'\n\
-             else\n\
+             elif [ $(grep -c -- --- {calls}) = 2 ]; then\n\
              printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"skill\\\",\\\"title\\\":\\\"Verify a release build\\\",\\\"body\\\":\\\"1. Build.\\\"}}]}}\"}}'\n\
+             else\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"skill\\\",\\\"title\\\":\\\"Ship the web bundle\\\",\\\"body\\\":\\\"1. npm run build.\\\"}}]}}\"}}'\n\
              fi\n",
             calls = calls.display()
         ),
@@ -639,6 +641,106 @@ fn skills_are_indexed_patched_learned_and_exported() {
         "{learn}"
     );
     assert!(valk(&["decisions", "show", "3"]).contains("Learned from the session"));
+
+    // The agent read skill #1: that's recorded, so it isn't retired as unused.
+    let used = std::fs::read_dir(dir.join("state/valkyrie/context"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("skill-use.json"))
+        .find(|p| p.exists())
+        .expect("skill use recorded");
+    let used: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(used).unwrap()).unwrap();
+    assert!(
+        used["reads"]["1"].is_u64() && used["sessions"]["c1"].is_u64(),
+        "{used}"
+    );
+
+    // A prompt about a skill points the agent at it.
+    let mut hook = Command::new(BIN);
+    hook.arg("context-hook").arg("claude");
+    env(&mut hook);
+    hook.env("VALK_SESSION", id)
+        .env("VALK_CONTEXT", dir.join("state/valkyrie/context"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child = hook.spawn().unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"ok cut the release now","cwd":repo})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let said = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    assert!(
+        said.contains("Skill #1 “Cut a release” looks like what this asks for")
+            && said.contains("decisions show 1"),
+        "{said}"
+    );
+
+    // A long job you approved: the daemon asks for the skill in it, unasked.
+    let long = out.join("t2.jsonl");
+    let mut lines = vec![
+        serde_json::json!({"type":"user","message":{"content":"build the web bundle"}}).to_string(),
+    ];
+    for i in 0..16 {
+        let n = format!("w{i}");
+        lines.push(call(&n, "npm run build"));
+        lines.push(result(&n, None));
+    }
+    lines.push(
+        serde_json::json!({"type":"user","message":{"content":"Perfect, commit and push"}})
+            .to_string(),
+    );
+    std::fs::write(&long, lines.join("\n") + "\n").unwrap();
+    let agent2 = dir.join("agent2/claude");
+    std::fs::create_dir_all(agent2.parent().unwrap()).unwrap();
+    let hook2 = |event: &str| {
+        format!(
+            "echo '{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"c2\",\"transcript_path\":\"{}\"}}' | valk hook claude\n",
+            long.display()
+        )
+    };
+    std::fs::write(
+        &agent2,
+        format!(
+            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            hook2("SessionStart"),
+            hook2("Stop"),
+            // The same approval ends another turn: asked once.
+            hook2("Stop"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent2, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    valk(&[
+        "new",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--",
+        agent2.to_str().unwrap(),
+    ]);
+    let start = Instant::now();
+    let mut listed = String::new();
+    while start.elapsed() < Duration::from_secs(10) && !listed.contains("#4") {
+        std::thread::sleep(Duration::from_millis(100));
+        listed = valk(&["decisions"]);
+    }
+    assert!(
+        listed.contains("#4  skill      Ship the web bundle (proposed)"),
+        "{listed}"
+    );
+    assert!(
+        valk(&["decisions", "show", "4"]).contains("after you said “Perfect, commit and push”")
+    );
+    std::thread::sleep(Duration::from_millis(1000));
+    let asked = std::fs::read_to_string(out.join("calls")).unwrap();
+    assert_eq!(asked.matches("---").count(), 3, "{asked}");
 
     valk(&["decisions", "export"]);
     let exported =

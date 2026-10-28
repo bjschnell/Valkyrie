@@ -1,8 +1,9 @@
-//! Skills (ADR-0010 §3–5): procedures a project's agents follow, kept as decisions
+//! Skills (ADR-0010 §3–6): procedures a project's agents follow, kept as decisions
 //! of kind `skill`. The index of them is injected; a body is read when needed. This
-//! is the pure part: exporting one for Claude Code, reading a session down to what
-//! was done in it, and the prompt that distills a skill from that (`valk decisions
-//! learn`), or a patch to one a session followed.
+//! is the pure part: exporting one for Claude Code, which skills a session read and
+//! which a prompt is about, when a skill has gone unread too long, when a session
+//! finished a long job you approved, reading a session down to what was done in
+//! it, and the prompt that distills a skill from that, or a patch to one.
 
 use crate::extract::{self, Found};
 use crate::retro;
@@ -11,6 +12,14 @@ use valkyrie_proto::{Decision, DecisionKind, DecisionStatus};
 
 /// The most of a session read, from its end: where the procedure finished.
 pub const MAX_DIGEST: usize = 16_000;
+/// A skill unread for this many days, while this many sessions worked in the
+/// project, is asked about: a project left alone keeps its skills.
+pub const IDLE_DAYS: u64 = 45;
+pub const IDLE_SESSIONS: usize = 10;
+/// Days a skill is asked about, still unread, before the daemon retires it.
+pub const ASKED_DAYS: u64 = 45;
+/// Tool calls a job you approved must have taken to be worth a skill.
+pub const LEARN_MIN_CALLS: usize = 15;
 /// The most of the project's skills shown whole to a model that may rewrite one:
 /// a skill it saw only part of could lose the rest in a rewrite.
 const MAX_SHOWN: usize = 24_000;
@@ -71,6 +80,18 @@ pub fn exported(text: &str) -> Option<(u32, u64)> {
 /// `get_decision`: the skills it followed, when they're skills.
 pub fn read(jsonl: &str) -> Vec<u32> {
     let mut out = Vec::new();
+    for (id, _) in read_at(jsonl) {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Each read [`read`] finds, with when it happened (the transcript's own time,
+/// so reading the same tail again says the same).
+pub fn read_at(jsonl: &str) -> Vec<(u32, Option<u64>)> {
+    let mut out = Vec::new();
     for line in jsonl.lines() {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -78,6 +99,7 @@ pub fn read(jsonl: &str) -> Vec<u32> {
         let Some(blocks) = event["message"]["content"].as_array() else {
             continue;
         };
+        let at = event["timestamp"].as_str().and_then(epoch);
         for b in blocks.iter().filter(|b| b["type"] == "tool_use") {
             let name = b["name"].as_str().unwrap_or("");
             let ids: Vec<u32> = match name {
@@ -89,14 +111,32 @@ pub fn read(jsonl: &str) -> Vec<u32> {
                 "Bash" => shown(b["input"]["command"].as_str().unwrap_or("")),
                 _ => Vec::new(),
             };
-            for id in ids {
-                if !out.contains(&id) {
-                    out.push(id);
-                }
-            }
+            out.extend(ids.into_iter().map(|id| (id, at)));
         }
     }
     out
+}
+
+/// Seconds since the epoch of an RFC 3339 UTC time (`2026-10-27T19:41:20.591Z`),
+/// as transcripts write them.
+fn epoch(time: &str) -> Option<u64> {
+    let (date, clock) = time.strip_suffix('Z')?.split_once('T')?;
+    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let mut c = clock.splitn(3, ':');
+    let (h, min) = (
+        c.next()?.parse::<i64>().ok()?,
+        c.next()?.parse::<i64>().ok()?,
+    );
+    let sec = c.next()?.split('.').next()?.parse::<i64>().ok()?;
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3600 + min * 60 + sec).ok()
 }
 
 /// The ids `valk decisions show` was run on in a shell command: `valk` (by any
@@ -120,6 +160,157 @@ fn shown(command: &str) -> Vec<u32> {
         }
     }
     out
+}
+
+/// Days since a skill was last read or confirmed, if that's [`IDLE_DAYS`] and
+/// [`IDLE_SESSIONS`] sessions worked in the project meanwhile. Nothing from
+/// before reads were recorded counts.
+pub fn idle(d: &Decision, used: &crate::SkillUse, now: u64) -> Option<u64> {
+    if d.kind != DecisionKind::Skill || d.status != DecisionStatus::Active || used.since == 0 {
+        return None;
+    }
+    let since = crate::stale::confirmed(d)
+        .max(used.reads.get(&d.id).copied().unwrap_or(0))
+        .max(used.since);
+    let days = now.saturating_sub(since) / 86_400;
+    (days >= IDLE_DAYS && used.sessions_since(since) >= IDLE_SESSIONS).then_some(days)
+}
+
+/// Whether an idle skill has been asked about for [`ASKED_DAYS`] (as it is
+/// now: a confirmation or an edit asks again), so it's retired.
+pub fn retire_due(d: &Decision, used: &crate::SkillUse, now: u64) -> bool {
+    used.flagged
+        .get(&(d.id, d.updated))
+        .is_some_and(|at| now.saturating_sub(*at) >= ASKED_DAYS * 86_400)
+}
+
+/// Whether a message of yours approves finished work: short, with a sentence
+/// that opens by saying so ("Perfect.", "yep, ship it"), not a request that only
+/// mentions a word of it.
+pub fn approved(text: &str) -> bool {
+    const SAYING: &[&str] = &[
+        "looks good",
+        "looks great",
+        "looks perfect",
+        "perfect",
+        "lgtm",
+        "ship it",
+        "go for it",
+        "commit and push",
+        "great work",
+        "nice work",
+        "good job",
+        "that works",
+        "it works",
+        "works now",
+        "all good",
+        "merged",
+        "awesome",
+        "excellent",
+    ];
+    const FILLER: &[&str] = &["yep", "yes", "yeah", "ok", "okay", "cool", "so"];
+    // "It works on mac but not linux", "merged main and now tests fail".
+    const BUT: &[&str] = &[
+        "but", "not", "fail", "fails", "failed", "failing", "broken", "breaks", "error", "errors",
+        "doesn", "isn", "still", "except", "though",
+    ];
+    let text = text.to_lowercase();
+    let all: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if all.len() > 25 || all.iter().any(|w| BUT.contains(w)) {
+        return false;
+    }
+    text.split(['.', '!', '?', ';', ',', '\n']).any(|sentence| {
+        let words: Vec<&str> = sentence
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .skip_while(|w| FILLER.contains(w))
+            .collect();
+        let opening = format!("{} ", words.join(" "));
+        // The approval is most of its sentence, not the start of a request.
+        SAYING.iter().any(|s| {
+            opening.starts_with(&format!("{s} ")) && words.len() <= s.split(' ').count() + 4
+        })
+    })
+}
+
+/// When the last message you typed approved finished work: how many tool calls
+/// the work took since the one before it (or since the start), the message, and
+/// its id in the transcript (so it's learned from once). A session that just
+/// finished something long is where a procedure is.
+pub fn finished(jsonl: &str) -> Option<(usize, String, String)> {
+    let mut calls = 0;
+    let mut last: Option<(usize, String, String)> = None;
+    for line in jsonl.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if ["isMeta", "isCompactSummary", "isSidechain"]
+            .iter()
+            .any(|k| event[k] == true)
+        {
+            continue;
+        }
+        let typed = match (&event["type"], &event["message"]["content"]) {
+            (t, Value::String(text)) if t == "user" => Some(text.as_str()),
+            (t, Value::Array(blocks)) if t == "user" => blocks
+                .iter()
+                .find(|b| b["type"] == "text")
+                .and_then(|b| b["text"].as_str()),
+            (_, Value::Array(blocks)) => {
+                calls += blocks.iter().filter(|b| b["type"] == "tool_use").count();
+                None
+            }
+            _ => None,
+        };
+        // Yours, not a command or reminder.
+        let Some(text) = typed
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && !t.starts_with('<'))
+        else {
+            continue;
+        };
+        if approved(text) {
+            let id = event["uuid"]
+                .as_str()
+                .or(event["timestamp"].as_str())
+                .map_or_else(|| format!("{calls}:{text}"), str::to_owned);
+            last = Some((calls, text.to_owned(), id));
+            calls = 0;
+        } else {
+            // More to do: the job goes on, and isn't approved yet.
+            last = None;
+        }
+    }
+    last
+}
+
+/// The active skills a prompt is about: most of a title's words in it, leaving
+/// out words every sentence has, and a plural's `s`.
+pub fn about<'a>(prompt: &str, known: &'a [Decision]) -> Vec<&'a Decision> {
+    let words = |text: &str| -> std::collections::BTreeSet<String> {
+        extract::words(text)
+            .into_iter()
+            .filter(|w| !crate::mine::STOPWORDS.contains(&w.as_str()))
+            .map(|w| match w.strip_suffix('s') {
+                Some(one) if one.len() > 2 && !one.ends_with('s') => one.to_owned(),
+                _ => w,
+            })
+            .collect()
+    };
+    let said = words(prompt);
+    known
+        .iter()
+        .filter(|d| d.kind == DecisionKind::Skill && d.status == DecisionStatus::Active)
+        .filter(|d| {
+            let title = words(&d.title);
+            let shared = title.intersection(&said).count();
+            shared >= 2 && shared * 2 >= title.len()
+        })
+        .take(2)
+        .collect()
 }
 
 /// A session as what was asked, said and done, one line each, redacted: the
@@ -375,6 +566,10 @@ mod tests {
         .map(|e| e.to_string())
         .join("\n");
         assert_eq!(read(&jsonl), [12, 4]);
+        let timed = json!({"type":"assistant","timestamp":"1970-01-01T00:01:00Z","message":{"content":[
+            {"type":"tool_use","id":"1","name":"Bash","input":{"command":"valk decisions show 5"}}]}})
+        .to_string();
+        assert_eq!(read_at(&timed), [(5, Some(60))]);
         assert_eq!(
             shown("valk decisions show  9 && /x/valk decisions show --x 3"),
             [9, 3]
@@ -419,6 +614,126 @@ mod tests {
             .collect();
         let text = digest(&long);
         assert!(text.len() <= MAX_DIGEST && text.ends_with("You: step 1999\n"));
+    }
+
+    #[test]
+    fn a_skill_unread_while_the_project_worked_is_idle() {
+        let day = 86_400;
+        let mut d = skill(1, "Cut a release", DecisionStatus::Active);
+        d.updated = day;
+        let mut used = crate::SkillUse {
+            since: day,
+            ..Default::default()
+        };
+        let late = (IDLE_DAYS + 1) * day;
+        // Nobody worked in the project: a quiet repo keeps its skills.
+        assert_eq!(idle(&d, &used, late), None);
+        for i in 0..IDLE_SESSIONS as u64 {
+            used.sessions.insert(format!("s{i}"), 2 * day + i);
+        }
+        assert_eq!(idle(&d, &used, (IDLE_DAYS - 1) * day), None);
+        assert_eq!(idle(&d, &used, late), Some(IDLE_DAYS));
+        // Read lately (by transcript time): not idle.
+        used.reads.insert(1, 10 * day);
+        assert_eq!(idle(&d, &used, late), None);
+        used.reads.clear();
+        // Before reads were recorded, nothing counts as unread.
+        used.since = 30 * day;
+        assert_eq!(idle(&d, &used, late), None);
+        used.since = day;
+        let mut rule = d.clone();
+        rule.kind = DecisionKind::Decision;
+        assert_eq!(idle(&rule, &used, 999 * day), None);
+        // Retired only after being asked about for ASKED_DAYS, as it is now.
+        assert!(!retire_due(&d, &used, late));
+        used.flagged.insert((1, day), late);
+        assert!(!retire_due(&d, &used, late + (ASKED_DAYS - 1) * day));
+        assert!(retire_due(&d, &used, late + ASKED_DAYS * day));
+        d.updated = 2 * day;
+        assert!(!retire_due(&d, &used, late + ASKED_DAYS * day));
+    }
+
+    #[test]
+    fn transcript_times_are_epoch_seconds() {
+        assert_eq!(epoch("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(epoch("2026-10-27T19:41:20.591Z"), Some(1_793_130_080));
+        assert_eq!(epoch("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(epoch("yesterday"), None);
+    }
+
+    #[test]
+    fn approval_after_a_long_job_is_a_finish() {
+        assert!(approved("Perfect. Yep commit and PR."));
+        assert!(approved("merged now. Phase 2 onward"));
+        assert!(approved("looks good, ship it"));
+        assert!(!approved(
+            "the perfect hash function in src/hash.rs is slow, can you profile it and find out why it allocates on every call"
+        ));
+        assert!(!approved("fix the login bug"));
+        assert!(!approved("imperfect"));
+        assert!(approved("Yeah, that works"));
+        assert!(approved("great work!"));
+        assert!(!approved("it works on mac but not on linux, fix it"));
+        assert!(!approved("ok so it works locally but CI fails"));
+        assert!(!approved("merged main and now tests fail"));
+
+        let user = |t: &str| json!({"type":"user","message":{"content":t}}).to_string();
+        let calls = |n: usize| {
+            let blocks: Vec<Value> = (0..n)
+                .map(|i| json!({"type":"tool_use","id":i.to_string(),"name":"Bash","input":{}}))
+                .collect();
+            json!({"type":"assistant","message":{"content":blocks}}).to_string()
+        };
+        let jsonl = [
+            user("release it"),
+            calls(5),
+            user("also bump the changelog"),
+            calls(12),
+            user("<command-name>/clear</command-name>"),
+            user("looks great, commit and push"),
+            calls(3),
+        ]
+        .join("\n");
+        let (work, said, _) = finished(&jsonl).unwrap();
+        assert_eq!((work, said.as_str()), (17, "looks great, commit and push"));
+        // Something asked after the approval: not finished.
+        let more = format!("{jsonl}\n{}", user("now the docs"));
+        assert_eq!(finished(&more), None);
+        // Counted from the previous approval.
+        let again = format!("{jsonl}\n{}\n{}", calls(2), user("perfect"));
+        assert_eq!(finished(&again).map(|f| f.0), Some(5));
+        // Each approval is its own, by its transcript id.
+        let with_id =
+            json!({"type":"user","uuid":"u-9","message":{"content":"perfect"}}).to_string();
+        assert_eq!(finished(&with_id).unwrap().2, "u-9");
+    }
+
+    #[test]
+    fn a_prompt_finds_the_skill_its_about() {
+        let known = [
+            skill(
+                1,
+                "Verify a change against an isolated valk daemon",
+                DecisionStatus::Active,
+            ),
+            skill(2, "Cut a release", DecisionStatus::Active),
+            skill(3, "Verify the daemon change", DecisionStatus::Retired),
+        ];
+        let ids = |p: &str| about(p, &known).iter().map(|d| d.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids("can you verify the daemon change against an isolated one"),
+            [1]
+        );
+        assert_eq!(ids("let's cut the release"), [2]);
+        assert!(ids("verify this").is_empty());
+        // Words every sentence has don't make a match; a plural still does.
+        let db = [skill(
+            4,
+            "Set up the database for tests",
+            DecisionStatus::Active,
+        )];
+        assert!(about("add the tests for the parser", &db).is_empty());
+        assert_eq!(about("set up databases for the tests", &db).len(), 1);
     }
 
     #[test]

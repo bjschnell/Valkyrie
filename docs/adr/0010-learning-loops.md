@@ -62,13 +62,17 @@ Constraints:
    - **The miner:** a repeat group asking for the same several-step procedure is proposed as a skill.
    - **`valk decisions learn SESSION`:** reads one session as what was asked, said, run and what failed (redacted, its last 16,000 characters), and proposes the skill in it, or a rewrite of an active skill it shows wrong. `--about` names the procedure when the session did more than one thing. Claude sessions only, and not with `auto off`.
    - **Patching:** when a session that read skill X (`valk decisions show X` or Valkyrie's MCP `get_decision`) hits a failure, the retro is shown X and may propose X rewritten, naming the moment that showed it wrong; the rewrite quotes that failure and records its signature.
-   - **Not yet:** the retro proposing a new skill on its own when a session reached green through a long path. Telling a procedure from a struggle needs more than a turn's failures; `learn` covers it on request until real use shows what the signal is.
+   - **A job you approved:** when the last message you typed approves finished work (a short sentence opening with "perfect", "looks good", "ship it", "merged"..., and nothing like "but", "fails", "not") after at least 15 tool calls since your previous approval, the daemon runs `learn` on that session by itself: your approval is what tells a procedure that worked from a struggle. Once per approval (kept by its transcript id, across restarts), under the extractor's hourly limits and consent, Claude sessions only.
+   - **Triggered when asked for:** with each prompt, the context hook names the active skills whose title's words the prompt mostly holds ("Skill #12 “Cut a release” looks like what this asks for: read it first"). Word matching, no model.
 6. **Knowledge is measured.**
    - **Recording:** a decision or skill proposed from a failure records its signature.
    - **Health:** `valk decisions health` and MCP `project_health` report an active decision whose failure happened in two or more sessions since it was accepted or last confirmed ("#12 isn't working: the failure it came from happened in 4 sessions since it was accepted"), to reword or retire. One session isn't enough: a session started before the acceptance never got it.
      - It sees the last 90 days: past that, the file's compaction drops the line naming the failure a decision came from, and the decision is no longer measured.
    - **Miner:** repeat counts falling over time are the miner's measure.
-   - Nothing is retired automatically.
+   - **Unread skills are cleaned up, by counting alone:** each Stop in a project with skills records that the session worked there, and which active skills it read, by the transcript's own time (`skill-use.json`: since when, the last read per skill, each session's last turn).
+     - **Asked first:** a skill no agent read in 45 days *and* 10 sessions of work there, since it was accepted, confirmed or tracking began, waits on review ("keep it, or retire it"). A project left alone keeps its skills; time before tracking began doesn't count.
+     - **Retired after:** when that question has stood unanswered for 45 more days (when it was first asked is kept, so a restart or a closed laptop doesn't skip it), the daemon retires the skill. Keeping it (`a`), reading it or editing it starts over. A retired skill stays on file (`valk decisions --all`).
+   - Nothing else is retired automatically.
 
 ## Phases
 1. The retro (items 1 and 2), Claude transcripts. Shipped in #29.
@@ -90,7 +94,7 @@ Constraints:
   - No hub installs: a skill from elsewhere is text that would reach every agent unreviewed.
   - No trajectories kept for training.
 - **Model trust:** the model's text is still untrusted.
-  - A proposed skill is shown in full before it can be accepted: the web card scrolls, `valk decisions show` prints it, and the TUI refuses to accept a skill longer than its preview panel.
+  - A proposed skill is shown in full before it can be accepted: the web card scrolls, `valk decisions show` prints it, and the TUI's preview scrolls (PgUp/PgDn) and accepts a skill only once it's been scrolled to its end.
   - Bodies lose control characters and bidi overrides, as decisions do.
 - **Open:** whether Valkyrie-launched Claude sessions should also load active skills natively, through a per-session plugin directory, so the `Skill` tool sees them. The index works without it.
-- **Open:** skill usage isn't counted yet, so an unused skill isn't flagged; reads (`decisions show`) are visible in transcripts and could be.
+- **Reads are seen in Claude transcripts of Valkyrie sessions only.** A skill only Codex sessions, a `claude` outside Valkyrie, or you read looks unread, as does every skill with the Context setting off (agents never see the index); the question comes first, so keeping it is one key.
