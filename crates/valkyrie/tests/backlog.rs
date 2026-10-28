@@ -88,8 +88,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         &agent,
         format!(
             "#!/bin/sh\nfor a; do last=$a; done\npwd > {p}\n\
-             valk todo note 'fixed the off-by-one; check IME input' > {n} 2>&1\n\
-             valk todo note -i 2 'not mine' > {x} 2>&1\n\
+             valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
+             valk todo note -i 2 'not mine' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
             b = o("brief"),
             p = o("pwd"),
@@ -105,9 +105,12 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         std::env::var("PATH").unwrap_or_default()
     );
     // A human, as in context.rs: on a terminal of its own, outside every session.
-    let human = |line: &str| {
+    // `script` runs detached, so its output appears in `out/<name>` by a rename once
+    // the command is done: printed line by line, a partial file can end in `\n` too.
+    let human = |cmd: &str, name: &str| {
+        let line = format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}", o = o(name));
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -119,25 +122,24 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap();
-        assert!(status.success(), "{line}");
+        assert!(status.success(), "{cmd}");
     };
 
-    human(&format!(
-        "valk todo add -k bug -f {} 'Tab rename eats the last letter' > {} 2>&1",
-        shot.display(),
-        o("add")
-    ));
+    human(
+        &format!(
+            "valk todo add -k bug -f {} 'Tab rename eats the last letter'",
+            shot.display()
+        ),
+        "add",
+    );
     assert_eq!(
         wait_for(&out.join("add")),
         "#1 Tab rename eats the last letter (repo)\n"
     );
 
-    human(&format!(
-        "valk todo add --no-folder 'Someone else' > {} 2>&1",
-        o("add2")
-    ));
+    human("valk todo add --no-folder 'Someone else'", "add2");
     wait_for(&out.join("add2"));
-    human(&format!("valk todo launch 1 > {} 2>&1", o("launch")));
+    human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
     let worktree = dir.join("repo-fix-1-tab-rename-eats-the-last");
@@ -162,7 +164,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     let start = Instant::now();
     let list = loop {
         let _ = std::fs::remove_file(out.join("list"));
-        human(&format!("valk todo list > {} 2>&1", o("list")));
+        human("valk todo list", "list");
         let list = wait_for(&out.join("list"));
         if list.contains("to review") || start.elapsed() > Duration::from_secs(10) {
             break list;
@@ -181,7 +183,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         refused.contains("only the item its session was launched for"),
         "{refused}"
     );
-    human(&format!("valk todo show 1 > {} 2>&1", o("show")));
+    human("valk todo show 1", "show");
     let show = wait_for(&out.join("show"));
     assert!(
         show.contains("fix/1-tab-rename-eats-the-last: 0 commits"),
@@ -192,7 +194,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{show}"
     );
 
-    human(&format!("valk todo ship 1 > {} 2>&1", o("ship")));
+    human("valk todo ship 1", "ship");
     let ship = wait_for(&out.join("ship"));
     assert!(ship.contains("shipped"), "{ship}");
     assert!(
