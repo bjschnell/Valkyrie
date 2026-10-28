@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Backlog, ItemEditor } from "./components/Backlog";
 import { Inbox } from "./components/Inbox";
 import { Launcher } from "./components/Launcher";
 import { Pair } from "./components/Pair";
@@ -12,15 +13,24 @@ type Route =
   | { page: "inbox" }
   | { page: "new" }
   | { page: "settings" }
+  | { page: "backlog" }
+  | { page: "item"; id: number | null }
   | { page: "session"; id: number }
   | { page: "review"; id: number };
 
-/** `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher, `#/settings` settings. */
+/**
+ * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
+ * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
+ * writing an item down and changing item 3.
+ */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
   if (m) return { page: m[2] ? "review" : "session", id: Number(m[1]) };
   if (location.hash === "#/new") return { page: "new" };
   if (location.hash === "#/settings") return { page: "settings" };
+  if (location.hash === "#/backlog") return { page: "backlog" };
+  const b = /^#\/backlog\/(new|\d+)$/.exec(location.hash);
+  if (b) return { page: "item", id: b[1] === "new" ? null : Number(b[1]) };
   return { page: "inbox" };
 }
 
@@ -52,6 +62,8 @@ export function App() {
       {at.page === "inbox" && <Inbox />}
       {at.page === "new" && <Launcher />}
       {at.page === "settings" && <Settings />}
+      {at.page === "backlog" && <Backlog />}
+      {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}
       {at.page === "session" && <SessionView id={at.id} />}
       {at.page === "review" && <ReviewView id={at.id} />}
       <Toast />

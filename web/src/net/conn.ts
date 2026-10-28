@@ -25,7 +25,8 @@ export interface ConnOptions {
   onPush: (msg: ServerMsg) => void;
   onStatus: (status: Status) => void;
   /** Called on every (re)connect once the daemon answered: resubscribe here. */
-  onReady: () => void;
+  /** `boot` names the daemon: a restarted one numbers its sessions afresh. */
+  onReady: (boot: number) => void;
 }
 
 const RELOADED_KEY = "valk.reloaded";
@@ -158,6 +159,7 @@ export class Conn {
   }
 
   private async handshake(): Promise<void> {
+    let boot = 0;
     try {
       const hello = await this.request({ t: "hello" });
       // Before the protocol: a newer app is the cure for a newer daemon.
@@ -174,6 +176,7 @@ export class Conn {
         this.ws?.close(1000);
         return;
       }
+      boot = hello.boot;
     } catch {
       this.ws?.close(4000);
       return;
@@ -185,7 +188,7 @@ export class Conn {
       // slept); closing it starts a reconnect.
       this.request({ t: "hello" }).catch(() => this.ws?.close(4000));
     }, KEEPALIVE_MS);
-    this.opts.onReady();
+    this.opts.onReady(boot);
   }
 
   private scheduleRetry(): void {

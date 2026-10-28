@@ -100,9 +100,11 @@ pub fn create(dir: &Path, branch: &str, name: Option<&str>) -> Result<Made> {
         (branch.to_owned(), path, existing)
     };
 
+    // From the checkout's top the rest is empty, and `join("")` would add a `/`.
     let start = dir
         .strip_prefix(&checkout)
         .ok()
+        .filter(|r| !r.as_os_str().is_empty())
         .map(|r| path.join(r))
         .filter(|d| d.is_dir())
         .unwrap_or_else(|| path.clone());
@@ -112,6 +114,33 @@ pub fn create(dir: &Path, branch: &str, name: Option<&str>) -> Result<Made> {
         checkout,
         branch: (!existing).then_some(branch),
     })
+}
+
+/// Takes away a worktree a backlog item's launch made, now that it shipped, and its
+/// branch if that's merged; returns whether the worktree went, and what to tell the
+/// user. Never forced: git keeps a checkout with changes or untracked files, and a
+/// branch with commits not merged here (a squash-merged pull request among them).
+pub fn remove(repo: &Path, path: &Path, branch: Option<&str>) -> (bool, String) {
+    let shown = path.display();
+    if !path.is_dir() {
+        return (true, format!("{shown} was already gone"));
+    }
+    if project::checkout(path) == project::checkout(repo) {
+        return (false, format!("left {shown} alone: it's the main checkout"));
+    }
+    if let Err(e) = git(repo, &["worktree", "remove", &path.to_string_lossy()]) {
+        return (false, format!("kept {shown}: {e:#}"));
+    }
+    let Some(branch) = branch.filter(|b| valid(repo, b).is_ok()) else {
+        return (true, format!("took away {shown}"));
+    };
+    match git(repo, &["branch", "--quiet", "-d", branch]) {
+        Ok(()) => (true, format!("took away {shown} and branch {branch}")),
+        Err(_) => (
+            true,
+            format!("took away {shown}; kept branch {branch}, which isn't merged here"),
+        ),
+    }
 }
 
 /// Refuses what git couldn't name a branch, and what it would read as an option or
@@ -234,6 +263,12 @@ mod tests {
             .unwrap()
             .start;
         assert_eq!(again, repo.0.join("app-fix-the-login-bug-2"));
+        // As text: `Path`'s `==` ignores a trailing `/`, which a session's `PWD`
+        // keeps, and which `sh` (dash) then prints as the folder it's in.
+        assert_eq!(
+            again.to_str(),
+            repo.0.join("app-fix-the-login-bug-2").to_str()
+        );
     }
 
     #[test]
@@ -287,5 +322,49 @@ mod tests {
         assert_eq!(slug("  --  "), "session");
         assert_eq!(slug("v1.2 release"), "v1-2-release");
         assert_eq!(slug("bump deps.lock"), "bump-deps-lock");
+    }
+
+    #[test]
+    fn a_shipped_worktree_goes_only_when_clean_and_its_branch_only_when_merged() {
+        let repo = Repo::new("remove");
+        let clean = create(&repo.main(), "feat/1-x", None).unwrap().start;
+        let (gone, said) = remove(&repo.main(), &clean, Some("feat/1-x"));
+        assert!(gone && !clean.exists(), "{said}");
+        assert!(
+            !has_branch(&repo.main(), "feat/1-x"),
+            "merged (no new commits): {said}"
+        );
+
+        let dirty = create(&repo.main(), "fix/2-y", None).unwrap().start;
+        std::fs::write(dirty.join("new.txt"), "wip").unwrap();
+        let (gone, said) = remove(&repo.main(), &dirty, Some("fix/2-y"));
+        assert!(!gone && dirty.exists(), "{said}");
+        assert!(said.starts_with("kept "), "{said}");
+
+        let ahead = create(&repo.main(), "fix/3-z", None).unwrap().start;
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "z",
+        ];
+        git(&ahead, &commit).unwrap();
+        let (gone, said) = remove(&repo.main(), &ahead, Some("fix/3-z"));
+        assert!(gone && !ahead.exists(), "{said}");
+        assert!(
+            has_branch(&repo.main(), "fix/3-z"),
+            "unmerged work stays: {said}"
+        );
+
+        let (gone, _) = remove(&repo.main(), &repo.main(), None);
+        assert!(
+            !gone && repo.main().exists(),
+            "the main checkout is never taken"
+        );
     }
 }

@@ -2369,3 +2369,229 @@ button.title-name {
     animation: blink 1.06s steps(1) infinite !important;
   }
 }
+
+/* Backlog (DESIGN §8.12) --------------------------------------------------- */
+
+.kind-bug { --kind: var(--blocked); }
+.kind-feature { --kind: var(--accent); }
+.kind-chore { --kind: var(--soft); }
+
+.icon-btn {
+  position: relative;
+}
+
+.icon-badge {
+  position: absolute;
+  top: 3px;
+  right: 1px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--fg);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.section-toggle {
+  width: calc(100% - 8px);
+}
+
+.section-toggle::after {
+  content: "▸";
+  margin-left: auto;
+  transition: transform 0.15s;
+}
+
+.section-toggle[aria-expanded="true"]::after {
+  transform: rotate(90deg);
+}
+
+.backlog-calm {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.backlog-calm .calm-sub {
+  max-width: 420px;
+}
+
+.item-card .item-title {
+  cursor: pointer;
+}
+
+.item-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-done {
+  opacity: 0.7;
+}
+
+.item-live {
+  margin-top: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--state, var(--soft));
+}
+
+.item-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--soft);
+  word-break: break-all;
+}
+
+.item-file svg,
+.item-attach .ghost svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.launch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.launch select,
+.launcher select {
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  font: 14px var(--font);
+}
+
+.launcher select {
+  width: 100%;
+  padding: 10px 13px;
+  border-radius: 12px;
+  font-size: 16px;
+}
+
+.item-attach {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.item-attach .ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.item-dock {
+  flex-direction: row;
+}
+
+.item-dock .ghost {
+  flex: none;
+}
+
+.item-dock .start {
+  flex: 1;
+}
+
+.item-needs {
+  margin-right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--needs);
+  color: var(--page);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* One column of lanes on a phone, skipping the empty ones; a board of four side
+   by side when there's room for it. */
+.column-empty,
+.column-none,
+.column-shut .cards {
+  display: none;
+}
+
+@media (min-width: 960px) {
+  .inbox.backlog {
+    max-width: 1440px;
+  }
+
+  .board {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    align-items: start;
+  }
+
+  .column,
+  .column-empty {
+    display: block;
+    min-height: 160px;
+    padding: 0 10px 10px;
+    border-radius: 14px;
+    background: var(--surface);
+  }
+
+  .column .section-title {
+    margin-left: 0;
+  }
+
+  .column-shut .cards {
+    display: grid;
+  }
+
+  .column .section-toggle {
+    pointer-events: none;
+  }
+
+  .column .section-toggle::after {
+    content: none;
+  }
+
+  /* A column is narrow: actions wrap onto a new row, not into a word each. */
+  .column .card-actions {
+    flex-wrap: wrap;
+  }
+
+  .column .card-actions button {
+    white-space: nowrap;
+  }
+
+  .column-none {
+    display: block;
+    padding: 18px 4px;
+    color: var(--soft);
+    font-size: 13px;
+    text-align: center;
+  }
+}
+
+.ghost.no.item-sure {
+  background: var(--blocked);
+  border-color: var(--blocked);
+  color: var(--page);
+}
+
+.item-proposed {
+  --state: var(--accent2);
+  border-style: dashed;
+}
+
+.item-needs.item-proposed-pill {
+  background: var(--accent2);
+}

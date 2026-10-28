@@ -4,7 +4,7 @@ import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
 import { answer, answerAll, kill, useApp } from "../store";
 import { useLook } from "../lib/theme";
-import { Chevron, Gear, Plus } from "./icons";
+import { Chevron, Gear, List, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyHint } from "./Notify";
@@ -19,6 +19,7 @@ const go = (id: number) => {
 export function Inbox() {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
+  const openItems = useApp((s) => s.items.filter((i) => i.status === "open").length);
   const look = useLook();
   const working = sessions.filter((s) => s.exited === null && s.status.state === "working").length;
   const [sel, setSel] = useState(-1);
@@ -29,7 +30,7 @@ export function Inbox() {
   const selected = order[sel] ?? null;
 
   // n starts a session; j/k pick a card or row, Enter opens it, r reviews its
-  // changes, `,` opens settings.
+  // changes, b opens the backlog, `,` opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -40,6 +41,7 @@ export function Inbox() {
       };
       const actions: Record<string, () => void> = {
         n: () => (location.hash = "#/new"),
+        b: () => (location.hash = "#/backlog"),
         ",": () => (location.hash = "#/settings"),
         j: () => pick(sel + 1),
         k: () => pick(sel - 1),
@@ -66,6 +68,10 @@ export function Inbox() {
           <Wordmark />
         </div>
         <ConnectionPill />
+        <button className="icon-btn" aria-label="Backlog" title="Backlog" onClick={() => (location.hash = "#/backlog")}>
+          <List />
+          {openItems > 0 && <span className="icon-badge">{openItems}</span>}
+        </button>
         <button className="icon-btn" aria-label="Settings" title="Settings" onClick={() => (location.hash = "#/settings")}>
           <Gear />
         </button>

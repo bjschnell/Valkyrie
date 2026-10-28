@@ -3,6 +3,7 @@ mod context;
 mod hook;
 mod mcp;
 mod service;
+mod todo;
 mod tools;
 mod update;
 
@@ -157,6 +158,12 @@ enum Cmd {
         all: bool,
         #[command(subcommand)]
         action: Option<context::DecisionsCmd>,
+    },
+    /// The backlog: bugs, features and chores written down for later, each of
+    /// which can start an agent on itself. Lists the open ones without a command.
+    Todo {
+        #[command(subcommand)]
+        action: Option<todo::TodoCmd>,
     },
     /// Install agent integrations.
     #[command(subcommand)]
@@ -580,6 +587,16 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
         }
         Some(Cmd::Mcp) => mcp::serve(connect(&socket).await?.0).await,
+        Some(Cmd::Todo { action }) => {
+            if matches!(action, Some(todo::TodoCmd::Launch { attach: true, .. })) {
+                require_tty()?;
+            }
+            let (client, pushes) = connect(&socket).await?;
+            match todo::run(&client, action).await? {
+                Some(info) => valkyrie_tui::run(client, pushes, Some(info.id), socket).await,
+                None => Ok(()),
+            }
+        }
         Some(Cmd::Decisions { all, action }) => {
             context::decisions(&connect(&socket).await?.0, all, action).await
         }

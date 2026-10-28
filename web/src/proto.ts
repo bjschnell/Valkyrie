@@ -1,7 +1,7 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 12;
+export const PROTOCOL = 13;
 
 export type SessionId = number;
 export type Size = { cols: number; rows: number };
@@ -149,6 +149,44 @@ export interface SpawnSpec {
   worktree?: string | null;
 }
 
+/** A backlog item (DESIGN §8.12): written down for later, it can start an agent on itself. */
+export type ItemKind = "bug" | "feature" | "chore";
+export const ITEM_KINDS: ItemKind[] = ["bug", "feature", "chore"];
+export type ItemStatus = "open" | "shipped" | "dropped" | "proposed";
+
+export interface Item {
+  id: number;
+  title: string;
+  body: string;
+  kind: ItemKind;
+  status: ItemStatus;
+  /** The repository it's for; absent until one is picked. */
+  project?: string;
+  attachments?: string[];
+  /** `human`, or the agent that wrote it down. */
+  by: string;
+  /** Sessions started on it, oldest first; ids of the daemon whose `boot` this is. */
+  sessions?: SessionId[];
+  boot: number;
+  branch?: string;
+  checkout?: string;
+  /** Seconds since the epoch. */
+  created: number;
+  updated: number;
+}
+
+export interface NewItem {
+  title: string;
+  body: string;
+  kind: ItemKind;
+  cwd: string | null;
+  attachments: string[];
+}
+
+export type ItemChange =
+  | { do: "edit"; title: string; body: string; kind: ItemKind; cwd: string | null }
+  | { do: "status"; status: ItemStatus };
+
 /** Requests, without the `req` id the client adds. */
 export type Request =
   | { t: "hello" }
@@ -163,7 +201,12 @@ export type Request =
   | { t: "move"; session: SessionId; to: number }
   | { t: "spawn"; spec: SpawnSpec }
   | { t: "review"; project: string; id: number; action: ReviewAction; seen: number }
-  | { t: "decisions"; cwd: string | null };
+  | { t: "decisions"; cwd: string | null }
+  | { t: "add_item"; item: NewItem }
+  | { t: "items" }
+  | { t: "change_item"; id: number; change: ItemChange }
+  | { t: "delete_item"; id: number }
+  | { t: "launch_item"; id: number; agent: "claude" | "codex"; worktree: boolean; size: Size; env: [string, string | null][] };
 
 /** Fire-and-forget messages. */
 export type Notice =
@@ -182,7 +225,10 @@ export type Reply =
   | { t: "sessions"; sessions: SessionInfo[] }
   | { t: "text"; text: string }
   | { t: "decision"; decision: Decision }
-  | { t: "decisions"; decisions: Decision[] };
+  | { t: "decisions"; decisions: Decision[] }
+  /** `note`: what else happened (a worktree taken away, or why it was kept). */
+  | { t: "item"; item: Item; note?: string }
+  | { t: "items"; items: Item[] };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
@@ -192,6 +238,8 @@ export type ServerMsg =
   | { t: "queue"; items: QueueItem[] }
   /** Every project's decisions waiting on review, oldest first. */
   | { t: "proposals"; items: Decision[] }
+  /** Every backlog item. */
+  | { t: "items"; items: Item[] }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

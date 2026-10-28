@@ -5,6 +5,7 @@
 //! `Exited`) carry none.
 
 pub mod agent;
+pub mod backlog;
 pub mod client;
 pub mod codec;
 pub mod context;
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
+pub use backlog::{Item, ItemChange, ItemKind, ItemStatus, NewItem};
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
@@ -25,7 +27,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 12;
+pub const PROTOCOL: u32 = 13;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -270,6 +272,44 @@ pub enum ClientMsg {
         req: ReqId,
         what: String,
     },
+    /// Writes down a backlog item (DESIGN §8.12). Replies `Item`.
+    AddItem {
+        req: ReqId,
+        item: NewItem,
+    },
+    /// Every backlog item. Replies `Items`.
+    Items {
+        req: ReqId,
+    },
+    /// Rewords, moves, ships, drops or reopens an item. Replies `Item`.
+    ChangeItem {
+        req: ReqId,
+        id: u32,
+        change: ItemChange,
+    },
+    /// Deletes an item for good, the user only: refused while an agent runs on it,
+    /// or while its worktree has work in it. Replies `Item`, the one deleted.
+    DeleteItem {
+        req: ReqId,
+        id: u32,
+    },
+    /// Starts an agent on an item, in its own worktree unless `worktree` is false
+    /// (a later launch goes back to the first one's). Replies `Session`.
+    LaunchItem {
+        req: ReqId,
+        id: u32,
+        /// `claude` or `codex`.
+        agent: String,
+        #[serde(default = "yes")]
+        worktree: bool,
+        size: Size,
+        #[serde(default)]
+        env: Vec<(String, Option<String>)>,
+    },
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -299,6 +339,11 @@ pub enum ServerMsg {
     /// watchers after the first `Queue` and whenever they change (ADR-0007).
     Proposals {
         items: Vec<Decision>,
+    },
+    /// Every backlog item; pushed to queue watchers after the first `Queue` and
+    /// whenever one changes (DESIGN §8.12).
+    Items {
+        items: Vec<Item>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.
@@ -352,6 +397,16 @@ pub enum Reply {
     },
     Decisions {
         decisions: Vec<Decision>,
+    },
+    Item {
+        item: Box<Item>,
+        /// What else happened, for the person who asked (a worktree taken away, or
+        /// why it was kept).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    Items {
+        items: Vec<Item>,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

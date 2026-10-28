@@ -395,6 +395,73 @@ impl Client {
         }
     }
 
+    /// Writes down a backlog item (DESIGN §8.12).
+    pub async fn add_item(&self, item: crate::NewItem) -> Result<crate::Item> {
+        match self.request(|req| ClientMsg::AddItem { req, item }).await? {
+            Reply::Item { item, .. } => Ok(*item),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn items(&self) -> Result<Vec<crate::Item>> {
+        match self.request(|req| ClientMsg::Items { req }).await? {
+            Reply::Items { items } => Ok(items),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Changes an item; also returns what else happened (a worktree taken away).
+    pub async fn change_item(
+        &self,
+        id: u32,
+        change: crate::ItemChange,
+    ) -> Result<(crate::Item, Option<String>)> {
+        match self
+            .request(|req| ClientMsg::ChangeItem { req, id, change })
+            .await?
+        {
+            Reply::Item { item, note } => Ok((*item, note)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Deletes an item; also returns what else happened (a worktree taken away).
+    pub async fn delete_item(&self, id: u32) -> Result<(crate::Item, Option<String>)> {
+        match self
+            .request(|req| ClientMsg::DeleteItem { req, id })
+            .await?
+        {
+            Reply::Item { item, note } => Ok((*item, note)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Starts `agent` on an item (see `ClientMsg::LaunchItem`).
+    pub async fn launch_item(
+        &self,
+        id: u32,
+        agent: &str,
+        worktree: bool,
+        size: Size,
+    ) -> Result<SessionInfo> {
+        let agent = agent.to_owned();
+        let env = crate::login_env();
+        match self
+            .request(|req| ClientMsg::LaunchItem {
+                req,
+                id,
+                agent,
+                worktree,
+                size,
+                env,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(info),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Fire-and-forget: the terminal's cell size in pixels (see `ClientMsg::CellPixels`).
     pub fn cell_pixels(&self, session: Option<SessionId>, width: u16, height: u16) -> Result<()> {
         self.out
