@@ -334,6 +334,24 @@ Every worktree of a repo shares its decisions, which are kept in
 
 </details>
 
+### Backlog
+
+Write a bug or an idea down when it comes up, on your phone or in a terminal, and
+start an agent on it later with one tap.
+
+```sh
+valk todo add -k bug -f shot.png "Tab rename eats the last letter"
+valk todo                  # what's open, and where each one is
+valk todo launch 1         # claude in a worktree on fix/1-tab-rename-…, with a brief
+valk todo ship 1           # done: the worktree goes if it's clean, the branch if merged
+```
+
+On the phone, the list icon in the inbox opens the board: Backlog, In progress,
+Review, Done. Cards move on their own as their agent works, waits on you or
+finishes. A bug's brief tells the agent to reproduce it first; a feature's, to plan
+and ask before writing code. Agents can add items too, as proposals you accept
+before anything can start them.
+
 ## How it's built
 
 Valkyrie is a Rust workspace:

@@ -2,6 +2,7 @@
 //! protocol over a unix socket.
 
 mod activity;
+mod backlog;
 mod chat;
 mod context;
 mod extract;
@@ -141,6 +142,10 @@ struct Registry {
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// The backlog (DESIGN §8.12); the lock keeps ids from colliding.
+    backlog: Mutex<valkyrie_context::backlog::Backlog>,
+    /// Every backlog item, pushed with the queue.
+    items: watch::Sender<backlog::Items>,
 }
 
 impl Registry {
@@ -427,8 +432,13 @@ fn new_registry(
         stale_check: tokio::sync::Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
+        backlog: Mutex::new(valkyrie_context::backlog::Backlog::new(
+            state_dir.join("backlog"),
+        )),
+        items: watch::Sender::new(Arc::default()),
     });
     registry.refresh_proposals();
+    registry.refresh_items();
     Ok((registry, rx))
 }
 
@@ -918,7 +928,13 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 if queue_watch.is_none() {
                     let rx = registry.queue.subscribe();
                     let proposals = registry.proposals.subscribe();
-                    queue_watch = Some(tokio::spawn(forward_queue(rx, proposals, out.clone())));
+                    let items = registry.items.subscribe();
+                    queue_watch = Some(tokio::spawn(forward_queue(
+                        rx,
+                        proposals,
+                        items,
+                        out.clone(),
+                    )));
                 }
                 continue;
             }
@@ -982,6 +998,24 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ),
             ClientMsg::Spawn { req, spec } => {
                 let result = in_worktree(spec, |spec| spawn(&registry, spec)).await;
+                mark_driven(&registry, &result, &mut driver, peer);
+                (req, result)
+            }
+            ClientMsg::AddItem { req, item } => (req, registry.add_item(&item, peer)),
+            ClientMsg::Items { req } => (req, Ok(registry.items())),
+            ClientMsg::ChangeItem { req, id, change } => {
+                (req, registry.change_item(id, change, peer).await)
+            }
+            ClientMsg::DeleteItem { req, id } => (req, registry.delete_item(id, peer).await),
+            ClientMsg::LaunchItem {
+                req,
+                id,
+                agent,
+                worktree,
+                size,
+                env,
+            } => {
+                let result = registry.launch_item(id, &agent, worktree, size, env).await;
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }
@@ -1243,6 +1277,7 @@ fn spawn_with(
 async fn forward_queue(
     mut rx: watch::Receiver<Queue>,
     mut proposals: watch::Receiver<Proposals>,
+    mut backlog: watch::Receiver<backlog::Items>,
     out: Out,
 ) {
     let send = async |msg| out.send(Arc::new(msg)).await.is_ok();
@@ -1254,6 +1289,10 @@ async fn forward_queue(
     if !send(ServerMsg::Proposals { items }).await {
         return;
     }
+    let items = (**backlog.borrow_and_update()).clone();
+    if !send(ServerMsg::Items { items }).await {
+        return;
+    }
     loop {
         let msg = tokio::select! {
             changed = rx.changed() => match changed {
@@ -1262,6 +1301,10 @@ async fn forward_queue(
             },
             changed = proposals.changed() => match changed {
                 Ok(()) => ServerMsg::Proposals { items: (**proposals.borrow_and_update()).clone() },
+                Err(_) => return,
+            },
+            changed = backlog.changed() => match changed {
+                Ok(()) => ServerMsg::Items { items: (**backlog.borrow_and_update()).clone() },
                 Err(_) => return,
             },
         };

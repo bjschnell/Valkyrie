@@ -60,7 +60,7 @@ pub fn save(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
 /// `name` with only letters, digits, `.`, `-` and `_`, the rest as `_`, and its
 /// extension kept when it's cut short. A name of only an extension (`.png`) stays
 /// one, so the saved file is `<ms>.png`.
-fn safe_name(name: &str) -> String {
+pub fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let mut safe: String = base
         .chars()

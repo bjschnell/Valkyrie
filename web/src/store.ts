@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
-import type { Decision, Modes, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
+import type { Decision, Item, ItemChange, Modes, NewItem, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
@@ -42,6 +42,10 @@ interface State {
   queue: QueueItem[];
   /** Decisions agents proposed, waiting on the human (ADR-0007). */
   proposals: Decision[];
+  /** The backlog (DESIGN §8.12), as the daemon pushes it. */
+  items: Item[];
+  /** The daemon's `boot`: an item's session ids only mean something on the same one. */
+  boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
   openId: SessionId | null;
   screen: Screen | null;
@@ -65,6 +69,8 @@ export const useApp = create<State>(() => ({
   sessions: [],
   queue: [],
   proposals: [],
+  items: [],
+  boot: 0,
   openId: null,
   screen: null,
   exited: null,
@@ -125,7 +131,8 @@ export function connect(): void {
       if (status === "updated") reloadWhenSafe();
     },
     onPush,
-    onReady: () => {
+    onReady: (boot) => {
+      set({ boot });
       reportVisible();
       void conn?.request({ t: "watch_queue" }).catch(() => {});
       void refresh();
@@ -156,6 +163,9 @@ function onPush(msg: ServerMsg): void {
       break;
     case "proposals":
       set({ proposals: msg.items });
+      break;
+    case "items":
+      set({ items: msg.items });
       break;
     case "screen":
       if (msg.session === get().openId) set({ screen: apply(get().screen, msg.update) });
@@ -430,6 +440,49 @@ export async function spawn(
   if (!conn) throw new Error("not connected");
   const spec = { command, cwd, name, size: SPAWN_SIZE, env: [], worktree };
   const reply = await conn.request({ t: "spawn", spec });
+  if (reply.t !== "session") throw new Error("unexpected reply");
+  void refresh();
+  return reply.info.id;
+}
+
+/** Writes down a backlog item; its id. */
+export async function addItem(item: NewItem): Promise<number> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "add_item", item });
+  if (reply.t !== "item") throw new Error("unexpected reply");
+  return reply.item.id;
+}
+
+/** Changes a backlog item, saying what else happened (a worktree taken away). */
+export async function changeItem(id: number, change: ItemChange): Promise<boolean> {
+  if (!conn) return false;
+  try {
+    const reply = await conn.request({ t: "change_item", id, change });
+    if (reply.t === "item" && reply.note) toast(reply.note);
+    return true;
+  } catch (e) {
+    toast((e as Error).message);
+    return false;
+  }
+}
+
+/** Deletes a backlog item for good. */
+export async function deleteItem(id: number): Promise<boolean> {
+  if (!conn) return false;
+  try {
+    const reply = await conn.request({ t: "delete_item", id });
+    if (reply.t === "item" && reply.note) toast(reply.note);
+    return true;
+  } catch (e) {
+    toast((e as Error).message);
+    return false;
+  }
+}
+
+/** Starts an agent on a backlog item, in a worktree of its own; the session's id. */
+export async function launchItem(id: number, agent: "claude" | "codex", worktree = true): Promise<SessionId> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "launch_item", id, agent, worktree, size: SPAWN_SIZE, env: [] });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
   return reply.info.id;

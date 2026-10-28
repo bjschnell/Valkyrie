@@ -14,7 +14,11 @@ fn how_to_propose(valk: &str) -> String {
         "When you and the user settle something that should hold in future sessions (a \
          design choice, a constraint, a gotcha), propose it with `{valk} decide --kind \
          <decision|constraint|pattern|gotcha|fix> \"<title>\" \"<a sentence or two>\"`. \
-         It goes to the user for review; propose sparingly."
+         It goes to the user for review; propose sparingly.\n\nA bug, follow-up or idea \
+         outside what you're doing goes in the user's backlog, not into your change: \
+         check `{valk} todo list --json` for it first, then `{valk} todo add -k \
+         <bug|feature|chore> \"<title>\" --body \"<what, and how to reproduce it>\"`. It waits for \
+         the user to accept it."
     )
 }
 

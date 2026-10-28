@@ -66,6 +66,11 @@ export const Clip = () => (
     <path d="M21 11.5l-8.6 8.6a5 5 0 01-7.1-7.1l8.6-8.6a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4l7.9-7.9" />
   </svg>
 );
+export const List = () => (
+  <svg {...base}>
+    <path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01" />
+  </svg>
+);
 export const Plus = () => (
   <svg {...base}>
     <path d="M12 5v14M5 12h14" />

@@ -2,6 +2,7 @@
 //! markdown files in the state dir, their review lifecycle, and the block injected
 //! into agents.
 
+pub mod backlog;
 pub mod extract;
 mod file;
 pub mod handoff;
@@ -326,31 +327,41 @@ impl Store {
 /// the body's line breaks) or bidi overrides: text a reviewer reads in a terminal
 /// must be the text agents get.
 fn clean(title: &str, body: &str) -> Result<(String, String)> {
-    let shown = |c: char, keep: &[char]| {
-        keep.contains(&c)
-            || !(c.is_control()
-                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
-    };
-    let title: String = title
-        .chars()
-        .map(|c| if shown(c, &[]) { c } else { ' ' })
-        .collect();
-    let title = file::one_line(&title);
+    let title = file::one_line(&shown(title, false));
     if title.is_empty() {
         bail!("a decision needs a title");
     }
     if title.chars().count() > MAX_TITLE {
         bail!("title is over {MAX_TITLE} characters; put the detail in the body");
     }
-    let body: String = body.chars().filter(|&c| shown(c, &['\n', '\t'])).collect();
-    let body = body.trim().to_owned();
+    let body = shown(body, true).trim().to_owned();
     if body.chars().count() > MAX_BODY {
         bail!("body is over {MAX_BODY} characters; a decision is a few sentences");
     }
     Ok((title, body))
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
+/// `text` without control characters or bidi overrides, so what a reviewer reads in
+/// a terminal is what an agent gets. On one line they become spaces; `multiline`
+/// keeps newlines and tabs and drops the rest.
+pub(crate) fn shown(text: &str, multiline: bool) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    };
+    match multiline {
+        true => text
+            .chars()
+            .filter(|&c| matches!(c, '\n' | '\t') || !hidden(c))
+            .collect(),
+        false => text
+            .chars()
+            .map(|c| if hidden(c) { ' ' } else { c })
+            .collect(),
+    }
+}
+
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
