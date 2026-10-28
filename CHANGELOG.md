@@ -3,6 +3,14 @@
 Releases from 0.1.0 on follow [Semantic Versioning](https://semver.org) and are
 written by release-please from [Conventional Commits](docs/releasing.md).
 
+## [0.3.0](https://github.com/bjschnell/Valkyrie/compare/v0.2.1...v0.3.0) (2026-10-28)
+
+
+### Features
+
+* **cli:** add `valk setup alias` for a short `v` command ([50b00d7](https://github.com/bjschnell/Valkyrie/commit/50b00d7310eb584df48351704664975fb823abc8))
+* **cli:** add `valk setup alias` for a short `v` command ([ad58633](https://github.com/bjschnell/Valkyrie/commit/ad586330988f289d45817ff999ec7a3ca634dc74))
+
 ## [0.2.1](https://github.com/bjschnell/Valkyrie/compare/v0.2.0...v0.2.1) (2026-10-28)
 
 
