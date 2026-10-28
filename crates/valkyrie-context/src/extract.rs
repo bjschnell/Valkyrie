@@ -384,13 +384,15 @@ pub fn reply_list(reply: &str) -> Vec<Value> {
     }
 }
 
-/// One item of [`reply_list`]; `None` without a title.
+/// One item of [`reply_list`]; `None` without a title. Never a skill: a skill is
+/// a procedure, which a few clipped sentences aren't (`skill::found` reads those).
 pub fn found(d: &Value) -> Option<Found> {
     let title = d["title"].as_str()?.trim();
     (!title.is_empty()).then(|| Found {
         kind: d["kind"]
             .as_str()
             .and_then(DecisionKind::parse)
+            .filter(|k| *k != DecisionKind::Skill)
             .unwrap_or_default(),
         title: clip(title, 150),
         body: clip(d["body"].as_str().unwrap_or("").trim(), 600),
@@ -559,7 +561,7 @@ mod tests {
     fn replies_are_parsed_defensively() {
         let found = parse_reply(
             "Sure:\n{\"decisions\":[{\"kind\":\"constraint\",\"title\":\"Use pnpm\",\"body\":\"Not npm.\"},\
-             {\"kind\":\"weird\",\"title\":\"Second\"},{\"title\":\"Third\"},{\"title\":\"\"}]}",
+             {\"kind\":\"skill\",\"title\":\"Second\"},{\"title\":\"Third\"},{\"title\":\"\"}]}",
         );
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].kind, DecisionKind::Constraint);

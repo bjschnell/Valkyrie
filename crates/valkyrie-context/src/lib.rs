@@ -11,12 +11,15 @@ pub mod mine;
 pub mod model;
 pub mod project;
 pub mod retro;
+pub mod skill;
 pub mod stale;
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use valkyrie_proto::{Decision, DecisionStatus, NewDecision, Provenance, ReviewAction};
+use valkyrie_proto::{
+    Decision, DecisionKind, DecisionStatus, NewDecision, Provenance, ReviewAction,
+};
 
 pub use file::{name as file_name, parse, render};
 
@@ -24,11 +27,16 @@ pub use file::{name as file_name, parse, render};
 pub const MAX_TITLE: usize = 200;
 /// Longest body kept; a decision is a few sentences, not a design doc.
 pub const MAX_BODY: usize = 4000;
+/// A skill's body holds a procedure: steps, pitfalls and how to verify.
+pub const MAX_SKILL_BODY: usize = 12_000;
 
 /// How long a failure counts (ADR-0010 §2).
 pub const FAILURE_DAYS: u64 = 90;
 /// Size past which `failures.jsonl` drops what no longer counts.
 const FAILURES_COMPACT: u64 = 1 << 20;
+/// In how many sessions a decision's failure happens after it's accepted before
+/// health says it isn't working.
+pub const RECURRED: usize = 2;
 
 /// What a project's sessions' failures have been (ADR-0010 §2).
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -114,17 +122,30 @@ impl Store {
     /// `proposed`. `provenance.by` must already be set by the caller (the daemon,
     /// which knows whether the session runs an agent).
     pub fn decide(&self, new: &NewDecision, provenance: Provenance, now: u64) -> Result<Decision> {
-        let (title, body) = clean(&new.title, &new.body)?;
+        let (title, body) = clean(&new.title, &new.body, new.kind)?;
         let root = project::root(&new.cwd);
         let files = self.files(&root);
+        let by_human = provenance.by == "human";
         if let Some(old) = new.supersedes {
             match files.get(&old) {
                 Some((_, d)) if d.status == DecisionStatus::Active => {}
                 Some((_, d)) => bail!("#{old} is {}, not active", d.status.as_str()),
                 None => bail!("no decision #{old} in {}", root.display()),
             }
+            // One proposed replacement at a time: two, accepted in turn, would
+            // leave two active (a skill rewritten twice from the same version).
+            let proposing = !by_human || new.propose;
+            if proposing
+                && let Some((_, p)) = files.values().find(|(_, p)| {
+                    p.status == DecisionStatus::Proposed && p.supersedes == Some(old)
+                })
+            {
+                bail!(
+                    "#{} already proposes replacing #{old}; review it first",
+                    p.id
+                );
+            }
         }
-        let by_human = provenance.by == "human";
         let mut provenance = provenance;
         provenance.commit = provenance.commit.filter(|c| stale::valid_commit(c));
         let text = format!("{title}\n{body}");
@@ -183,6 +204,18 @@ impl Store {
             bail!("#{id} changed since you read it; look at it again");
         }
         let mut d = d.clone();
+        // What it replaces was replaced by another meanwhile: accepting this too
+        // would make two active versions.
+        if matches!(action, ReviewAction::Accept | ReviewAction::Revise { .. })
+            && let Some(old) = d.supersedes
+            && let Some((_, o)) = files.get(&old)
+            && o.status == Superseded
+        {
+            bail!(
+                "#{id} replaces #{old}, which #{} already replaced; reject it, or propose it again against #{0}",
+                o.superseded_by.unwrap_or(0)
+            );
+        }
         let mut accepting = false;
         let mut confirming = false;
         let mut reworded = false;
@@ -192,12 +225,12 @@ impl Store {
             (ReviewAction::Retire, Active) => d.status = Retired,
             (ReviewAction::Confirm, Active) => confirming = true,
             (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
-                (d.title, d.body) = clean(title, body)?;
+                (d.title, d.body) = clean(title, body, *kind)?;
                 d.kind = *kind;
                 reworded = true;
             }
             (ReviewAction::Revise { title, body, kind }, Proposed) => {
-                (d.title, d.body) = clean(title, body)?;
+                (d.title, d.body) = clean(title, body, *kind)?;
                 d.kind = *kind;
                 accepting = true;
                 reworded = true;
@@ -322,12 +355,22 @@ impl Store {
     }
 
     /// Records failed calls (`(signature, call id)`) seen in `root`'s sessions.
-    pub fn record_failures(&self, root: &Path, seen: &[(u64, &str)], now: u64) -> Result<()> {
+    pub fn record_failures(
+        &self,
+        root: &Path,
+        seen: &[(u64, &str)],
+        session: Option<&str>,
+        now: u64,
+    ) -> Result<()> {
         let lines: Vec<String> = seen
             .iter()
             .map(|(sig, call)| {
-                serde_json::json!({"sig": format!("{sig:016x}"), "at": now, "call": call})
-                    .to_string()
+                let mut v =
+                    serde_json::json!({"sig": format!("{sig:016x}"), "at": now, "call": call});
+                if let Some(session) = session {
+                    v["session"] = session.into();
+                }
+                v.to_string()
             })
             .collect();
         self.append_failures(root, &lines, now)
@@ -338,6 +381,46 @@ impl Store {
         let line = serde_json::json!({"sig": format!("{sig:016x}"), "at": now, "decision": id})
             .to_string();
         self.append_failures(root, &[line], now)
+    }
+
+    /// Active decisions whose failure kept happening after they were accepted
+    /// (ADR-0010 §6): each with in how many sessions since. A session started
+    /// before the acceptance never got it, so it takes [`RECURRED`] sessions.
+    pub fn recurred(&self, root: &Path, decisions: &[Decision]) -> Vec<(u32, usize)> {
+        let text = std::fs::read_to_string(self.failures_file(root)).unwrap_or_default();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let mut out = Vec::new();
+        for d in decisions
+            .iter()
+            .filter(|d| d.status == DecisionStatus::Active)
+        {
+            let Some(sig) = lines
+                .iter()
+                .find(|v| v["decision"].as_u64() == Some(u64::from(d.id)))
+                .and_then(|v| v["sig"].as_str())
+            else {
+                continue;
+            };
+            let since = stale::confirmed(d);
+            // A line without its session (an older one) counts as its own.
+            let times = lines
+                .iter()
+                .filter(|v| {
+                    v["call"].is_string()
+                        && v["sig"].as_str() == Some(sig)
+                        && v["at"].as_u64().is_some_and(|at| at > since)
+                })
+                .map(|v| v["session"].as_str().or(v["call"].as_str()))
+                .collect::<HashSet<_>>()
+                .len();
+            if times >= RECURRED {
+                out.push((d.id, times));
+            }
+        }
+        out
     }
 
     fn failures_file(&self, root: &Path) -> PathBuf {
@@ -394,9 +477,10 @@ impl Store {
     }
 
     /// Copies `root`'s active decisions into `<checkout>/.valkyrie/decisions/` (the
-    /// checkout being exported from, which may be a worktree of `root`), replacing
-    /// what an earlier export of these decisions put there. Files that aren't
-    /// this store's (a teammate's, say) are left alone. Returns the files written.
+    /// checkout being exported from, which may be a worktree of `root`), and its
+    /// skills into `<checkout>/.claude/skills/`, replacing what an earlier export
+    /// of these put there. Files that aren't this store's (a teammate's, say) are
+    /// left alone. Returns the files written.
     pub fn export(&self, root: &Path, checkout: &Path) -> Result<Vec<PathBuf>> {
         let all = self.load(root);
         if all.is_empty() {
@@ -415,22 +499,78 @@ impl Store {
             }
         }
         let mut written = Vec::new();
-        for d in all {
-            if d.status != DecisionStatus::Active {
+        for d in &all {
+            if d.status != DecisionStatus::Active || d.kind == DecisionKind::Skill {
                 continue;
             }
-            let path = into.join(file::name(&d));
-            write_atomic(&path, &file::render(&d))?;
+            let path = into.join(file::name(d));
+            write_atomic(&path, &file::render(d))?;
             written.push(path);
         }
+        written.extend(export_skills(&all, checkout)?);
         Ok(written)
     }
+}
+
+/// Active skills as `<checkout>/.claude/skills/<name>/SKILL.md`, where Claude Code
+/// loads them (ADR-0010 §4); directories an earlier export made are replaced.
+fn export_skills(all: &[Decision], checkout: &Path) -> Result<Vec<PathBuf>> {
+    let into = checkout.join(".claude/skills");
+    if let Ok(entries) = std::fs::read_dir(&into) {
+        for entry in entries.flatten() {
+            let file = entry.path().join("SKILL.md");
+            let ours = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| skill::exported(&t))
+                .is_some_and(|(id, created)| {
+                    all.iter().any(|d| d.id == id && d.created == created)
+                });
+            // Only the file it wrote: anything added beside it stays, and so
+            // does the directory then.
+            if ours {
+                std::fs::remove_file(&file)?;
+                let _ = std::fs::remove_dir(entry.path());
+            }
+        }
+    }
+    let mut written = Vec::new();
+    let mut names = HashSet::new();
+    for d in all
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Active && d.kind == DecisionKind::Skill)
+    {
+        // Not over someone else's skill, nor another of these, by the same name.
+        let base = skill::name(d);
+        let taken = |n: &String| into.join(n).join("SKILL.md").exists() || names.contains(n);
+        let mut name = base.clone();
+        let mut n = 1;
+        while taken(&name) {
+            let suffix = if n == 1 {
+                format!("-{}", d.id)
+            } else {
+                format!("-{}-{n}", d.id)
+            };
+            let keep = 64usize.saturating_sub(suffix.len());
+            name = format!(
+                "{}{suffix}",
+                base[..base.len().min(keep)].trim_end_matches('-')
+            );
+            n += 1;
+        }
+        names.insert(name.clone());
+        let dir = into.join(&name);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join("SKILL.md");
+        write_atomic(&path, &skill::render(d, &name))?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 /// A title on one line and a trimmed body, both without control characters (but
 /// the body's line breaks) or bidi overrides: text a reviewer reads in a terminal
 /// must be the text agents get.
-fn clean(title: &str, body: &str) -> Result<(String, String)> {
+fn clean(title: &str, body: &str, kind: DecisionKind) -> Result<(String, String)> {
     let title = file::one_line(&shown(title, false));
     if title.is_empty() {
         bail!("a decision needs a title");
@@ -439,7 +579,11 @@ fn clean(title: &str, body: &str) -> Result<(String, String)> {
         bail!("title is over {MAX_TITLE} characters; put the detail in the body");
     }
     let body = shown(body, true).trim().to_owned();
-    if body.chars().count() > MAX_BODY {
+    if kind == DecisionKind::Skill {
+        if body.chars().count() > MAX_SKILL_BODY {
+            bail!("body is over {MAX_SKILL_BODY} characters; a skill is one procedure");
+        }
+    } else if body.chars().count() > MAX_BODY {
         bail!("body is over {MAX_BODY} characters; a decision is a few sentences");
     }
     Ok((title, body))
@@ -475,7 +619,6 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use valkyrie_proto::DecisionKind;
 
     struct Fixture {
         base: PathBuf,
@@ -528,11 +671,16 @@ mod tests {
         let day = 86_400;
         assert_eq!(f.store.failures(&f.repo, day), Failures::default());
         f.store
-            .record_failures(&f.repo, &[(0xabc, "c1"), (0xabc, "c2"), (0xdef, "c3")], day)
+            .record_failures(
+                &f.repo,
+                &[(0xabc, "c1"), (0xabc, "c2"), (0xdef, "c3")],
+                None,
+                day,
+            )
             .unwrap();
         // Read again after a restart: not counted twice.
         f.store
-            .record_failures(&f.repo, &[(0xabc, "c1")], day)
+            .record_failures(&f.repo, &[(0xabc, "c1")], None, day)
             .unwrap();
         f.store.record_proposal(&f.repo, 0xabc, 4, 2 * day).unwrap();
         let got = f.store.failures(&f.repo, 2 * day);
@@ -778,5 +926,137 @@ mod tests {
         assert_eq!(names, vec!["0001-keep.md", "0009-theirs.md", "README.md"]);
         let empty = Fixture::new("export-empty");
         assert!(empty.store.export(&empty.repo, &empty.repo).is_err());
+    }
+
+    #[test]
+    fn a_failure_that_keeps_happening_after_acceptance_is_reported() {
+        let f = Fixture::new("recurred");
+        let mut proposal = f.new_decision("Kill exact pids");
+        proposal.propose = true;
+        let d = f.store.decide(&proposal, by("valkyrie"), 10).unwrap();
+        f.store.record_proposal(&f.repo, 0xabc, d.id, 10).unwrap();
+        // Before acceptance: the failures it came from.
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c1"), (0xabc, "c2")], Some("s1"), 10)
+            .unwrap();
+        let accepted = f
+            .store
+            .review(&f.repo, d.id, &ReviewAction::Accept, None, None, 20)
+            .unwrap();
+        let all = || f.store.load(&f.repo);
+        assert!(f.store.recurred(&f.repo, &all()).is_empty());
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c3"), (0xdef, "c4")], Some("s2"), 30)
+            .unwrap();
+        assert!(
+            f.store.recurred(&f.repo, &all()).is_empty(),
+            "once isn't a pattern"
+        );
+        // Again in the same session: still one session.
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c6")], Some("s2"), 35)
+            .unwrap();
+        assert!(f.store.recurred(&f.repo, &all()).is_empty());
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c5")], Some("s3"), 40)
+            .unwrap();
+        assert_eq!(f.store.recurred(&f.repo, &all()), [(accepted.id, 2)]);
+        // Confirming it (reworded, say) starts the count again.
+        f.store
+            .review(&f.repo, d.id, &ReviewAction::Confirm, None, None, 50)
+            .unwrap();
+        assert!(f.store.recurred(&f.repo, &all()).is_empty());
+    }
+
+    #[test]
+    fn skills_export_where_claude_loads_them() {
+        let f = Fixture::new("export-skills");
+        let skill = |title: &str| NewDecision {
+            kind: DecisionKind::Skill,
+            body: "1. Do it.".into(),
+            ..f.new_decision(title)
+        };
+        f.store
+            .decide(&skill("Cut a release"), by("human"), 1)
+            .unwrap();
+        f.store
+            .decide(&skill("Cut a release!"), by("human"), 2)
+            .unwrap();
+        // Hand-written ones, one by the name the second would fall back to.
+        for name in ["verify", "cut-a-release-2"] {
+            let theirs = f.repo.join(".claude/skills").join(name);
+            std::fs::create_dir_all(&theirs).unwrap();
+            std::fs::write(
+                theirs.join("SKILL.md"),
+                format!("---\nname: {name}\n---\nhand-written\n"),
+            )
+            .unwrap();
+        }
+        let written = f.store.export(&f.repo, &f.repo).unwrap();
+        let skills = f.repo.join(".claude/skills");
+        assert_eq!(
+            written,
+            [
+                skills.join("cut-a-release/SKILL.md"),
+                skills.join("cut-a-release-2-2/SKILL.md")
+            ]
+        );
+        assert!(
+            std::fs::read_to_string(skills.join("cut-a-release-2/SKILL.md"))
+                .unwrap()
+                .contains("hand-written")
+        );
+        // A file added beside an exported skill survives the next export.
+        std::fs::write(skills.join("cut-a-release/notes.md"), "mine").unwrap();
+        assert!(
+            !f.repo
+                .join(".valkyrie/decisions/0001-cut-a-release.md")
+                .exists()
+        );
+        let text = std::fs::read_to_string(&written[0]).unwrap();
+        assert!(text.contains("name: cut-a-release\ndescription: \"Cut a release\""));
+        // Again, after one is retired: its directory goes, the hand-written one stays.
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Retire, None, None, 3)
+            .unwrap();
+        f.store.export(&f.repo, &f.repo).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&skills)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["cut-a-release", "cut-a-release-2", "verify"]);
+        assert!(skills.join("cut-a-release/notes.md").exists());
+    }
+
+    #[test]
+    fn one_replacement_waits_at_a_time_and_never_two_become_active() {
+        let f = Fixture::new("supersede-race");
+        f.store
+            .decide(&f.new_decision("Cut a release"), by("human"), 1)
+            .unwrap();
+        let rewrite = |title: &str| NewDecision {
+            supersedes: Some(1),
+            propose: true,
+            ..f.new_decision(title)
+        };
+        f.store
+            .decide(&rewrite("Cut it v2"), by("claude"), 2)
+            .unwrap();
+        let second = f.store.decide(&rewrite("Cut it v3"), by("valkyrie"), 3);
+        assert!(format!("{:#}", second.unwrap_err()).contains("#2 already proposes replacing #1"));
+        // One that got in anyway (written by an older binary, say) can't be
+        // accepted once the first is.
+        let mut raced = f.store.load(&f.repo)[1].clone();
+        raced.id = 3;
+        raced.title = "Cut it v3".into();
+        f.store.write(&f.repo, &raced, None).unwrap();
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Accept, None, None, 4)
+            .unwrap();
+        let late = f
+            .store
+            .review(&f.repo, 3, &ReviewAction::Accept, None, None, 5);
+        assert!(format!("{:#}", late.unwrap_err()).contains("which #2 already replaced"));
     }
 }

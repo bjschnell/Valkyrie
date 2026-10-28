@@ -83,15 +83,15 @@ fn tools() -> Value {
         },
         {
             "name": "get_decision",
-            "description": "One decision in full: why, where it came from, the files it's about, and whether it may be out of date.",
+            "description": "One decision or skill in full: why (or a skill's steps), where it came from, the files it's about, and whether it may be out of date.",
             "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}
         },
         {
             "name": "propose_decision",
-            "description": "Propose a decision the user and you settled that should hold in future sessions. It waits on the user's review; propose sparingly.",
+            "description": "Propose a decision the user and you settled that should hold in future sessions, or a skill: a procedure worth repeating (kind skill, the title says when to use it, the body holds the steps; with supersedes, a fix to an active skill). It waits on the user's review; propose sparingly.",
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "One line, imperative"},
-                "body": {"type": "string", "description": "A sentence or two: the rule and why"},
+                "body": {"type": "string", "description": "A sentence or two: the rule and why (a skill's: Markdown steps, pitfalls, how to verify)"},
                 "kind": {"type": "string", "enum": kinds},
                 "supersedes": {"type": "integer", "description": "The active decision this replaces"}
             }, "required": ["title", "body"]}
@@ -203,6 +203,14 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                     "\n#{} may be out of date: {}",
                     d.id,
                     d.fresh.review.as_deref().unwrap_or("")
+                ));
+            }
+            let root = valkyrie_context::project::root(cwd);
+            let store = valkyrie_context::Store::new(crate::context::store_base());
+            for (id, times) in store.recurred(&root, &list) {
+                text.push_str(&format!(
+                    "\n#{id} isn't working: {}",
+                    crate::context::not_working(times)
                 ));
             }
             Ok(text)

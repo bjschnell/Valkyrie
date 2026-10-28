@@ -183,6 +183,9 @@ struct App {
     /// A flagged decision `d` was pressed on once: retiring has no undo, so it
     /// takes a second `d`.
     retire_armed: Option<(PathBuf, u32)>,
+    /// The proposal preview's inner size when last drawn: a skill longer than it
+    /// can't be read whole here, so it isn't accepted here.
+    preview_size: std::cell::Cell<(u16, u16)>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
     view: Option<Attached>,
@@ -339,6 +342,7 @@ impl App {
             items: Vec::new(),
             backlog: None,
             retire_armed: None,
+            preview_size: std::cell::Cell::new((0, 0)),
             selected: 0,
             view: None,
             status: String::new(),
@@ -1879,6 +1883,23 @@ impl App {
             .checked_sub(self.proposals.len() + self.queue.len())
     }
 
+    /// Whether a proposal's text fits the preview, so what's accepted here was
+    /// seen whole. Only a skill gets long enough not to.
+    fn fits(&self, d: &Decision) -> bool {
+        if d.kind != valkyrie_proto::DecisionKind::Skill {
+            return true;
+        }
+        let (width, height) = self.preview_size.get();
+        let width = usize::from(width.max(1));
+        // The kind line and the note that it doesn't fit.
+        let rows: usize = 2 + d
+            .body
+            .lines()
+            .map(|l| l.chars().count().div_ceil(width).max(1))
+            .sum::<usize>();
+        rows <= usize::from(height)
+    }
+
     /// The proposal under the cursor.
     fn proposal(&self) -> Option<&Decision> {
         self.proposals.get(self.selected)
@@ -1951,6 +1972,11 @@ impl App {
         if flagged && !yes && !armed {
             self.retire_armed = Some((project, id));
             return Some(format!("d again to retire #{id}; agents stop getting it"));
+        }
+        if !flagged && yes && !self.fits(d) {
+            return Some(format!(
+                "#{id} is longer than the preview: read it whole with `valk decisions show {id}` or in the web app, and accept it there"
+            ));
         }
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
@@ -2650,13 +2676,27 @@ impl App {
             ]);
             let mut lines = vec![Line::from(
                 format!(
-                    "{}  ·  {} · {}",
+                    "{}  ·  {} · {}{}",
                     d.kind.as_str(),
                     proposer(d),
-                    short_path(&d.project)
+                    short_path(&d.project),
+                    d.supersedes
+                        .map(|n| format!(" · replaces #{n}"))
+                        .unwrap_or_default()
                 )
                 .fg(t.muted),
             )];
+            self.preview_size
+                .set((area.width.saturating_sub(2), area.height.saturating_sub(2)));
+            if !self.fits(d) {
+                lines.push(Line::from(
+                    format!(
+                        "longer than this panel: read it whole with `valk decisions show {}` or in the web app, and accept it there",
+                        d.id
+                    )
+                    .fg(t.accent2),
+                ));
+            }
             lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
             let body = Paragraph::new(lines)
                 .wrap(Wrap { trim: false })

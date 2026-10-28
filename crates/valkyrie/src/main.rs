@@ -115,9 +115,9 @@ enum Cmd {
     /// Record a project decision that every agent in this repo gets from now on. Run
     /// by an agent, it is only proposed, for you to accept.
     Decide {
-        /// One line.
+        /// One line (a skill's says when to use it).
         title: String,
-        /// A sentence or two of why; `-` reads it from stdin.
+        /// A sentence or two of why (a skill's steps); `-` reads it from stdin.
         body: Option<String>,
         #[arg(short, long, default_value = "decision", value_parser = context::parse_kind)]
         kind: valkyrie_proto::DecisionKind,

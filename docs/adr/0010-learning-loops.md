@@ -46,31 +46,35 @@ Constraints:
    - **Window:** only the last 90 days count, and past 1 MiB the file drops what's older.
    - **Cost:** a signature costs nothing to compute.
    - **Ranking:** signatures are how the retro ranks what to ask about (recurring first), and how item 5 measures.
-3. **Skills are a second kind of reviewed knowledge, kept like decisions** (decided 2026-10-27: the state dir, not the repo).
-   - **Storage:** a skill is `<state dir>/context/<project>/skills/<name>/SKILL.md`, with `name`, `description` (when to use it) and `version` front matter. Its body holds the procedure, pitfalls and verification, compatible with agentskills.io.
-   - **Lifecycle:** `proposed → active | rejected`, `active → retired`.
-   - **Patches:** a patch is a proposal against an active skill, reviewed as a diff, and accepting one bumps `version`.
-   - **Who acts:** agents propose (`valk skill propose`, MCP `propose_skill`), and only a human reviews.
+3. **A skill is a decision of kind `skill`** (decided 2026-10-27: Valkyrie's state dir, not the repo).
+   - **What:** its title says when to use it, and its body holds the procedure: steps with their commands, pitfalls, how to verify. A body may be 12,000 characters, where a decision's is 4,000.
+   - **Why a kind, not a second store:** a skill needs everything a decision already has: proposal and review in the queue, TUI, web and CLI; agents only proposing; retiring; anchors and staleness; provenance; export. A second store would copy all of it.
+   - **Patches:** a patch is a proposed skill that `supersedes` the active one, reviewed like any proposal. Accepting it supersedes the old one, so the chain is its history.
+     - **Whole or not at all:** a model may rewrite only a skill it was shown whole (newest first, up to 24,000 characters in all), so a rewrite can't drop a tail it never saw.
+     - **One at a time:** the store refuses a second proposed replacement of the same decision while one waits, and refuses to accept a replacement of something another one already replaced. Otherwise two rewrites of one version, accepted in turn, would leave two active.
+   - **Who acts:** agents propose (`valk decide --kind skill`, MCP `propose_decision`), and only a human reviews.
+   - **Not from the extractor or the retro's lessons:** those are a few clipped sentences, never a procedure, so a `skill` kind in their replies is read as a decision.
 4. **Skills are served by index.**
-   - **Index:** the context hook adds one line per active skill (`name: when to use it`), under its own budget of 1,500 characters beside the decisions' 6,000.
-   - **Bodies:** an agent reads one when it needs it, with `valk skill show NAME` or MCP `get_skill`. This works the same for Claude and Codex, and puts no files in the repo.
-   - **Export:** `valk skills export` copies active skills into `.claude/skills/` for anyone who wants them in git, natively loaded.
+   - **Index:** the context hook lists active skills one line each (`#id title`, newest first), apart from the decisions, under their own budget of 1,500 characters beside the decisions' 6,000.
+   - **Bodies:** an agent reads one when it needs it, with `valk decisions show ID` or MCP `get_decision`. This works the same for Claude and Codex, and puts no files in the repo.
+   - **Export:** `valk decisions export` also writes active skills to `.claude/skills/<name>/SKILL.md`, for anyone who wants them in git, natively loaded. Each says which skill it is, so the next export replaces only its own.
 5. **Skills come from what agents already do:**
-   - **The miner:** repeat groups that read as procedures, not rules.
-   - **The retro:** a session that reached green through a long multi-step path.
-   - **`valk skill learn SESSION`:** distills one session on request.
-   - **Patching:** when a session that read skill X hits failures, the retro proposes a patch to X instead of a new skill.
+   - **The miner:** a repeat group asking for the same several-step procedure is proposed as a skill.
+   - **`valk decisions learn SESSION`:** reads one session as what was asked, said, run and what failed (redacted, its last 16,000 characters), and proposes the skill in it, or a rewrite of an active skill it shows wrong. `--about` names the procedure when the session did more than one thing. Claude sessions only, and not with `auto off`.
+   - **Patching:** when a session that read skill X (`valk decisions show X` or Valkyrie's MCP `get_decision`) hits a failure, the retro is shown X and may propose X rewritten, naming the moment that showed it wrong; the rewrite quotes that failure and records its signature.
+   - **Not yet:** the retro proposing a new skill on its own when a session reached green through a long path. Telling a procedure from a struggle needs more than a turn's failures; `learn` covers it on request until real use shows what the signal is.
 6. **Knowledge is measured.**
-   - **Recording:** a decision or skill proposed from a signature records it.
-   - **Health:** `valk decisions health` reports when that signature recurs after acceptance ("#12, accepted 9 days ago: its failure happened 4 times since") and flags it for rewording or retirement.
+   - **Recording:** a decision or skill proposed from a failure records its signature.
+   - **Health:** `valk decisions health` and MCP `project_health` report an active decision whose failure happened in two or more sessions since it was accepted or last confirmed ("#12 isn't working: the failure it came from happened in 4 sessions since it was accepted"), to reword or retire. One session isn't enough: a session started before the acceptance never got it.
+     - It sees the last 90 days: past that, the file's compaction drops the line naming the failure a decision came from, and the decision is no longer measured.
    - **Miner:** repeat counts falling over time are the miner's measure.
    - Nothing is retired automatically.
 
 ## Phases
-1. The retro (items 1 and 2), Claude transcripts.
-2. The skill store, review (queue, TUI, web, CLI), index and serving (items 3 and 4).
-3. Skill generation and patching (item 5).
-4. Measures in `health` (item 6).
+1. The retro (items 1 and 2), Claude transcripts. Shipped in #29.
+2. The `skill` kind, its index, serving and export (items 3 and 4).
+3. Skills from the miner, `learn` and retro patches (item 5).
+4. Recurrences in `health` (item 6).
 
 ## Consequences
 - **Larger exposure than the extractor's.** Tool inputs and error text can carry secrets and file contents.
@@ -78,12 +82,15 @@ Constraints:
   - `auto off` stops it with everything else.
 - **Codex:** its rollouts record tool failures differently, so phase 1 reads Claude's only. That is also the default consent (`auto claude`).
 - **A turn whose only trouble was a refusal** may not fire `PostToolUseFailure`, so its refusal is read only once a failure arms the session. That needs checking against a real denial before refusals count as a trigger of their own.
-- **A skill index costs every session up to ~400 tokens.** An unused skill is retired like a stale decision.
+- **A skill index costs every session up to ~400 tokens.** Past its budget, the newest are listed and the rest counted.
+- **Upgrades:** an older binary reads `kind: skill` as a decision, and rewrites it as one if it edits the file. Run one version (`valk upgrade --local`) before relying on skills.
+- **A rewrite carries its failure quote** into the skill's body once accepted; you can edit it out when accepting.
 - **Hermes's defaults are not taken:**
   - No autonomous writes.
   - No hub installs: a skill from elsewhere is text that would reach every agent unreviewed.
   - No trajectories kept for training.
 - **Model trust:** the model's text is still untrusted.
-  - A proposed skill is shown in full before it can be accepted.
+  - A proposed skill is shown in full before it can be accepted: the web card scrolls, `valk decisions show` prints it, and the TUI refuses to accept a skill longer than its preview panel.
   - Bodies lose control characters and bidi overrides, as decisions do.
 - **Open:** whether Valkyrie-launched Claude sessions should also load active skills natively, through a per-session plugin directory, so the `Skill` tool sees them. The index works without it.
+- **Open:** skill usage isn't counted yet, so an unused skill isn't flagged; reads (`decisions show`) are visible in transcripts and could be.
