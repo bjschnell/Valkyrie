@@ -87,9 +87,14 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     std::fs::write(
         &agent,
         format!(
-            "#!/bin/sh\nfor a; do last=$a; done\nprintf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\npwd > {p}\n",
+            "#!/bin/sh\nfor a; do last=$a; done\npwd > {p}\n\
+             valk todo note 'fixed the off-by-one; check IME input' > {n} 2>&1\n\
+             valk todo note -i 2 'not mine' > {x} 2>&1\n\
+             printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
             b = o("brief"),
             p = o("pwd"),
+            n = o("note"),
+            x = o("not-mine"),
         ),
     )
     .unwrap();
@@ -127,6 +132,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "#1 Tab rename eats the last letter (repo)\n"
     );
 
+    human(&format!(
+        "valk todo add --no-folder 'Someone else' > {} 2>&1",
+        o("add2")
+    ));
+    wait_for(&out.join("add2"));
     human(&format!("valk todo launch 1 > {} 2>&1", o("launch")));
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -160,6 +170,27 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         std::thread::sleep(Duration::from_millis(200));
     };
     assert!(list.contains("#1") && list.contains("to review"), "{list}");
+
+    // The agent's handoff landed on its own item, and only there.
+    assert_eq!(
+        wait_for(&out.join("note")),
+        "noted on #1 Tab rename eats the last letter\n"
+    );
+    let refused = wait_for(&out.join("not-mine"));
+    assert!(
+        refused.contains("only the item its session was launched for"),
+        "{refused}"
+    );
+    human(&format!("valk todo show 1 > {} 2>&1", o("show")));
+    let show = wait_for(&out.join("show"));
+    assert!(
+        show.contains("fix/1-tab-rename-eats-the-last: 0 commits"),
+        "{show}"
+    );
+    assert!(
+        show.contains(":\nfixed the off-by-one; check IME input"),
+        "{show}"
+    );
 
     human(&format!("valk todo ship 1 > {} 2>&1", o("ship")));
     let ship = wait_for(&out.join("ship"));

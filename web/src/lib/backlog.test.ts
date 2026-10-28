@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { byColumn, byLane, lane, liveSession } from "./backlog";
+import { byColumn, byLane, factsLine, lane, liveSession } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -84,5 +84,14 @@ describe("byColumn", () => {
       [2, "proposed"],
       [1, "backlog"],
     ]);
+  });
+});
+
+describe("factsLine", () => {
+  it("says only what there is", () => {
+    expect(factsLine({ branch: "fix/1-x", ahead: 0, commits: [], diff: "", dirty: 0 })).toBe("0 commits");
+    expect(
+      factsLine({ branch: "fix/1-x", ahead: 1, commits: ["abc x"], diff: "1 file changed, 2 insertions(+)", dirty: 3 }),
+    ).toBe("1 commit · 1 file changed, 2 insertions(+) · 3 not committed");
   });
 });

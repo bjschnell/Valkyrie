@@ -1,7 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
-import type { Item, SessionInfo } from "../proto";
+import type { Item, ItemFacts, SessionInfo } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -69,3 +69,11 @@ export function byColumn(
 
 /** The last part of a path: a repository's name. */
 export const base = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+
+/** `2 commits · 3 files changed, 40 insertions(+) · 1 not committed`. */
+export function factsLine(f: ItemFacts): string {
+  const parts = [f.ahead === 1 ? "1 commit" : `${f.ahead} commits`];
+  if (f.diff) parts.push(f.diff);
+  if (f.dirty > 0) parts.push(`${f.dirty} not committed`);
+  return parts.join(" · ");
+}

@@ -436,6 +436,25 @@ impl Client {
         }
     }
 
+    /// Leaves a handoff note on an item.
+    pub async fn note_item(&self, id: u32, text: String) -> Result<crate::Item> {
+        match self
+            .request(|req| ClientMsg::NoteItem { req, id, text })
+            .await?
+        {
+            Reply::Item { item, .. } => Ok(*item),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// What an item's checkout holds now, if it has one.
+    pub async fn item_facts(&self, id: u32) -> Result<Option<crate::ItemFacts>> {
+        match self.request(|req| ClientMsg::ItemFacts { req, id }).await? {
+            Reply::ItemFacts { facts } => Ok(facts),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Starts `agent` on an item (see `ClientMsg::LaunchItem`).
     pub async fn launch_item(
         &self,

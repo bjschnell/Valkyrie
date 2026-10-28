@@ -2595,3 +2595,65 @@ button.title-name {
 .item-needs.item-proposed-pill {
   background: var(--accent2);
 }
+
+/* Handoffs (DESIGN §8.12): the agent's word on a card waiting for review, and the
+   checkout's facts beside it. */
+.item-handoff {
+  display: -webkit-box;
+  margin: 6px 0 0;
+  overflow: hidden;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  color: var(--soft);
+  font-size: 13px;
+  white-space: pre-line;
+  cursor: pointer;
+}
+
+.item-handoff-by,
+.item-note-by {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.item-facts {
+  margin-top: 8px;
+  font-size: 12.5px;
+}
+
+.item-facts-line {
+  color: var(--working);
+  font-weight: 600;
+}
+
+.item-commit {
+  overflow: hidden;
+  color: var(--soft);
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-note {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line);
+  font-size: 13px;
+}
+
+.item-note p {
+  margin: 2px 0 0;
+  white-space: pre-line;
+}
+
+.item-note-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.item-note-add input {
+  flex: 1;
+  min-width: 0;
+}

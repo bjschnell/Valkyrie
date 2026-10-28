@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, base, byColumn, liveSession, type Lane } from "../lib/backlog";
+import { COLUMNS, base, byColumn, factsLine, liveSession, type Lane } from "../lib/backlog";
 import { age } from "../lib/time";
-import { ITEM_KINDS, type Item, type ItemKind } from "../proto";
-import { addItem, changeItem, deleteItem, launchItem, sendFile, toast, useApp } from "../store";
+import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
+import { addItem, changeItem, deleteItem, itemFacts, launchItem, noteItem, sendFile, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
 
@@ -165,6 +165,27 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   }, [sure]);
   const remove = () => (sure ? act(() => deleteItem(item.id)) : setSure(true));
 
+  // What its checkout holds, read from git when the card opens and as it changes.
+  const [facts, setFacts] = useState<ItemFacts | null>(null);
+  useEffect(() => {
+    if (!expanded || !item.checkout) return setFacts(null);
+    let stale = false;
+    itemFacts(item.id).then(
+      (f) => stale || setFacts(f),
+      () => stale || setFacts(null),
+    );
+    return () => {
+      stale = true;
+    };
+  }, [expanded, item.id, item.checkout, item.updated]);
+  const latest = item.notes?.at(-1);
+  const [draft, setDraft] = useState("");
+  const leave = () =>
+    act(async () => {
+      if (await noteItem(item.id, draft)) setDraft("");
+    });
+  const who = (by: string) => (by === "human" ? "you" : by);
+
   return (
     <div className="card-slot">
       <article className={`card item-card ${EDGE[lane]} ${lane === "done" ? "item-done" : ""}`}>
@@ -188,6 +209,11 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
             {live.name} · {live.status.state.replace("_", " ")}
           </div>
         )}
+        {!expanded && lane === "review" && latest && (
+          <p className="item-handoff" onClick={() => setExpanded(true)}>
+            <span className="item-handoff-by">{who(latest.by)}:</span> {latest.text}
+          </p>
+        )}
         {expanded && (
           <>
             {item.body && item.body !== item.title && <p className="decision-body">{item.body}</p>}
@@ -200,6 +226,44 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
               {item.by === "human" ? "written by you" : `written by ${item.by}`}
               {item.branch && <> · {item.branch}</>}
             </div>
+            {facts && (
+              <div className="item-facts">
+                <div className="item-facts-line">{factsLine(facts)}</div>
+                {facts.commits.map((c) => (
+                  <div key={c} className="item-commit">
+                    {c}
+                  </div>
+                ))}
+              </div>
+            )}
+            {(item.notes ?? []).map((n, i) => (
+              <div key={i} className="item-note">
+                <div className="item-note-by">
+                  {who(n.by)} · {age(n.at * 1000, now)}
+                </div>
+                <p>{n.text}</p>
+              </div>
+            ))}
+            {lane !== "proposed" && (
+              <form
+                className="item-note-add"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (draft.trim()) void leave();
+                }}
+              >
+                <input
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="Add a note for the next launch"
+                  aria-label="Add a note"
+                  maxLength={4000}
+                />
+                <button className="ghost" disabled={busy || !draft.trim()}>
+                  Note
+                </button>
+              </form>
+            )}
           </>
         )}
         <div className="card-actions">

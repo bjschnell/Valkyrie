@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
-pub use backlog::{Item, ItemChange, ItemKind, ItemStatus, NewItem};
+pub use backlog::{Item, ItemChange, ItemFacts, ItemKind, ItemNote, ItemStatus, NewItem};
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
@@ -293,6 +293,18 @@ pub enum ClientMsg {
         req: ReqId,
         id: u32,
     },
+    /// Leaves a handoff note on an item: an agent only on the item its session was
+    /// launched for. Replies `Item`.
+    NoteItem {
+        req: ReqId,
+        id: u32,
+        text: String,
+    },
+    /// What the item's checkout holds now. Replies `ItemFacts`.
+    ItemFacts {
+        req: ReqId,
+        id: u32,
+    },
     /// Starts an agent on an item, in its own worktree unless `worktree` is false
     /// (a later launch goes back to the first one's). Replies `Session`.
     LaunchItem {
@@ -407,6 +419,11 @@ pub enum Reply {
     },
     Items {
         items: Vec<Item>,
+    },
+    /// `None`: no checkout of its own to look at (not launched, shipped, or
+    /// started in the repository itself).
+    ItemFacts {
+        facts: Option<ItemFacts>,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

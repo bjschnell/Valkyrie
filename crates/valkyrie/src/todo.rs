@@ -39,6 +39,16 @@ pub enum TodoCmd {
     },
     /// Accept an item an agent proposed, so it can be started.
     Accept { id: u32 },
+    /// Leave a handoff: what changed, what's left, what to check. It shows on the
+    /// item and goes into the brief of its next launch.
+    Note {
+        /// What happened; `-` reads it from stdin.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// The item (default: the one this session was launched for).
+        #[arg(short, long = "item", env = "VALK_ITEM", value_name = "ID")]
+        id: u32,
+    },
     /// One item in full (default: the one this session was launched for).
     Show {
         #[arg(env = "VALK_ITEM")]
@@ -172,6 +182,26 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             for a in &i.attachments {
                 println!("attached: {}", a.display());
             }
+            if let Some(f) = client.item_facts(id).await? {
+                println!("\n{}", facts(&f));
+                for c in &f.commits {
+                    println!("  {c}");
+                }
+            }
+            for n in &i.notes {
+                let by = if n.by == "human" { "you" } else { &n.by };
+                println!("\nnote from {by}:\n{}", n.text);
+            }
+            Ok(None)
+        }
+        TodoCmd::Note { text, id } => {
+            let mut text = text.join(" ");
+            if text == "-" {
+                text.clear();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            }
+            let item = client.note_item(id, text).await?;
+            println!("noted on #{} {}", item.id, item.title);
             Ok(None)
         }
         TodoCmd::Launch {
@@ -216,6 +246,21 @@ async fn status(client: &Client, id: u32, status: ItemStatus) -> Result<Option<S
         println!("{note}");
     }
     Ok(None)
+}
+
+/// `fix/3-x: 2 commits, 3 files changed, 40 insertions(+), 1 not committed`.
+fn facts(f: &valkyrie_proto::ItemFacts) -> String {
+    let mut parts = vec![match f.ahead {
+        1 => "1 commit".to_owned(),
+        n => format!("{n} commits"),
+    }];
+    if !f.diff.is_empty() {
+        parts.push(f.diff.clone());
+    }
+    if f.dirty > 0 {
+        parts.push(format!("{} not committed", f.dirty));
+    }
+    format!("{}: {}", f.branch, parts.join(", "))
 }
 
 /// Where an open item is: not started, or what its newest live session is doing.

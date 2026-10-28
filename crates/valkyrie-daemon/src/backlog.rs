@@ -155,6 +155,47 @@ impl Registry {
         .await?)
     }
 
+    /// Leaves a handoff note. An agent may only on the item its own session was
+    /// launched for: a note goes into the brief of the item's next launch, so one
+    /// from anywhere else would be a way into a prompt the user starts.
+    pub(crate) fn note_item(&self, id: u32, text: &str, peer: Option<Peer>) -> Result<Reply> {
+        let caller = self.caller(peer);
+        let by = caller.agent.clone().unwrap_or_else(|| "human".into());
+        if caller.agent.is_some() {
+            let item = self.backlog.lock().unwrap().get(id)?;
+            let its_own = caller
+                .session
+                .as_ref()
+                .is_some_and(|s| item.boot == self.boot && item.sessions.contains(&s.info().id));
+            if !its_own {
+                bail!("an agent notes only the item its session was launched for, not #{id}");
+            }
+        }
+        let item = self
+            .backlog
+            .lock()
+            .unwrap()
+            .note(id, &by, text, now_secs())?;
+        tracing::info!(id, by, "backlog note left");
+        self.refresh_items();
+        Ok(Reply::Item {
+            item: Box::new(item),
+            note: None,
+        })
+    }
+
+    /// What item `id`'s checkout holds now, from git.
+    pub(crate) async fn item_facts(&self, id: u32) -> Result<Reply> {
+        let item = self.backlog.lock().unwrap().get(id)?;
+        let facts = match (item.project, item.checkout) {
+            (Some(repo), Some(checkout)) => {
+                tokio::task::spawn_blocking(move || worktree::facts(&repo, &checkout)).await?
+            }
+            _ => None,
+        };
+        Ok(Reply::ItemFacts { facts })
+    }
+
     /// Starts `agent` on item `id`: in the checkout an earlier launch made if it's
     /// still there, else in a new worktree on the item's branch (or the repository
     /// itself without `worktree`). Returns the spawn's reply.
