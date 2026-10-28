@@ -207,7 +207,7 @@ fn corrections_become_proposals() {
         &model,
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
-             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"constraint\\\",\\\"title\\\":\\\"Use pnpm, never npm\\\",\\\"body\\\":\\\"The repo is pnpm.\\\"}}]}}\"}}'\n",
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"constraint\\\",\\\"title\\\":\\\"Use pnpm, never npm\\\",\\\"body\\\":\\\"The repo is pnpm.\\\"}}]}}\"}}'\n",
             calls = out.join("calls").display()
         ),
     )
@@ -346,7 +346,7 @@ fn failures_become_proposals() {
         &model,
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
-             echo '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
             calls = out.join("calls").display()
         ),
     )
@@ -453,6 +453,201 @@ fn failures_become_proposals() {
     assert!(
         sigs.contains("\"call\":\"1\"") && sigs.contains("\"decision\":1"),
         "{sigs}"
+    );
+    drop(daemon);
+}
+
+/// ADR-0010 §3–5: a skill is listed by title, read in full, rewritten when a
+/// session that followed it fails, distilled from a session on request, and
+/// exported where Claude Code loads it.
+#[test]
+fn skills_are_indexed_patched_learned_and_exported() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-skills-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join(".git"), &out, &dir.join("agent")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // The model: the retro's reply first (a rewrite of skill #1), then learn's.
+    let model = bin.join("model");
+    let calls = out.join("calls");
+    std::fs::write(
+        &model,
+        format!(
+            "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
+             if [ $(grep -c -- --- {calls}) = 1 ]; then\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"patch\\\":1,\\\"title\\\":\\\"Cut a release\\\",\\\"body\\\":\\\"1. Set the upstream.\\\\n2. Push the tag.\\\"}}]}}\"}}'\n\
+             else\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"kind\\\":\\\"skill\\\",\\\"title\\\":\\\"Verify a release build\\\",\\\"body\\\":\\\"1. Build.\\\"}}]}}\"}}'\n\
+             fi\n",
+            calls = calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&model, exec.clone()).unwrap();
+
+    // The agent read skill #1, then `git push --tags` failed and a push with
+    // the upstream set worked.
+    let transcript = out.join("t.jsonl");
+    let call = |id: &str, command: &str| {
+        serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":command}}]}}).to_string()
+    };
+    let result = |id: &str, error: Option<&str>| {
+        serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error.is_some(),"content":error.unwrap_or("ok")}]}}).to_string()
+    };
+    let lines = [
+        serde_json::json!({"type":"user","message":{"content":"cut the release"}}).to_string(),
+        call("1", "valk decisions show 1"),
+        result("1", None),
+        call("2", "git push --tags"),
+        result("2", Some("Exit code 128\nfatal: no upstream branch")),
+        call("3", "git push -u origin main --tags"),
+        result("3", None),
+    ];
+    std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    let hook = |event: &str| {
+        format!(
+            "echo '{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"c1\",\"tool_name\":\"Bash\",\"transcript_path\":\"{}\"}}' | valk hook claude\n",
+            transcript.display()
+        )
+    };
+    let agent = dir.join("agent/claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            hook("SessionStart"),
+            hook("PostToolUseFailure"),
+            hook("Stop"),
+            // Each hook is its own process, so on a slow machine the Stop may land
+            // before the failure: the next turn's end reads it then, as in use.
+            hook("Stop"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, exec).unwrap();
+
+    let env = |c: &mut Command| {
+        c.current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env("VALK_EXTRACTOR", model.to_str().unwrap())
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT");
+    };
+    let valk = |args: &[&str]| {
+        let mut c = Command::new(BIN);
+        c.args(args);
+        env(&mut c);
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // The skill itself, from a human: active at once.
+    let mut human = Command::new("setsid");
+    human.args([
+        "-f",
+        "script",
+        "-qec",
+        &format!(
+            "printf '1. Push the tag.\\n' | valk decide --kind skill 'Cut a release' - > {} 2>&1",
+            out.join("human").display()
+        ),
+        "/dev/null",
+    ]);
+    env(&mut human);
+    human
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    assert!(human.status().unwrap().success());
+    assert!(wait_for(&out.join("human")).contains("#1 recorded"));
+
+    // Listed by title for agents, its steps a `decisions show` away.
+    let preview = valk(&["decisions", "preview"]);
+    assert!(
+        preview.contains("decisions show <id>`:\n- #1 Cut a release\n")
+            && !preview.contains("Push the tag"),
+        "{preview}"
+    );
+
+    let id = valk(&[
+        "new",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--",
+        agent.to_str().unwrap(),
+    ]);
+    let id = id.trim();
+    let start = Instant::now();
+    let mut listed = String::new();
+    while start.elapsed() < Duration::from_secs(10) && !listed.contains("#2") {
+        std::thread::sleep(Duration::from_millis(100));
+        listed = valk(&["decisions"]);
+    }
+    assert!(
+        listed.contains("#2  skill      Cut a release (proposed)"),
+        "{listed}\n--- model calls:\n{}\n--- daemon log:\n{}",
+        std::fs::read_to_string(out.join("calls")).unwrap_or_default(),
+        std::fs::read_to_string(dir.join("state/valkyrie/daemon.log")).unwrap_or_default()
+    );
+    let shown = valk(&["decisions", "show", "2"]);
+    assert!(
+        shown.contains("supersedes: 1")
+            && shown.contains("1. Set the upstream.\n2. Push the tag.")
+            && shown.contains(
+                "Rewritten after a failure: `git push --tags` → fatal: no upstream branch"
+            ),
+        "{shown}"
+    );
+    let retro = std::fs::read_to_string(&calls).unwrap();
+    assert!(
+        retro.contains("<skill number=\"1\" title=\"Cut a release\">\n1. Push the tag.\n</skill>"),
+        "{retro}"
+    );
+
+    let learned = valk(&["decisions", "learn", id]);
+    assert!(
+        learned.contains("#3 proposed: Verify a release build"),
+        "{learned}"
+    );
+    let calls = std::fs::read_to_string(&calls).unwrap();
+    let learn = calls.split("---\n").nth(1).unwrap();
+    assert!(
+        learn.contains("You: cut the release\n> Bash: valk decisions show 1\n")
+            && learn.contains("! (exit 128) | fatal: no upstream branch\n"),
+        "{learn}"
+    );
+    assert!(valk(&["decisions", "show", "3"]).contains("Learned from the session"));
+
+    valk(&["decisions", "export"]);
+    let exported =
+        std::fs::read_to_string(repo.join(".claude/skills/cut-a-release/SKILL.md")).unwrap();
+    assert!(
+        exported.starts_with(
+            "---\nname: cut-a-release\ndescription: \"Cut a release\"\n---\n\n1. Push the tag.\n"
+        ),
+        "{exported}"
     );
     drop(daemon);
 }

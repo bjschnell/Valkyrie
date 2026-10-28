@@ -56,7 +56,7 @@ function ProposalCard({ d }: { d: Decision }) {
         ) : (
           <>
             <p className="decision-title">{d.title}</p>
-            {d.body && <p className="decision-body">{d.body}</p>}
+            {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
             <div className="decision-by">
               proposed by {who}
               {d.supersedes !== undefined && <> · replaces #{d.supersedes}</>}
@@ -97,7 +97,7 @@ function StaleCard({ d }: { d: Decision }) {
           <span className="card-prog">{base(d.project)}</span>
         </div>
         <p className="decision-title">{d.title}</p>
-        {d.body && <p className="decision-body">{d.body}</p>}
+        {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
         <div className="decision-by">{d.fresh?.review}</div>
         <div className="card-actions">
           <button className="ghost no" disabled={busy} onClick={() => void act({ a: "retire" })}>
@@ -145,7 +145,7 @@ function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDon
       </label>
       <label className="field">
         <span className="field-label">Why</span>
-        <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} maxLength={4000} />
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={kind === "skill" ? 12 : 4} maxLength={kind === "skill" ? 12000 : 4000} />
       </label>
       <div className="card-actions">
         <button className="ghost" disabled={saving} onClick={onDone}>

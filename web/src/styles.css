@@ -1952,6 +1952,14 @@ button.title-name {
   word-break: break-word;
 }
 
+/* A skill is a procedure, often long: scroll it in place. */
+.decision-body.skill {
+  max-height: 45vh;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 .decision-by {
   margin-top: 6px;
   font-size: 12.5px;
@@ -1979,6 +1987,7 @@ button.title-name {
 .kind-decision { --kind: var(--accent); }
 .kind-pattern { --kind: var(--working); }
 .kind-fix { --kind: var(--done); }
+.kind-skill { --kind: var(--needs); }
 
 .decision-edit {
   display: flex;

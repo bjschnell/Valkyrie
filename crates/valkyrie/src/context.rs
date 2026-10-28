@@ -37,6 +37,16 @@ pub enum DecisionsCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Have a small model turn what a session did into a skill: a procedure for the
+    /// next agent, or a fix to a skill the session followed. Proposed for review.
+    /// Claude sessions only.
+    Learn {
+        /// The session (default: this one).
+        session: Option<valkyrie_proto::SessionId>,
+        /// What the procedure is, if the session did more than one thing.
+        #[arg(long)]
+        about: Option<String>,
+    },
     /// Which sessions' corrections to agents a small model reads, to propose the
     /// rules in them: off, claude (the default) or all (Codex sessions too, whose
     /// conversations then also go to Anthropic). Without one, shows which.
@@ -160,6 +170,16 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
         }
         Some(DecisionsCmd::Mine { days, dry_run }) => {
             mine(client, &cwd, &root, days, dry_run).await
+        }
+        Some(DecisionsCmd::Learn { session, about }) => {
+            let session = match session {
+                Some(id) => id,
+                None => std::env::var("VALK_SESSION")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .context("which session? `valk decisions learn <session>`")?,
+            };
+            learn(client, session, about).await
         }
         Some(DecisionsCmd::Export) => {
             // The daemon's store, as the daemon would read it.
@@ -290,6 +310,94 @@ async fn mine(client: &Client, cwd: &Path, root: &Path, days: u64, dry_run: bool
     Ok(())
 }
 
+/// `valk decisions learn`: the skill in what one session did.
+async fn learn(
+    client: &Client,
+    id: valkyrie_proto::SessionId,
+    about: Option<String>,
+) -> Result<()> {
+    use valkyrie_context::{extract, model, skill};
+    let auto = valkyrie_proto::AutoMode::parse(&client.auto(None).await?);
+    // `auto off` keeps your conversations on this machine; that holds here too.
+    anyhow::ensure!(
+        auto.is_some_and(|a| a != valkyrie_proto::AutoMode::Off),
+        "`valk decisions auto` is off, so nothing goes to the model"
+    );
+    let info = client
+        .list()
+        .await?
+        .into_iter()
+        .find(|s| s.id == id)
+        .with_context(|| format!("no session {id}"))?;
+    anyhow::ensure!(
+        info.status.agent == "claude",
+        "session {id} isn't a Claude session; learn reads Claude transcripts only"
+    );
+    let chat = info
+        .chat
+        .clone()
+        .with_context(|| format!("session {id} has no transcript Valkyrie knows of"))?;
+    let jsonl =
+        std::fs::read_to_string(&chat).with_context(|| format!("read {}", chat.display()))?;
+    let digest = skill::digest(&jsonl);
+    anyhow::ensure!(!digest.is_empty(), "session {id} has done nothing yet");
+    let known = client.decisions(Some(info.cwd.clone())).await?;
+    let root = valkyrie_context::project::root(&info.cwd);
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Only a skill shown whole may be rewritten: it would lose what wasn't.
+    let (prompt, shown) = skill::prompt(&name, &known, &digest, about.as_deref());
+    eprintln!(
+        "Asking a small model (claude -p --model haiku, no tools) about {}…",
+        info.name
+    );
+    let dir = store_base();
+    let reply = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::ensure_private_dir(&dir)?;
+        model::ask(
+            &model::command(skill::SYSTEM),
+            &prompt,
+            &dir,
+            std::time::Duration::from_secs(180),
+        )
+    })
+    .await??;
+    let Some((found, patch)) = skill::parse_reply(&reply, &shown) else {
+        println!(
+            "No procedure to keep in {} (or one a skill already covers).",
+            info.name
+        );
+        return Ok(());
+    };
+    if patch.is_none() && extract::already_known(&found.title, &known) {
+        println!("“{}” is already known.", found.title);
+        return Ok(());
+    }
+    let d = client
+        .decide(NewDecision {
+            cwd: info.cwd.clone(),
+            title: found.title,
+            body: format!("{}\n\nLearned from the session {}.", found.body, info.name),
+            kind: DecisionKind::Skill,
+            propose: true,
+            supersedes: patch,
+            review_every: None,
+            session: Some(id),
+        })
+        .await?;
+    match patch {
+        Some(old) => println!("#{} proposed, to replace skill #{old}: {}", d.id, d.title),
+        None => println!("#{} proposed: {}", d.id, d.title),
+    }
+    println!(
+        "Review it with `valk decisions show {}`, the TUI or the web app.",
+        d.id
+    );
+    Ok(())
+}
+
 fn print_list(root: &Path, list: &[Decision], all: bool) {
     let shown: Vec<&Decision> = list
         .iter()
@@ -350,7 +458,11 @@ fn print_health(root: &Path, list: &[Decision]) {
             d.fresh.review.as_deref().unwrap_or("")
         );
     }
-    let waiting = count(DecisionStatus::Proposed) + flagged.len();
+    let recurred = valkyrie_context::Store::new(store_base()).recurred(root, list);
+    for (id, times) in &recurred {
+        println!("  #{id} isn't working: {}", not_working(*times));
+    }
+    let waiting = count(DecisionStatus::Proposed) + flagged.len() + recurred.len();
     println!(
         "  {}",
         if waiting == 0 {
@@ -359,6 +471,14 @@ fn print_health(root: &Path, list: &[Decision]) {
             format!("{waiting} wait on you: valk decisions, the TUI or your phone")
         }
     );
+}
+
+/// Why a decision whose failure recurred `times` since it was accepted needs you.
+pub(crate) fn not_working(times: usize) -> String {
+    format!(
+        "the failure it came from happened in {times} sessions since it was accepted; reword it \
+         (`valk decisions` → edit) or retire it"
+    )
 }
 
 /// `HEAD` of the checkout `dir` is in, short; `None` outside git.
@@ -376,7 +496,7 @@ fn head_commit(dir: &Path) -> Option<String> {
 }
 
 /// The store the daemon that started this session uses, else the default one.
-fn store_base() -> PathBuf {
+pub(crate) fn store_base() -> PathBuf {
     std::env::var_os("VALK_CONTEXT")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())

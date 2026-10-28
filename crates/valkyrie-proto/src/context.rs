@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// What sort of thing a decision records. Constraints rank first when injected.
+/// What sort of thing a decision records. Constraints rank first when injected; a
+/// skill is a procedure, listed by title and read in full when needed (ADR-0010).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {
@@ -14,15 +15,17 @@ pub enum DecisionKind {
     Pattern,
     Gotcha,
     Fix,
+    Skill,
 }
 
 impl DecisionKind {
-    pub const ALL: [DecisionKind; 5] = [
+    pub const ALL: [DecisionKind; 6] = [
         Self::Decision,
         Self::Constraint,
         Self::Pattern,
         Self::Gotcha,
         Self::Fix,
+        Self::Skill,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -32,6 +35,7 @@ impl DecisionKind {
             Self::Pattern => "pattern",
             Self::Gotcha => "gotcha",
             Self::Fix => "fix",
+            Self::Skill => "skill",
         }
     }
 

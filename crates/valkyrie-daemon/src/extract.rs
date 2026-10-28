@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use valkyrie_context::{extract, retro};
+use valkyrie_context::{extract, retro, skill};
 use valkyrie_proto::{AutoMode, NewDecision, Provenance, SessionId};
 
 /// How much of a transcript's end is read: a few exchanges.
@@ -214,19 +214,21 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
     let Ok(session) = registry.get(id) else {
         return false;
     };
-    session.take_failures();
     let info = session.info();
     if !mode.reads(&info.status.agent) {
         return false;
     }
+    // Not known yet (its first hook is still on the way): kept for the next turn.
     let Some(chat) = info.chat.clone() else {
         return false;
     };
     // Outside a repository there's no project to learn for.
     let root = valkyrie_context::project::root(&info.cwd);
     if !root.join(".git").exists() {
+        session.take_failures();
         return false;
     }
+    session.take_failures();
     let Ok(tail) = tokio::task::spawn_blocking(move || read_tail(&chat)).await else {
         return false;
     };
@@ -246,12 +248,12 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
         .iter()
         .map(|m| (m.signature, m.id.as_str()))
         .collect();
-    if let Err(e) = registry
-        .context
-        .lock()
-        .unwrap()
-        .record_failures(&root, &sigs, now)
-    {
+    if let Err(e) = registry.context.lock().unwrap().record_failures(
+        &root,
+        &sigs,
+        session.conversation().as_deref(),
+        now,
+    ) {
         tracing::warn!(session = id, "couldn't record failures: {e:#}");
     }
     let seen = before.seen;
@@ -271,7 +273,9 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let prompt = retro::prompt(&name, &known, &moments);
+    // Skills the session read: a failure may show one of them wrong.
+    let followed = skill::active(&known, &skill::read(&tail));
+    let (prompt, shown) = retro::prompt(&name, &known, &moments, &followed);
     let dir = registry.host.context_dir.clone();
     let command = command.to_vec();
     let asked = tokio::task::spawn_blocking(move || {
@@ -286,12 +290,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
             return true;
         }
     };
-    let mut proposed = 0;
-    for (f, n) in retro::parse_reply(&reply, moments.len()) {
-        if extract::already_known(&f.title, &known) {
-            continue;
-        }
-        let (m, count) = &moments[n];
+    let source = |(m, count): &(retro::Moment, usize)| {
         let error = m
             .error
             .lines()
@@ -302,18 +301,37 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
         } else {
             String::new()
         };
+        format!(
+            "a failure{seen}: `{}` → {}",
+            retro::quote(&m.input),
+            retro::quote(error)
+        )
+    };
+    // Each proposal, the skill it rewrites, and the moment it came from.
+    let mut found: Vec<(extract::Found, Option<u32>, usize)> = Vec::new();
+    for (f, n) in retro::parse_reply(&reply, moments.len()) {
+        if !extract::already_known(&f.title, &known) {
+            found.push((f, None, n));
+        }
+    }
+    // One rewrite waiting at a time: the store refuses a second.
+    if let Some((f, skill, n)) = retro::parse_patch(&reply, &shown, moments.len()) {
+        found.push((f, Some(skill), n));
+    }
+    let mut proposed = 0;
+    for (f, patch, n) in found {
+        let m = &moments[n].0;
+        let because = match patch {
+            Some(_) => "Rewritten after",
+            None => "From",
+        };
         let new = NewDecision {
             cwd: info.cwd.clone(),
             title: f.title,
-            body: format!(
-                "{}\n\nFrom a failure{seen}: `{}` → {}",
-                f.body,
-                retro::quote(&m.input),
-                retro::quote(error)
-            ),
+            body: format!("{}\n\n{because} {}", f.body, source(&moments[n])),
             kind: f.kind,
             propose: true,
-            supersedes: None,
+            supersedes: patch,
             review_every: None,
             session: Some(id),
         };

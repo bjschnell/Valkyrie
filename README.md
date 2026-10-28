@@ -283,10 +283,11 @@ Tell Valkyrie something once, and every agent in the repo starts with it.
 valk decide -k constraint "Never pkill by pattern" "It killed tool shells; kill exact pids."
 valk decisions            # this repo's decisions (--all: retired ones too)
 valk decisions preview    # what an agent gets at session start
-valk decisions export     # copy them into .valkyrie/decisions/ for git
+valk decisions export     # copy them into .valkyrie/decisions/ (skills: .claude/skills/) for git
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
-valk decisions health     # what waits on you; decisions that may be out of date
+valk decisions health     # what waits on you; decisions that may be out of date or not working
 valk decisions mine       # propose decisions from what you keep telling agents
+valk decisions learn 3    # propose a skill from what session 3 did
 claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 ```
 
@@ -309,7 +310,24 @@ How it works:
    you repeat. Codex transcripts are read only with `valk decisions auto all`, and
    with `auto off` nothing is sent. Transcripts from worktrees you've since removed
    can't be traced to the repo, so they're skipped.
-5. **Agents know about each other.** With each prompt, an agent also hears what the
+5. **What goes wrong becomes proposals.** When an agent's turn ends after a tool
+   failed, the same small model reads the failed call, a few lines of its error,
+   and what worked next, and proposes the gotcha or fix in it, quoting the failure.
+   Most failures teach nothing and are skipped. Each failure is remembered by a
+   signature, so the ones that keep coming back are asked about first, and
+   `valk decisions health` says when a decision's failure kept happening after you
+   accepted it. Same consent as corrections: `valk decisions auto`.
+6. **Procedures become skills.** A skill is a decision of kind `skill`: its title
+   says when to use it, its body holds the steps. Agents get a one-line index of
+   the project's skills and read one in full with `valk decisions show <id>` (or
+   the MCP `get_decision`), so a long procedure costs a session one line until it's
+   needed. Skills come from you (`valk decide -k skill "Cut a release" -` with the
+   steps on stdin), from agents, from `valk decisions mine` when what you repeat is
+   a procedure, and from `valk decisions learn <session>`, which reads what a
+   session did. When a session that followed a skill hits a failure, the retro may
+   propose the skill rewritten; accepting it replaces the old one. `valk decisions
+   export` writes active skills to `.claude/skills/` where Claude Code loads them.
+7. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently
    editing the same file.
