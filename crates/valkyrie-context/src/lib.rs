@@ -6,6 +6,7 @@ pub mod extract;
 mod file;
 pub mod handoff;
 pub mod inject;
+pub mod mine;
 pub mod model;
 pub mod project;
 pub mod stale;
