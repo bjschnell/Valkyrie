@@ -4,6 +4,7 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod backlog;
 mod clip;
 mod keys;
 mod links;
@@ -41,9 +42,9 @@ use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, DaemonInfo, Pushes};
 use valkyrie_proto::{
-    AgentState, AgentStatus, Color, CursorShape, Decision, Modes, Pane, QueueItem, ReviewAction,
-    Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId, SessionInfo, Side, Size, SpawnSpec,
-    Style,
+    AgentState, AgentStatus, Color, CursorShape, Decision, Item, ItemChange, Modes, NewItem, Pane,
+    QueueItem, ReviewAction, Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId, SessionInfo,
+    Side, Size, SpawnSpec, Style,
 };
 
 /// Ctrl-] — detach from the attached session, whatever the keys page maps.
@@ -175,6 +176,10 @@ struct App {
     sessions: Vec<SessionInfo>,
     /// Every project's decisions waiting on a human, oldest first, as last pushed.
     proposals: Vec<Decision>,
+    /// Every backlog item, as last pushed (DESIGN §8.12).
+    items: Vec<Item>,
+    /// The backlog page is open (`b`).
+    backlog: Option<backlog::Page>,
     /// A flagged decision `d` was pressed on once: retiring has no undo, so it
     /// takes a second `d`.
     retire_armed: Option<(PathBuf, u32)>,
@@ -331,6 +336,8 @@ impl App {
             queue: Vec::new(),
             sessions: Vec::new(),
             proposals: Vec::new(),
+            items: Vec::new(),
+            backlog: None,
             retire_armed: None,
             selected: 0,
             view: None,
@@ -646,6 +653,9 @@ impl App {
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
+        if self.backlog.is_some() {
+            return self.backlog_keys(&bytes).await;
+        }
         if self.settings_cursor.is_some() {
             return self.settings_keys(&bytes);
         }
@@ -698,8 +708,12 @@ impl App {
             return self.rename_keys(&bytes).await;
         }
         self.option_hint(&bytes);
-        for key in home_keys(&bytes, &self.settings.keys) {
+        for (key, end) in home_keys_at(&bytes, &self.settings.keys) {
             self.on_home_key(key).await;
+            // The rest of the read is the backlog page's, once a key opened it.
+            if self.backlog.is_some() {
+                return self.backlog_keys(&bytes[end..]).await;
+            }
         }
     }
 
@@ -926,6 +940,11 @@ impl App {
                     self.tab_mode = false;
                     self.open_focused_pane_menu();
                     return Box::pin(self.menu_keys(keys)).await;
+                }
+                b"b" => {
+                    self.tab_mode = false;
+                    self.open_backlog().await;
+                    return;
                 }
                 b"d" => {
                     self.tab_mode = false;
@@ -2031,7 +2050,116 @@ impl App {
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
+            HomeKey::Backlog => self.open_backlog().await,
         }
+    }
+
+    /// The daemon's boot, to tell this daemon's sessions from a restarted one's.
+    fn boot(&self) -> u64 {
+        self.daemon.map_or(0, |d| d.boot)
+    }
+
+    fn backlog_rows(&self) -> Vec<(backlog::Lane, Item)> {
+        backlog::rows(&self.items, &self.sessions, self.boot())
+    }
+
+    async fn open_backlog(&mut self) {
+        self.backlog = Some(backlog::Page::default());
+        self.backlog_facts().await;
+    }
+
+    /// Reads the selected item's facts from git, unless they're for it already.
+    async fn backlog_facts(&mut self) {
+        let rows = self.backlog_rows();
+        let Some(page) = &mut self.backlog else {
+            return;
+        };
+        page.cursor = page.cursor.min(rows.len().saturating_sub(1));
+        let Some((_, item)) = rows.get(page.cursor) else {
+            return;
+        };
+        let fresh = page
+            .facts
+            .as_ref()
+            .is_some_and(|(id, updated, _)| *id == item.id && *updated == item.updated);
+        if fresh {
+            return;
+        }
+        let (id, updated) = (item.id, item.updated);
+        let facts = match item.checkout {
+            Some(_) => self.client.item_facts(id).await.ok().flatten(),
+            None => None,
+        };
+        if let Some(page) = &mut self.backlog {
+            page.facts = Some((id, updated, facts));
+        }
+    }
+
+    async fn backlog_keys(&mut self, bytes: &[u8]) {
+        let rows = self.backlog_rows();
+        let boot = self.boot();
+        let Some(page) = &mut self.backlog else {
+            return;
+        };
+        let todo = page.keys(bytes, &rows, &self.sessions, boot);
+        for act in todo {
+            if let Err(e) = self.backlog_do(act).await {
+                self.say(format!("{e:#}"));
+            }
+        }
+        self.backlog_facts().await;
+    }
+
+    async fn backlog_do(&mut self, act: backlog::Do) -> Result<()> {
+        use backlog::Do;
+        match act {
+            Do::Close => self.backlog = None,
+            Do::Say(text) => self.say(text),
+            Do::Attach(id) => {
+                self.backlog = None;
+                self.switch_to(id).await;
+            }
+            Do::Launch { id, agent } => {
+                let size = self.session_size()?;
+                let info = self.client.launch_item(id, agent, true, size).await?;
+                self.backlog = None;
+                self.refresh().await;
+                self.switch_to(info.id).await;
+            }
+            Do::Status(id, status) => {
+                let (item, note) = self
+                    .client
+                    .change_item(id, ItemChange::Status { status })
+                    .await?;
+                let said = format!("#{} {}", item.id, item.status.as_str());
+                self.say(note.map_or(said.clone(), |n| format!("{said}: {n}")));
+            }
+            Do::Delete(id) => {
+                let (item, _) = self.client.delete_item(id).await?;
+                self.say(format!("deleted #{} {}", item.id, item.title));
+            }
+            Do::Note { id, text } => {
+                self.client.note_item(id, text).await?;
+                self.say(format!("noted on #{id}"));
+            }
+            Do::Add { kind, text } => {
+                // For the repository the TUI is in, or the attached tab is.
+                let here = self.attached_cwd().or_else(|| std::env::current_dir().ok());
+                let cwd = here.filter(|d| d.ancestors().any(|a| a.join(".git").exists()));
+                let item = self
+                    .client
+                    .add_item(NewItem {
+                        title: String::new(),
+                        body: text,
+                        kind,
+                        cwd,
+                        attachments: Vec::new(),
+                    })
+                    .await?;
+                self.say(format!("added #{} {}", item.id, item.title));
+            }
+        }
+        Ok(())
     }
 
     async fn add_device(&mut self) {
@@ -2061,6 +2189,10 @@ impl App {
             // one closes the list.
             let last = self.proposals.len().checked_sub(1);
             self.reviewing = self.reviewing.zip(last).map(|(i, last)| i.min(last));
+            return Ok(true);
+        }
+        if let ServerMsg::Items { items } = msg {
+            self.items = items;
             return Ok(true);
         }
         if let ServerMsg::Queue { items } = msg {
@@ -2163,6 +2295,7 @@ impl App {
                         && self.reviewing.is_none()
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
+                        && self.backlog.is_none()
                         && !self.rail_open();
                     self.draw_panes(frame, main, cursor);
                     if let Some(tabs) = tabs {
@@ -2196,6 +2329,11 @@ impl App {
             }
             if let Some(page) = &self.keys_page {
                 self.draw_keys_page(frame, page);
+            }
+            if let Some(page) = &self.backlog {
+                let rows = self.backlog_rows();
+                let t = self.settings.theme;
+                page.draw(frame, &rows, &self.sessions, self.boot(), now_ms(), t);
             }
         })?;
         Ok(())
@@ -2287,6 +2425,8 @@ const SPIN_EVERY: Duration = Duration::from_millis(100);
 const PREVIEW_MIN_WIDTH: u16 = 130;
 /// The most proposals shown at once; more scroll.
 const PROPOSAL_ROWS: usize = 6;
+/// Backlog items the home screen shows at most.
+const BACKLOG_ROWS: usize = 4;
 
 impl App {
     fn draw_home(&self, frame: &mut ratatui::Frame, body: Rect, bar: Rect) {
@@ -2338,15 +2478,52 @@ impl App {
                 .min(lists.height / 3)
                 .max(3),
         };
+        // Backlog items waiting on the user (to review, stuck, proposed), only while
+        // there are some; `b` opens the whole backlog.
+        let waiting: Vec<(backlog::Lane, Item)> = self
+            .backlog_rows()
+            .into_iter()
+            .filter(|(lane, _)| lane.waits())
+            .collect();
+        let backlog_height = match waiting.len() {
+            0 => 0,
+            n => (n.min(BACKLOG_ROWS) as u16 + 2)
+                .min(lists.height / 4)
+                .max(3),
+        };
         let queue_height = (self.queue.len().max(2) as u16 + 2)
-            .min(lists.height.saturating_sub(proposals_height) / 2)
+            .min(
+                lists
+                    .height
+                    .saturating_sub(proposals_height + backlog_height)
+                    / 2,
+            )
             .max(4);
-        let [proposals_area, queue_area, sessions_area] = Layout::vertical([
+        let [proposals_area, backlog_area, queue_area, sessions_area] = Layout::vertical([
             Constraint::Length(proposals_height),
+            Constraint::Length(backlog_height),
             Constraint::Length(queue_height),
             Constraint::Fill(1),
         ])
         .areas(lists);
+        if backlog_height > 0 {
+            let title = Line::from(vec![
+                " ▤ ".fg(t.done).bold(),
+                "backlog ".fg(t.fg).bold(),
+                format!("{} waiting ", waiting.len()).fg(t.muted),
+                "· b opens it ".fg(t.muted),
+            ]);
+            let width = backlog_area.width.saturating_sub(2) as usize;
+            let lines: Vec<Line> = waiting
+                .iter()
+                .take(BACKLOG_ROWS)
+                .map(|(lane, item)| backlog::home_line(item, *lane, width, t))
+                .collect();
+            frame.render_widget(
+                Paragraph::new(lines).block(panel(title, t, false)),
+                backlog_area,
+            );
+        }
 
         let in_proposals = self.proposal().is_some();
         if proposals_height > 0 {
@@ -2428,6 +2605,7 @@ impl App {
             let inside = Margin::new(1, 1);
             let regions: Vec<Rect> = [
                 Some(proposals_area),
+                Some(backlog_area),
                 Some(queue_area),
                 Some(sessions_area),
                 preview,
@@ -3929,6 +4107,7 @@ fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'
     };
     let general = [
         ("n", "new"),
+        ("b", "backlog"),
         (",", "settings"),
         (".", "keys"),
         ("p", "pair"),
@@ -4448,10 +4627,20 @@ enum HomeKey {
     Reject,
     /// A short code that pairs another device with the web app.
     AddDevice,
+    /// Open the backlog page.
+    Backlog,
     Quit,
 }
 
 fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
+    home_keys_at(bytes, map)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// The home screen's keys in `bytes`, each with where it ends.
+fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
     let mut keys = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -4468,33 +4657,38 @@ fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
             // Whole sequences, so a stray mouse report (`ESC[<0;5;3m`) is not read as
             // keys; an X10 report (`ESC[M` + 3 raw bytes) has no final byte at all.
             let key = next_key(rest);
+            let len = if key == b"\x1b[M" { 6 } else { key.len() };
             match key {
-                b"\x1b[A" | b"\x1bOA" => keys.push(HomeKey::Up),
-                b"\x1b[B" | b"\x1bOB" => keys.push(HomeKey::Down),
+                b"\x1b[A" | b"\x1bOA" => keys.push((HomeKey::Up, i + len)),
+                b"\x1b[B" | b"\x1bOB" => keys.push((HomeKey::Down, i + len)),
                 _ => {}
             }
-            i += if key == b"\x1b[M" { 6 } else { key.len() };
-            continue;
-        }
-        if let Some((action, len)) = map.at(rest) {
-            keys.push(HomeKey::Direct(action));
             i += len;
             continue;
         }
-        match rest[0] {
-            b'k' => keys.push(HomeKey::Up),
-            b'j' => keys.push(HomeKey::Down),
-            b'\r' | b'\n' => keys.push(HomeKey::Enter),
-            b'n' => keys.push(HomeKey::NewShell),
-            b'x' => keys.push(HomeKey::Kill),
-            b',' => keys.push(HomeKey::Settings),
-            b'r' => keys.push(HomeKey::Rename),
-            b'.' => keys.push(HomeKey::Keys),
-            b'a' => keys.push(HomeKey::Accept),
-            b'd' => keys.push(HomeKey::Reject),
-            b'p' => keys.push(HomeKey::AddDevice),
-            b'q' | 0x03 => keys.push(HomeKey::Quit),
-            _ => {}
+        if let Some((action, len)) = map.at(rest) {
+            keys.push((HomeKey::Direct(action), i + len));
+            i += len;
+            continue;
+        }
+        let key = match rest[0] {
+            b'k' => Some(HomeKey::Up),
+            b'j' => Some(HomeKey::Down),
+            b'\r' | b'\n' => Some(HomeKey::Enter),
+            b'n' => Some(HomeKey::NewShell),
+            b'x' => Some(HomeKey::Kill),
+            b',' => Some(HomeKey::Settings),
+            b'r' => Some(HomeKey::Rename),
+            b'.' => Some(HomeKey::Keys),
+            b'a' => Some(HomeKey::Accept),
+            b'd' => Some(HomeKey::Reject),
+            b'p' => Some(HomeKey::AddDevice),
+            b'b' => Some(HomeKey::Backlog),
+            b'q' | 0x03 => Some(HomeKey::Quit),
+            _ => None,
+        };
+        if let Some(key) = key {
+            keys.push((key, i + 1));
         }
         i += 1;
     }
@@ -5383,6 +5577,99 @@ mod tests {
     /// `.` on the home screen opens the keys page. Enter waits for a key and maps
     /// it, taking it from whoever had it; the map is kept in the settings file, and
     /// `r`, Backspace and `R R` reset, clear and reset everything.
+    #[tokio::test]
+    async fn backlog_opens_with_b_and_shows_what_waits_on_the_home_screen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-backlog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        let item = |id: u32, title: &str, status: valkyrie_proto::ItemStatus| Item {
+            id,
+            title: title.into(),
+            body: String::new(),
+            kind: valkyrie_proto::ItemKind::Bug,
+            status,
+            project: Some("/r/app".into()),
+            attachments: Vec::new(),
+            by: "claude".into(),
+            sessions: Vec::new(),
+            boot: 0,
+            branch: None,
+            checkout: None,
+            notes: Vec::new(),
+            created: 0,
+            updated: u64::from(id),
+        };
+        use valkyrie_proto::ItemStatus::{Open, Proposed};
+        app.on_push(ServerMsg::Items {
+            items: vec![
+                item(1, "Tab rename eats a letter", Open),
+                item(2, "Flaky exit test", Proposed),
+            ],
+        })
+        .unwrap();
+        let text = |terminal: &Terminal<TestBackend>| -> String {
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
+
+        // Home: only the proposal waits on the user.
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                let [body, bar] =
+                    Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
+                app.draw_home(f, body, bar)
+            })
+            .unwrap();
+        let home = text(&terminal);
+        assert!(home.contains("1 waiting"), "{home}");
+        assert!(home.contains("#2   Flaky exit test"), "{home}");
+        assert!(!home.contains("Tab rename"), "{home}");
+
+        // Keys after `b` in the same read go to the page, not the home screen.
+        app.on_input(b"bj".to_vec()).await;
+        let page = app.backlog.clone().unwrap();
+        assert_eq!(page.cursor, 1);
+        terminal
+            .draw(|f| {
+                page.draw(
+                    f,
+                    &app.backlog_rows(),
+                    &app.sessions,
+                    0,
+                    0,
+                    app.settings.theme,
+                )
+            })
+            .unwrap();
+        let shown = text(&terminal);
+        for want in [
+            "Backlog",
+            "2 open",
+            "proposed",
+            "backlog",
+            "Tab rename eats a letter",
+            "↩ launch",
+        ] {
+            assert!(shown.contains(want), "{want}: {shown}");
+        }
+        app.on_input(b"q".to_vec()).await;
+        assert!(app.backlog.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn keys_page_remaps_and_resets() {
         use ratatui::Terminal;

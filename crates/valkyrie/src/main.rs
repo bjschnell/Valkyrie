@@ -424,13 +424,24 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     Some(Some(code)) => format!("exited {code}"),
                     Some(None) => "exited".into(),
                 };
+                // On one line: a backlog launch's argument is a whole brief.
+                let command = s
+                    .command
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let command = match command.char_indices().nth(60) {
+                    Some((cut, _)) => format!("{}…", &command[..cut]),
+                    None => command,
+                };
                 println!(
                     "{:>3}  {:<14} {:<7} {:<13} {}  {}",
                     s.id,
                     s.name,
                     s.status.agent,
                     state,
-                    s.command.join(" "),
+                    command,
                     s.cwd.display()
                 );
                 if let Some(summary) = &s.status.summary {
