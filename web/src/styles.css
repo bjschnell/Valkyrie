@@ -683,6 +683,12 @@ button.title-name {
   overflow-y: auto;
 }
 
+/* Capped and scrolling: long options keep their height instead of squeezing
+   their text out over their neighbors. */
+.dock-choices .choice {
+  flex: none;
+}
+
 .keybar {
   display: flex;
   gap: 6px;
