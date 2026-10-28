@@ -26,6 +26,17 @@ pub enum DecisionsCmd {
     Preview,
     /// Copy the active decisions into <repo>/.valkyrie/decisions/ for git.
     Export,
+    /// Find what you keep telling agents in this repo's transcripts, and have a
+    /// small model propose the decisions that would make repeating it unnecessary.
+    /// Codex transcripts are read only when `auto` is `all`.
+    Mine {
+        /// How many days of transcripts to read.
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// Show what you repeat; send nothing to the model and propose nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Which sessions' corrections to agents a small model reads, to propose the
     /// rules in them: off, claude (the default) or all (Codex sessions too, whose
     /// conversations then also go to Anthropic). Without one, shows which.
@@ -147,6 +158,9 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
             );
             Ok(())
         }
+        Some(DecisionsCmd::Mine { days, dry_run }) => {
+            mine(client, &cwd, &root, days, dry_run).await
+        }
         Some(DecisionsCmd::Export) => {
             // The daemon's store, as the daemon would read it.
             let store = valkyrie_context::Store::new(store_base());
@@ -162,6 +176,118 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
             Ok(())
         }
     }
+}
+
+/// `valk decisions mine`: what you said again and again in this repository's
+/// transcripts, and the decisions a small model proposes from it.
+async fn mine(client: &Client, cwd: &Path, root: &Path, days: u64, dry_run: bool) -> Result<()> {
+    use valkyrie_context::{extract, mine, model};
+    let auto = valkyrie_proto::AutoMode::parse(&client.auto(None).await?);
+    let codex = auto == Some(valkyrie_proto::AutoMode::All);
+    let home = valkyrie_proto::home_dir();
+    let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    let since = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(days.saturating_mul(86_400)))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let root_owned = root.to_owned();
+    let (read, repeats) = tokio::task::spawn_blocking(move || {
+        let codex_home = codex.then_some(codex_home.as_path());
+        let sessions: Vec<Vec<String>> =
+            mine::transcripts(&root_owned, &claude_home, codex_home, since)
+                .iter()
+                .filter_map(|path| std::fs::read_to_string(path).ok())
+                .map(|jsonl| mine::said(&jsonl))
+                .collect();
+        (sessions.len(), mine::repeats(&sessions))
+    })
+    .await?;
+    if repeats.is_empty() {
+        println!(
+            "Nothing said {}+ times in {}+ sessions ({read} transcripts from the last {days} days).",
+            mine::MIN_TIMES,
+            mine::MIN_SESSIONS,
+        );
+        return Ok(());
+    }
+    if dry_run {
+        for r in &repeats {
+            println!("{}x in {} sessions:", r.said.len(), r.sessions);
+            for s in r.said.iter().take(3) {
+                println!("  - {s}");
+            }
+        }
+        return Ok(());
+    }
+    // `auto off` keeps your conversations on this machine; that holds here too.
+    anyhow::ensure!(
+        auto.is_some_and(|a| a != valkyrie_proto::AutoMode::Off),
+        "`valk decisions auto` is off, so nothing goes to the model; --dry-run shows what you repeat"
+    );
+    eprintln!(
+        "Asking a small model (claude -p --model haiku, no tools) about {} repeats from {read} sessions…",
+        repeats.len(),
+    );
+    let mut known = client.decisions(Some(cwd.to_owned())).await?;
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prompt = mine::prompt(&name, &known, &repeats);
+    let dir = store_base();
+    let reply = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::ensure_private_dir(&dir)?;
+        model::ask(
+            &model::command(mine::SYSTEM),
+            &prompt,
+            &dir,
+            std::time::Duration::from_secs(120),
+        )
+    })
+    .await??;
+    let mut proposed = 0;
+    for (found, group) in mine::parse_reply(&reply, &repeats) {
+        if extract::already_known(&found.title, &known) {
+            continue;
+        }
+        let r = &repeats[group];
+        let quote = mine::quote(&r.said[0]);
+        let d = client
+            .decide(NewDecision {
+                cwd: cwd.to_owned(),
+                title: found.title,
+                body: format!(
+                    "{}\n\nYou said this {} times in {} sessions, like “{quote}”",
+                    found.body,
+                    r.said.len(),
+                    r.sessions
+                ),
+                kind: found.kind,
+                propose: true,
+                supersedes: None,
+                review_every: None,
+                session: std::env::var("VALK_SESSION")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+            })
+            .await?;
+        println!("#{} proposed: {}", d.id, d.title);
+        known.push(d);
+        proposed += 1;
+    }
+    if proposed == 0 {
+        println!(
+            "Nothing a decision would fix in what you repeat ({} repeats looked at).",
+            repeats.len()
+        );
+    } else {
+        println!("Review them with `valk decisions`, the TUI home screen or the web app.");
+    }
+    Ok(())
 }
 
 fn print_list(root: &Path, list: &[Decision], all: bool) {

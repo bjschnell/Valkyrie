@@ -286,6 +286,7 @@ valk decisions preview    # what an agent gets at session start
 valk decisions export     # copy them into .valkyrie/decisions/ for git
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk decisions health     # what waits on you; decisions that may be out of date
+valk decisions mine       # propose decisions from what you keep telling agents
 claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 ```
 
@@ -301,7 +302,14 @@ How it works:
    a small model (Haiku, on your own Claude login, with no tools) reads that
    exchange and proposes the rule in it. This is on for Claude sessions by default;
    `valk decisions auto all|off` changes it.
-4. **Agents know about each other.** With each prompt, an agent also hears what the
+4. **What you repeat becomes proposals.** `valk decisions mine` reads this repo's
+   transcripts from the last 30 days (`--days`), finds what you said three or more
+   times across sessions ("did you push?"), and has the same small model propose the
+   decisions that would make saying it again unnecessary. `--dry-run` only shows what
+   you repeat. Codex transcripts are read only with `valk decisions auto all`, and
+   with `auto off` nothing is sent. Transcripts from worktrees you've since removed
+   can't be traced to the repo, so they're skipped.
+5. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently
    editing the same file.

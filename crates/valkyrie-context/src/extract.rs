@@ -311,7 +311,7 @@ fn looks_secret(token: &str) -> bool {
     body && token.len() >= 32 && digits >= 4 && letters >= 8
 }
 
-fn clip(text: &str, limit: usize) -> String {
+pub(crate) fn clip(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_owned();
     }
@@ -363,41 +363,43 @@ pub fn prompt(
 
 /// The decisions in the model's reply; anything malformed is dropped.
 pub fn parse_reply(reply: &str) -> Vec<Found> {
+    reply_list(reply)
+        .iter()
+        .filter_map(found)
+        .take(MAX_FOUND)
+        .collect()
+}
+
+/// The `decisions` array of a model's reply, which may have text around its JSON.
+pub fn reply_list(reply: &str) -> Vec<Value> {
     let (Some(start), Some(end)) = (reply.find('{'), reply.rfind('}')) else {
         return Vec::new();
     };
-    let Ok(v) = serde_json::from_str::<Value>(&reply[start..=end.max(start)]) else {
+    let Ok(mut v) = serde_json::from_str::<Value>(&reply[start..=end.max(start)]) else {
         return Vec::new();
     };
-    let Some(list) = v["decisions"].as_array() else {
-        return Vec::new();
-    };
-    list.iter()
-        .filter_map(|d| {
-            let title = d["title"].as_str()?.trim();
-            (!title.is_empty()).then(|| Found {
-                kind: d["kind"]
-                    .as_str()
-                    .and_then(DecisionKind::parse)
-                    .unwrap_or_default(),
-                title: clip(title, 150),
-                body: clip(d["body"].as_str().unwrap_or("").trim(), 600),
-            })
-        })
-        .take(MAX_FOUND)
-        .collect()
+    match v["decisions"].take() {
+        Value::Array(list) => list,
+        _ => Vec::new(),
+    }
+}
+
+/// One item of [`reply_list`]; `None` without a title.
+pub fn found(d: &Value) -> Option<Found> {
+    let title = d["title"].as_str()?.trim();
+    (!title.is_empty()).then(|| Found {
+        kind: d["kind"]
+            .as_str()
+            .and_then(DecisionKind::parse)
+            .unwrap_or_default(),
+        title: clip(title, 150),
+        body: clip(d["body"].as_str().unwrap_or("").trim(), 600),
+    })
 }
 
 /// Whether `title` says what one of `known` already says (any status, so a
 /// rejected proposal isn't made again): most of the words the same.
 pub fn already_known(title: &str, known: &[Decision]) -> bool {
-    let words = |s: &str| -> std::collections::BTreeSet<String> {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() > 2)
-            .map(str::to_owned)
-            .collect()
-    };
     let new = words(title);
     if new.is_empty() {
         return true;
@@ -408,6 +410,15 @@ pub fn already_known(title: &str, known: &[Decision]) -> bool {
         let all = new.union(&old).count();
         all > 0 && shared * 10 >= all * 6
     })
+}
+
+/// The words that carry a line's meaning: lowercase, longer than two letters.
+pub fn words(s: &str) -> std::collections::BTreeSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
