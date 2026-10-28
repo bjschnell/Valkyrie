@@ -37,7 +37,7 @@ async fn start() -> (Client, Pushes, TempDir) {
     let state = dir.join("state");
     let serve_socket = socket.clone();
     tokio::spawn(async move {
-        valkyrie_daemon::run(&serve_socket, &state, std::path::Path::new("valk")).await
+        valkyrie_daemon::run(&serve_socket, &state, std::path::Path::new("valk"), false).await
     });
     for _ in 0..200 {
         if let Ok((client, pushes)) = Client::connect(&socket).await {
@@ -122,9 +122,14 @@ async fn a_program_that_exits_reports_its_code() {
 async fn a_second_daemon_on_the_same_socket_is_refused() {
     let (_client, _pushes, dir) = start().await;
     let socket = dir.join("run").join("o.sock");
-    let err = valkyrie_daemon::run(&socket, &dir.join("state2"), std::path::Path::new("valk"))
-        .await
-        .unwrap_err();
+    let err = valkyrie_daemon::run(
+        &socket,
+        &dir.join("state2"),
+        std::path::Path::new("valk"),
+        false,
+    )
+    .await
+    .unwrap_err();
     assert!(format!("{err:#}").contains("already listening"), "{err:#}");
 }
 

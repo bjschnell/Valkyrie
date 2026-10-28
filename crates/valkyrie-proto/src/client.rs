@@ -75,6 +75,8 @@ pub struct DaemonInfo {
     pub generation: u32,
     /// Same across handoffs, different after a restart.
     pub boot: u64,
+    /// A development daemon (`valk daemon --dev`).
+    pub dev: bool,
 }
 
 impl DaemonInfo {
@@ -186,10 +188,12 @@ impl Client {
                 protocol,
                 generation,
                 boot,
+                dev,
             } => Ok(DaemonInfo {
                 protocol,
                 generation,
                 boot,
+                dev,
             }),
             other => bail!("unexpected reply: {other:?}"),
         }
@@ -446,6 +450,7 @@ mod tests {
             protocol: crate::PROTOCOL,
             generation,
             boot,
+            dev: false,
         };
         assert!(at(7, 1).upgraded_from(&at(7, 0)));
         assert!(!at(7, 1).upgraded_from(&at(7, 1)));

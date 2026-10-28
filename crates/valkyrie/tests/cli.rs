@@ -673,10 +673,15 @@ struct Daemon {
 
 impl Daemon {
     fn start(name: &str) -> Daemon {
+        Daemon::start_with(name, &[])
+    }
+
+    fn start_with(name: &str, args: &[&str]) -> Daemon {
         let dir = temp(name);
         let socket = dir.join("run/o.sock");
         let child = valk(&socket, &dir)
             .arg("daemon")
+            .args(args)
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -714,6 +719,16 @@ impl Daemon {
         }
     }
 
+    /// Whether the daemon says it is a development one (`Hello::dev`).
+    fn dev(&self) -> bool {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (client, _) = valkyrie_proto::client::Client::connect(&self.socket)
+                .await
+                .unwrap();
+            client.hello_info().await.unwrap().dev
+        })
+    }
+
     /// Pids of the daemon's children whose command line contains `marker`.
     fn children(&self, marker: &str) -> Vec<u32> {
         let ppid = self.child.id().to_string();
@@ -737,6 +752,24 @@ impl Drop for Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// ADR-0010: only `valk daemon --dev` lets browsers in with the dev token. The
+/// mode crosses an upgrade from the image handing off, so a dev daemon stays one and
+/// an upgrade can't make a daemon you use into one.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "upgrade hands off on unix")]
+fn only_a_dev_daemon_says_so_and_an_upgrade_keeps_its_mode() {
+    for (name, args, dev) in [
+        ("dev-mode", &["--dev"][..], true),
+        ("plain-mode", &[][..], false),
+    ] {
+        let d = Daemon::start_with(name, args);
+        assert_eq!(d.dev(), dev, "{name} before the upgrade");
+        let text = d.ok(&["upgrade", "--exe", BIN]);
+        assert!(text.contains("generation 1"), "{text}");
+        assert_eq!(d.dev(), dev, "{name} after the upgrade");
     }
 }
 

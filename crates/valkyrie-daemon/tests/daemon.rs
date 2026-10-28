@@ -43,7 +43,7 @@ async fn start_in(dir: &std::path::Path, socket: &str) -> (Client, Pushes) {
     let state = dir.join("state");
     let serve_socket = socket.clone();
     tokio::spawn(async move {
-        valkyrie_daemon::run(&serve_socket, &state, std::path::Path::new("valk")).await
+        valkyrie_daemon::run(&serve_socket, &state, std::path::Path::new("valk"), false).await
     });
     for _ in 0..100 {
         if let Ok((client, pushes)) = Client::connect(&socket).await {

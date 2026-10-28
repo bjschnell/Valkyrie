@@ -68,6 +68,10 @@ struct Handoff {
     /// Tabs split into panes; older images had none.
     #[serde(default)]
     layouts: Vec<Pane>,
+    /// A development daemon stays one, and only one stays one: the mode comes from
+    /// the image handing off, never from whoever asked for the upgrade.
+    #[serde(default)]
+    dev: bool,
 }
 
 /// Run by the new binary on `daemon --handoff-check` with a sample handoff on stdin:
@@ -102,6 +106,8 @@ struct Registry {
     generation: u32,
     /// When the first image of this daemon started (ns); survives handoffs.
     boot: u64,
+    /// Started with `--dev` (`Hello::dev`); survives handoffs.
+    dev: bool,
     /// Set while a handoff is under way: no new sessions.
     frozen: AtomicBool,
     /// Spawns hold it shared from the `frozen` check to the insert; a handoff takes
@@ -263,8 +269,9 @@ type Out = mpsc::Sender<Arc<ServerMsg>>;
 const TICK: Duration = Duration::from_millis(250);
 
 /// Serve forever. Transcripts go to `<state_dir>/sessions/<ns>-<id>.raw`, event logs
-/// next to them. Agent hooks registered by adapters run `hook_exe`.
-pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path) -> Result<()> {
+/// next to them. Agent hooks registered by adapters run `hook_exe`. A `dev` daemon
+/// is a throwaway one for development (`Hello::dev`).
+pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path, dev: bool) -> Result<()> {
     let socket = &std::path::absolute(socket)?;
     let dir = socket.parent().context("socket path has no parent")?;
     valkyrie_proto::ensure_private_dir(dir)?;
@@ -274,7 +281,7 @@ pub async fn run(socket: &Path, state_dir: &Path, hook_exe: &Path) -> Result<()>
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    let (registry, upgrades) = new_registry(socket.clone(), state_dir, hook_exe, 1, 0, boot)?;
+    let (registry, upgrades) = new_registry(socket.clone(), state_dir, hook_exe, 1, 0, boot, dev)?;
     // A fresh start; an upgrade (`resume`) has the sessions themselves.
     let restored = restore::restore(&registry, &registry.restore_file);
     if restored > 0 {
@@ -346,6 +353,7 @@ pub async fn resume(fd: RawFd, state_dir: &Path, hook_exe: &Path) -> Result<()> 
         handoff.next_id,
         generation,
         handoff.boot,
+        handoff.dev,
     )?;
     for pid in handoff.orphans {
         session::reap_orphan(pid);
@@ -383,6 +391,7 @@ fn new_registry(
     next_id: u32,
     generation: u32,
     boot: u64,
+    dev: bool,
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
     let (turns, turns_rx) = mpsc::unbounded_channel();
@@ -402,6 +411,7 @@ fn new_registry(
         queue: watch::Sender::new(Arc::default()),
         generation,
         boot,
+        dev,
         frozen: AtomicBool::new(false),
         gate: std::sync::RwLock::new(()),
         dying: Mutex::default(),
@@ -633,6 +643,7 @@ fn snapshot(
         sessions: sessions.iter().map(|s| s.save()).collect(),
         orphans,
         layouts: registry.layouts.lock().unwrap().clone(),
+        dev: registry.dev,
     }
 }
 
@@ -672,6 +683,7 @@ async fn preflight(registry: &Registry, exe: &Path) -> Result<()> {
         sessions: Vec::new(),
         orphans: Vec::new(),
         layouts: Vec::new(),
+        dev: registry.dev,
     };
     let sample = serde_json::to_vec(&sample)?;
     let mut child = tokio::process::Command::new(exe)
@@ -854,6 +866,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                     protocol: valkyrie_proto::PROTOCOL,
                     generation: registry.generation,
                     boot: registry.boot,
+                    dev: registry.dev,
                 }),
             ),
             ClientMsg::Input { session, data } => {
