@@ -275,7 +275,10 @@ async fn attaching_after_exit_still_reports_exit_code() {
             code: Some(3)
         }
     );
-    assert_eq!(client.dump(id).await.unwrap(), "bye\n");
+    // The exit can be seen before the reader has put the last output on the
+    // screen: wait for it rather than read the screen at once.
+    let text = wait_dump(&client, id, |t| t == "bye\n").await;
+    assert_eq!(text, "bye\n");
 }
 
 #[tokio::test]

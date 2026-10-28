@@ -536,6 +536,8 @@ M5 — Supervisor agent + policy engine.
 - License (MIT vs Apache-2.0 vs dual).
 - ~~Summarizer/extractor model strategy~~ → locked-down `claude -p --model haiku` on the user's own login (2026-10-08).
 - Name.
+- **Backlog: GitHub issue import** (§8.12). Decide after a week of using the backlog as it is (from 2026-10-28): is retyping issues a real cost? If it's built, it must be selective, because the repository is public and anyone can open an issue, which then becomes a prompt the user launches. Import only issues the user opened (or picks one by one), never on a label alone; frame the title and body in the brief as quoted data from GitHub, not as instructions; keep a link back to the issue; and never launch on import.
+- **Backlog: still to try or build** (§8.12). Check with a real claude, not the fake agent, that the In progress lane follows real hook states and that agents leave the handoff note when asked. Then, by value: share-sheet capture (an iOS Shortcut posting to Valkyrie), keeping attachments in the quick-add draft, a typed path in its repository picker, the TUI, and launching on capture (§7).
 
 ## 13. M0 spec (complete 2026-10-06)
 
