@@ -68,4 +68,7 @@ esac
 if command -v codex >/dev/null 2>&1; then
     say "Codex found: run 'valk setup codex' once for accurate Codex states"
 fi
+if ! command -v v >/dev/null 2>&1; then
+    say "nothing here is called v: 'valk setup alias' lets you type v instead of valk"
+fi
 say "done. Run 'valk' to open it, or 'valk new -a -- claude' to start an agent."

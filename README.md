@@ -171,6 +171,7 @@ valk new -- codex          # start Codex in the background
 valk new -w --name "fix login" -a -- claude   # in its own git worktree and branch
 valk ls                    # list sessions, with their state
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
+valk setup alias           # optional: type v instead of valk, if nothing else is called v
 ```
 
 ### One worktree per agent
