@@ -353,6 +353,17 @@ cargo test --workspace             # Rust tests
 cd web && npm ci && npm test       # web tests; `npm run build` refreshes web/dist
 ```
 
+To try the web app against a throwaway daemon, give it its own state and socket and
+start it with `--dev`; its `valk web` then takes `dev-token` at the pairing screen
+([ADR-0010](docs/adr/0010-dev-token.md)). Never use `--dev` for the daemon you use.
+
+```sh
+S=$(mktemp -d); chmod 700 $S
+export XDG_STATE_HOME=$S VALK_SOCKET=$S/d.sock
+valk daemon --dev &
+valk web --listen 127.0.0.1:8833 --url http://127.0.0.1:8833
+```
+
 [DESIGN.md](DESIGN.md) is the design and its history, and [docs/adr](docs/adr)
 holds the architecture decisions. Commits follow Conventional Commits, and versions
 follow semver; [docs/releasing.md](docs/releasing.md) says how both work and how a

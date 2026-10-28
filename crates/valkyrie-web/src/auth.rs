@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The token a development daemon's (`valk daemon --dev`) web server takes from any
+/// browser, so throwaway daemons need no pairing. A daemon you use never says it is
+/// one, and the mode can't be switched on later (ADR-0010).
+pub const DEV_TOKEN: &str = "dev-token";
 /// How long a pairing link's code works.
 pub const CODE_TTL_SECS: u64 = 10 * 60;
 /// How long a short code works.
@@ -38,6 +42,17 @@ pub struct Device {
 }
 
 impl Device {
+    /// Any browser holding `DEV_TOKEN`, on a development daemon. Never written to
+    /// `devices.json`, so it can't be listed, revoked or outlive the daemon's mode.
+    pub fn dev() -> Self {
+        Device {
+            name: "dev".into(),
+            token_sha256: sha256(DEV_TOKEN),
+            created_unix: 0,
+            added_by: None,
+        }
+    }
+
     /// Names the device on its push subscriptions, without the token.
     pub fn id(&self) -> &str {
         &self.token_sha256

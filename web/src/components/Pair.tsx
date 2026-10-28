@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { parseCode } from "../lib/pair";
+import { DEV_TOKEN, parseCode } from "../lib/pair";
 import { saveToken, useApp } from "../store";
 import { Wordmark } from "./Logo";
 
@@ -57,6 +57,7 @@ export function Pair() {
   }, [code]);
 
   const pasted = parseCode(typed);
+  const dev = typed.trim() === DEV_TOKEN;
 
   return (
     <main className="pair">
@@ -96,7 +97,9 @@ export function Pair() {
             className="pair-paste"
             onSubmit={(e) => {
               e.preventDefault();
-              if (pasted) {
+              if (dev) {
+                saveToken(DEV_TOKEN);
+              } else if (pasted) {
                 setError("");
                 setCode(pasted);
                 setTyped("");
@@ -112,7 +115,7 @@ export function Pair() {
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
             />
-            <button className="primary" type="submit" disabled={!pasted}>
+            <button className="primary" type="submit" disabled={!pasted && !dev}>
               Pair
             </button>
           </form>

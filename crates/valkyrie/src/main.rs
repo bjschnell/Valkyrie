@@ -41,6 +41,10 @@ enum Cmd {
         /// Check that a handoff on stdin parses, print the format and exit.
         #[arg(long, hide = true)]
         handoff_check: bool,
+        /// A throwaway daemon for development: its `valk web` lets any browser in
+        /// with the token `dev-token`, no pairing. Never for the daemon you use.
+        #[arg(long)]
+        dev: bool,
     },
     /// Update valk to the latest release, then switch the running daemon to it,
     /// keeping every session (ADR-0006). A build from source skips the download.
@@ -301,7 +305,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             println!("{}", valkyrie_daemon::HANDOFF_VERSION);
             Ok(())
         }
-        Some(Cmd::Daemon { resume_fd, .. }) => {
+        Some(Cmd::Daemon { resume_fd, dev, .. }) => {
             init_logging();
             let exe = std::env::current_exe()?;
             let state = valkyrie_proto::state_dir();
@@ -312,7 +316,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Some(fd) => valkyrie_daemon::resume(fd, &state, &exe).await,
                 #[cfg(windows)]
                 Some(_) => bail!("Windows upgrades restart the daemon; there is no handoff"),
-                None => valkyrie_daemon::run(&socket, &state, &exe).await,
+                None => valkyrie_daemon::run(&socket, &state, &exe, dev).await,
             }
         }
         Some(Cmd::Upgrade {

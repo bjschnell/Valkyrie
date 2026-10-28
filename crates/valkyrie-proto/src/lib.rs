@@ -330,6 +330,10 @@ pub enum Reply {
         /// ids start over) has a different one.
         #[serde(default)]
         boot: u64,
+        /// Started with `valk daemon --dev`: a throwaway daemon for development,
+        /// whose web server lets any browser in with the fixed `dev-token`.
+        #[serde(default)]
+        dev: bool,
     },
     Session {
         info: SessionInfo,

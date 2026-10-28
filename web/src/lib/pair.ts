@@ -1,3 +1,7 @@
+/** What a development daemon (`valk daemon --dev`) takes in place of pairing; any
+ * other daemon refuses it like a revoked token. */
+export const DEV_TOKEN = "dev-token";
+
 /** The code in a pairing link (`…/#pair=<code>`), a bare link code, or a short code
  * as typed (`KQ7-4M2`, `kq7 4m2`). */
 export function parseCode(text: string): string | null {

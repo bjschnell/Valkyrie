@@ -22,7 +22,7 @@ use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use valkyrie_proto::ClientMsg;
@@ -92,9 +92,32 @@ pub(crate) struct App {
     visible: AtomicUsize,
     /// Told when the daemon comes back from an upgrade.
     upgraded: tokio::sync::Notify,
+    /// The daemon said it is a development one (`Hello::dev`) on the connection the
+    /// queue watch holds now; false until it says so, and as soon as that drops.
+    dev: AtomicBool,
 }
 
 impl App {
+    /// The device a token belongs to: a paired one, or on a development daemon
+    /// anyone with `auth::DEV_TOKEN`.
+    pub(crate) fn check(&self, token: &str) -> Option<auth::Device> {
+        if token == auth::DEV_TOKEN {
+            return self.dev.load(Ordering::Relaxed).then(auth::Device::dev);
+        }
+        self.store.check(token)
+    }
+
+    pub(crate) fn set_dev(&self, dev: bool) {
+        if dev && !self.dev.swap(true, Ordering::Relaxed) {
+            println!(
+                "  development daemon: paste `{}` to pair, no code needed",
+                auth::DEV_TOKEN
+            );
+        } else if !dev {
+            self.dev.store(false, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn visible(&self) -> bool {
         self.visible.load(Ordering::Relaxed) > 0
     }
@@ -149,6 +172,7 @@ pub async fn run(opts: Options) -> Result<()> {
         push,
         visible: AtomicUsize::new(0),
         upgraded: tokio::sync::Notify::new(),
+        dev: AtomicBool::new(false),
     });
     tokio::spawn(notify::run(app.clone()));
     let watch = app.clone();
@@ -285,7 +309,7 @@ fn device(app: &App, headers: &HeaderMap) -> Option<auth::Device> {
         .to_str()
         .ok()?
         .strip_prefix("Bearer ")?;
-    app.store.check(token.trim())
+    app.check(token.trim())
 }
 
 fn unpaired() -> Response {
@@ -519,7 +543,7 @@ async fn ws(
         .find_map(|p| p.trim().strip_prefix("bearer."))
         .unwrap_or("")
         .to_string();
-    let Some(device) = app.store.check(&token) else {
+    let Some(device) = app.check(&token) else {
         // Upgraded only to close with 4401: a refused handshake looks like a
         // network drop to the browser, and the app must tell "pair again" apart.
         return upgrade
@@ -762,6 +786,43 @@ mod tests {
             HeaderValue::from_static("thor.example.ts.net"),
         );
         assert!(same_origin(&h));
+    }
+
+    /// ADR-0010: the dev token is good only while the daemon says it is a
+    /// development one; paired devices are unaffected either way.
+    #[test]
+    fn the_dev_token_works_only_on_a_dev_daemon() {
+        let dir = std::env::temp_dir().join(format!("valk-web-dev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = auth::Store::open(&dir).unwrap();
+        let paired = store.pair(&store.new_code().unwrap(), "phone").unwrap();
+        let app = App {
+            store,
+            socket: dir.join("d.sock"),
+            push: None,
+            visible: AtomicUsize::new(0),
+            upgraded: tokio::sync::Notify::new(),
+            dev: AtomicBool::new(false),
+        };
+        assert!(
+            app.check(auth::DEV_TOKEN).is_none(),
+            "before the daemon says so"
+        );
+        assert!(app.check(&paired).is_some());
+        app.set_dev(true);
+        assert_eq!(app.check(auth::DEV_TOKEN).unwrap().name, "dev");
+        assert!(app.check("dev-token ").is_none(), "only the exact token");
+        assert!(app.check(&paired).is_some());
+        app.set_dev(false);
+        assert!(
+            app.check(auth::DEV_TOKEN).is_none(),
+            "once the daemon is gone"
+        );
+        assert!(
+            app.store.devices().iter().all(|d| d.name != "dev"),
+            "never written as a device"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

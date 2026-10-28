@@ -253,6 +253,8 @@ pub(crate) async fn run(app: Arc<App>) {
         if let Err(e) = watch_daemon(&app, &mut watch, &mut daemon).await {
             tracing::debug!("queue watch: {e:#}");
         }
+        // Whatever takes the socket next has to say it's a development daemon again.
+        app.set_dev(false);
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
@@ -264,6 +266,7 @@ async fn watch_daemon(
 ) -> Result<()> {
     let (client, mut pushes) = Client::connect(&app.socket).await?;
     let info = client.hello_info().await?;
+    app.set_dev(info.dev);
     if daemon
         .replace(info)
         .is_some_and(|before| info.upgraded_from(&before))
