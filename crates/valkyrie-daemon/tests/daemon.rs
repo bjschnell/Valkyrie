@@ -1209,7 +1209,7 @@ async fn spawn_can_start_in_a_new_worktree() {
     assert!(!broken.exists(), "the failed session's worktree stayed");
 }
 
-/// ADR-0010 §6: a skill no agent read while the project was worked in is asked
+/// ADR-0011 §6: a skill no agent read while the project was worked in is asked
 /// about, and retired once the question has gone unanswered for long; a skill
 /// read lately is left alone. Counting only, no model.
 #[tokio::test]

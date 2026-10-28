@@ -1,4 +1,4 @@
-//! Skills (ADR-0010 §3–6): procedures a project's agents follow, kept as decisions
+//! Skills (ADR-0011 §3–6): procedures a project's agents follow, kept as decisions
 //! of kind `skill`. The index of them is injected; a body is read when needed. This
 //! is the pure part: exporting one for Claude Code, which skills a session read and
 //! which a prompt is about, when a skill has gone unread too long, when a session

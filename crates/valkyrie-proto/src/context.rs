@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// What sort of thing a decision records. Constraints rank first when injected; a
-/// skill is a procedure, listed by title and read in full when needed (ADR-0010).
+/// skill is a procedure, listed by title and read in full when needed (ADR-0011).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {

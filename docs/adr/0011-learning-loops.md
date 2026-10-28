@@ -1,6 +1,6 @@
-# ADR-0010: Projects learn from their sessions: a retro proposes what went wrong, skills are reviewed and served like decisions, and both are measured
+# ADR-0011: Projects learn from their sessions: a retro proposes what went wrong, skills are reviewed and served like decisions, and both are measured
 
-Status: proposed
+Status: accepted (2026-10-28)
 Date: 2026-10-27
 
 ## Context
@@ -76,9 +76,9 @@ Constraints:
 
 ## Phases
 1. The retro (items 1 and 2), Claude transcripts. Shipped in #29.
-2. The `skill` kind, its index, serving and export (items 3 and 4).
-3. Skills from the miner, `learn` and retro patches (item 5).
-4. Recurrences in `health` (item 6).
+2. The `skill` kind, its index, serving and export (items 3 and 4). Shipped in #32.
+3. Skills from the miner, `learn` and retro patches (item 5). Shipped in #32; learning from an approved job and suggesting a skill per prompt in #34.
+4. Recurrences in `health` (item 6). Shipped in #32; cleaning up unread skills in #34.
 
 ## Consequences
 - **Larger exposure than the extractor's.** Tool inputs and error text can carry secrets and file contents.

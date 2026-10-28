@@ -30,7 +30,7 @@ pub const MAX_BODY: usize = 4000;
 /// A skill's body holds a procedure: steps, pitfalls and how to verify.
 pub const MAX_SKILL_BODY: usize = 12_000;
 
-/// How long a failure counts (ADR-0010 §2).
+/// How long a failure counts (ADR-0011 §2).
 pub const FAILURE_DAYS: u64 = 90;
 /// Size past which `failures.jsonl` drops what no longer counts.
 const FAILURES_COMPACT: u64 = 1 << 20;
@@ -38,7 +38,7 @@ const FAILURES_COMPACT: u64 = 1 << 20;
 /// health says it isn't working.
 pub const RECURRED: usize = 2;
 
-/// How a project's skills are used (ADR-0010 §6), so one nobody needs is found.
+/// How a project's skills are used (ADR-0011 §6), so one nobody needs is found.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SkillUse {
     /// When this started being recorded: nothing before it is known.
@@ -106,7 +106,7 @@ impl SkillUse {
     }
 }
 
-/// What a project's sessions' failures have been (ADR-0010 §2).
+/// What a project's sessions' failures have been (ADR-0011 §2).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Failures {
     /// How often each signature was seen.
@@ -393,7 +393,7 @@ impl Store {
         Ok(())
     }
 
-    /// What `root`'s sessions' failures have been (ADR-0010 §2) over the last
+    /// What `root`'s sessions' failures have been (ADR-0011 §2) over the last
     /// [`FAILURE_DAYS`] days.
     pub fn failures(&self, root: &Path, now: u64) -> Failures {
         let mut out = Failures::default();
@@ -452,7 +452,7 @@ impl Store {
     }
 
     /// Active decisions whose failure kept happening after they were accepted
-    /// (ADR-0010 §6): each with in how many sessions since. A session started
+    /// (ADR-0011 §6): each with in how many sessions since. A session started
     /// before the acceptance never got it, so it takes [`RECURRED`] sessions.
     pub fn recurred(&self, root: &Path, decisions: &[Decision]) -> Vec<(u32, usize)> {
         let text = std::fs::read_to_string(self.failures_file(root)).unwrap_or_default();
@@ -491,7 +491,7 @@ impl Store {
         out
     }
 
-    /// How `root`'s skills are used (ADR-0010 §6); empty before anything was
+    /// How `root`'s skills are used (ADR-0011 §6); empty before anything was
     /// recorded.
     pub fn skill_use(&self, root: &Path) -> SkillUse {
         let path = self.base.join(project::key(root)).join("skill-use.json");
@@ -614,7 +614,7 @@ impl Store {
 }
 
 /// Active skills as `<checkout>/.claude/skills/<name>/SKILL.md`, where Claude Code
-/// loads them (ADR-0010 §4); directories an earlier export made are replaced.
+/// loads them (ADR-0011 §4); directories an earlier export made are replaced.
 fn export_skills(all: &[Decision], checkout: &Path) -> Result<Vec<PathBuf>> {
     let into = checkout.join(".claude/skills");
     if let Ok(entries) = std::fs::read_dir(&into) {

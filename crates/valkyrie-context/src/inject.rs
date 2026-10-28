@@ -1,5 +1,5 @@
 //! The block an agent gets at session start (ADR-0007 §6): the project's active
-//! decisions, ranked and cut to a budget, an index of its skills (ADR-0010 §4),
+//! decisions, ranked and cut to a budget, an index of its skills (ADR-0011 §4),
 //! and how to propose a new one.
 
 use std::path::Path;
