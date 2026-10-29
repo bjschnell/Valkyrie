@@ -185,8 +185,11 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
 - Uncommitted changes and ignored files (`node_modules`, `.env`) don't come along.
 - Every worktree shares the repo's decisions. The phone's New session screen has
   the same option.
-- Valkyrie doesn't remove worktrees. Once the work is merged, run
-  `git worktree remove <path>`.
+- Once the work is merged, `valk worktree prune` lists which worktrees could go
+  and why the others stay; `valk worktree prune --yes` takes away those whose
+  branch is in `origin`'s default branch, with the branch, unless a session runs
+  there, a backlog item owns it, it has no commits of its own, or it has changes.
+  It lists the ignored files (`.env`, `target/`) that go with each.
 
 ### Keybinds
 

@@ -598,6 +598,11 @@ impl Session {
         self.pid
     }
 
+    /// Where it was spawned, wherever its foreground program is now.
+    pub fn started_in(&self) -> &Path {
+        &self.cwd
+    }
+
     /// Everything the next daemon image needs; call with the reader stopped.
     #[cfg(unix)]
     pub fn save(&self) -> SavedSession {
