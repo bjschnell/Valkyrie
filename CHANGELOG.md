@@ -3,6 +3,23 @@
 Releases from 0.1.0 on follow [Semantic Versioning](https://semver.org) and are
 written by release-please from [Conventional Commits](docs/releasing.md).
 
+## [0.4.0](https://github.com/bjschnell/Valkyrie/compare/v0.3.0...v0.4.0) (2026-10-29)
+
+
+### Features
+
+* **cli:** valk pings, a report of where agents interrupt you ([6446479](https://github.com/bjschnell/Valkyrie/commit/6446479ac59511c40681f571fd24032a1b2a54ea))
+* **cli:** valk pings, a report of where agents interrupt you ([340b6ca](https://github.com/bjschnell/Valkyrie/commit/340b6cac435842a9ad22ed607d4b7e5b12aa19ed))
+* **worktree:** prune merged worktrees with `valk worktree prune` ([6c72f56](https://github.com/bjschnell/Valkyrie/commit/6c72f5681cfe1b9518606a12695ecd35e7ef5a31))
+* **worktree:** prune merged worktrees with `valk worktree prune` ([52d8432](https://github.com/bjschnell/Valkyrie/commit/52d8432cfbd659beecb35dab4e2f9ca087624e37))
+
+
+### Bug Fixes
+
+* **cli:** match deleted worktrees by the --repo path as given ([f8413d6](https://github.com/bjschnell/Valkyrie/commit/f8413d60f1a3bb277d1d91cb0b60ecbb72b3e5f7))
+* **cli:** valk pings review fixes ([bb71f78](https://github.com/bjschnell/Valkyrie/commit/bb71f78339e0af02bcea3b93e6752ed0ed596e86))
+* **worktree:** tighten prune's merge rule and show what goes ([dead050](https://github.com/bjschnell/Valkyrie/commit/dead05061f23ec5cbba51b104e34f02d427297b9))
+
 ## [0.3.0](https://github.com/bjschnell/Valkyrie/compare/v0.2.1...v0.3.0) (2026-10-28)
 
 
