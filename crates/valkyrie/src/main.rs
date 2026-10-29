@@ -3,6 +3,7 @@ mod bench;
 mod context;
 mod hook;
 mod mcp;
+mod pings;
 mod service;
 mod todo;
 mod tools;
@@ -204,6 +205,20 @@ enum Cmd {
         /// JSON lines `{"at": <seconds>, "state": "<state>"}`, each holding until the next.
         #[arg(long)]
         labels: Option<PathBuf>,
+    },
+    /// Where agents stopped and waited on you: questions, permissions, turns that
+    /// ended asking something. Read from the recorded sessions; no daemon needed.
+    Pings {
+        /// How many days back to look.
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// Only sessions in this project (any of its worktrees; a deleted one by its
+        /// `<repo>-<branch>` name beside the repository).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Print JSON, with every stop listed.
+        #[arg(long)]
+        json: bool,
     },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
@@ -689,6 +704,20 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         }
         Some(Cmd::Replay { events, labels }) => {
             print!("{}", tools::replay_report(&events, labels.as_deref())?);
+            Ok(())
+        }
+        Some(Cmd::Pings { days, repo, json }) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            let since = now.saturating_sub(days.saturating_mul(86_400_000));
+            let dir = valkyrie_proto::state_dir().join("sessions");
+            let pings = pings::collect(&dir, since, repo.as_deref())?;
+            if json {
+                println!("{}", pings::json(&pings, days, since, now));
+            } else {
+                print!("{}", pings::report(&pings, days, since, now)?);
+            }
             Ok(())
         }
         Some(Cmd::Bench(cmd)) => bench::run(cmd, &socket).await,
