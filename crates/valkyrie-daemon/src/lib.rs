@@ -1012,6 +1012,15 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::DeleteItem { req, id } => (req, registry.delete_item(id, peer).await),
             ClientMsg::NoteItem { req, id, text } => (req, registry.note_item(id, &text, peer)),
             ClientMsg::ItemFacts { req, id } => (req, registry.item_facts(id).await),
+            ClientMsg::PruneWorktrees {
+                req,
+                cwd,
+                remote,
+                remove,
+            } => (
+                req,
+                registry.prune_worktrees(cwd, remote, remove, peer).await,
+            ),
             ClientMsg::LaunchItem {
                 req,
                 id,

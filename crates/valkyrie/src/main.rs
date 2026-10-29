@@ -7,6 +7,7 @@ mod service;
 mod todo;
 mod tools;
 mod update;
+mod worktree;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -166,6 +167,9 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<todo::TodoCmd>,
     },
+    /// The worktrees sessions and backlog launches made beside the repository.
+    #[command(subcommand)]
+    Worktree(worktree::WorktreeCmd),
     /// Install agent integrations.
     #[command(subcommand)]
     Setup(SetupCmd),
@@ -619,6 +623,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => Ok(()),
             }
         }
+        Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
         Some(Cmd::Decisions { all, action }) => {
             context::decisions(&connect(&socket).await?.0, all, action).await
         }

@@ -150,7 +150,7 @@ impl Registry {
         }
         let branch = item.branch.clone();
         Ok(tokio::task::spawn_blocking(move || {
-            worktree::remove(&project, &checkout, branch.as_deref())
+            worktree::remove(&project, &checkout, branch.as_deref(), None)
         })
         .await?)
     }

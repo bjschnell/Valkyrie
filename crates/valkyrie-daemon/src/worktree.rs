@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use valkyrie_context::project;
-use valkyrie_proto::NoWindow;
+use valkyrie_proto::{ItemStatus, NoWindow};
 
 /// A worktree made for a session that hasn't started yet.
 #[derive(Debug)]
@@ -116,11 +116,17 @@ pub fn create(dir: &Path, branch: &str, name: Option<&str>) -> Result<Made> {
     })
 }
 
-/// Takes away a worktree a backlog item's launch made, now that it shipped, and its
-/// branch if that's merged; returns whether the worktree went, and what to tell the
-/// user. Never forced: git keeps a checkout with changes or untracked files, and a
-/// branch with commits not merged here (a squash-merged pull request among them).
-pub fn remove(repo: &Path, path: &Path, branch: Option<&str>) -> (bool, String) {
+/// Takes away a worktree (a shipped backlog item's, or a pruned one), and its branch
+/// if that's merged; returns whether the worktree went, and what to tell the user.
+/// Never forced: git keeps a checkout with changes or untracked files, and a branch
+/// with commits not merged here (a squash-merged pull request among them).
+/// `merged_at` is the commit the caller itself found merged (see `survey`).
+pub fn remove(
+    repo: &Path,
+    path: &Path,
+    branch: Option<&str>,
+    merged_at: Option<&str>,
+) -> (bool, String) {
     let shown = path.display();
     if !path.is_dir() {
         return (true, format!("{shown} was already gone"));
@@ -134,7 +140,20 @@ pub fn remove(repo: &Path, path: &Path, branch: Option<&str>) -> (bool, String) 
     let Some(branch) = branch.filter(|b| valid(repo, b).is_ok()) else {
         return (true, format!("took away {shown}"));
     };
-    match git(repo, &["branch", "--quiet", "-d", branch]) {
+    // `-d` asks whether the branch is merged into its upstream or this `HEAD`, and
+    // the main checkout's `main` often lags `origin/main`, where the pull request
+    // merged: it would keep every such branch. So `-D`, but only once the caller's
+    // own check passed against `origin/<default>` or `HEAD`, and only while the
+    // branch still points at the commit it checked.
+    let reference = format!("refs/heads/{branch}");
+    let still = |at: &str| {
+        git_out(repo, &["rev-parse", "--verify", "--quiet", &reference]).is_ok_and(|t| t == at)
+    };
+    let flag = match merged_at {
+        Some(at) if still(at) => "-D",
+        _ => "-d",
+    };
+    match git(repo, &["branch", "--quiet", flag, branch]) {
         Ok(()) => (true, format!("took away {shown} and branch {branch}")),
         Err(_) => (
             true,
@@ -181,6 +200,214 @@ pub fn facts(repo: &Path, checkout: &Path) -> Option<valkyrie_proto::ItemFacts> 
         diff: out(checkout, &["diff", "--shortstat", &base])?,
         dirty: out(checkout, &["status", "--porcelain"])?.lines().count() as u32,
     })
+}
+
+/// A linked worktree of a repository, as git sees it.
+#[derive(Debug)]
+pub struct Linked {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+    /// Its `HEAD` is in one of `Survey::against`.
+    pub merged: bool,
+    /// Its branch's upstream is gone: the remote deleted it, as a merged pull
+    /// request does, squashed ones included.
+    pub upstream_gone: bool,
+    pub locked: bool,
+    /// Its folder is gone, though git still lists it.
+    pub missing: bool,
+    /// Files changed or untracked but not committed.
+    pub dirty: u32,
+}
+
+#[derive(Debug)]
+pub struct Survey {
+    /// The main checkout.
+    pub repo: PathBuf,
+    /// What merged is judged against: `origin/<default>` (with `remote`) and the main
+    /// checkout's `HEAD`.
+    pub against: Vec<String>,
+    /// Every linked worktree; never the main checkout.
+    pub linked: Vec<Linked>,
+}
+
+/// The linked worktrees of the repository holding `dir`, each checked for being
+/// merged: its `HEAD` an ancestor of `origin`'s default branch (with `remote`) or of
+/// the main checkout's `HEAD`. A squash-merged branch isn't.
+pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
+    let canonical = |p: &Path| valkyrie_proto::canonical(p).unwrap_or_else(|_| p.to_path_buf());
+    anyhow::ensure!(
+        project::checkout(dir).join(".git").exists(),
+        "{} is not in a git repository",
+        dir.display()
+    );
+    let repo = canonical(&project::root(dir));
+    let mut against = Vec::new();
+    let mut tips = Vec::new();
+    if remote {
+        let default = git_out(
+            &repo,
+            &[
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+        )
+        .ok()
+        .into_iter()
+        .chain(["origin/main".to_owned(), "origin/master".to_owned()])
+        .find_map(|name| {
+            let reference = format!("refs/remotes/{name}");
+            let tip = git_out(&repo, &["rev-parse", "--verify", "--quiet", &reference]).ok()?;
+            Some((name, tip))
+        });
+        if let Some((name, tip)) = default {
+            against.push(name);
+            tips.push(tip);
+        }
+    }
+    if let Ok(tip) = git_out(&repo, &["rev-parse", "--verify", "--quiet", "HEAD"]) {
+        against.push(format!("HEAD of {}", repo.display()));
+        tips.push(tip);
+    }
+
+    let listed = git_out(&repo, &["worktree", "list", "--porcelain"])?;
+    let mut linked = Vec::new();
+    // Blocks split by a blank line; the first is always the main checkout.
+    for block in listed.split("\n\n").skip(1) {
+        let field = |key: &str| {
+            block.lines().find_map(|l| {
+                l.strip_prefix(key)
+                    .filter(|rest| rest.is_empty() || rest.starts_with(' '))
+                    .map(str::trim)
+            })
+        };
+        let (Some(path), Some(head)) = (field("worktree"), field("HEAD")) else {
+            continue;
+        };
+        let path = canonical(Path::new(path));
+        let head = head.to_owned();
+        let branch = field("branch").map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_owned());
+        let merged = tips
+            .iter()
+            .any(|tip| git(&repo, &["merge-base", "--is-ancestor", &head, tip]).is_ok());
+        let upstream_gone = branch.as_ref().is_some_and(|b| {
+            let reference = format!("refs/heads/{b}");
+            git_out(
+                &repo,
+                &["for-each-ref", "--format=%(upstream:track)", &reference],
+            )
+            .is_ok_and(|track| track == "[gone]")
+        });
+        let missing = !path.is_dir();
+        let dirty = if missing {
+            0
+        } else {
+            git_out(&path, &["status", "--porcelain"]).map_or(0, |out| out.lines().count() as u32)
+        };
+        linked.push(Linked {
+            locked: field("locked").is_some(),
+            path,
+            branch,
+            head,
+            merged,
+            upstream_gone,
+            missing,
+            dirty,
+        });
+    }
+    Ok(Survey {
+        repo,
+        against,
+        linked,
+    })
+}
+
+impl crate::Registry {
+    /// Judges each linked worktree of `cwd`'s repository, and with `remove` takes
+    /// away those that may go: merged, clean, with no session running in it and no
+    /// backlog item on it. Anyone may look; removing is the user's, as shipping is.
+    pub(crate) async fn prune_worktrees(
+        &self,
+        cwd: PathBuf,
+        remote: bool,
+        remove: bool,
+        peer: Option<crate::context::Peer>,
+    ) -> Result<valkyrie_proto::Reply> {
+        if remove {
+            self.vouch(peer, "removing worktrees")?;
+        }
+        let asked = cwd.clone();
+        let survey = tokio::task::spawn_blocking(move || survey(&cwd, remote)).await??;
+        let items = self.backlog.lock().unwrap().load();
+        let sessions: Vec<_> = self
+            .listed()
+            .into_iter()
+            .filter(|s| !s.exited())
+            .map(|s| s.info())
+            .collect();
+        let mut worktrees = Vec::new();
+        for wt in survey.linked {
+            let item = items.iter().find(|i| {
+                matches!(i.status, ItemStatus::Open | ItemStatus::Proposed)
+                    && i.checkout.as_ref().is_some_and(|c| {
+                        valkyrie_proto::canonical(c).unwrap_or_else(|_| c.clone()) == wt.path
+                    })
+            });
+            let session = sessions.iter().find(|s| s.cwd.starts_with(&wt.path));
+            let why = if wt.missing {
+                Some("its folder is gone; `git worktree prune` forgets it".to_owned())
+            } else if let Some(item) = item {
+                Some(format!(
+                    "backlog #{0} is on it: `valk todo ship {0}` instead",
+                    item.id
+                ))
+            } else if let Some(s) = session {
+                Some(format!("session {} runs in it", s.id))
+            } else if asked.starts_with(&wt.path) {
+                Some("you're in it".to_owned())
+            } else if wt.locked {
+                Some("locked".to_owned())
+            } else if !wt.merged && wt.upstream_gone {
+                Some("not merged (squash merge?)".to_owned())
+            } else if !wt.merged {
+                Some("not merged".to_owned())
+            } else if wt.dirty > 0 {
+                Some(format!("has changes ({} files)", wt.dirty))
+            } else {
+                None
+            };
+            let prunable = why.is_none();
+            let (removed, why) = match why {
+                Some(why) => (false, why),
+                None if remove => {
+                    let repo = survey.repo.clone();
+                    let (path, branch, head) = (wt.path.clone(), wt.branch.clone(), wt.head);
+                    tokio::task::spawn_blocking(move || {
+                        self::remove(&repo, &path, branch.as_deref(), Some(&head))
+                    })
+                    .await?
+                }
+                None => (false, "merged".to_owned()),
+            };
+            worktrees.push(valkyrie_proto::Worktree {
+                path: wt.path,
+                branch: wt.branch,
+                prunable,
+                removed,
+                why,
+            });
+        }
+        if remove {
+            let gone = worktrees.iter().filter(|w| w.removed).count();
+            tracing::info!(gone, "pruned worktrees");
+        }
+        Ok(valkyrie_proto::Reply::Worktrees {
+            against: survey.against,
+            worktrees,
+        })
+    }
 }
 
 /// Runs `git` in `dir`, returning what it printed, trimmed.
@@ -368,7 +595,7 @@ mod tests {
     fn a_shipped_worktree_goes_only_when_clean_and_its_branch_only_when_merged() {
         let repo = Repo::new("remove");
         let clean = create(&repo.main(), "feat/1-x", None).unwrap().start;
-        let (gone, said) = remove(&repo.main(), &clean, Some("feat/1-x"));
+        let (gone, said) = remove(&repo.main(), &clean, Some("feat/1-x"), None);
         assert!(gone && !clean.exists(), "{said}");
         assert!(
             !has_branch(&repo.main(), "feat/1-x"),
@@ -377,7 +604,7 @@ mod tests {
 
         let dirty = create(&repo.main(), "fix/2-y", None).unwrap().start;
         std::fs::write(dirty.join("new.txt"), "wip").unwrap();
-        let (gone, said) = remove(&repo.main(), &dirty, Some("fix/2-y"));
+        let (gone, said) = remove(&repo.main(), &dirty, Some("fix/2-y"), None);
         assert!(!gone && dirty.exists(), "{said}");
         assert!(said.starts_with("kept "), "{said}");
 
@@ -394,14 +621,14 @@ mod tests {
             "z",
         ];
         git(&ahead, &commit).unwrap();
-        let (gone, said) = remove(&repo.main(), &ahead, Some("fix/3-z"));
+        let (gone, said) = remove(&repo.main(), &ahead, Some("fix/3-z"), None);
         assert!(gone && !ahead.exists(), "{said}");
         assert!(
             has_branch(&repo.main(), "fix/3-z"),
             "unmerged work stays: {said}"
         );
 
-        let (gone, _) = remove(&repo.main(), &repo.main(), None);
+        let (gone, _) = remove(&repo.main(), &repo.main(), None, None);
         assert!(
             !gone && repo.main().exists(),
             "the main checkout is never taken"

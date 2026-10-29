@@ -455,6 +455,29 @@ impl Client {
         }
     }
 
+    /// Judges `cwd`'s repository's worktrees, and with `remove` takes away those
+    /// that may go (see `ClientMsg::PruneWorktrees`). Returns what merged was
+    /// judged against, and each worktree.
+    pub async fn prune_worktrees(
+        &self,
+        cwd: PathBuf,
+        remote: bool,
+        remove: bool,
+    ) -> Result<(Vec<String>, Vec<crate::Worktree>)> {
+        match self
+            .request(|req| ClientMsg::PruneWorktrees {
+                req,
+                cwd,
+                remote,
+                remove,
+            })
+            .await?
+        {
+            Reply::Worktrees { against, worktrees } => Ok((against, worktrees)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Starts `agent` on an item (see `ClientMsg::LaunchItem`).
     pub async fn launch_item(
         &self,

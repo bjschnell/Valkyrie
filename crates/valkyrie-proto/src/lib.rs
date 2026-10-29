@@ -27,7 +27,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 13;
+pub const PROTOCOL: u32 = 14;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -84,6 +84,19 @@ pub fn login_env() -> Vec<(String, Option<String>)> {
         .iter()
         .map(|k| (k.to_string(), std::env::var(k).ok()))
         .collect()
+}
+
+/// A linked worktree as `PruneWorktrees` judged it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// `None`: a detached `HEAD`.
+    pub branch: Option<String>,
+    /// Merged, clean, and nothing runs in it or is on it: it may go.
+    pub prunable: bool,
+    pub removed: bool,
+    /// Why it stays, or what taking it away did.
+    pub why: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -318,6 +331,17 @@ pub enum ClientMsg {
         #[serde(default)]
         env: Vec<(String, Option<String>)>,
     },
+    /// Judges each linked worktree of `cwd`'s repository for removal (DESIGN §4.3),
+    /// and with `remove` takes away those that pass: the user only. Replies
+    /// `Worktrees`.
+    PruneWorktrees {
+        req: ReqId,
+        cwd: PathBuf,
+        /// Count `origin`'s default branch as merged into; false when the client
+        /// couldn't fetch it, so only the main checkout's `HEAD` counts.
+        remote: bool,
+        remove: bool,
+    },
 }
 
 fn yes() -> bool {
@@ -424,6 +448,11 @@ pub enum Reply {
     /// started in the repository itself).
     ItemFacts {
         facts: Option<ItemFacts>,
+    },
+    Worktrees {
+        /// What merged was judged against, e.g. `origin/main`.
+        against: Vec<String>,
+        worktrees: Vec<Worktree>,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.
