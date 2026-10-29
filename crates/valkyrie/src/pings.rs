@@ -38,6 +38,17 @@ const OFFERS: &[&str] = &[
 /// word (`commit` in "committed"); a trailing space makes it whole (`pr `).
 const TOPICS: &[(&str, &[&str])] = &[
     (
+        "wait till you're done, clean up",
+        &[
+            "when you re done",
+            "when you are done",
+            "clean up",
+            "cleanup",
+            "tear down",
+            "killed ",
+        ],
+    ),
+    (
         "commit, push, PR or merge",
         &[
             "commit",
@@ -88,36 +99,66 @@ pub struct Ping {
     pub summary: String,
     /// A turn end whose last line asks you something: that line.
     pub ask: Option<String>,
-    /// Where a turn end's reply was read from: `hook`, `transcript` or `summary`.
+    /// Where a turn end's reply was read from: `hook`, `transcript`, `summary`, or
+    /// `none` when nothing recorded one.
     pub source: Option<&'static str>,
     cwd: Option<PathBuf>,
 }
+
+/// The summary the tracker gives a turn still waiting on background work.
+const BACKGROUND: &str = "background work still running";
 
 /// The pings since `since_ms` in every event log in `dir`, oldest first; with
 /// `repo`, only those whose agent ran in that project (any of its worktrees).
 pub fn collect(dir: &Path, since_ms: u64, repo: Option<&Path>) -> Result<Vec<Ping>> {
     let mut pings = Vec::new();
-    let entries = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+    let mut transcripts = Transcripts::new();
+    let entries = match std::fs::read_dir(dir) {
+        // Nothing recorded yet.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(pings),
+        entries => entries.with_context(|| format!("read {}", dir.display()))?,
+    };
     for entry in entries {
         let path = entry?.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         if let Some(stem) = name.strip_suffix(".events.jsonl") {
-            read_log(&path, stem, since_ms, &mut pings)?;
+            read_log(&path, stem, since_ms, &mut transcripts, &mut pings)?;
         }
     }
     if let Some(repo) = repo {
-        let repo = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let repo =
+            std::fs::canonicalize(repo).with_context(|| format!("--repo {}", repo.display()))?;
         let root = project::root(&repo);
         let mut inside = HashMap::new();
         pings.retain(|p| {
             let Some(cwd) = &p.cwd else { return false };
             *inside
                 .entry(cwd.clone())
-                .or_insert_with(|| cwd.starts_with(&repo) || project::root(cwd) == root)
+                .or_insert_with(|| in_repo(cwd, &repo, &root))
         });
     }
     pings.sort_by_key(|p| p.t);
     Ok(pings)
+}
+
+/// Whether `cwd` is in the project at `root`. A directory that's gone can't be
+/// asked for its repository; a worktree Valkyrie made is named `<repo>-<branch>`
+/// beside the root (DESIGN §4.3), so a gone one is matched by that name.
+fn in_repo(cwd: &Path, repo: &Path, root: &Path) -> bool {
+    if cwd.starts_with(repo) || cwd.starts_with(root) {
+        return true;
+    }
+    if cwd.exists() {
+        return project::root(cwd) == root;
+    }
+    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
+        return false;
+    };
+    let prefix = format!("{}-", name.to_string_lossy());
+    cwd.strip_prefix(parent)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .is_some_and(|dir| dir.as_os_str().to_string_lossy().starts_with(&prefix))
 }
 
 /// The last Stop hook seen before a state line.
@@ -126,11 +167,26 @@ struct Stop {
     transcript: Option<PathBuf>,
 }
 
-fn read_log(path: &Path, stem: &str, since_ms: u64, out: &mut Vec<Ping>) -> Result<()> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+fn read_log(
+    path: &Path,
+    stem: &str,
+    since_ms: u64,
+    transcripts: &mut Transcripts,
+    out: &mut Vec<Ping>,
+) -> Result<()> {
+    let bytes = match std::fs::read(path) {
+        // Pruned while we looked.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        bytes => bytes.with_context(|| format!("read {}", path.display()))?,
+    };
+    let text = String::from_utf8_lossy(&bytes);
     let mut seqs = HashSet::new();
     let mut cwd: Option<PathBuf> = None;
     let mut stop: Option<Stop> = None;
+    // The last turn end's summary, while only background work followed it: the
+    // tracker repeats that turn end once the work is done, under a new seq.
+    let mut ended: Option<String> = None;
+    let mut background = false;
     // A live session's last line may be half written.
     for line in text
         .lines()
@@ -157,10 +213,22 @@ fn read_log(path: &Path, stem: &str, since_ms: u64, out: &mut Vec<Ping>) -> Resu
                     continue;
                 }
                 let stop = stop.take();
-                if t < since_ms || s["agent"].as_str().is_none_or(|a| a == "generic") {
+                let state = s["state"].as_str();
+                let summary = s["summary"].as_str().unwrap_or("").to_owned();
+                if state == Some("working") && summary == BACKGROUND {
+                    background = ended.is_some();
                     continue;
                 }
-                let kind = match (s["state"].as_str(), s["ask"].as_str()) {
+                let repeat = state == Some("review_ready")
+                    && background
+                    && stop.is_none()
+                    && ended.as_ref() == Some(&summary);
+                ended = (state == Some("review_ready")).then(|| summary.clone());
+                background = false;
+                if repeat || t < since_ms || s["agent"].as_str().is_none_or(|a| a == "generic") {
+                    continue;
+                }
+                let kind = match (state, s["ask"].as_str()) {
                     (Some("needs_input"), ask) => KINDS
                         .iter()
                         .find(|k| Some(**k) == ask)
@@ -170,19 +238,20 @@ fn read_log(path: &Path, stem: &str, since_ms: u64, out: &mut Vec<Ping>) -> Resu
                     (Some("review_ready"), _) => "turn ended",
                     _ => continue,
                 };
-                let summary = s["summary"].as_str().unwrap_or("").to_owned();
                 let (mut ask, mut source) = (None, None);
                 if kind == "turn ended" {
-                    let (reply, from) = stop
+                    let reply = stop
                         .as_ref()
                         .and_then(|s| Some((s.message.clone()?, "hook")))
                         .or_else(|| {
-                            let reply = last_reply(stop.as_ref()?.transcript.as_ref()?, t)?;
-                            Some((reply, "transcript"))
+                            let path = stop.as_ref()?.transcript.as_ref()?;
+                            Some((transcripts.last_reply(path, t)?, "transcript"))
                         })
-                        .unwrap_or_else(|| (summary.clone(), "summary"));
+                        .or_else(|| (!summary.is_empty()).then(|| (summary.clone(), "summary")));
+                    // A hookless turn end, seen only on the screen, has no reply at all.
+                    let (reply, from) = reply.unwrap_or_default();
                     ask = asking(&reply);
-                    source = Some(from);
+                    source = Some(if from.is_empty() { "none" } else { from });
                 }
                 out.push(Ping {
                     kind,
@@ -201,27 +270,48 @@ fn read_log(path: &Path, stem: &str, since_ms: u64, out: &mut Vec<Ping>) -> Resu
     Ok(())
 }
 
-/// The agent's last text reply in a Claude transcript up to `t_ms`.
-fn last_reply(transcript: &Path, t_ms: u64) -> Option<String> {
-    let text = std::fs::read_to_string(transcript).ok()?;
-    let mut last = None;
-    for event in text
+/// The agent's text replies in each Claude transcript, with their times, read
+/// once per run.
+struct Transcripts(HashMap<PathBuf, Vec<(Option<u64>, String)>>);
+
+impl Transcripts {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// The last text reply up to `t_ms`.
+    fn last_reply(&mut self, path: &Path, t_ms: u64) -> Option<String> {
+        let replies = self
+            .0
+            .entry(path.to_path_buf())
+            .or_insert_with(|| read_replies(path));
+        let upto = replies.partition_point(|(at, _)| at.is_none_or(|at| at <= t_ms / 1000 + 1));
+        replies[..upto].last().map(|(_, text)| text.clone())
+    }
+}
+
+fn read_replies(path: &Path) -> Vec<(Option<u64>, String)> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let mut replies = Vec::new();
+    for event in String::from_utf8_lossy(&bytes)
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
     {
-        if event["type"] != "assistant" {
+        // A subagent's replies are to its parent, not to you.
+        if event["type"] != "assistant" || event["isSidechain"] == true {
             continue;
         }
         let at = event["timestamp"].as_str().and_then(skill::epoch);
-        if at.is_some_and(|at| at > t_ms / 1000 + 1) {
-            break;
-        }
         let blocks = event["message"]["content"].as_array();
         for b in blocks.into_iter().flatten().filter(|b| b["type"] == "text") {
-            last = b["text"].as_str().map(str::to_owned);
+            if let Some(text) = b["text"].as_str() {
+                replies.push((at, text.to_owned()));
+            }
         }
     }
-    last
+    replies
 }
 
 /// The reply's last line, if it asks you something or offers you the next step.
@@ -311,20 +401,23 @@ pub fn report(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Result<S
     let asks: Vec<&str> = ends.iter().filter_map(|p| p.ask.as_deref()).collect();
     let mut sources: BTreeMap<&str, usize> = BTreeMap::new();
     for p in &ends {
-        *sources.entry(p.source.unwrap_or("summary")).or_default() += 1;
+        *sources.entry(p.source.unwrap_or("none")).or_default() += 1;
     }
+    let unknown = sources.get("none").copied().unwrap_or(0);
     let sources: Vec<String> = sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
     writeln!(s, "\nTurn ends: {}", ends.len())?;
     writeln!(s, "  ended asking you something  {}", asks.len())?;
     writeln!(
         s,
         "  just finished               {}",
-        ends.len() - asks.len()
+        ends.len() - asks.len() - unknown
     )?;
+    writeln!(s, "  no reply recorded           {unknown}")?;
     writeln!(s, "  (last reply read from: {})", sources.join(", "))?;
 
     let questions = pings.iter().filter(|p| p.kind == "question");
     let questions: Vec<&str> = questions.map(|p| p.summary.as_str()).collect();
+    writeln!(s, "\nTopics below are rough word matching.")?;
     for (title, texts) in [("Questions", questions), ("Asked in a reply", asks)] {
         writeln!(s, "\n{title}: {}", texts.len())?;
         for (topic, examples) in by_topic(texts.into_iter()) {
@@ -368,8 +461,15 @@ pub fn json(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Value {
 mod tests {
     use super::*;
 
+    /// A string goes in as it is, to write a broken line.
     fn write_log(dir: &Path, stem: &str, lines: &[Value]) {
-        let log: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let log: String = lines
+            .iter()
+            .map(|l| match l {
+                Value::String(raw) => format!("{raw}\n"),
+                l => format!("{l}\n"),
+            })
+            .collect();
         std::fs::write(dir.join(format!("{stem}.events.jsonl")), log).unwrap();
     }
 
@@ -403,6 +503,8 @@ mod tests {
             [
                 json!({"type": "assistant", "timestamp": "1970-01-01T00:16:40Z",
                        "message": {"content": [{"type": "text", "text": "Done.\n\nShould I push it?"}]}}),
+                json!({"type": "assistant", "timestamp": "1970-01-01T00:16:40Z", "isSidechain": true,
+                       "message": {"content": [{"type": "text", "text": "A subagent's reply."}]}}),
                 json!({"type": "assistant", "timestamp": "1970-01-01T05:00:00Z",
                        "message": {"content": [{"type": "text", "text": "A later turn."}]}}),
             ]
@@ -443,9 +545,16 @@ mod tests {
                 state(1000, 2, "review_ready", None, "Built it.", true),
                 stop(1_000_000, &repo, None, Some(&transcript)),
                 state(1_000_000, 3, "review_ready", None, "Done.", false),
-                state(1_000_100, 4, "working", None, "", true),
-                state(1_000_200, 5, "review_ready", None, "All green.", false),
-                state(1_000_300, 6, "blocked", None, "exited with code 1", false),
+                // Background work, then the tracker repeats the same turn end.
+                state(1_000_010, 4, "working", None, BACKGROUND, false),
+                state(1_000_020, 5, "review_ready", None, "Done.", false),
+                json!("{not json"),
+                state(1_000_100, 6, "working", None, "", true),
+                state(1_000_200, 7, "review_ready", None, "All green.", false),
+                state(1_000_210, 8, "working", None, "", true),
+                // Seen only on the screen: no hook, no summary.
+                state(1_000_220, 9, "review_ready", None, "", false),
+                state(1_000_300, 10, "blocked", None, "exited with code 1", false),
                 json!({"k": "state", "t": 1_000_400, "status": {"agent": "claude"}}),
             ],
         );
@@ -479,6 +588,7 @@ mod tests {
                 "turn ended",
                 "turn ended",
                 "turn ended",
+                "turn ended",
                 "blocked"
             ]
         );
@@ -494,25 +604,70 @@ mod tests {
                 (Some("Want me to commit and open the PR?"), Some("hook")),
                 (Some("Should I push it?"), Some("transcript")),
                 (None, Some("summary")),
+                (None, Some("none")),
             ]
         );
-        assert_eq!(collect(&dir, 1000, None).unwrap().len(), 4);
+        assert_eq!(collect(&dir, 1000, None).unwrap().len(), 5);
         let in_repo = collect(&dir, 0, Some(&repo)).unwrap();
         assert!(in_repo.iter().all(|p| p.session == "1-1"));
-        assert_eq!(in_repo.len(), 5);
+        assert_eq!(in_repo.len(), 6);
 
         let text = report(&pings, 30, 0, 86_400_000).unwrap();
         assert!(text.contains("in 2 sessions"), "{text}");
         assert!(text.contains("ended asking you something  2"), "{text}");
-        assert!(text.contains("hook 1, summary 1, transcript 1"), "{text}");
+        assert!(text.contains("just finished               1"), "{text}");
+        assert!(text.contains("no reply recorded           1"), "{text}");
+        assert!(
+            text.contains("hook 1, none 1, summary 1, transcript 1"),
+            "{text}"
+        );
         assert!(text.contains("commit, push, PR or merge  2"), "{text}");
         assert!(
             text.contains("pick an option  1\n    Which loop first?"),
             "{text}"
         );
         let v = json(&pings, 30, 0, 86_400_000);
-        assert_eq!(v["pings"].as_array().unwrap().len(), 6);
+        assert_eq!(v["pings"].as_array().unwrap().len(), 7);
         assert_eq!(v["asks"][0]["count"], 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn matches_deleted_worktrees_by_name_and_survives_missing_files() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-pings-gone-{}", std::process::id()));
+        let repo = dir.join("valk");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let ask = |cwd: &Path| {
+            [
+                json!({"k": "hook", "t": 1, "agent": "claude",
+                       "payload": {"hook_event_name": "PreToolUse", "cwd": cwd}}),
+                state(1, 1, "needs_input", Some("question"), "Which?", false),
+            ]
+        };
+        // None of these directories exist any more.
+        write_log(&dir, "1-1", &ask(&dir.join("valk-fix-1-race/crates")));
+        write_log(&dir, "1-2", &ask(&dir.join("valkyrie")));
+        write_log(&dir, "1-3", &ask(&dir.join("other-valk")));
+        // A Stop hook naming a transcript that's gone falls back to the summary.
+        write_log(
+            &dir,
+            "1-4",
+            &[
+                stop(5, &repo, None, Some(&dir.join("gone.jsonl"))),
+                state(5, 1, "review_ready", None, "Shall I merge it?", false),
+            ],
+        );
+        let pings = collect(&dir, 0, Some(&repo)).unwrap();
+        let sessions: Vec<&str> = pings.iter().map(|p| p.session.as_str()).collect();
+        assert_eq!(sessions, ["1-1", "1-4"]);
+        assert_eq!(pings[1].source, Some("summary"));
+        assert_eq!(pings[1].ask.as_deref(), Some("Shall I merge it?"));
+
+        assert!(collect(&dir, 0, Some(&dir.join("nowhere"))).is_err());
+        let none = collect(&dir.join("sessions"), 0, None).unwrap();
+        let text = report(&none, 30, 0, 86_400_000).unwrap();
+        assert!(text.contains("in 0 sessions"), "{text}");
+        assert!(text.contains("Questions: 0"), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -534,5 +689,9 @@ mod tests {
         );
         assert_eq!(topic("Does this approach look good?"), "approve a plan");
         assert_eq!(topic("Should I proceed?"), "go on");
+        assert_eq!(
+            topic("Tell me when you're done and I'll stop the servers. Nothing is pushed yet."),
+            "wait till you're done, clean up"
+        );
     }
 }

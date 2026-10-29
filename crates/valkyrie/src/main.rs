@@ -208,7 +208,8 @@ enum Cmd {
         /// How many days back to look.
         #[arg(long, default_value_t = 30)]
         days: u64,
-        /// Only sessions in this project (any of its worktrees).
+        /// Only sessions in this project (any of its worktrees; a deleted one by its
+        /// `<repo>-<branch>` name beside the repository).
         #[arg(long)]
         repo: Option<PathBuf>,
         /// Print JSON, with every stop listed.
@@ -704,7 +705,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u64;
-            let since = now.saturating_sub(days * 86_400_000);
+            let since = now.saturating_sub(days.saturating_mul(86_400_000));
             let dir = valkyrie_proto::state_dir().join("sessions");
             let pings = pings::collect(&dir, since, repo.as_deref())?;
             if json {
