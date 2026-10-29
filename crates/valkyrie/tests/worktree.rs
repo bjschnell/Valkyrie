@@ -91,6 +91,7 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
 
     git(&repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("README"), "hi\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), ".env\ntarget/\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "one"]);
     git(&dir, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
@@ -101,40 +102,37 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
     git(&repo, &["push", "-q", "-u", "origin", "main"]);
     git(&repo, &["remote", "set-head", "origin", "main"]);
 
-    let add = |branch: &str| {
+    let add_at = |branch: &str, start: &str| {
         let path = dir.join(format!("repo-{branch}"));
-        git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                branch,
-                path.to_str().unwrap(),
-            ],
-        );
+        let at = path.to_str().unwrap();
+        git(&repo, &["worktree", "add", "-q", "-b", branch, at, start]);
         path
     };
-    // Merged on origin only: the local `main` lags, as after a pull request.
-    let merged = add("merged");
-    git(
-        &merged,
-        &["commit", "-q", "--allow-empty", "-m", "merged work"],
-    );
+    let add = |branch: &str| add_at(branch, "HEAD");
+    let commit = |dir: &Path, message: &str| {
+        git(dir, &["commit", "-q", "--allow-empty", "-m", message]);
+    };
+    // Merged (its commit is on origin/main), but with a file not committed.
+    let dirty = add("dirty");
+    commit(&dirty, "first half");
+    std::fs::write(dirty.join("notes.txt"), "keep me\n").unwrap();
+    // Merged on origin only, by a fast-forward: the local `main` lags, as after a
+    // pull request.
+    let merged = add_at("merged", "dirty");
+    commit(&merged, "merged work");
     git(&merged, &["push", "-q", "origin", "merged:main"]);
+    std::fs::write(merged.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::create_dir_all(merged.join("target/debug")).unwrap();
+    std::fs::write(merged.join("target/debug/app"), "").unwrap();
     let unmerged = add("unmerged");
-    git(&unmerged, &["commit", "-q", "--allow-empty", "-m", "wip"]);
+    commit(&unmerged, "wip");
     // Pushed, then its branch deleted on origin without its commit landing there.
     let squashed = add("squashed");
-    git(
-        &squashed,
-        &["commit", "-q", "--allow-empty", "-m", "squash me"],
-    );
+    commit(&squashed, "squash me");
     git(&squashed, &["push", "-q", "-u", "origin", "squashed"]);
     git(&repo, &["push", "-q", "origin", "--delete", "squashed"]);
-    let dirty = add("dirty");
-    std::fs::write(dirty.join("notes.txt"), "keep me\n").unwrap();
+    // Nothing committed since it was made: "merged" only because it's main itself.
+    let fresh = add("fresh");
     let live = add("live");
 
     // Every call names the throwaway daemon: VALK_SOCKET may point at a real one.
@@ -149,9 +147,28 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
             .output()
             .unwrap()
     };
-    let spawned = valk(&["new", "--cwd", live.to_str().unwrap(), "--", "sleep", "600"]);
+    // Started in the worktree, then gone elsewhere: it still counts.
+    let script = "cd / && exec sleep 600";
+    let at = live.to_str().unwrap();
+    let spawned = valk(&["new", "--cwd", at, "--", "sh", "-c", script]);
     assert!(spawned.status.success(), "{spawned:?}");
     let session = String::from_utf8(spawned.stdout).unwrap();
+    let session = session.trim();
+    let start = Instant::now();
+    loop {
+        let ls = String::from_utf8(valk(&["ls"]).stdout).unwrap();
+        let moved = ls
+            .lines()
+            .any(|l| l.trim_start().starts_with(&format!("{session} ")) && l.ends_with("  /"));
+        if moved {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "never left: {ls}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     // A dry run, which anyone (this test counts as an agent) may ask for.
     let dry = valk(&["worktree", "prune"]);
@@ -162,7 +179,14 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         String::from_utf8_lossy(&dry.stderr)
     );
     assert!(
-        said.contains("merged means in origin/main or HEAD of"),
+        said.contains(&format!(
+            "merged means in origin/main or main at {}\n",
+            repo.display()
+        )),
+        "{said}"
+    );
+    assert!(
+        line(&said, &merged).ends_with("merged; also deletes ignored: .env, target/"),
         "{said}"
     );
     assert!(line(&said, &merged).contains("would go"), "{said}");
@@ -179,13 +203,17 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         "{said}"
     );
     assert!(
-        line(&said, &live).ends_with(&format!("session {} runs in it", session.trim())),
+        line(&said, &fresh).ends_with("(fresh): no commits of its own"),
+        "{said}"
+    );
+    assert!(
+        line(&said, &live).ends_with(&format!("session {session} runs in it")),
         "{said}"
     );
     // Never the main checkout.
     assert!(!said.contains(&format!("{} (", repo.display())), "{said}");
     assert!(said.contains("1 may go"), "{said}");
-    for w in [&merged, &unmerged, &squashed, &dirty, &live] {
+    for w in [&merged, &unmerged, &squashed, &dirty, &fresh, &live] {
         assert!(w.exists(), "the dry run took {}", w.display());
     }
 
@@ -221,11 +249,14 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
     human("worktree prune --yes", "prune");
     let said = wait_for(&out.join("prune"));
     assert!(
-        said.contains(&format!("took away {} and branch merged", merged.display())),
+        said.contains(&format!(
+            "took away {} and branch merged; with it went ignored: .env, target/",
+            merged.display()
+        )),
         "{said}"
     );
     assert!(!merged.exists(), "{said}");
-    for w in [&unmerged, &squashed, &dirty, &live] {
+    for w in [&unmerged, &squashed, &dirty, &fresh, &live] {
         assert!(w.exists(), "{} went: {said}", w.display());
     }
     let branches = String::from_utf8(git(&repo, &["branch", "--list"]).stdout).unwrap();
@@ -235,7 +266,7 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         .collect();
     assert_eq!(
         names,
-        ["dirty", "live", "main", "squashed", "unmerged"],
+        ["dirty", "fresh", "live", "main", "squashed", "unmerged"],
         "{said}"
     );
     drop(daemon);

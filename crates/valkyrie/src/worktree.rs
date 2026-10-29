@@ -8,9 +8,11 @@ use std::process::{Command, Stdio};
 #[derive(Subcommand)]
 pub enum WorktreeCmd {
     /// Take away this repository's worktrees whose branch is merged into origin's
-    /// default branch (or the main checkout's HEAD), with the branch, unless a
-    /// session runs in one, a backlog item is on it, or it has changes. Only says
-    /// what it would do without --yes.
+    /// default branch (or the main checkout's, when it's on that branch), with the
+    /// branch, unless a session runs in one, a backlog item is on it, it has no
+    /// commits of its own, or it has changes. Only says what it would do without
+    /// --yes; either way it first runs `git fetch --prune origin`, with your
+    /// credentials.
     Prune {
         /// Take them away.
         #[arg(short, long)]
@@ -35,14 +37,25 @@ pub async fn run(socket: &Path, cmd: WorktreeCmd) -> Result<()> {
         println!("no worktrees besides the main checkout");
         return Ok(());
     }
-    println!("merged means in {}", against.join(" or "));
+    if against.is_empty() {
+        println!("no default branch to judge against: nothing counts as merged");
+    } else {
+        println!("merged means in {}", against.join(" or "));
+    }
     for w in &worktrees {
         let branch = w.branch.as_deref().unwrap_or("detached");
         let path = w.path.display();
         match (w.prunable, yes) {
             // What taking it away did, which names it.
+            (true, true) if w.removed => {
+                println!("  {}{}", w.why, ignored("with it went", &w.ignored))
+            }
             (true, true) => println!("  {}", w.why),
-            (true, false) => println!("  would go  {path} ({branch}): {}", w.why),
+            (true, false) => println!(
+                "  would go  {path} ({branch}): {}{}",
+                w.why,
+                ignored("also deletes", &w.ignored)
+            ),
             (false, _) => println!("  keeps     {path} ({branch}): {}", w.why),
         }
     }
@@ -51,6 +64,19 @@ pub async fn run(socket: &Path, cmd: WorktreeCmd) -> Result<()> {
         println!("{can} may go: `valk worktree prune --yes` takes them away");
     }
     Ok(())
+}
+
+/// `; also deletes ignored: target/, .env, +3 more`, for what `git worktree remove`
+/// takes without asking.
+fn ignored(verb: &str, entries: &[String]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut shown = entries[..entries.len().min(3)].join(", ");
+    if entries.len() > 3 {
+        shown += &format!(", +{} more", entries.len() - 3);
+    }
+    format!("; {verb} ignored: {shown}")
 }
 
 /// `git fetch --prune origin`, quietly; whether `origin`'s branches are fresh enough

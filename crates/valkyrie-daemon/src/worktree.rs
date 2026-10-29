@@ -134,6 +134,15 @@ pub fn remove(
     if project::checkout(path) == project::checkout(repo) {
         return (false, format!("left {shown} alone: it's the main checkout"));
     }
+    // Someone committed or switched there since the caller looked.
+    if let Some(at) = merged_at
+        && git_out(path, &["rev-parse", "HEAD"]).ok().as_deref() != Some(at)
+    {
+        return (
+            false,
+            format!("kept {shown}: its HEAD moved since it was checked"),
+        );
+    }
     if let Err(e) = git(repo, &["worktree", "remove", &path.to_string_lossy()]) {
         return (false, format!("kept {shown}: {e:#}"));
     }
@@ -155,9 +164,13 @@ pub fn remove(
     };
     match git(repo, &["branch", "--quiet", flag, branch]) {
         Ok(()) => (true, format!("took away {shown} and branch {branch}")),
-        Err(_) => (
+        Err(_) if flag == "-d" => (
             true,
             format!("took away {shown}; kept branch {branch}, which isn't merged here"),
+        ),
+        Err(e) => (
+            true,
+            format!("took away {shown}; kept branch {branch}: {e:#}"),
         ),
     }
 }
@@ -210,6 +223,10 @@ pub struct Linked {
     pub head: String,
     /// Its `HEAD` is in one of `Survey::against`.
     pub merged: bool,
+    /// Nothing was committed on it since it was made: its branch's reflog holds
+    /// only its creation (else its `HEAD` is one of those tips or the main
+    /// checkout's `HEAD`).
+    pub no_commits: bool,
     /// Its branch's upstream is gone: the remote deleted it, as a merged pull
     /// request does, squashed ones included.
     pub upstream_gone: bool,
@@ -218,14 +235,16 @@ pub struct Linked {
     pub missing: bool,
     /// Files changed or untracked but not committed.
     pub dirty: u32,
+    /// Ignored files and folders, as `git status --ignored` lists them: removing
+    /// the worktree deletes them too.
+    pub ignored: Vec<String>,
 }
 
 #[derive(Debug)]
 pub struct Survey {
     /// The main checkout.
     pub repo: PathBuf,
-    /// What merged is judged against: `origin/<default>` (with `remote`) and the main
-    /// checkout's `HEAD`.
+    /// What merged is judged against, e.g. `origin/main` and `main at <repo>`.
     pub against: Vec<String>,
     /// Every linked worktree; never the main checkout.
     pub linked: Vec<Linked>,
@@ -233,7 +252,8 @@ pub struct Survey {
 
 /// The linked worktrees of the repository holding `dir`, each checked for being
 /// merged: its `HEAD` an ancestor of `origin`'s default branch (with `remote`) or of
-/// the main checkout's `HEAD`. A squash-merged branch isn't.
+/// the main checkout's `HEAD` when that's on the default branch too. A
+/// squash-merged branch isn't.
 pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
     let canonical = |p: &Path| valkyrie_proto::canonical(p).unwrap_or_else(|_| p.to_path_buf());
     anyhow::ensure!(
@@ -242,45 +262,55 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         dir.display()
     );
     let repo = canonical(&project::root(dir));
+    let tip = |reference: &str| git_out(&repo, &["rev-parse", "--verify", "--quiet", reference]);
+    // `origin/HEAD` names it even offline; else whichever of main and master exists.
+    let default = git_out(
+        &repo,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .ok()
+    .and_then(|name| name.strip_prefix("origin/").map(str::to_owned))
+    .or_else(|| {
+        ["main", "master"].into_iter().map(str::to_owned).find(|b| {
+            tip(&format!("refs/heads/{b}")).is_ok()
+                || tip(&format!("refs/remotes/origin/{b}")).is_ok()
+        })
+    });
     let mut against = Vec::new();
     let mut tips = Vec::new();
-    if remote {
-        let default = git_out(
-            &repo,
-            &[
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "refs/remotes/origin/HEAD",
-            ],
-        )
-        .ok()
-        .into_iter()
-        .chain(["origin/main".to_owned(), "origin/master".to_owned()])
-        .find_map(|name| {
-            let reference = format!("refs/remotes/{name}");
-            let tip = git_out(&repo, &["rev-parse", "--verify", "--quiet", &reference]).ok()?;
-            Some((name, tip))
-        });
-        if let Some((name, tip)) = default {
-            against.push(name);
-            tips.push(tip);
+    if let Some(default) = &default {
+        if remote && let Ok(at) = tip(&format!("refs/remotes/origin/{default}")) {
+            against.push(format!("origin/{default}"));
+            tips.push(at);
+        }
+        // Only on the default branch: a feature branch checked out there isn't
+        // where work lands.
+        let on = git_out(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+        if on.is_ok_and(|on| &on == default)
+            && let Ok(at) = tip("HEAD")
+        {
+            against.push(format!("{default} at {}", repo.display()));
+            tips.push(at);
         }
     }
-    if let Ok(tip) = git_out(&repo, &["rev-parse", "--verify", "--quiet", "HEAD"]) {
-        against.push(format!("HEAD of {}", repo.display()));
-        tips.push(tip);
-    }
+    let main_head = tip("HEAD").ok();
 
-    let listed = git_out(&repo, &["worktree", "list", "--porcelain"])?;
+    let listed = git_raw(&repo, &["worktree", "list", "--porcelain", "-z"])?;
     let mut linked = Vec::new();
-    // Blocks split by a blank line; the first is always the main checkout.
-    for block in listed.split("\n\n").skip(1) {
+    // Each field ends in a NUL and each worktree with one more; the first is always
+    // the main checkout.
+    for block in listed.split("\0\0").skip(1) {
+        let fields: Vec<&str> = block.split('\0').collect();
         let field = |key: &str| {
-            block.lines().find_map(|l| {
-                l.strip_prefix(key)
-                    .filter(|rest| rest.is_empty() || rest.starts_with(' '))
-                    .map(str::trim)
+            fields.iter().find_map(|f| match f.strip_prefix(key) {
+                Some("") => Some(""),
+                Some(rest) => rest.strip_prefix(' '),
+                None => None,
             })
         };
         let (Some(path), Some(head)) = (field("worktree"), field("HEAD")) else {
@@ -292,6 +322,18 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         let merged = tips
             .iter()
             .any(|tip| git(&repo, &["merge-base", "--is-ancestor", &head, tip]).is_ok());
+        // A branch's reflog says whether anything happened on it since it was made;
+        // its tip can't, as a fast-forward merge leaves it equal to `origin/main`.
+        // Without one (detached, or expired) its `HEAD` being one of the tips does.
+        let history = branch.as_ref().and_then(|b| {
+            let reference = format!("refs/heads/{b}");
+            let log = git_out(&repo, &["reflog", "show", "--format=%gs", &reference]).ok()?;
+            (!log.is_empty()).then_some(log)
+        });
+        let no_commits = match history {
+            Some(log) => log.lines().all(|l| l.starts_with("branch: Created from")),
+            None => tips.contains(&head) || main_head.as_ref() == Some(&head),
+        };
         let upstream_gone = branch.as_ref().is_some_and(|b| {
             let reference = format!("refs/heads/{b}");
             git_out(
@@ -301,20 +343,25 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
             .is_ok_and(|track| track == "[gone]")
         });
         let missing = !path.is_dir();
-        let dirty = if missing {
-            0
-        } else {
-            git_out(&path, &["status", "--porcelain"]).map_or(0, |out| out.lines().count() as u32)
+        let status = match missing {
+            true => String::new(),
+            false => {
+                git_raw(&path, &["status", "--porcelain", "-z", "--ignored"]).unwrap_or_default()
+            }
         };
+        let entries = status.split('\0').filter(|e| e.len() > 3);
+        let (ignored, dirty): (Vec<&str>, Vec<&str>) = entries.partition(|e| e.starts_with("!! "));
         linked.push(Linked {
             locked: field("locked").is_some(),
             path,
             branch,
             head,
             merged,
+            no_commits,
             upstream_gone,
             missing,
-            dirty,
+            dirty: dirty.len() as u32,
+            ignored: ignored.iter().map(|e| e[3..].to_owned()).collect(),
         });
     }
     Ok(Survey {
@@ -341,11 +388,13 @@ impl crate::Registry {
         let asked = cwd.clone();
         let survey = tokio::task::spawn_blocking(move || survey(&cwd, remote)).await??;
         let items = self.backlog.lock().unwrap().load();
+        // Where each runs now, and where it started: a session made in a worktree
+        // still counts once its program has gone elsewhere.
         let sessions: Vec<_> = self
             .listed()
             .into_iter()
             .filter(|s| !s.exited())
-            .map(|s| s.info())
+            .map(|s| (s.id, s.info().cwd, s.started_in().to_path_buf()))
             .collect();
         let mut worktrees = Vec::new();
         for wt in survey.linked {
@@ -355,7 +404,9 @@ impl crate::Registry {
                         valkyrie_proto::canonical(c).unwrap_or_else(|_| c.clone()) == wt.path
                     })
             });
-            let session = sessions.iter().find(|s| s.cwd.starts_with(&wt.path));
+            let session = sessions
+                .iter()
+                .find(|(_, now, start)| now.starts_with(&wt.path) || start.starts_with(&wt.path));
             let why = if wt.missing {
                 Some("its folder is gone; `git worktree prune` forgets it".to_owned())
             } else if let Some(item) = item {
@@ -363,8 +414,8 @@ impl crate::Registry {
                     "backlog #{0} is on it: `valk todo ship {0}` instead",
                     item.id
                 ))
-            } else if let Some(s) = session {
-                Some(format!("session {} runs in it", s.id))
+            } else if let Some((id, ..)) = session {
+                Some(format!("session {id} runs in it"))
             } else if asked.starts_with(&wt.path) {
                 Some("you're in it".to_owned())
             } else if wt.locked {
@@ -373,6 +424,8 @@ impl crate::Registry {
                 Some("not merged (squash merge?)".to_owned())
             } else if !wt.merged {
                 Some("not merged".to_owned())
+            } else if wt.no_commits {
+                Some("no commits of its own".to_owned())
             } else if wt.dirty > 0 {
                 Some(format!("has changes ({} files)", wt.dirty))
             } else {
@@ -397,6 +450,7 @@ impl crate::Registry {
                 prunable,
                 removed,
                 why,
+                ignored: wt.ignored,
             });
         }
         if remove {
@@ -410,8 +464,8 @@ impl crate::Registry {
     }
 }
 
-/// Runs `git` in `dir`, returning what it printed, trimmed.
-fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
+/// Runs `git` in `dir`, returning what it printed as it is: for `-z` output.
+fn git_raw(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .no_window()
         .args(args)
@@ -422,7 +476,12 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
     if !out.status.success() {
         bail!("git {} failed", args.first().unwrap_or(&""));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Runs `git` in `dir`, returning what it printed, trimmed.
+fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(git_raw(dir, args)?.trim().to_owned())
 }
 
 /// Runs `git` in `dir`, failing with what it printed.
@@ -633,6 +692,35 @@ mod tests {
             !gone && repo.main().exists(),
             "the main checkout is never taken"
         );
+    }
+
+    #[test]
+    fn a_checked_worktree_goes_only_while_its_head_is_what_was_checked() {
+        let repo = Repo::new("moved");
+        let at = create(&repo.main(), "feat/5-v", None).unwrap().start;
+        let checked = git_out(&at, &["rev-parse", "HEAD"]).unwrap();
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "v",
+        ];
+        git(&at, &commit).unwrap();
+        let (gone, said) = remove(&repo.main(), &at, Some("feat/5-v"), Some(&checked));
+        assert!(!gone && at.exists(), "{said}");
+        assert!(said.contains("its HEAD moved"), "{said}");
+
+        // Checked where it is now: it goes, and so does the branch, though `-d`
+        // would keep it (its commit isn't in this `HEAD`).
+        let now = git_out(&at, &["rev-parse", "HEAD"]).unwrap();
+        let (gone, said) = remove(&repo.main(), &at, Some("feat/5-v"), Some(&now));
+        assert!(gone && !at.exists(), "{said}");
+        assert!(!has_branch(&repo.main(), "feat/5-v"), "{said}");
     }
 
     #[test]

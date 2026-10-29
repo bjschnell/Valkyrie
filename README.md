@@ -188,7 +188,8 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
 - Once the work is merged, `valk worktree prune` lists which worktrees could go
   and why the others stay; `valk worktree prune --yes` takes away those whose
   branch is in `origin`'s default branch, with the branch, unless a session runs
-  there, a backlog item owns it, or it has changes.
+  there, a backlog item owns it, it has no commits of its own, or it has changes.
+  It lists the ignored files (`.env`, `target/`) that go with each.
 
 ### Keybinds
 

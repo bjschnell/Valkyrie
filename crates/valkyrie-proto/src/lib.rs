@@ -97,6 +97,10 @@ pub struct Worktree {
     pub removed: bool,
     /// Why it stays, or what taking it away did.
     pub why: String,
+    /// Ignored files and folders in it (`target/`, `.env`), which taking it away
+    /// deletes too.
+    #[serde(default)]
+    pub ignored: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -450,7 +454,8 @@ pub enum Reply {
         facts: Option<ItemFacts>,
     },
     Worktrees {
-        /// What merged was judged against, e.g. `origin/main`.
+        /// What merged was judged against, e.g. `origin/main` and `main at <repo>`;
+        /// empty when nothing is.
         against: Vec<String>,
         worktrees: Vec<Worktree>,
     },
