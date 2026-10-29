@@ -119,7 +119,7 @@ pub fn read_at(jsonl: &str) -> Vec<(u32, Option<u64>)> {
 
 /// Seconds since the epoch of an RFC 3339 UTC time (`2026-10-27T19:41:20.591Z`),
 /// as transcripts write them.
-fn epoch(time: &str) -> Option<u64> {
+pub fn epoch(time: &str) -> Option<u64> {
     let (date, clock) = time.strip_suffix('Z')?.split_once('T')?;
     let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);

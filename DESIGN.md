@@ -207,6 +207,7 @@ Decision {
 - Full audit log of every autonomous action; one-tap undo/stop-all.
 - Depends on 4.2 structured channel quality and 5 state accuracy. Do not start until phase 1 queue accuracy is measured.
 - Check herdr's agent-automation primitives for prior art. [VERIFY]
+- **Where you get interrupted (2026-10-28).** `valk pings [--days N] [--repo DIR] [--json]` reads the sessions' event logs offline, no daemon, and counts every time an agent session stopped and waited: questions, permissions, screen prompts, bells, blocked, and turn ends, with how many sessions, per day, and how many came while you weren't watching (`seen` at the transition). State lines are counted once per `(file, seq)`. A turn end counts as asking you something when its reply's last line has a `?` or offers the next step ("want me to", "say the word"). The reply comes from the Stop hook's `last_assistant_message`, else the transcript the hook names, else the state's one-line summary, and the report says how many came from each. Questions and asks are grouped by a few word lists (commit/push/PR/merge, pick an option, approve a plan, go on, other), first match wins, with the newest examples. On 21 days of the author's records: 570 turn ends, 100 of them asking (60 about committing, pushing or merging), 69 questions and 8 permissions (Claude runs in auto mode). Sessions without hooks (Codex here) have no cwd, so `--repo` leaves them out.
 
 ## 8. Clients
 
