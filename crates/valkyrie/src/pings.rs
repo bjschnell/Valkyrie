@@ -126,15 +126,15 @@ pub fn collect(dir: &Path, since_ms: u64, repo: Option<&Path>) -> Result<Vec<Pin
         }
     }
     if let Some(repo) = repo {
-        let repo =
+        let canonical =
             std::fs::canonicalize(repo).with_context(|| format!("--repo {}", repo.display()))?;
-        let root = project::root(&repo);
+        let root = project::root(&canonical);
         let mut inside = HashMap::new();
         pings.retain(|p| {
             let Some(cwd) = &p.cwd else { return false };
             *inside
                 .entry(cwd.clone())
-                .or_insert_with(|| in_repo(cwd, &repo, &root))
+                .or_insert_with(|| in_repo(cwd, repo, &root))
         });
     }
     pings.sort_by_key(|p| p.t);
@@ -151,14 +151,18 @@ fn in_repo(cwd: &Path, repo: &Path, root: &Path) -> bool {
     if cwd.exists() {
         return project::root(cwd) == root;
     }
-    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
-        return false;
-    };
-    let prefix = format!("{}-", name.to_string_lossy());
-    cwd.strip_prefix(parent)
-        .ok()
-        .and_then(|rest| rest.components().next())
-        .is_some_and(|dir| dir.as_os_str().to_string_lossy().starts_with(&prefix))
+    // A gone cwd can't be canonicalized, so it may be spelled like either path
+    // (macOS's /var is /private/var, and Windows canonical paths start \\?\).
+    [root, repo].into_iter().any(|base| {
+        let (Some(parent), Some(name)) = (base.parent(), base.file_name()) else {
+            return false;
+        };
+        let prefix = format!("{}-", name.to_string_lossy());
+        cwd.strip_prefix(parent)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .is_some_and(|dir| dir.as_os_str().to_string_lossy().starts_with(&prefix))
+    })
 }
 
 /// The last Stop hook seen before a state line.
