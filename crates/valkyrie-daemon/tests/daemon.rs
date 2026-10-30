@@ -1307,8 +1307,14 @@ async fn clients_say_their_build_and_the_daemon_tells_who_is_behind() {
         binary: Some((0, 0)),
         ..ClientBuild::this("web")
     };
+    // Not a kind `valk upgrade` names: never listed.
+    let stranger = ClientBuild {
+        kind: "\x1b]0;pwned\x07".into(),
+        pid: 5,
+        ..ClientBuild::this("tui")
+    };
     let mut held = Vec::new();
-    for build in [&current, &old_protocol, &other_binary] {
+    for build in [&current, &old_protocol, &other_binary, &stranger] {
         let (c, p) = Client::connect(&socket).await.unwrap();
         c.hello_as(build.clone()).await.unwrap();
         held.push((c, p));

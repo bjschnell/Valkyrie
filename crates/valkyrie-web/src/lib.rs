@@ -598,7 +598,10 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// Messages a browser may not send: switching the daemon's binary, and posing as an
 /// agent's hooks.
 fn allowed(msg: &ClientMsg) -> bool {
-    !matches!(msg, ClientMsg::Upgrade { .. } | ClientMsg::Hook { .. })
+    !matches!(
+        msg,
+        ClientMsg::Upgrade { .. } | ClientMsg::Hook { .. } | ClientMsg::Clients { .. }
+    )
 }
 
 /// Whether one connected app is on screen; it stops counting when it disconnects.
@@ -669,7 +672,16 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                     continue;
                 }
                 match serde_json::from_value::<ClientMsg>(value.clone()) {
-                    Ok(msg) if allowed(&msg) => write_frame(&mut to_daemon, &value).await?,
+                    Ok(msg) if allowed(&msg) => {
+                        let mut value = value;
+                        // Only `valk web` itself says which build it is.
+                        if let ClientMsg::Hello { .. } = msg
+                            && let Some(hello) = value.as_object_mut()
+                        {
+                            hello.remove("client");
+                        }
+                        write_frame(&mut to_daemon, &value).await?
+                    }
                     _ => {
                         let refusal = serde_json::json!({
                             "t": "err",
@@ -685,6 +697,10 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                     Some(mut frame) => {
                         if frame["t"] == "ok" && frame["reply"]["t"] == "hello" {
                             frame["reply"]["web"] = BUILD.as_str().into();
+                            // The daemon's binary is this machine's business.
+                            if let Some(reply) = frame["reply"].as_object_mut() {
+                                reply.remove("exe");
+                            }
                         }
                         ws.send(Message::Text(frame.to_string().into())).await?
                     }
@@ -844,6 +860,7 @@ mod tests {
             exe: "/tmp/x".into(),
         };
         assert!(!allowed(&upgrade));
+        assert!(!allowed(&ClientMsg::Clients { req: 1 }));
         assert!(allowed(&ClientMsg::List { req: 1 }));
     }
 

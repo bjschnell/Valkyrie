@@ -784,7 +784,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
     let before = client.hello_info().await.context(PREDATES)?;
     anyhow::ensure!(before.protocol >= 3, PREDATES);
     let sessions = client.list().await?.len();
-    let following = connected_clients(socket).await.map_or(0, |c| c.len());
+    let following = connected_clients(socket).await.unwrap_or_default();
     client.upgrade(exe.clone()).await?;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -853,27 +853,57 @@ async fn connected_clients(socket: &Path) -> Option<Vec<ConnectedClient>> {
     client.clients().await.ok()
 }
 
-/// After an upgrade, waits for the `following` clients connected before it to come
-/// back on the daemon's build (a TUI within a second, `valk web` within a few), and
-/// names any still on another build or protocol: those didn't follow.
-async fn left_behind(socket: &Path, following: usize, protocol: u32) {
-    if following == 0 {
+/// How long `valk upgrade` waits for clients to follow. Debug builds take
+/// `VALK_FOLLOW_WAIT_MS`, for tests.
+fn follow_wait() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("VALK_FOLLOW_WAIT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(10)
+}
+
+/// After an upgrade, waits for each client connected before it (by pid, which an
+/// exec keeps) to come back on the daemon's build or to be gone (a TUI follows
+/// within a second, `valk web` within a few), and names any still on another build
+/// or protocol: those didn't follow.
+async fn left_behind(socket: &Path, before: Vec<ConnectedClient>, protocol: u32) {
+    let mut waiting: Vec<u32> = before.iter().map(|c| c.client.pid).collect();
+    if waiting.is_empty() {
         return;
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    println!("waiting for {} clients to follow…", waiting.len());
+    let deadline = std::time::Instant::now() + follow_wait();
+    let mut conn: Option<Client> = None;
     let mut clients = Vec::new();
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        clients = connected_clients(socket).await.unwrap_or_default();
-        if clients.iter().filter(|c| c.current).count() >= following {
+        if conn.is_none() {
+            conn = Client::connect(socket).await.ok().map(|(client, _)| client);
+        }
+        let Some(client) = &conn else { continue };
+        match client.clients().await {
+            Ok(now) => clients = now,
+            Err(_) => {
+                conn = None;
+                continue;
+            }
+        }
+        waiting
+            .retain(|&pid| alive(pid) && !clients.iter().any(|c| c.client.pid == pid && c.current));
+        if waiting.is_empty() {
             return;
         }
     }
     for ConnectedClient { client, .. } in clients.iter().filter(|c| !c.current) {
+        // Only the kinds the daemon keeps; never print what a peer sent as is.
         let who = match client.kind.as_str() {
             "tui" => "a TUI",
             "web" => "valk web",
-            other => other,
+            _ => "a client",
         };
         if client.protocol != protocol {
             println!(
@@ -886,6 +916,24 @@ async fn left_behind(socket: &Path, following: usize, protocol: u32) {
                 client.pid
             );
         }
+    }
+}
+
+/// Whether process `pid` still exists (Windows can't tell, so says yes).
+fn alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 only checks that the process exists.
+        let sent = unsafe { libc::kill(pid, 0) };
+        sent == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        true
     }
 }
 

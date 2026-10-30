@@ -20,6 +20,8 @@ pub struct Client {
     pending: Pending,
     closed: Arc<AtomicBool>,
     next: Arc<AtomicU64>,
+    /// The daemon runs as this user, so the binary its `Hello` names may be run.
+    same_user: bool,
 }
 
 /// Screen and image pushes held for a consumer that isn't reading (a TUI whose
@@ -108,6 +110,7 @@ impl Client {
             crate::ensure_private_dir(dir)?;
         }
         let stream = crate::ipc::connect(path).await?;
+        let same_user = crate::ipc::peer_is_me(&stream);
         let (mut rd, mut wr) = tokio::io::split(stream);
         let (out, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
         let (push_tx, push_rx) = mpsc::unbounded_channel();
@@ -165,6 +168,7 @@ impl Client {
                 pending,
                 closed,
                 next: Arc::new(AtomicU64::new(1)),
+                same_user,
             },
             Pushes { rx: push_rx, lag },
         ))
@@ -218,7 +222,8 @@ impl Client {
                 generation,
                 boot,
                 dev,
-                exe,
+                // A socket another user listens on mustn't pick what this one runs.
+                exe: exe.filter(|_| self.same_user),
             }),
             other => bail!("unexpected reply: {other:?}"),
         }

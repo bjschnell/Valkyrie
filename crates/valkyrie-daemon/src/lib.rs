@@ -898,7 +898,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
         };
         let (req, result) = match msg {
             ClientMsg::Hello { req, client } => {
-                if let Some(client) = client {
+                // Only the kinds `valk upgrade` names; anything else is ignored.
+                if let Some(client) = client
+                    && matches!(client.kind.as_str(), "tui" | "web")
+                {
                     registry.clients.lock().unwrap().insert(conn, client);
                 }
                 (

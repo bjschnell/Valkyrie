@@ -79,6 +79,13 @@ mod unix {
     pub fn peer_pid(stream: &Stream) -> Option<i32> {
         stream.peer_cred().ok()?.pid()
     }
+
+    /// The other end runs as this user.
+    pub fn peer_is_me(stream: &Stream) -> bool {
+        // SAFETY: getuid cannot fail.
+        let uid = unsafe { libc::getuid() };
+        stream.peer_cred().is_ok_and(|cred| cred.uid() == uid)
+    }
 }
 
 #[cfg(windows)]
@@ -216,6 +223,11 @@ mod windows {
         // SAFETY: a valid pipe handle and out pointer.
         let ok = unsafe { GetNamedPipeClientProcessId(server.as_raw_handle(), &mut pid) };
         (ok != 0 && pid != 0).then_some(pid as i32)
+    }
+
+    /// The other end runs as this user: `connect` refuses a pipe another user serves.
+    pub fn peer_is_me(_stream: &Stream) -> bool {
+        true
     }
 
     /// Refuses a pipe another user's process serves: whoever holds the name gets

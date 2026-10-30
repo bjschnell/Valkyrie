@@ -782,16 +782,18 @@ fn upgrade_names_the_clients_left_on_an_old_build() {
     use valkyrie_proto::ClientBuild;
     use valkyrie_proto::client::Client;
     let d = Daemon::start("left-behind");
-    let valk = std::fs::metadata(BIN).unwrap();
+    let bin = std::fs::metadata(BIN).unwrap();
+    // Live pids: `valk upgrade` stops waiting for one that is gone.
+    let mut stale = Command::new("sleep").arg("30").spawn().unwrap();
     let following = ClientBuild {
         kind: "tui".into(),
-        pid: 1111,
+        pid: std::process::id(),
         protocol: valkyrie_proto::PROTOCOL,
-        binary: Some((valk.dev(), valk.ino())),
+        binary: Some((bin.dev(), bin.ino())),
     };
     let behind = ClientBuild {
         kind: "web".into(),
-        pid: 4242,
+        pid: stale.id(),
         binary: Some((0, 0)),
         ..following.clone()
     };
@@ -826,13 +828,26 @@ fn upgrade_names_the_clients_left_on_an_old_build() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let text = d.ok(&["upgrade", "--exe", BIN]);
+    let out = valk(&d.socket, &d.dir)
+        .env("VALK_FOLLOW_WAIT_MS", "2000")
+        .args(["upgrade", "--exe", BIN])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{text}");
     assert!(text.contains("generation 1"), "{text}");
+    assert!(text.contains("waiting for 2 clients to follow"), "{text}");
+    let behind = format!(
+        "valk web (pid {}) still runs another valk than the daemon",
+        stale.id()
+    );
+    assert!(text.contains(&behind), "{text}");
     assert!(
-        text.contains("valk web (pid 4242) still runs another valk than the daemon"),
+        !text.contains(&format!("pid {})", std::process::id())),
         "{text}"
     );
-    assert!(!text.contains("pid 1111"), "{text}");
+    let _ = stale.kill();
+    let _ = stale.wait();
     assert_eq!(
         hello().exe,
         Some(valkyrie_proto::canonical(Path::new(BIN)).unwrap())
