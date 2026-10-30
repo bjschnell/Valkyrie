@@ -29,7 +29,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 16;
+pub const PROTOCOL: u32 = 18;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -360,6 +360,15 @@ pub enum ClientMsg {
     AddItem {
         req: ReqId,
         item: NewItem,
+        /// Also take it for the caller's session, with its branch and pull request
+        /// (protocol 18): an agent tracking work it does that nobody planned. From
+        /// inside a valk session only.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        take: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<String>,
     },
     /// Every backlog item. Replies `Items`.
     Items {
@@ -391,7 +400,9 @@ pub enum ClientMsg {
     },
     /// Claims an accepted item for the caller's session, as a launch would link it,
     /// so its lane follows that session; and records its branch and pull request,
-    /// when given. From inside a valk session only, agent or user. Replies `Item`.
+    /// when given. From inside a valk session only, agent or user. Refused while
+    /// another live session is on the item, unless the user `steal`s it (protocol
+    /// 17), which hands it to their session. Replies `Item`.
     TakeItem {
         req: ReqId,
         id: u32,
@@ -399,6 +410,8 @@ pub enum ClientMsg {
         branch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pr: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        steal: bool,
     },
     /// Ships every open item whose branch is merged into the default branch, as
     /// last fetched (the daemon doesn't fetch): the user only. With `dry_run`,
@@ -946,5 +959,16 @@ mod tests {
             Size { cols: 0, rows: 0 }.clamped(),
             Size { cols: 2, rows: 1 }
         );
+    }
+
+    #[test]
+    fn a_take_from_before_steal_is_no_steal() {
+        let old: ClientMsg = serde_json::from_str(r#"{"t":"take_item","req":1,"id":3}"#).unwrap();
+        let ClientMsg::TakeItem { steal, .. } = &old else {
+            panic!("{old:?}");
+        };
+        assert!(!steal);
+        // And one that doesn't steal reads as it did before.
+        assert!(!serde_json::to_string(&old).unwrap().contains("steal"));
     }
 }

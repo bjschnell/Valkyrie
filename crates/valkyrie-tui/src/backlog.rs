@@ -78,21 +78,45 @@ pub(crate) fn live<'a>(
         .find_map(|id| sessions.iter().find(|s| s.id == *id && s.exited.is_none()))
 }
 
+/// An open item whose live sessions only took it: the user's launch hands it over,
+/// as `valk todo launch` does, so `↩` launches and `o` opens the session. A take
+/// never locks the user out.
+pub(crate) fn taken_only(item: &Item, sessions: &[SessionInfo], boot: u64) -> bool {
+    if item.status != ItemStatus::Open || item.boot != boot {
+        return false;
+    }
+    let mut live = item
+        .sessions
+        .iter()
+        .filter(|id| sessions.iter().any(|s| s.id == **id && s.exited.is_none()));
+    let first = live.next();
+    first.is_some()
+        && first
+            .into_iter()
+            .chain(live)
+            .all(|id| item.taken.contains(id))
+}
+
 /// Where an item stands, from its newest live session: as the web board works it out.
+/// One with a pull request open waits on review whatever that session does, unless
+/// it needs you: a session that took several items would show them all running.
+/// An agent's own work it filed and took follows its session though not accepted.
 pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
     match item.status {
-        ItemStatus::Proposed => return Lane::Proposed,
+        ItemStatus::Proposed if !item.agent_filed() => return Lane::Proposed,
+        ItemStatus::Proposed => {}
         ItemStatus::Shipped | ItemStatus::Dropped => return Lane::Done,
         ItemStatus::Open => {}
     }
     if let Some(s) = live(item, sessions, boot) {
         return match s.status.state {
             AgentState::NeedsInput | AgentState::Blocked => Lane::Needs,
+            _ if item.pr.is_some() => Lane::Review,
             AgentState::Working | AgentState::Stale => Lane::Running,
             _ => Lane::Review,
         };
     }
-    if item.checkout.is_some() || !item.sessions.is_empty() {
+    if item.pr.is_some() || item.checkout.is_some() || !item.sessions.is_empty() {
         Lane::Review
     } else {
         Lane::Backlog
@@ -388,27 +412,31 @@ impl Page {
     ) -> Vec<Do> {
         let id = item.id;
         let live = live(item, sessions, boot).map(|s| s.id);
-        let launchable = item.status == ItemStatus::Open && live.is_none();
+        let hand_over = taken_only(item, sessions, boot);
+        let launchable = item.status == ItemStatus::Open && (live.is_none() || hand_over);
         let act = match key {
             b"\r" | b"\n" => match live {
-                Some(s) => Do::Attach(s),
-                None if lane == Lane::Proposed => Do::Say("accept it first: a".into()),
-                None if !launchable => {
+                Some(s) if !hand_over => Do::Attach(s),
+                _ if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
+                _ if !launchable => {
                     Do::Say(format!("#{id} is {}: o reopens it", item.status.as_str()))
                 }
-                None if item.project.is_none() => {
+                _ if item.project.is_none() => {
                     Do::Say(format!("#{id} has no folder yet: pick one in the web app"))
                 }
-                None => Do::Launch {
+                _ => Do::Launch {
                     id,
                     agent: "claude",
                 },
             },
             b"c" if launchable && item.project.is_some() => Do::Launch { id, agent: "codex" },
-            b"a" if lane == Lane::Proposed => Do::Status(id, ItemStatus::Open),
-            b"s" if item.status == ItemStatus::Open => Do::Status(id, ItemStatus::Shipped),
+            b"a" if item.status == ItemStatus::Proposed => Do::Status(id, ItemStatus::Open),
+            b"s" if item.status == ItemStatus::Open || item.agent_filed() => {
+                Do::Status(id, ItemStatus::Shipped)
+            }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
             b"o" if lane == Lane::Done => Do::Status(id, ItemStatus::Open),
+            b"o" if live.is_some() => Do::Attach(live.unwrap_or_default()),
             b"N" => {
                 self.typing = Some(Typing::Note {
                     id,
@@ -494,15 +522,18 @@ impl Page {
             ]
             .concat(),
             (None, Some((lane, item))) => {
-                let open = if live(item, sessions, boot).is_some() {
-                    hint(" ↩ ", "open ")
+                let open = if taken_only(item, sessions, boot) {
+                    [hint(" ↩ ", "launch "), hint(" o ", "open its session ")].concat()
+                } else if live(item, sessions, boot).is_some() {
+                    hint(" ↩ ", "open ").to_vec()
+                } else if item.agent_filed() {
+                    hint(" a ", "accept ").to_vec()
                 } else if *lane == Lane::Review {
-                    hint(" ↩ ", "relaunch ")
+                    hint(" ↩ ", "relaunch ").to_vec()
                 } else {
-                    hint(" ↩ ", "launch ")
+                    hint(" ↩ ", "launch ").to_vec()
                 };
-                [
-                    open,
+                let rest = [
                     hint(" s ", "ship "),
                     hint(" S ", "merged "),
                     hint(" e ", "edit "),
@@ -510,8 +541,8 @@ impl Page {
                     hint(" d ", "drop "),
                     hint(" n ", "new "),
                     hint(" esc ", "close "),
-                ]
-                .concat()
+                ];
+                [open, rest.concat()].concat()
             }
             (None, None) => [hint(" n ", "new "), hint(" esc ", "close ")].concat(),
         };
@@ -629,9 +660,10 @@ pub(crate) fn answer(
     (arm, shipped_summary(shipped, kept, unfetched, said))
 }
 
-/// `S`'s one line: `ship #1 fix/a, #4 fix/b (take)? S again; 2 not merged; #9
-/// branch fix/x not found`, then `shipped #1 #4`. A branch a take set is marked,
-/// since an agent chose it. `unfetched` repositories were judged as last fetched.
+/// `S`'s one line: `ship #1 fix/a, #4 fix/b (take), #6 fix/c (take, agent-filed)?
+/// S again; 2 not merged; #9 branch fix/x not found`, then `shipped #1 #4`. A
+/// branch a take set is marked, since an agent chose it, and an item an agent
+/// filed that the user hasn't accepted, since shipping it accepts it. `unfetched` repositories were judged as last fetched.
 pub(crate) fn shipped_summary(
     shipped: &[ShippedItem],
     kept: &[KeptItem],
@@ -642,8 +674,14 @@ pub(crate) fn shipped_summary(
     let branches: Vec<String> = shipped
         .iter()
         .map(|s| {
-            let take = if s.branch_taken { " (take)" } else { "" };
-            format!("#{} {}{take}", s.id, s.branch)
+            let marks: Vec<&str> = [(s.branch_taken, "take"), (s.filed, "agent-filed")]
+                .into_iter()
+                .filter_map(|(on, mark)| on.then_some(mark))
+                .collect();
+            match marks.is_empty() {
+                true => format!("#{} {}", s.id, s.branch),
+                false => format!("#{} {} ({})", s.id, s.branch, marks.join(", ")),
+            }
         })
         .collect();
     let mut parts = vec![match (shipped, said) {
@@ -750,6 +788,10 @@ fn detail_lines(
         ]),
         Line::from(vec![
             format!(" {} ", lane.title()).fg(lane.color(t)).bold(),
+            match lane == Lane::Review && item.pr.is_some() {
+                true => "· PR open ".fg(t.muted),
+                false => "".into(),
+            },
             match live {
                 Some(s) => format!("· tab {} {} ", s.id, s.status.state.label()).fg(t.muted),
                 None => "".into(),
@@ -762,6 +804,10 @@ fn detail_lines(
     if lane == Lane::Proposed {
         out.push(Line::from(
             format!(" by {}, waiting on you", item.by).fg(t.accent2),
+        ));
+    } else if item.agent_filed() {
+        out.push(Line::from(
+            format!(" agent-filed by {}, not accepted yet: a", item.by).fg(t.accent2),
         ));
     }
     if let Some(pr) = &item.pr {
@@ -836,6 +882,8 @@ mod tests {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by: None,
+            unaccepted: false,
             notes: Vec::new(),
             created: 0,
             updated,
@@ -911,6 +959,106 @@ mod tests {
         assert_eq!(done, [19, 18, 17, 16, 15], "the newest five");
         // A restarted daemon's session 3 is someone else's: the item waits on review.
         assert_eq!(lane(&rows[0].1, &sessions, 8), Lane::Review);
+    }
+
+    #[test]
+    fn enter_launches_over_sessions_that_only_took_it_and_o_opens_them() {
+        let took = Item {
+            sessions: vec![3, 4],
+            taken: vec![4],
+            ..item(1, 1)
+        };
+        let working = |id| session(id, AgentState::Working);
+        // Only a take is live: the user's launch hands it over; o still attaches.
+        let rows = rows(std::slice::from_ref(&took), &[working(4)], 7);
+        let mut page = Page::default();
+        assert_eq!(
+            page.keys(b"\r", &rows, &[working(4)], 7),
+            [Do::Launch {
+                id: 1,
+                agent: "claude"
+            }]
+        );
+        assert_eq!(page.keys(b"o", &rows, &[working(4)], 7), [Do::Attach(4)]);
+        // Its launched session is live too: that one holds it, so ↩ attaches.
+        let live = [working(3), working(4)];
+        let rows = super::rows(&[took], &live, 7);
+        assert_eq!(page.keys(b"\r", &rows, &live, 7), [Do::Attach(4)]);
+    }
+
+    #[test]
+    fn an_agents_own_filed_work_follows_its_session_until_accepted() {
+        let filed = Item {
+            status: ItemStatus::Proposed,
+            by: "claude".into(),
+            sessions: vec![4],
+            taken: vec![4],
+            filed_by: Some((7, 4)),
+            ..item(1, 1)
+        };
+        let working = [session(4, AgentState::Working)];
+        assert_eq!(lane(&filed, &working, 7), Lane::Running);
+        assert_eq!(
+            lane(&filed, &[session(4, AgentState::NeedsInput)], 7),
+            Lane::Needs
+        );
+        let pr = Item {
+            pr: Some("https://github.com/o/r/pull/7".into()),
+            ..filed.clone()
+        };
+        assert_eq!(lane(&pr, &working, 7), Lane::Review);
+        // Proposed by an agent without taking it: waits on the user, as before.
+        let proposed = Item {
+            filed_by: None,
+            unaccepted: false,
+            ..filed.clone()
+        };
+        assert_eq!(lane(&proposed, &working, 7), Lane::Proposed);
+        let t = crate::theme::DRACULA;
+        let text: Vec<String> = detail_lines(&filed, Lane::Running, None, None, 0, &t)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text[2].contains("agent-filed by claude"), "{text:?}");
+        // Never launched before it's accepted; accepting it is a key away.
+        let rows = rows(&[filed], &[], 7);
+        assert_eq!(rows[0].0, Lane::Review, "taken: it waits on review");
+        let mut page = Page::default();
+        assert_eq!(
+            page.keys(b"\r", &rows, &[], 7),
+            [Do::Say("accept it first: a".into())]
+        );
+        assert_eq!(
+            page.keys(b"a", &rows, &[], 7),
+            [Do::Status(1, ItemStatus::Open)]
+        );
+    }
+
+    #[test]
+    fn a_pull_request_open_waits_on_review_unless_its_session_needs_you() {
+        let pr = |id| Item {
+            sessions: vec![4],
+            pr: Some("https://github.com/o/r/pull/7".into()),
+            ..item(id, 1)
+        };
+        let lane_with = |state| lane(&pr(1), &[session(4, state)], 7);
+        assert_eq!(lane_with(AgentState::Working), Lane::Review);
+        assert_eq!(lane_with(AgentState::Idle), Lane::Review);
+        assert_eq!(lane_with(AgentState::NeedsInput), Lane::Needs);
+        assert_eq!(lane_with(AgentState::Blocked), Lane::Needs);
+        // Gone, or a restarted daemon's: still waiting on review.
+        assert_eq!(lane(&pr(1), &[], 7), Lane::Review);
+        let shipped = Item {
+            status: ItemStatus::Shipped,
+            ..pr(1)
+        };
+        assert_eq!(lane(&shipped, &[], 7), Lane::Done);
+        let t = crate::theme::DRACULA;
+        let text: Vec<String> = detail_lines(&pr(1), Lane::Review, None, None, 0, &t)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text[1].contains("review · PR open"), "{text:?}");
     }
 
     #[test]
@@ -1078,6 +1226,7 @@ mod tests {
             title: String::new(),
             branch: format!("fix/{id}"),
             branch_taken: id == 4,
+            filed: id == 6,
             against: "origin/main".into(),
             note: None,
         };
@@ -1104,6 +1253,14 @@ mod tests {
             shipped_summary(&found, &[kept(2, "not merged")], 0, Said::Confirm),
             "ship #1 fix/1, #4 fix/4 (take)? S again; 1 not merged"
         );
+        let filed = ShippedItem {
+            branch_taken: true,
+            ..shipped(6)
+        };
+        assert_eq!(
+            shipped_summary(&[filed], &[], 0, Said::Confirm),
+            "ship #6 fix/6 (take, agent-filed)? S again"
+        );
         assert_eq!(
             shipped_summary(&found, &[], 0, Said::Found),
             "merged: #1 fix/1, #4 fix/4 (take) (b, then S S to ship)"
@@ -1125,6 +1282,7 @@ mod tests {
             title: String::new(),
             branch: "fix/a".into(),
             branch_taken: false,
+            filed: false,
             against: "origin/main".into(),
             note: None,
         }];

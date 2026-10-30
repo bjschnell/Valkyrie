@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, base, byColumn, editChange, factsLine, liveSession, prLink, type Lane } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, liveSession, prLink, type Lane } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
 import { addItem, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, sendFile, shipMerged, toast, useApp } from "../store";
@@ -53,7 +53,7 @@ export function Backlog() {
   const columns = byColumn(items, sessions, boot);
   const open = items.length - columns.done.length;
   // Only items with a branch can be found merged.
-  const mergeable = items.some((i) => i.status === "open" && i.branch && i.project);
+  const mergeable = items.some((i) => (i.status === "open" || agentFiled(i)) && i.branch && i.project);
   const [shipping, setShipping] = useState(false);
   // Two taps, as delete asks: the first finds what's merged and lists it, the second
   // ships exactly those, if they still are.
@@ -171,6 +171,9 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const [busy, setBusy] = useState(false);
   const [agent, setAgent] = useState<Agent>(() => (read(AGENT_KEY) === "codex" ? "codex" : "claude"));
   const live = liveSession(item, sessions, boot);
+  // Accept, Open, Launch: Launch beside Open while only takes are live (it hands
+  // the item over), Accept beside it for an agent's own filed work.
+  const actions = cardActions(item, sessions, boot);
   const folder = item.project ? base(item.project) : null;
   const pr = prLink(item.pr);
 
@@ -241,12 +244,18 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
             <strong className="item-needs item-proposed-pill">Proposed</strong>by {item.by}, waiting on you
           </div>
         )}
+        {agentFiled(item) && (
+          <div className="item-live">
+            <strong className="item-needs item-proposed-pill">Agent-filed</strong>by {item.by}, not accepted yet
+          </div>
+        )}
         {live && (
           <div className="item-live">
             {lane === "needs" && <strong className="item-needs">Needs you</strong>}
             {live.name} · {live.status.state.replace("_", " ")}
           </div>
         )}
+        {lane === "review" && pr && <div className="item-live">PR open</div>}
         {!expanded && lane === "review" && latest && (
           <p className="item-handoff" onClick={() => setExpanded(true)}>
             <span className="item-handoff-by">
@@ -362,30 +371,43 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
                   </button>
                 </>
               )}
-              {live ? (
-                <button className="primary" onClick={() => (location.hash = `#/s/${live.id}`)}>
-                  Open
-                </button>
-              ) : !item.project ? (
-                <button className="primary" onClick={() => (location.hash = `#/backlog/${item.id}`)}>
-                  Pick a folder
-                </button>
-              ) : (
-                <span className="launch">
-                  <select
-                    aria-label="Agent"
-                    value={agent}
-                    onChange={(e) => setAgent(e.target.value as Agent)}
-                    disabled={busy}
-                  >
-                    <option value="claude">Claude</option>
-                    <option value="codex">Codex</option>
-                  </select>
-                  <button className="primary" disabled={busy} onClick={() => void launch()}>
-                    {busy ? "Starting…" : lane === "review" ? "Relaunch" : "Launch"}
-                  </button>
-                </span>
-              )}
+              {actions.map((a, i) => {
+                const kind = i === actions.length - 1 ? "primary" : "ghost";
+                if (a === "accept")
+                  return (
+                    <button key={a} className={kind} disabled={busy} onClick={() => void status("open")}>
+                      Accept
+                    </button>
+                  );
+                if (a === "open")
+                  return (
+                    <button key={a} className={kind} onClick={() => (location.hash = `#/s/${live?.id}`)}>
+                      Open
+                    </button>
+                  );
+                if (a === "folder")
+                  return (
+                    <button key={a} className={kind} onClick={() => (location.hash = `#/backlog/${item.id}`)}>
+                      Pick a folder
+                    </button>
+                  );
+                return (
+                  <span key={a} className="launch">
+                    <select
+                      aria-label="Agent"
+                      value={agent}
+                      onChange={(e) => setAgent(e.target.value as Agent)}
+                      disabled={busy}
+                    >
+                      <option value="claude">Claude</option>
+                      <option value="codex">Codex</option>
+                    </select>
+                    <button className={kind} disabled={busy} onClick={() => void launch()}>
+                      {busy ? "Starting…" : lane === "review" ? "Relaunch" : "Launch"}
+                    </button>
+                  </span>
+                );
+              })}
             </>
           )}
         </div>

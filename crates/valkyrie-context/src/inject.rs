@@ -20,13 +20,16 @@ fn how_to_propose(valk: &str) -> String {
          <decision|constraint|pattern|gotcha|fix> \"<title>\" \"<a sentence or two>\"`. \
          It goes to the user for review; propose sparingly. A procedure worth \
          repeating (steps, pitfalls, how to verify) is a skill: `{valk} decide --kind skill \
-         \"<when to use it>\" -` with the steps on stdin.\n\nA bug, follow-up or idea \
-         outside what you're doing goes in the user's backlog, not into your change: \
-         check `{valk} todo list --json` for it first, then `{valk} todo add -k \
-         <bug|feature|chore> \"<title>\" --body \"<what, and how to reproduce it>\"`. It waits for \
-         the user to accept it. Working on an accepted item outside a launch, run `{valk} todo \
-         take N --branch <branch>` as you start, `{valk} todo take N --pr <url>` once the pull \
-         request is open, and leave a `{valk} todo note -i N`; shipping it is the user's."
+         \"<when to use it>\" -` with the steps on stdin.\n\nFix small related things \
+         you find (bugs, follow-ups), as part of this work or in a pull request of their own, \
+         and record each with `{valk} todo add --take -k <bug|feature|chore> \"<title>\" \
+         --branch <branch>` (`{valk} todo take N --pr <url>` once the pull request is open, \
+         `{valk} todo note -i N` for what's left), so the user can follow and ship it. File \
+         without fixing (`{valk} todo add -k <kind> \"<title>\" --body \"<what, and how to \
+         reproduce it>\"`, after checking `{valk} todo list --json`) only what you won't do \
+         now. Working on an accepted item outside a launch, `{valk} todo take N --branch \
+         <branch>` as you start; a take is refused while another session is on the item: \
+         leave that one to it. Never ship or accept an item: that's the user's."
     )
 }
 

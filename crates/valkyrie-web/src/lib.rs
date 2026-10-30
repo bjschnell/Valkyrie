@@ -596,8 +596,9 @@ fn same_origin(headers: &HeaderMap) -> bool {
 }
 
 /// Messages a browser may not send: switching the daemon's binary, posing as an
-/// agent's hooks, and taking a backlog item, which links the session the caller
-/// runs in: here that's `valk web`'s own, if it was started in one.
+/// agent's hooks, and taking a backlog item (or adding one taken), which links
+/// the session the caller runs in: here that's `valk web`'s own, if it was started
+/// in one.
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
@@ -605,6 +606,7 @@ fn allowed(msg: &ClientMsg) -> bool {
             | ClientMsg::Hook { .. }
             | ClientMsg::Clients { .. }
             | ClientMsg::TakeItem { .. }
+            | ClientMsg::AddItem { take: true, .. }
     )
 }
 
@@ -871,8 +873,24 @@ mod tests {
             id: 1,
             branch: None,
             pr: None,
+            steal: false,
         };
         assert!(!allowed(&take));
+        let add = |take| ClientMsg::AddItem {
+            req: 1,
+            item: valkyrie_proto::NewItem {
+                title: "x".into(),
+                body: String::new(),
+                kind: Default::default(),
+                cwd: None,
+                attachments: Vec::new(),
+            },
+            take,
+            branch: None,
+            pr: None,
+        };
+        assert!(allowed(&add(false)));
+        assert!(!allowed(&add(true)), "nor take as it adds");
         let ship = ClientMsg::ShipMerged {
             req: 1,
             dry_run: false,

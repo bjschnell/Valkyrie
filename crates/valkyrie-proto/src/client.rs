@@ -436,7 +436,35 @@ impl Client {
 
     /// Writes down a backlog item (DESIGN §8.12).
     pub async fn add_item(&self, item: crate::NewItem) -> Result<crate::Item> {
-        match self.request(|req| ClientMsg::AddItem { req, item }).await? {
+        self.add(item, false, None, None).await
+    }
+
+    /// Writes an item down and takes it for the session this process runs in, with
+    /// its branch and pull request if given.
+    pub async fn add_and_take(
+        &self,
+        item: crate::NewItem,
+        branch: Option<String>,
+        pr: Option<String>,
+    ) -> Result<crate::Item> {
+        self.add(item, true, branch, pr).await
+    }
+
+    async fn add(
+        &self,
+        item: crate::NewItem,
+        take: bool,
+        branch: Option<String>,
+        pr: Option<String>,
+    ) -> Result<crate::Item> {
+        let msg = |req| ClientMsg::AddItem {
+            req,
+            item,
+            take,
+            branch,
+            pr,
+        };
+        match self.request(msg).await? {
             Reply::Item { item, .. } => Ok(*item),
             other => bail!("unexpected reply: {other:?}"),
         }
@@ -495,12 +523,13 @@ impl Client {
     }
 
     /// Claims an item for the session this process runs in, with its branch and
-    /// pull request if given.
+    /// pull request if given; `steal` takes it from another session (the user's).
     pub async fn take_item(
         &self,
         id: u32,
         branch: Option<String>,
         pr: Option<String>,
+        steal: bool,
     ) -> Result<crate::Item> {
         match self
             .request(|req| ClientMsg::TakeItem {
@@ -508,6 +537,7 @@ impl Client {
                 id,
                 branch,
                 pr,
+                steal,
             })
             .await?
         {

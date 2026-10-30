@@ -90,7 +90,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     std::fs::write(
         &agent,
         format!(
-            "#!/bin/sh\nfor a; do last=$a; done\npwd > {p}\n\
+            "#!/bin/sh\nfor a; do last=$a; done\n\
+             if [ \"$VALK_ITEM\" = 5 ]; then echo on5 > {l5}; exec sleep 60; fi\npwd > {p}\n\
              valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
              valk todo note -i 2 'not mine' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
              valk todo edit 1 -t 'Done already' > {e}.tmp 2>&1; mv {e}.tmp {e}\n\
@@ -99,6 +100,14 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
              valk todo take 4 -b fix/3-clients > {r4}.tmp 2>&1; mv {r4}.tmp {r4}\n\
              valk todo take 1 -b fix/3-clients > {r1}.tmp 2>&1; mv {r1}.tmp {r1}\n\
              valk todo note -i 3 'merged upstream' > {tn}.tmp 2>&1; mv {tn}.tmp {tn}\n\
+             valk todo take 5 > {h5}.tmp 2>&1; mv {h5}.tmp {h5}\n\
+             valk todo take 5 --steal > {s5}.tmp 2>&1; mv {s5}.tmp {s5}\n\
+             valk todo add --take -k bug 'Found along the way' --branch fix/found > {af}.tmp 2>&1; mv {af}.tmp {af}\n\
+             valk todo take 6 --pr {pr} > {afp}.tmp 2>&1; mv {afp}.tmp {afp}\n\
+             valk todo note -i 6 'fixed the overflow too' > {afn}.tmp 2>&1; mv {afn}.tmp {afn}\n\
+             valk todo add 'For later' > {al}.tmp 2>&1; mv {al}.tmp {al}\n\
+             valk todo take 7 > {alt}.tmp 2>&1; mv {alt}.tmp {alt}\n\
+             valk todo launch 1 > {al1}.tmp 2>&1; mv {al1}.tmp {al1}\n\
              valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
              valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
@@ -114,6 +123,15 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             sm = o("agent-ship-merged"),
             r4 = o("retake4"),
             r1 = o("retake1"),
+            h5 = o("held5"),
+            l5 = o("launched5"),
+            af = o("add-take"),
+            afp = o("add-take-pr"),
+            afn = o("add-take-note"),
+            al = o("add-later"),
+            alt = o("take-later"),
+            al1 = o("agent-relaunch1"),
+            s5 = o("agent-steal5"),
             pr = PR,
         ),
     )
@@ -188,6 +206,24 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         wait_for(&out.join("human-take")).contains("from inside a valk session"),
         "outside every session there's nothing to follow"
     );
+    // One session at a time on an item: the user's own, here, holds #5.
+    human("valk todo add 'Held elsewhere'", "add5");
+    wait_for(&out.join("add5"));
+    let in_session = |script: &str, name: &str| {
+        let cmd = format!("valk new --name {name} -- sh -c '{script}; exec sleep 60'");
+        human(&cmd, name);
+        let id = wait_for(&out.join(name));
+        assert!(id.trim().parse::<u32>().is_ok(), "{id}");
+        id.trim().to_owned()
+    };
+    let holder = in_session(
+        &format!(
+            "valk todo take 5 > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            o = o("take5")
+        ),
+        "hold5",
+    );
+    assert!(wait_for(&out.join("take5")).contains("#5 Held elsewhere taken"));
     human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -221,6 +257,48 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         std::thread::sleep(Duration::from_millis(200));
     };
     assert!(list.contains("#1") && list.contains("to review"), "{list}");
+    // A pull request open waits on review, whatever its session does.
+    let three = list.lines().find(|l| l.starts_with("#3 ")).unwrap_or("");
+    assert!(three.contains("PR open"), "{list}");
+
+    // What the agent fixed along the way, filed and taken in one go: proposed, but
+    // tracked like any taken item; and never launched before the user accepts it.
+    assert_eq!(
+        wait_for(&out.join("add-take")),
+        "#6 Found along the way (repo), taken; proposed until the user accepts it\n"
+    );
+    assert!(
+        wait_for(&out.join("add-take-pr"))
+            .contains("#6 Found along the way taken (branch fix/found, PR")
+    );
+    assert!(wait_for(&out.join("add-take-note")).starts_with("noted on #6"));
+    let six = list.lines().find(|l| l.starts_with("#6 ")).unwrap_or("");
+    assert!(
+        six.contains("PR open") && six.ends_with(" (PR) (agent-filed)"),
+        "{list}"
+    );
+    // Only its own: another proposed item still waits on the user.
+    assert!(wait_for(&out.join("add-later")).starts_with("#7 For later"));
+    let refused = wait_for(&out.join("take-later"));
+    assert!(
+        refused.contains("#7 is proposed; accept it first"),
+        "{refused}"
+    );
+    // An agent's own session counts: it can't put a second one on its item.
+    let refused = wait_for(&out.join("agent-relaunch1"));
+    assert!(
+        refused.contains(&format!(
+            "#1 is already being worked on in session {}",
+            launched.trim()
+        )) && refused.contains("leave it to that session"),
+        "{refused}"
+    );
+    human("valk todo launch 6", "launch6");
+    let refused = wait_for(&out.join("launch6"));
+    assert!(
+        refused.contains("#6 is proposed; accept it first"),
+        "{refused}"
+    );
 
     // The agent's handoff landed on its own item, and only there.
     assert_eq!(
@@ -262,6 +340,80 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     assert!(refused.contains("only the user changes that"), "{refused}");
     let refused = wait_for(&out.join("retake1"));
     assert!(refused.contains("its launch's branch"), "{refused}");
+    // Nor take #5 from the session on it, which only the user may.
+    let refused = wait_for(&out.join("held5"));
+    assert!(
+        refused.contains(&format!(
+            "#5 is already being worked on in session {holder} (sh, \"hold5\"); leave it to that session"
+        )) && !refused.contains("--steal"),
+        "{refused}"
+    );
+    let refused = wait_for(&out.join("agent-steal5"));
+    assert!(refused.contains("is for the user"), "{refused}");
+    // The user, in another session, is refused too, then hands it over with --steal.
+    let take = |name: &str, steal: &str| {
+        format!(
+            "valk todo take 5{steal} > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            o = o(name)
+        )
+    };
+    let stealer = in_session(
+        &format!(
+            "{}; {}",
+            take("take5-again", ""),
+            take("steal5", " --steal")
+        ),
+        "steal5-tab",
+    );
+    let refused = wait_for(&out.join("take5-again"));
+    assert!(
+        refused.contains("stop it first or take it with --steal"),
+        "{refused}"
+    );
+    assert!(wait_for(&out.join("steal5")).contains("#5 Held elsewhere taken"));
+    human("valk todo list --json", "list-json");
+    let items: serde_json::Value = serde_json::from_str(&wait_for(&out.join("list-json"))).unwrap();
+    let five = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == 5)
+        .unwrap();
+    assert_eq!(
+        five["sessions"],
+        serde_json::json!([stealer.parse::<u32>().unwrap()])
+    );
+    // A take never locks the user out: their launch hands it over, and the old
+    // session keeps running. One launched on it does hold it.
+    human("valk todo launch 5", "launch5");
+    let on5 = wait_for(&out.join("launch5")).trim().to_owned();
+    assert_eq!(wait_for(&out.join("launched5")), "on5\n");
+    human("valk todo list --json", "list-json2");
+    let items: serde_json::Value =
+        serde_json::from_str(&wait_for(&out.join("list-json2"))).unwrap();
+    let five = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == 5)
+        .unwrap();
+    assert_eq!(
+        five["sessions"],
+        serde_json::json!([on5.parse::<u32>().unwrap()])
+    );
+    human("valk ls", "ls");
+    assert!(
+        wait_for(&out.join("ls")).contains("steal5-tab"),
+        "still running"
+    );
+    human("valk todo launch 5", "relaunch5");
+    let refused = wait_for(&out.join("relaunch5"));
+    assert!(
+        refused.contains(&format!("#5 is already being worked on in session {on5}"))
+            && refused.contains("attach to it, or stop it first"),
+        "{refused}"
+    );
+
     human("valk todo show 3", "show3");
     let show = wait_for(&out.join("show3"));
     assert!(show.contains(&format!("\npr: {PR}\n")), "{show}");
@@ -284,6 +436,10 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         &["commit", "-q", "--allow-empty", "-m", "wip"],
         &["checkout", "-q", "main"],
         &["merge", "-q", "--ff-only", "fix/3-clients"],
+        &["checkout", "-q", "-b", "fix/found"],
+        &["commit", "-q", "--allow-empty", "-m", "found it"],
+        &["checkout", "-q", "main"],
+        &["merge", "-q", "--ff-only", "fix/found"],
     ] {
         let done = git(args);
         assert!(done.status.success(), "{args:?}: {done:?}");
@@ -299,8 +455,16 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         )),
         "{would}"
     );
+    // Shipping the agent's own item is the user's confirm, and its acceptance.
     assert!(
-        would.contains("1 may ship: `valk todo ship --merged --yes`"),
+        would.contains(&format!(
+            "#6 Found along the way: would ship fix/found (agent-filed, not yet accepted), merged into main at {}\n",
+            repo_at.display()
+        )),
+        "{would}"
+    );
+    assert!(
+        would.contains("2 may ship: `valk todo ship --merged --yes`"),
         "{would}"
     );
     human("valk todo show 3", "still-open");
@@ -312,6 +476,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             "#3 Clients stay connected: shipped fix/3-clients (set by a take), merged into main at {}\n",
             repo_at.display()
         )),
+        "{merged}"
+    );
+    assert!(
+        merged
+            .contains("#6 Found along the way: shipped fix/found (agent-filed, not yet accepted)"),
         "{merged}"
     );
     assert!(
@@ -327,6 +496,10 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     let line = |id: &str| list.lines().find(|l| l.starts_with(id)).unwrap_or("");
     assert!(line("#3 ").contains("shipped"), "{list}");
     assert!(line("#3 ").ends_with(" (PR)"), "{list}");
+    assert!(
+        line("#6 ").contains("shipped") && !line("#6 ").contains("agent-filed"),
+        "{list}"
+    );
     assert!(!line("#4 ").contains("shipped"), "{list}");
     assert!(worktree.exists(), "#1 stays as it was");
 

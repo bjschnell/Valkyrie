@@ -105,6 +105,15 @@ pub struct Item {
     /// The pull request, an `https://` URL, as `valk todo take --pr` recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
+    /// The daemon `boot` and session that wrote it down and took it in one step
+    /// (`valk todo add --take`): an agent's own work, tracked. That session may
+    /// take it while it's still proposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filed_by: Option<(u64, SessionId)>,
+    /// Shipped or dropped while still proposed: the user never accepted it, so
+    /// reopening it makes it proposed again rather than open.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unaccepted: bool,
     /// Handoffs left on it, oldest first: what an agent did and what's left, or
     /// the user's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -112,6 +121,14 @@ pub struct Item {
     /// Seconds since the epoch.
     pub created: u64,
     pub updated: u64,
+}
+
+impl Item {
+    /// Written down and taken by an agent for its own work, and not accepted yet:
+    /// it follows its session like an open item, and shipping it accepts it.
+    pub fn agent_filed(&self) -> bool {
+        self.status == ItemStatus::Proposed && self.filed_by.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +210,10 @@ pub struct ShippedItem {
     pub branch: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub branch_taken: bool,
+    /// An agent filed it and the user hasn't accepted it: shipping it is the
+    /// acceptance (`Item::agent_filed`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub filed: bool,
     /// What its branch was found merged into, e.g. `origin/main`.
     pub against: String,
     /// What else happened (its worktree taken away, or why it was kept).

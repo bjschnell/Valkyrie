@@ -62,6 +62,18 @@ impl Backlog {
     /// Writes `new` down as the next item. `by` is `human` or the agent asking,
     /// worked out by the daemon; an agent's waits, proposed, for the user.
     pub fn add(&self, new: &NewItem, by: &str, now: u64) -> Result<Item> {
+        self.add_filed(new, by, None, now)
+    }
+
+    /// Adds an item as `add` does, recording the daemon boot and session that
+    /// wrote it down to take it (`valk todo add --take`), if one did.
+    pub fn add_filed(
+        &self,
+        new: &NewItem,
+        by: &str,
+        filed_by: Option<(u64, SessionId)>,
+        now: u64,
+    ) -> Result<Item> {
         let (title, body) = clean(&new.title, &new.body)?;
         if new.attachments.len() > MAX_ATTACHMENTS {
             bail!("at most {MAX_ATTACHMENTS} attachments");
@@ -102,6 +114,8 @@ impl Backlog {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by,
+            unaccepted: false,
             notes: Vec::new(),
             created: now,
             updated: now,
@@ -218,19 +232,36 @@ impl Backlog {
                     item.project = Some(root);
                 }
             }
-            ItemChange::Status { status } => item.status = *status,
+            ItemChange::Status { status } => {
+                // Shipped or dropped before the user accepted it (an agent's own
+                // work, shipped by the user's confirm): reopened, it's proposed
+                // again, so it still can't be launched unaccepted (ADR-0012).
+                match (item.status, *status) {
+                    (ItemStatus::Proposed, ItemStatus::Shipped | ItemStatus::Dropped) => {
+                        item.unaccepted = true;
+                        item.status = *status;
+                    }
+                    (_, ItemStatus::Open) if item.unaccepted => {
+                        item.unaccepted = false;
+                        item.status = ItemStatus::Proposed;
+                    }
+                    _ => item.status = *status,
+                }
+            }
         }
         item.updated = now;
         self.write(&item)?;
         Ok(item)
     }
 
-    /// Records a session started on `id`, and the checkout it runs in.
+    /// Records a session started on `id`, and the checkout it runs in. Launched
+    /// `from` sessions that only took it (the user's launch), it's no longer theirs.
     pub fn launched(
         &self,
         id: u32,
         session: SessionId,
         boot: u64,
+        from: &[SessionId],
         checkout: Option<(String, PathBuf)>,
         now: u64,
     ) -> Result<Item> {
@@ -240,6 +271,7 @@ impl Backlog {
             item.taken.clear();
             item.boot = boot;
         }
+        leave(&mut item, from);
         item.sessions.push(session);
         if let Some((branch, path)) = checkout {
             item.branch = Some(branch);
@@ -254,7 +286,9 @@ impl Backlog {
     /// Records `session` taking item `id`, as `launched` does but with no checkout
     /// of its own: it may be working in the main one, which shipping must never
     /// take away. A session already on it isn't listed twice. Sets the branch and
-    /// pull request when given, and the repository when it has none yet. Whether
+    /// pull request when given, and the repository when it has none yet. Taken
+    /// `from` other sessions (the user's steal), it's no longer theirs: they leave
+    /// its sessions, and `session` is its newest, so the lane follows it. Whether
     /// the item may be taken, and the branch's name, are the daemon's to check.
     #[allow(clippy::too_many_arguments)]
     pub fn taken(
@@ -262,6 +296,7 @@ impl Backlog {
         id: u32,
         session: SessionId,
         boot: u64,
+        from: &[SessionId],
         branch: Option<&str>,
         pr: Option<&str>,
         project: Option<PathBuf>,
@@ -275,6 +310,14 @@ impl Backlog {
             item.sessions.clear();
             item.taken.clear();
             item.boot = boot;
+        }
+        if !from.is_empty() {
+            leave(&mut item, from);
+            // The newest, so the lane follows it rather than an older one of its own.
+            if let Some(at) = item.sessions.iter().position(|&s| s == session) {
+                item.sessions.remove(at);
+                item.sessions.push(session);
+            }
         }
         // A session launched on it stays launched: its notes still go into the brief.
         if !item.sessions.contains(&session) {
@@ -313,7 +356,7 @@ impl Backlog {
 
 /// Refuses a pull request that isn't one plain `https://` URL: it's shown as a
 /// link in the web app.
-fn pr_url(pr: &str) -> Result<()> {
+pub fn pr_url(pr: &str) -> Result<()> {
     // ASCII only: bidi and look-alike characters could make a link read as another.
     let ok = pr.is_ascii()
         && pr.starts_with("https://")
@@ -324,6 +367,18 @@ fn pr_url(pr: &str) -> Result<()> {
         bail!("a pull request is one https:// URL, at most {MAX_PR} characters");
     }
     Ok(())
+}
+
+/// Takes `from` off the item: they no longer steer its lane or note it.
+fn leave(item: &mut Item, from: &[SessionId]) {
+    item.sessions.retain(|s| !from.contains(s));
+    item.taken.retain(|s| !from.contains(s));
+}
+
+/// `text` on one line without control or bidi characters, as a title is kept: for
+/// text from elsewhere (a session's name) put into a message.
+pub fn one_line(text: &str) -> String {
+    file::one_line(&shown(text, false))
 }
 
 fn display(p: &Option<PathBuf>) -> String {
@@ -426,7 +481,7 @@ pub fn brief(item: &Item) -> String {
         }
     }
     text.push_str(&format!(
-        "\n(This is item #{} in my Valkyrie backlog. Anything else you find along the way goes in with `valk todo add`, not into this change. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "\n(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`, then `valk todo take N --pr <url>` and `valk todo note -i N \"…\"` with the N it printed (without -i N, both mean this item); `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         item.id
     ));
     text
@@ -701,11 +756,11 @@ mod tests {
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Feature), "human", 1).unwrap();
         let wt = Some(("feat/1-x".to_owned(), PathBuf::from("/r-feat-1-x")));
-        b.launched(1, 4, 77, wt, 2).unwrap();
-        let item = b.launched(1, 5, 77, None, 3).unwrap();
+        b.launched(1, 4, 77, &[], wt, 2).unwrap();
+        let item = b.launched(1, 5, 77, &[], None, 3).unwrap();
         assert_eq!(item.sessions, [4, 5]);
         assert_eq!(item.branch.as_deref(), Some("feat/1-x"));
-        let item = b.launched(1, 1, 78, None, 4).unwrap();
+        let item = b.launched(1, 1, 78, &[], None, 4).unwrap();
         assert!(!item.branch_taken, "a launch's branch");
         assert_eq!((item.sessions.as_slice(), item.boot), (&[1][..], 78));
         assert_eq!(item.checkout, Some(PathBuf::from("/r-feat-1-x")));
@@ -718,7 +773,7 @@ mod tests {
         b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
         let pr = "https://github.com/o/r/pull/7";
         let item = b
-            .taken(1, 4, 77, Some("fix/x"), None, Some("/r".into()), 2)
+            .taken(1, 4, 77, &[], Some("fix/x"), None, Some("/r".into()), 2)
             .unwrap();
         assert_eq!(
             (item.sessions.as_slice(), item.taken.as_slice()),
@@ -730,14 +785,14 @@ mod tests {
         );
         assert_eq!(item.project, Some(PathBuf::from("/r")));
         // Taken again by the same session: the PR is added, the rest stays.
-        let item = b.taken(1, 4, 77, None, Some(pr), None, 3).unwrap();
+        let item = b.taken(1, 4, 77, &[], None, Some(pr), None, 3).unwrap();
         assert_eq!(item.sessions, [4], "not listed twice");
         assert_eq!(
             (item.branch.as_deref(), item.pr.as_deref(), item.updated),
             (Some("fix/x"), Some(pr), 3)
         );
         let item = b
-            .taken(1, 5, 77, Some("fix/y"), None, Some("/other".into()), 4)
+            .taken(1, 5, 77, &[], Some("fix/y"), None, Some("/other".into()), 4)
             .unwrap();
         assert_eq!(item.sessions, [4, 5]);
         assert_eq!(item.branch.as_deref(), Some("fix/y"));
@@ -754,7 +809,7 @@ mod tests {
             &format!("https://{}", "x".repeat(MAX_PR)),
         ] {
             assert!(
-                b.taken(1, 5, 77, None, Some(bad), None, 5).is_err(),
+                b.taken(1, 5, 77, &[], None, Some(bad), None, 5).is_err(),
                 "{bad}"
             );
         }
@@ -762,20 +817,70 @@ mod tests {
     }
 
     #[test]
+    fn an_item_never_accepted_reopens_proposed() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let status = |status| ItemChange::Status { status };
+        // An agent's own work, shipped by the user's confirm, then reopened.
+        b.add_filed(&new("x", "", ItemKind::Bug), "claude", Some((7, 4)), 1)
+            .unwrap();
+        let item = b.change(1, &status(ItemStatus::Shipped), 2).unwrap();
+        assert!(item.unaccepted);
+        let item = b.change(1, &status(ItemStatus::Open), 3).unwrap();
+        assert_eq!(
+            (item.status, item.unaccepted),
+            (ItemStatus::Proposed, false)
+        );
+        // Accepted, it reopens open as before.
+        b.change(1, &status(ItemStatus::Open), 4).unwrap();
+        b.change(1, &status(ItemStatus::Dropped), 5).unwrap();
+        let item = b.change(1, &status(ItemStatus::Open), 6).unwrap();
+        assert_eq!(item.status, ItemStatus::Open);
+        // Dropped while proposed, too.
+        b.add(&new("y", "", ItemKind::Bug), "claude", 7).unwrap();
+        b.change(2, &status(ItemStatus::Dropped), 8).unwrap();
+        let item = b.change(2, &status(ItemStatus::Open), 9).unwrap();
+        assert_eq!(item.status, ItemStatus::Proposed);
+    }
+
+    #[test]
+    fn a_steal_takes_the_item_from_the_sessions_it_was_with() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
+        b.launched(1, 3, 77, &[], None, 2).unwrap();
+        b.taken(1, 4, 77, &[], None, None, None, 3).unwrap();
+        b.taken(1, 5, 77, &[], None, None, None, 4).unwrap();
+        // 4 takes it back from 3 and 5: now the newest, the lane follows it.
+        let item = b.taken(1, 4, 77, &[3, 5], None, None, None, 5).unwrap();
+        assert_eq!(
+            (item.sessions.as_slice(), item.taken.as_slice()),
+            (&[4][..], &[4][..])
+        );
+        // The user's launch over a take: 4 leaves it, the new session 6 has it.
+        let item = b.launched(1, 6, 77, &[4], None, 6).unwrap();
+        assert_eq!(
+            (item.sessions.as_slice(), item.taken.as_slice()),
+            (&[6][..], &[][..])
+        );
+        assert_eq!(one_line("a\u{202e}b\nc\x1b[2J"), "a b c [2J");
+    }
+
+    #[test]
     fn a_launched_session_that_takes_stays_launched_and_taken_notes_stay_out_of_the_brief() {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
-        b.launched(1, 3, 77, None, 2).unwrap();
-        let item = b.taken(1, 3, 77, None, None, None, 3).unwrap();
+        b.launched(1, 3, 77, &[], None, 2).unwrap();
+        let item = b.taken(1, 3, 77, &[], None, None, None, 3).unwrap();
         assert_eq!(
             (item.sessions.as_slice(), item.taken.as_slice()),
             (&[3][..], &[][..])
         );
-        let item = b.taken(1, 4, 77, None, None, None, 3).unwrap();
+        let item = b.taken(1, 4, 77, &[], None, None, None, 3).unwrap();
         assert_eq!(item.taken, [4]);
         // A new daemon's ids are someone else's.
-        assert!(b.launched(1, 4, 78, None, 4).unwrap().taken.is_empty());
+        assert!(b.launched(1, 4, 78, &[], None, 4).unwrap().taken.is_empty());
 
         b.note(1, "claude", "from the launch", false, 5).unwrap();
         let item = b
@@ -811,6 +916,8 @@ mod tests {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by: None,
+            unaccepted: false,
             notes: Vec::new(),
             created: 0,
             updated: 0,

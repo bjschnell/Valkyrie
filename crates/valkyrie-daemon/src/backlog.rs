@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use valkyrie_context::backlog;
 use valkyrie_proto::{
-    Item, ItemChange, ItemStatus, KeptItem, NewItem, Reply, SessionInfo, ShippedItem, Size,
-    SpawnSpec,
+    Item, ItemChange, ItemStatus, KeptItem, NewItem, Reply, SessionId, SessionInfo, ShippedItem,
+    Size, SpawnSpec,
 };
 
 /// Every item, pushed to queue watchers with the queue.
@@ -41,10 +41,46 @@ impl Registry {
         });
     }
 
-    pub(crate) fn add_item(&self, new: &NewItem, peer: Option<Peer>) -> Result<Reply> {
-        let by = self.caller(peer).agent.unwrap_or_else(|| "human".into());
-        let item = self.backlog.lock().unwrap().add(new, &by, now_secs())?;
-        tracing::info!(id = item.id, by, "backlog item added");
+    /// Writes an item down: an agent's is proposed until the user accepts it. With
+    /// `take` (its branch and pull request), it's also taken for the caller's
+    /// session in the same step, as `take_item` would: an agent tracking work it
+    /// does that nobody planned. The card follows that session; its text still
+    /// never becomes a prompt the user launches until they accept it (ADR-0012).
+    pub(crate) fn add_item(
+        &self,
+        new: &NewItem,
+        take: Option<(Option<&str>, Option<&str>)>,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        let caller = self.caller(peer);
+        let by = caller.agent.unwrap_or_else(|| "human".into());
+        let item = match take {
+            None => self.backlog.lock().unwrap().add(new, &by, now_secs())?,
+            Some((branch, pr)) => {
+                let Some(session) = caller.session else {
+                    bail!("add --take from inside a valk session");
+                };
+                let info = session.info();
+                if let Some(branch) = branch {
+                    worktree::valid(&info.cwd, branch)?;
+                }
+                if let Some(pr) = pr {
+                    backlog::pr_url(pr)?;
+                }
+                let project = valkyrie_context::project::in_git(&info.cwd)
+                    .then(|| valkyrie_context::project::root(&info.cwd));
+                let backlog = self.backlog.lock().unwrap();
+                let now = now_secs();
+                let filed = backlog.add_filed(new, &by, Some((self.boot, info.id)), now)?;
+                backlog.taken(filed.id, info.id, self.boot, &[], branch, pr, project, now)?
+            }
+        };
+        tracing::info!(
+            id = item.id,
+            by,
+            taken = take.is_some(),
+            "backlog item added"
+        );
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
@@ -111,28 +147,111 @@ impl Registry {
         Ok((item, note))
     }
 
+    /// The sessions other than `mine` still running on `item` on this daemon, by
+    /// launch or take, newest first.
+    fn holders(&self, item: &Item, mine: Option<SessionId>) -> Vec<SessionId> {
+        if item.boot != self.boot {
+            return Vec::new();
+        }
+        item.sessions
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&s| Some(s) != mine && self.get(s).is_ok_and(|s| !s.exited()))
+            .collect()
+    }
+
+    /// Whether `item` may be taken or launched (`how`) by the caller, whose own
+    /// session (`mine`: on a launch, only the user's) doesn't count: several agents on one backlog mustn't end up
+    /// on the same item. Refused while a launch is starting a session on it, or
+    /// while another live session is on it, naming that one, unless the caller
+    /// hands it over: the user's steal, or the user's launch over sessions that
+    /// only took it (a take never locks the user out). Returns the sessions it's
+    /// handed over from, which leave the item; they keep running.
+    fn claim(
+        &self,
+        item: &Item,
+        mine: Option<SessionId>,
+        agent: bool,
+        how: Claim,
+    ) -> Result<Vec<SessionId>> {
+        let id = item.id;
+        if self.launching.lock().unwrap().contains(&id) {
+            bail!("#{id} is being launched right now; try again in a moment");
+        }
+        let holders = self.holders(item, mine);
+        let Some(&newest) = holders.first() else {
+            return Ok(holders);
+        };
+        let launched = holders.iter().find(|s| !item.taken.contains(s)).copied();
+        let hand_over = match how {
+            Claim::Take { steal } => steal,
+            Claim::Launch => !agent && launched.is_none(),
+        };
+        if hand_over {
+            return Ok(holders);
+        }
+        let or = match how {
+            _ if agent => "leave it to that session",
+            Claim::Take { .. } => "stop it first or take it with --steal",
+            Claim::Launch => "attach to it, or stop it first",
+        };
+        let blocker = match how {
+            Claim::Launch => launched.unwrap_or(newest),
+            Claim::Take { .. } => newest,
+        };
+        let Ok(session) = self.get(blocker) else {
+            bail!("#{id} is already being worked on in session {blocker}; {or}");
+        };
+        let info = session.info();
+        let agent = session.agent_behind().unwrap_or_else(|| {
+            let program = info.command.first().map(PathBuf::from).unwrap_or_default();
+            program
+                .file_name()
+                .map_or("shell".into(), |n| n.to_string_lossy().into_owned())
+        });
+        let mut name = backlog::one_line(&info.name);
+        if name.chars().count() > 24 {
+            name = format!("{}…", name.chars().take(23).collect::<String>());
+        }
+        bail!(
+            "#{id} is already being worked on in session {} ({}, \"{name}\"); {or}",
+            info.id,
+            backlog::one_line(&agent)
+        );
+    }
+
     /// Claims item `id` for the caller's session, as a launch links one, so its
     /// lane follows that session and the session may leave notes on it. Agents may:
     /// it's how one working through accepted items outside a launch says which it's
-    /// on. No checkout is recorded, since the session may be in the main one.
+    /// on. No checkout is recorded, since the session may be in the main one. One
+    /// session at a time: another live one on it refuses the take, unless the user
+    /// `steal`s it, which hands it to their session.
     pub(crate) fn take_item(
         &self,
         id: u32,
         branch: Option<&str>,
         pr: Option<&str>,
+        steal: bool,
         peer: Option<Peer>,
     ) -> Result<Reply> {
+        if steal {
+            self.vouch(peer, "taking an item from another session")?;
+        }
         let caller = self.caller(peer);
         let Some(session) = caller.session else {
             bail!("take it from inside a valk session");
         };
         let item = self.backlog.lock().unwrap().get(id)?;
+        let info = session.info();
         match item.status {
             ItemStatus::Open => {}
+            // Its own work, written down with `add --take`: the session that filed
+            // it may take it again (to record the pull request) before it's accepted.
+            ItemStatus::Proposed if item.filed_by == Some((self.boot, info.id)) => {}
             ItemStatus::Proposed => bail!("#{id} is proposed; accept it first"),
             other => bail!("#{id} is {}; reopen it first", other.as_str()),
         }
-        let info = session.info();
         // Ship merged judges an item by its branch, so which branch it is can't be
         // an agent's to steer: a launch's is fixed, and one a take recorded only
         // the user replaces.
@@ -148,15 +267,27 @@ impl Registry {
         }
         let project = valkyrie_context::project::in_git(&info.cwd)
             .then(|| valkyrie_context::project::root(&info.cwd));
-        let item = self.backlog.lock().unwrap().taken(
-            id,
-            info.id,
-            self.boot,
-            branch,
-            pr,
-            project,
-            now_secs(),
-        )?;
+        // Checked and recorded under one lock, so two takes can't both find it free.
+        let item = {
+            let backlog = self.backlog.lock().unwrap();
+            let item = backlog.get(id)?;
+            let from = self.claim(
+                &item,
+                Some(info.id),
+                caller.agent.is_some(),
+                Claim::Take { steal },
+            )?;
+            backlog.taken(
+                id,
+                info.id,
+                self.boot,
+                &from,
+                branch,
+                pr,
+                project,
+                now_secs(),
+            )?
+        };
         let by = caller.agent.unwrap_or_else(|| "human".into());
         tracing::info!(id, session = info.id, by, "backlog item taken");
         self.refresh_items();
@@ -194,9 +325,12 @@ impl Registry {
             let (Some(project), Some(branch)) = (item.project.clone(), item.branch.clone()) else {
                 continue;
             };
-            if item.status != ItemStatus::Open {
+            // An agent's own work it filed and took ships too: the user's confirm
+            // is the acceptance.
+            if item.status != ItemStatus::Open && !item.agent_filed() {
                 continue;
             }
+            let filed = item.agent_filed();
             let (id, title) = (item.id, item.title.clone());
             judged.push(id);
             let checkout = item.checkout.clone().filter(|c| c.is_dir());
@@ -219,6 +353,7 @@ impl Registry {
                     title,
                     branch: judged_branch.clone(),
                     branch_taken,
+                    filed,
                     against,
                     note: None,
                 });
@@ -230,7 +365,7 @@ impl Registry {
                 let backlog = self.backlog.lock().unwrap();
                 match backlog.get(id) {
                     Ok(now)
-                        if now.status == ItemStatus::Open
+                        if now.status == item.status
                             && now.branch == item.branch
                             && now.checkout == item.checkout =>
                     {
@@ -257,6 +392,7 @@ impl Registry {
                     title,
                     branch: judged_branch.clone(),
                     branch_taken,
+                    filed,
                     against,
                     note: note.filter(|n| !n.is_empty()),
                 }),
@@ -407,6 +543,7 @@ impl Registry {
         worktree: bool,
         size: Size,
         env: Vec<(String, Option<String>)>,
+        peer: Option<Peer>,
     ) -> Result<Reply> {
         if !matches!(agent, "claude" | "codex") {
             bail!("an item starts claude or codex, not {agent}");
@@ -419,6 +556,26 @@ impl Registry {
         }
         let Some(project) = item.project.clone() else {
             bail!("#{id} has no folder yet; pick the repository it's for");
+        };
+        // One session on an item at a time; held from here until the new one is
+        // recorded on it, so a take or launch meanwhile is refused too.
+        let caller = self.caller(peer);
+        // The user's own session doesn't count; an agent's does, so it can't put a
+        // second live session on an item it holds.
+        let mine = match caller.agent {
+            None => caller.session.as_ref().map(|s| s.info().id),
+            Some(_) => None,
+        };
+        let (from, _launching) = {
+            let backlog = self.backlog.lock().unwrap();
+            let from = self.claim(
+                &backlog.get(id)?,
+                mine,
+                caller.agent.is_some(),
+                Claim::Launch,
+            )?;
+            self.launching.lock().unwrap().insert(id);
+            (from, Launching(self, id))
         };
         let branch = item
             .branch
@@ -448,13 +605,36 @@ impl Registry {
             return Ok(reply);
         };
         let checkout = new_worktree.map(|b| (b, checkout_of(info)));
-        self.backlog
-            .lock()
-            .unwrap()
-            .launched(id, info.id, self.boot, checkout, now_secs())?;
+        self.backlog.lock().unwrap().launched(
+            id,
+            info.id,
+            self.boot,
+            &from,
+            checkout,
+            now_secs(),
+        )?;
         tracing::info!(id, session = info.id, "launched a backlog item");
         self.refresh_items();
         Ok(reply)
+    }
+}
+
+/// What `Registry::claim` is asked for.
+#[derive(Clone, Copy)]
+enum Claim {
+    /// A take; `steal` (the user's) hands the item over from whoever has it.
+    Take {
+        steal: bool,
+    },
+    Launch,
+}
+
+/// Marks an item as being launched until dropped, whatever becomes of the launch.
+struct Launching<'a>(&'a Registry, u32);
+
+impl Drop for Launching<'_> {
+    fn drop(&mut self) {
+        self.0.launching.lock().unwrap().remove(&self.1);
     }
 }
 
@@ -462,4 +642,54 @@ impl Registry {
 /// repository's root.
 fn checkout_of(info: &SessionInfo) -> PathBuf {
     valkyrie_context::project::checkout(&info.cwd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_claims_an_item_while_a_launch_is_starting_on_it() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let new = NewItem {
+            title: "x".into(),
+            body: String::new(),
+            kind: Default::default(),
+            cwd: None,
+            attachments: Vec::new(),
+        };
+        let item = registry
+            .backlog
+            .lock()
+            .unwrap()
+            .add(&new, "human", 1)
+            .unwrap();
+        let take = |steal| registry.claim(&item, Some(3), false, Claim::Take { steal });
+        assert_eq!(take(false).unwrap(), Vec::<SessionId>::new());
+        {
+            registry.launching.lock().unwrap().insert(item.id);
+            let _launching = Launching(&registry, item.id);
+            for steal in [false, true] {
+                let refused = take(steal).unwrap_err().to_string();
+                assert!(refused.contains("being launched right now"), "{refused}");
+            }
+            let refused = registry.claim(&item, None, false, Claim::Launch);
+            assert!(refused.is_err(), "nor a second launch");
+        }
+        // Its guard dropped, whatever became of the launch: free again.
+        assert!(take(false).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
