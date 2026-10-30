@@ -5902,10 +5902,10 @@ mod tests {
                     message: message.into(),
                 };
                 let answer = match msg {
-                    ClientMsg::AddItem { req, item: new } if new.body == "fail" => {
+                    ClientMsg::AddItem { req, item: new, .. } if new.body == "fail" => {
                         refused(req, "the daemon said no")
                     }
-                    ClientMsg::AddItem { req, item: new } => {
+                    ClientMsg::AddItem { req, item: new, .. } => {
                         let id = kept
                             .lock()
                             .unwrap()
@@ -5928,6 +5928,8 @@ mod tests {
                             branch_taken: false,
                             checkout: None,
                             pr: None,
+                            filed_by: None,
+                            unaccepted: false,
                             notes: Vec::new(),
                             created: 0,
                             updated: 0,
@@ -5969,6 +5971,8 @@ mod tests {
                 branch_taken: false,
                 checkout: None,
                 pr: None,
+                filed_by: None,
+                unaccepted: false,
                 notes: Vec::new(),
                 created: 0,
                 updated: 1,
