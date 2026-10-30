@@ -89,11 +89,22 @@ pub struct Item {
     /// The daemon `boot` that `sessions` belong to.
     #[serde(default)]
     pub boot: u64,
-    /// The branch and checkout its first launch made, reused by later ones.
+    /// Those of `sessions` that took it (`valk todo take`) rather than being
+    /// launched on it: open to any agent, so their notes stay out of the brief.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taken: Vec<SessionId>,
+    /// The branch and checkout its first launch made, reused by later ones; or
+    /// the branch a take recorded (`branch_taken`), with no checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// `branch` was set by `valk todo take`, not a launch: the user may replace it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub branch_taken: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<PathBuf>,
+    /// The pull request, an `https://` URL, as `valk todo take --pr` recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
     /// Handoffs left on it, oldest first: what an agent did and what's left, or
     /// the user's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -110,6 +121,14 @@ pub struct ItemNote {
     /// `human`, or the agent that left it.
     pub by: String,
     pub text: String,
+    /// Left by an agent on an item it took rather than was launched for: shown,
+    /// but never put into a launch's brief (ADR-0007).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub taken: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// What an item's checkout holds, read from git rather than taken from the agent.
@@ -162,6 +181,32 @@ pub enum ItemChange {
     /// Ships, drops or reopens it. Shipping also takes away a worktree its launch
     /// made, when nothing is left in it.
     Status { status: ItemStatus },
+}
+
+/// An item `ShipMerged` shipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShippedItem {
+    pub id: u32,
+    pub title: String,
+    /// The branch judged, and whether a take set it rather than a launch.
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub branch_taken: bool,
+    /// What its branch was found merged into, e.g. `origin/main`.
+    pub against: String,
+    /// What else happened (its worktree taken away, or why it was kept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// An open item with a branch that `ShipMerged` left open, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptItem {
+    pub id: u32,
+    pub title: String,
+    /// `not merged`, `branch fix/x not found`, `no commits of its own`, …
+    pub why: String,
 }
 
 #[cfg(test)]

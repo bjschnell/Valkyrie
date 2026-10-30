@@ -7,7 +7,10 @@ use anyhow::{Result, bail};
 use std::path::PathBuf;
 use std::sync::Arc;
 use valkyrie_context::backlog;
-use valkyrie_proto::{Item, ItemChange, ItemStatus, NewItem, Reply, SessionInfo, Size, SpawnSpec};
+use valkyrie_proto::{
+    Item, ItemChange, ItemStatus, KeptItem, NewItem, Reply, SessionInfo, ShippedItem, Size,
+    SpawnSpec,
+};
 
 /// Every item, pushed to queue watchers with the queue.
 pub(crate) type Items = Arc<Vec<Item>>;
@@ -74,11 +77,29 @@ impl Registry {
                 self.vouch(peer, what)?;
             }
         }
-        let mut item = self
+        let (item, note) = self.apply(id, &change).await?;
+        self.refresh_items();
+        Ok(Reply::Item {
+            item: Box::new(item),
+            note,
+        })
+    }
+
+    /// Makes a change the caller may make, taking a shipped item's worktree away;
+    /// also returns what happened to that.
+    async fn apply(&self, id: u32, change: &ItemChange) -> Result<(Item, Option<String>)> {
+        let item = self
             .backlog
             .lock()
             .unwrap()
-            .change(id, &change, now_secs())?;
+            .change(id, change, now_secs())?;
+        self.after_change(item).await
+    }
+
+    /// Takes the worktree of an item just shipped away, if it has one; returns the
+    /// item as it is then, and what happened to that.
+    async fn after_change(&self, mut item: Item) -> Result<(Item, Option<String>)> {
+        let id = item.id;
         let mut note = None;
         if item.status == ItemStatus::Shipped && item.checkout.is_some() {
             let (removed, said) = self.take_checkout(&item).await?;
@@ -87,11 +108,181 @@ impl Registry {
             }
             note = Some(said);
         }
+        Ok((item, note))
+    }
+
+    /// Claims item `id` for the caller's session, as a launch links one, so its
+    /// lane follows that session and the session may leave notes on it. Agents may:
+    /// it's how one working through accepted items outside a launch says which it's
+    /// on. No checkout is recorded, since the session may be in the main one.
+    pub(crate) fn take_item(
+        &self,
+        id: u32,
+        branch: Option<&str>,
+        pr: Option<&str>,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        let caller = self.caller(peer);
+        let Some(session) = caller.session else {
+            bail!("take it from inside a valk session");
+        };
+        let item = self.backlog.lock().unwrap().get(id)?;
+        match item.status {
+            ItemStatus::Open => {}
+            ItemStatus::Proposed => bail!("#{id} is proposed; accept it first"),
+            other => bail!("#{id} is {}; reopen it first", other.as_str()),
+        }
+        let info = session.info();
+        // Ship merged judges an item by its branch, so which branch it is can't be
+        // an agent's to steer: a launch's is fixed, and one a take recorded only
+        // the user replaces.
+        if let Some(branch) = branch.filter(|b| item.branch.as_deref() != Some(*b)) {
+            let current = item.branch.as_deref().unwrap_or_default();
+            if item.checkout.is_some() || (item.branch.is_some() && !item.branch_taken) {
+                bail!("#{id} is on {current}, its launch's branch, which stays");
+            }
+            if item.branch.is_some() && caller.agent.is_some() {
+                bail!("#{id} is already on {current}; only the user changes that");
+            }
+            worktree::valid(&info.cwd, branch)?;
+        }
+        let project = valkyrie_context::project::in_git(&info.cwd)
+            .then(|| valkyrie_context::project::root(&info.cwd));
+        let item = self.backlog.lock().unwrap().taken(
+            id,
+            info.id,
+            self.boot,
+            branch,
+            pr,
+            project,
+            now_secs(),
+        )?;
+        let by = caller.agent.unwrap_or_else(|| "human".into());
+        tracing::info!(id, session = info.id, by, "backlog item taken");
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
-            note,
+            note: None,
         })
+    }
+
+    /// Ships every open item whose branch is merged into the default branch as
+    /// last fetched, the user only: shipping is theirs, this is just many at once.
+    /// Anyone may ask what would ship (`dry_run`); `only` ships just those items,
+    /// what the user was shown, each judged again. An item with a launch's
+    /// worktree is judged by what that checkout holds. Each goes as `valk todo
+    /// ship` would, so a launch's clean worktree goes too. The daemon doesn't
+    /// fetch: it has no credentials of the user's to fetch with, and the CLI and
+    /// TUI fetch before asking.
+    pub(crate) async fn ship_merged(
+        &self,
+        dry_run: bool,
+        only: Option<Vec<u32>>,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        if !dry_run {
+            self.vouch(peer, "shipping backlog items")?;
+        }
+        let items = self.backlog.lock().unwrap().load();
+        let mut shipped = Vec::new();
+        let mut kept = Vec::new();
+        let mut judged = Vec::new();
+        for item in items {
+            if only.as_ref().is_some_and(|ids| !ids.contains(&item.id)) {
+                continue;
+            }
+            let (Some(project), Some(branch)) = (item.project.clone(), item.branch.clone()) else {
+                continue;
+            };
+            if item.status != ItemStatus::Open {
+                continue;
+            }
+            let (id, title) = (item.id, item.title.clone());
+            judged.push(id);
+            let checkout = item.checkout.clone().filter(|c| c.is_dir());
+            let (judged_branch, branch_taken) = (branch.clone(), item.branch_taken);
+            let merged = tokio::task::spawn_blocking(move || match checkout {
+                Some(checkout) => worktree::checkout_merged(&project, &checkout, &branch),
+                None => worktree::branch_merged(&project, &branch),
+            })
+            .await?;
+            let against = match merged {
+                Ok(against) => against,
+                Err(why) => {
+                    kept.push(KeptItem { id, title, why });
+                    continue;
+                }
+            };
+            if dry_run {
+                shipped.push(ShippedItem {
+                    id,
+                    title,
+                    branch: judged_branch.clone(),
+                    branch_taken,
+                    against,
+                    note: None,
+                });
+                continue;
+            }
+            // Shipped only as it was judged: not if it was shipped, dropped, or
+            // moved to another branch or checkout meanwhile.
+            let changed = {
+                let backlog = self.backlog.lock().unwrap();
+                match backlog.get(id) {
+                    Ok(now)
+                        if now.status == ItemStatus::Open
+                            && now.branch == item.branch
+                            && now.checkout == item.checkout =>
+                    {
+                        let ship = ItemChange::Status {
+                            status: ItemStatus::Shipped,
+                        };
+                        Some(backlog.change(id, &ship, now_secs()))
+                    }
+                    _ => None,
+                }
+            };
+            let done = match changed {
+                Some(Ok(item)) => self.after_change(item).await,
+                Some(Err(e)) => Err(e),
+                None => {
+                    let why = "changed since it was checked".to_owned();
+                    kept.push(KeptItem { id, title, why });
+                    continue;
+                }
+            };
+            match done {
+                Ok((_, note)) => shipped.push(ShippedItem {
+                    id,
+                    title,
+                    branch: judged_branch.clone(),
+                    branch_taken,
+                    against,
+                    note: note.filter(|n| !n.is_empty()),
+                }),
+                Err(e) => kept.push(KeptItem {
+                    id,
+                    title,
+                    why: format!("{e:#}"),
+                }),
+            }
+        }
+        // Asked for by number, but no longer open with a branch.
+        for id in only.unwrap_or_default() {
+            if !judged.contains(&id) {
+                let why = "no longer open with a branch".to_owned();
+                kept.push(KeptItem {
+                    id,
+                    title: String::new(),
+                    why,
+                });
+            }
+        }
+        if !shipped.is_empty() && !dry_run {
+            tracing::info!(shipped = shipped.len(), "shipped merged backlog items");
+            self.refresh_items();
+        }
+        Ok(Reply::Shipped { shipped, kept })
     }
 
     /// Deletes item `id`, for the user only, since it can't be undone (drop is the
@@ -104,10 +295,12 @@ impl Registry {
     ) -> Result<Reply> {
         self.vouch(peer, "deleting a backlog item")?;
         let item = self.backlog.lock().unwrap().get(id)?;
+        // A session that took it may be on other work: only a launch's counts.
         let running = item.boot == self.boot
             && item
                 .sessions
                 .iter()
+                .filter(|s| !item.taken.contains(s))
                 .any(|&s| self.get(s).is_ok_and(|s| !s.exited()));
         if running {
             bail!("an agent is still running on #{id}; stop it first");
@@ -158,27 +351,32 @@ impl Registry {
         .await?)
     }
 
-    /// Leaves a handoff note. An agent may only on the item its own session was
-    /// launched for: a note goes into the brief of the item's next launch, so one
-    /// from anywhere else would be a way into a prompt the user starts.
+    /// Leaves a handoff note. An agent may only on an item its own session was
+    /// launched for or took: a note goes into the brief of the item's next launch,
+    /// so one from anywhere else would be a way into a prompt the user starts.
     pub(crate) fn note_item(&self, id: u32, text: &str, peer: Option<Peer>) -> Result<Reply> {
         let caller = self.caller(peer);
         let by = caller.agent.clone().unwrap_or_else(|| "human".into());
+        let mut taken = false;
         if caller.agent.is_some() {
             let item = self.backlog.lock().unwrap().get(id)?;
-            let its_own = caller
+            let session = caller
                 .session
                 .as_ref()
-                .is_some_and(|s| item.boot == self.boot && item.sessions.contains(&s.info().id));
-            if !its_own {
+                .map(|s| s.info().id)
+                .filter(|s| item.boot == self.boot && item.sessions.contains(s));
+            let Some(session) = session else {
                 bail!("an agent notes only the item its session was launched for, not #{id}");
-            }
+            };
+            // Any agent may take any accepted item, so its notes inform the user but
+            // never reach a prompt the user starts.
+            taken = item.taken.contains(&session);
         }
         let item = self
             .backlog
             .lock()
             .unwrap()
-            .note(id, &by, text, now_secs())?;
+            .note(id, &by, text, taken, now_secs())?;
         tracing::info!(id, by, "backlog note left");
         self.refresh_items();
         Ok(Reply::Item {

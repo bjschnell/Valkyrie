@@ -1,7 +1,7 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 15;
+export const PROTOCOL = 16;
 
 export type SessionId = number;
 export type Size = { cols: number; rows: number };
@@ -168,8 +168,14 @@ export interface Item {
   /** Sessions started on it, oldest first; ids of the daemon whose `boot` this is. */
   sessions?: SessionId[];
   boot: number;
+  /** Those of `sessions` that took it rather than being launched on it. */
+  taken?: SessionId[];
   branch?: string;
+  /** `branch` was set by `valk todo take`, not a launch. */
+  branch_taken?: boolean;
   checkout?: string;
+  /** The pull request's URL, as `valk todo take --pr` recorded it. */
+  pr?: string;
   /** Handoffs left on it, oldest first. */
   notes?: ItemNote[];
   /** Seconds since the epoch. */
@@ -183,6 +189,8 @@ export interface ItemNote {
   /** `human`, or the agent that left it. */
   by: string;
   text: string;
+  /** From an agent that took the item rather than was launched on it: never in a brief. */
+  taken?: boolean;
 }
 
 /** What an item's checkout holds, from git. */
@@ -193,6 +201,24 @@ export interface ItemFacts {
   /** `git diff --shortstat`; empty when nothing changed. */
   diff: string;
   dirty: number;
+}
+
+/** An item `ship_merged` shipped: `against` is what its branch is merged into. */
+export interface ShippedItem {
+  id: number;
+  title: string;
+  /** The branch judged; `branch_taken` when a take, not a launch, set it. */
+  branch: string;
+  branch_taken?: boolean;
+  against: string;
+  note?: string;
+}
+
+/** An open item with a branch that `ship_merged` kept, and why. */
+export interface KeptItem {
+  id: number;
+  title: string;
+  why: string;
 }
 
 export interface NewItem {
@@ -228,6 +254,9 @@ export type Request =
   | { t: "delete_item"; id: number }
   | { t: "note_item"; id: number; text: string }
   | { t: "item_facts"; id: number }
+  /** Ships every open item whose branch is merged, as last fetched; `dry_run` only
+   * says what would ship, `only` ships just those (each checked again). */
+  | { t: "ship_merged"; dry_run: boolean; only: number[] | null }
   | { t: "launch_item"; id: number; agent: "claude" | "codex"; worktree: boolean; size: Size; env: [string, string | null][] };
 
 /** Fire-and-forget messages. */
@@ -251,7 +280,8 @@ export type Reply =
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[] }
-  | { t: "item_facts"; facts: ItemFacts | null };
+  | { t: "item_facts"; facts: ItemFacts | null }
+  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }

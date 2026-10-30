@@ -1,7 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
-import type { Item, ItemChange, ItemFacts, ItemKind, SessionInfo } from "../proto";
+import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, SessionInfo, ShippedItem } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -76,6 +76,29 @@ export function factsLine(f: ItemFacts): string {
   if (f.diff) parts.push(f.diff);
   if (f.dirty > 0) parts.push(`${f.dirty} not committed`);
   return parts.join(" · ");
+}
+
+/** The pull request to link to: only an `https://` one, never `javascript:` and the like. */
+export function prLink(pr: string | undefined): string | null {
+  return pr && /^https:\/\/\S+$/.test(pr) ? pr : null;
+}
+
+/** `Shipped #1 #4 · 2 not merged · #9 branch fix/x not found (as of the last fetch)`. */
+export function shippedSummary(shipped: ShippedItem[], kept: KeptItem[]): string {
+  const parts = [shipped.length ? `Shipped ${shipped.map((s) => `#${s.id}`).join(" ")}` : "Nothing merged to ship"];
+  const notMerged = kept.filter((k) => k.why === "not merged").length;
+  if (notMerged) parts.push(`${notMerged} not merged`);
+  for (const k of kept) if (k.why !== "not merged") parts.push(`#${k.id} ${k.why}`);
+  return `${parts.join(" · ")} (as of the last fetch)`;
+}
+
+/** What a first tap found, to check before the second ships it:
+ * `Tap again to ship #3 fix/old (set by a take), merged into origin/main · …`. */
+export function wouldShip(shipped: ShippedItem[], kept: KeptItem[]): string {
+  const found = shipped.map((s) => `#${s.id} ${s.branch}${s.branch_taken ? " (set by a take)" : ""}, merged into ${s.against}`);
+  const notMerged = kept.filter((k) => k.why === "not merged").length;
+  const rest = notMerged ? ` · ${notMerged} not merged` : "";
+  return `Tap again to ship ${found.join(" · ")}${rest} (as of the last fetch)`;
 }
 
 /**

@@ -1049,6 +1049,18 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::DeleteItem { req, id } => (req, registry.delete_item(id, peer).await),
             ClientMsg::NoteItem { req, id, text } => (req, registry.note_item(id, &text, peer)),
             ClientMsg::ItemFacts { req, id } => (req, registry.item_facts(id).await),
+            ClientMsg::TakeItem {
+                req,
+                id,
+                branch,
+                pr,
+            } => (
+                req,
+                registry.take_item(id, branch.as_deref(), pr.as_deref(), peer),
+            ),
+            ClientMsg::ShipMerged { req, dry_run, only } => {
+                (req, registry.ship_merged(dry_run, only, peer).await)
+            }
             ClientMsg::PruneWorktrees {
                 req,
                 cwd,

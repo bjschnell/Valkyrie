@@ -595,12 +595,16 @@ fn same_origin(headers: &HeaderMap) -> bool {
     })
 }
 
-/// Messages a browser may not send: switching the daemon's binary, and posing as an
-/// agent's hooks.
+/// Messages a browser may not send: switching the daemon's binary, posing as an
+/// agent's hooks, and taking a backlog item, which links the session the caller
+/// runs in: here that's `valk web`'s own, if it was started in one.
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
-        ClientMsg::Upgrade { .. } | ClientMsg::Hook { .. } | ClientMsg::Clients { .. }
+        ClientMsg::Upgrade { .. }
+            | ClientMsg::Hook { .. }
+            | ClientMsg::Clients { .. }
+            | ClientMsg::TakeItem { .. }
     )
 }
 
@@ -862,6 +866,19 @@ mod tests {
         assert!(!allowed(&upgrade));
         assert!(!allowed(&ClientMsg::Clients { req: 1 }));
         assert!(allowed(&ClientMsg::List { req: 1 }));
+        let take = ClientMsg::TakeItem {
+            req: 1,
+            id: 1,
+            branch: None,
+            pr: None,
+        };
+        assert!(!allowed(&take));
+        let ship = ClientMsg::ShipMerged {
+            req: 1,
+            dry_run: false,
+            only: Some(vec![1]),
+        };
+        assert!(allowed(&ship));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! The backlog with the real binary (DESIGN §8.12): an item written down with a
 //! screenshot starts an agent in a worktree of its own with a brief for its kind,
-//! and shipping it takes the clean worktree and merged branch away again.
+//! and shipping it takes the clean worktree and merged branch away again. An agent
+//! takes accepted items with their branch and pull request, which the user then
+//! ships in one go once merged.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -8,6 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_valk");
+const PR: &str = "https://github.com/o/r/pull/7";
 
 /// Kills the isolated daemon's whole session, whatever the test did.
 struct Daemon {
@@ -91,12 +94,27 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
              valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
              valk todo note -i 2 'not mine' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
              valk todo edit 1 -t 'Done already' > {e}.tmp 2>&1; mv {e}.tmp {e}\n\
+             valk todo take 3 -b fix/3-clients --pr {pr} > {t}.tmp 2>&1; mv {t}.tmp {t}\n\
+             valk todo take 4 -b fix/4-open > {t4}.tmp 2>&1; mv {t4}.tmp {t4}\n\
+             valk todo take 4 -b fix/3-clients > {r4}.tmp 2>&1; mv {r4}.tmp {r4}\n\
+             valk todo take 1 -b fix/3-clients > {r1}.tmp 2>&1; mv {r1}.tmp {r1}\n\
+             valk todo note -i 3 'merged upstream' > {tn}.tmp 2>&1; mv {tn}.tmp {tn}\n\
+             valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
+             valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
             b = o("brief"),
             p = o("pwd"),
             n = o("note"),
             x = o("not-mine"),
             e = o("agent-edit"),
+            t = o("take"),
+            t4 = o("take4"),
+            tn = o("take-note"),
+            s = o("agent-ship"),
+            sm = o("agent-ship-merged"),
+            r4 = o("retake4"),
+            r1 = o("retake1"),
+            pr = PR,
         ),
     )
     .unwrap();
@@ -160,6 +178,16 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         wait_for(&out.join("show2")).contains("\nthe detail\n"),
         "the body is kept"
     );
+    // Accepted items an agent will take on outside a launch.
+    human("valk todo add 'Clients stay connected'", "add3");
+    wait_for(&out.join("add3"));
+    human("valk todo add 'Still open'", "add4");
+    wait_for(&out.join("add4"));
+    human("valk todo take 3", "human-take");
+    assert!(
+        wait_for(&out.join("human-take")).contains("from inside a valk session"),
+        "outside every session there's nothing to follow"
+    );
     human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -213,9 +241,94 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{show}"
     );
     assert!(
-        show.contains(":\nfixed the off-by-one; check IME input"),
+        show.contains("note from claude:\nfixed the off-by-one; check IME input"),
         "{show}"
     );
+
+    // The agent took #3 and #4 with their branches, and may note them, but
+    // shipping stays the user's.
+    assert_eq!(
+        wait_for(&out.join("take")),
+        format!("#3 Clients stay connected taken (branch fix/3-clients, PR {PR})\n")
+    );
+    assert!(wait_for(&out.join("take4")).contains("taken (branch fix/4-open)"));
+    assert!(wait_for(&out.join("take-note")).starts_with("noted on #3"));
+    let refused = wait_for(&out.join("agent-ship"));
+    assert!(refused.contains("is for the user"), "{refused}");
+    let refused = wait_for(&out.join("agent-ship-merged"));
+    assert!(refused.contains("is for the user"), "{refused}");
+    // Nor may it point an item at another branch, which ship merged would judge.
+    let refused = wait_for(&out.join("retake4"));
+    assert!(refused.contains("only the user changes that"), "{refused}");
+    let refused = wait_for(&out.join("retake1"));
+    assert!(refused.contains("its launch's branch"), "{refused}");
+    human("valk todo show 3", "show3");
+    let show = wait_for(&out.join("show3"));
+    assert!(show.contains(&format!("\npr: {PR}\n")), "{show}");
+    assert!(
+        show.contains("\nbranch: fix/3-clients\n"),
+        "no checkout: {show}"
+    );
+    // Shown, but marked: a take's note never goes into a brief.
+    assert!(
+        show.contains("note from claude (from a take):\nmerged upstream"),
+        "{show}"
+    );
+
+    // #3's branch is merged; #4's has work that isn't; #1's worktree has nothing
+    // of its own yet.
+    for args in [
+        &["checkout", "-q", "-b", "fix/3-clients"][..],
+        &["commit", "-q", "--allow-empty", "-m", "keep clients"],
+        &["checkout", "-q", "-b", "fix/4-open", "main"],
+        &["commit", "-q", "--allow-empty", "-m", "wip"],
+        &["checkout", "-q", "main"],
+        &["merge", "-q", "--ff-only", "fix/3-clients"],
+    ] {
+        let done = git(args);
+        assert!(done.status.success(), "{args:?}: {done:?}");
+    }
+    // First only what would ship; --yes ships it.
+    let repo_at = std::fs::canonicalize(&repo).unwrap();
+    human("valk todo ship --merged", "would-ship");
+    let would = wait_for(&out.join("would-ship"));
+    assert!(
+        would.contains(&format!(
+            "#3 Clients stay connected: would ship fix/3-clients (set by a take), merged into main at {}\n",
+            repo_at.display()
+        )),
+        "{would}"
+    );
+    assert!(
+        would.contains("1 may ship: `valk todo ship --merged --yes`"),
+        "{would}"
+    );
+    human("valk todo show 3", "still-open");
+    assert!(wait_for(&out.join("still-open")).contains(" · open · "));
+    human("valk todo ship --merged --yes", "ship-merged");
+    let merged = wait_for(&out.join("ship-merged"));
+    assert!(
+        merged.contains(&format!(
+            "#3 Clients stay connected: shipped fix/3-clients (set by a take), merged into main at {}\n",
+            repo_at.display()
+        )),
+        "{merged}"
+    );
+    assert!(
+        merged.contains("#4 Still open: kept, not merged\n"),
+        "{merged}"
+    );
+    assert!(
+        merged.contains("#1 Tab rename eats the last letter: kept, no commits of its own\n"),
+        "{merged}"
+    );
+    human("valk todo list --all", "list-all");
+    let list = wait_for(&out.join("list-all"));
+    let line = |id: &str| list.lines().find(|l| l.starts_with(id)).unwrap_or("");
+    assert!(line("#3 ").contains("shipped"), "{list}");
+    assert!(line("#3 ").ends_with(" (PR)"), "{list}");
+    assert!(!line("#4 ").contains("shipped"), "{list}");
+    assert!(worktree.exists(), "#1 stays as it was");
 
     human("valk todo ship 1", "ship");
     let ship = wait_for(&out.join("ship"));

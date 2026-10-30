@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, base, byColumn, editChange, factsLine, liveSession, type Lane } from "../lib/backlog";
+import { COLUMNS, base, byColumn, editChange, factsLine, liveSession, prLink, type Lane } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
-import { addItem, changeItem, deleteItem, itemFacts, launchItem, noteItem, sendFile, toast, useApp } from "../store";
+import { addItem, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, sendFile, shipMerged, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
 
@@ -52,6 +52,33 @@ export function Backlog() {
   const [showDone, setShowDone] = useState(false);
   const columns = byColumn(items, sessions, boot);
   const open = items.length - columns.done.length;
+  // Only items with a branch can be found merged.
+  const mergeable = items.some((i) => i.status === "open" && i.branch && i.project);
+  const [shipping, setShipping] = useState(false);
+  // Two taps, as delete asks: the first finds what's merged and lists it, the second
+  // ships exactly those, if they still are.
+  const [ready, setReady] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    const t = setTimeout(() => setReady(null), 8000);
+    return () => clearTimeout(t);
+  }, [ready]);
+  const listed = ready?.map((id) => `#${id}`).join(" ");
+  const shipLabel = shipping ? (ready ? "Shipping…" : "Checking…") : ready ? `Ship ${listed}` : "Ship merged";
+  const ship = async () => {
+    setShipping(true);
+    try {
+      if (ready) {
+        await shipMerged(ready);
+        setReady(null);
+      } else {
+        const found = await checkMerged();
+        if (found.length) setReady(found);
+      }
+    } finally {
+      setShipping(false);
+    }
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -77,6 +104,16 @@ export function Backlog() {
         <div className="title">
           <div className="title-name">Backlog</div>
         </div>
+        {mergeable && (
+          <button
+            className={ready ? "primary" : "ghost"}
+            disabled={shipping}
+            title="As of the last fetch; valk todo ship --merged fetches first"
+            onClick={() => void ship()}
+          >
+            {shipLabel}
+          </button>
+        )}
         <button className="icon-btn" aria-label="Write something down" onClick={() => (location.hash = "#/backlog/new")}>
           <Plus />
         </button>
@@ -135,6 +172,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const [agent, setAgent] = useState<Agent>(() => (read(AGENT_KEY) === "codex" ? "codex" : "claude"));
   const live = liveSession(item, sessions, boot);
   const folder = item.project ? base(item.project) : null;
+  const pr = prLink(item.pr);
 
   const act = async (f: () => Promise<unknown>) => {
     setBusy(true);
@@ -211,7 +249,11 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         )}
         {!expanded && lane === "review" && latest && (
           <p className="item-handoff" onClick={() => setExpanded(true)}>
-            <span className="item-handoff-by">{who(latest.by)}:</span> {latest.text}
+            <span className="item-handoff-by">
+              {who(latest.by)}
+              {latest.taken && " · from a take"}:
+            </span>{" "}
+            {latest.text}
           </p>
         )}
         {expanded && (
@@ -225,6 +267,14 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
             <div className="decision-by">
               {item.by === "human" ? "written by you" : `written by ${item.by}`}
               {item.branch && <> · {item.branch}</>}
+              {pr && (
+                <>
+                  {" · "}
+                  <a href={pr} target="_blank" rel="noopener noreferrer">
+                    pull request
+                  </a>
+                </>
+              )}
             </div>
             {facts && (
               <div className="item-facts">
@@ -240,6 +290,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
               <div key={i} className="item-note">
                 <div className="item-note-by">
                   {who(n.by)} · {age(n.at * 1000, now)}
+                  {n.taken && " · from a take"}
                 </div>
                 <p>{n.text}</p>
               </div>

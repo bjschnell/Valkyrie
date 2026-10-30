@@ -83,9 +83,34 @@ pub enum TodoCmd {
         #[arg(short, long)]
         attach: bool,
     },
+    /// Say you're working on an accepted item (default: the one this session was
+    /// launched for), from inside a valk session: its card follows the session,
+    /// and `--merged` can ship it once its branch is merged.
+    Take {
+        #[arg(env = "VALK_ITEM")]
+        id: u32,
+        /// The branch the work is on.
+        #[arg(short, long)]
+        branch: Option<String>,
+        /// The pull request's https:// URL.
+        #[arg(long, value_name = "URL")]
+        pr: Option<String>,
+    },
     /// Mark it done. Takes away the worktree its launch made, unless it has changes,
     /// and the branch, if it's merged.
-    Ship { id: u32 },
+    Ship {
+        #[arg(required_unless_present = "merged", conflicts_with = "merged")]
+        id: Option<u32>,
+        /// Ship every open item whose branch is merged into the default branch,
+        /// squash merges included. Only says what it would ship without --yes;
+        /// either way it first runs `git fetch --prune origin` in their
+        /// repositories, with your credentials.
+        #[arg(long)]
+        merged: bool,
+        /// With --merged: ship them.
+        #[arg(short, long, requires = "merged")]
+        yes: bool,
+    },
     /// Not going to happen.
     Drop { id: u32 },
     /// Open a shipped or dropped item again.
@@ -165,12 +190,13 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             for i in shown {
                 println!(
-                    "#{:<4} {:<8} {:<12} {:<14} {}",
+                    "#{:<4} {:<8} {:<12} {:<14} {}{}",
                     i.id,
                     i.kind.as_str(),
                     lane(i, &sessions, boot),
                     short(&folder(i), 14),
-                    i.title
+                    i.title,
+                    if i.pr.is_some() { " (PR)" } else { "" }
                 );
             }
             Ok(None)
@@ -192,6 +218,9 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 let at = i.checkout.as_ref().map(|c| format!(" in {}", c.display()));
                 println!("branch: {b}{}", at.unwrap_or_default());
             }
+            if let Some(pr) = &i.pr {
+                println!("pr: {pr}");
+            }
             if !i.body.is_empty() {
                 println!("\n{}", i.body);
             }
@@ -206,7 +235,8 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             for n in &i.notes {
                 let by = if n.by == "human" { "you" } else { &n.by };
-                println!("\nnote from {by}:\n{}", n.text);
+                let took = if n.taken { " (from a take)" } else { "" };
+                println!("\nnote from {by}{took}:\n{}", n.text);
             }
             Ok(None)
         }
@@ -274,7 +304,75 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             println!("{}", info.id);
             Ok(None)
         }
-        TodoCmd::Ship { id } => status(client, id, ItemStatus::Shipped).await,
+        TodoCmd::Take { id, branch, pr } => {
+            let item = client.take_item(id, branch, pr).await?;
+            let mut has = Vec::new();
+            if let Some(b) = &item.branch {
+                has.push(format!("branch {b}"));
+            }
+            if let Some(pr) = &item.pr {
+                has.push(format!("PR {pr}"));
+            }
+            let has = match has.is_empty() {
+                true => String::new(),
+                false => format!(" ({})", has.join(", ")),
+            };
+            println!("#{} {} taken{has}", item.id, short(&item.title, 40));
+            Ok(None)
+        }
+        TodoCmd::Ship {
+            merged: true, yes, ..
+        } => {
+            // The daemon judges against `origin` as last fetched, and can't fetch
+            // with the user's credentials itself.
+            let items = client.items().await?;
+            let mut projects: Vec<PathBuf> = items
+                .into_iter()
+                .filter(|i| i.status == ItemStatus::Open && i.branch.is_some())
+                .filter_map(|i| i.project)
+                .collect();
+            projects.sort();
+            projects.dedup();
+            for p in projects.iter().filter(|p| p.is_dir()) {
+                crate::worktree::fetch(p);
+            }
+            let (shipped, kept) = client.ship_merged(!yes, None).await?;
+            let done = if yes { "shipped" } else { "would ship" };
+            for s in &shipped {
+                // An agent chose a branch a take set: worth a look before shipping.
+                let take = if s.branch_taken {
+                    " (set by a take)"
+                } else {
+                    ""
+                };
+                println!(
+                    "#{} {}: {done} {}{take}, merged into {}",
+                    s.id, s.title, s.branch, s.against
+                );
+                if let Some(note) = &s.note {
+                    println!("  {note}");
+                }
+            }
+            for k in &kept {
+                println!("#{} {}: kept, {}", k.id, k.title, k.why);
+            }
+            if shipped.is_empty() && kept.is_empty() {
+                println!("no open item has a branch; `valk todo take N --branch B` records one");
+            }
+            if !yes && !shipped.is_empty() {
+                println!(
+                    "{} may ship: `valk todo ship --merged --yes` ships them",
+                    shipped.len()
+                );
+            }
+            Ok(None)
+        }
+        TodoCmd::Ship { id, .. } => {
+            let Some(id) = id else {
+                bail!("which item? give its number, or --merged");
+            };
+            status(client, id, ItemStatus::Shipped).await
+        }
         TodoCmd::Drop { id } => status(client, id, ItemStatus::Dropped).await,
         TodoCmd::Reopen { id } | TodoCmd::Accept { id } => {
             status(client, id, ItemStatus::Open).await

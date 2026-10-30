@@ -494,6 +494,44 @@ impl Client {
         }
     }
 
+    /// Claims an item for the session this process runs in, with its branch and
+    /// pull request if given.
+    pub async fn take_item(
+        &self,
+        id: u32,
+        branch: Option<String>,
+        pr: Option<String>,
+    ) -> Result<crate::Item> {
+        match self
+            .request(|req| ClientMsg::TakeItem {
+                req,
+                id,
+                branch,
+                pr,
+            })
+            .await?
+        {
+            Reply::Item { item, .. } => Ok(*item),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Ships every open item whose branch is merged (see `ClientMsg::ShipMerged`);
+    /// returns those shipped, or that would be, and those kept, with why.
+    pub async fn ship_merged(
+        &self,
+        dry_run: bool,
+        only: Option<Vec<u32>>,
+    ) -> Result<(Vec<crate::ShippedItem>, Vec<crate::KeptItem>)> {
+        match self
+            .request(|req| ClientMsg::ShipMerged { req, dry_run, only })
+            .await?
+        {
+            Reply::Shipped { shipped, kept } => Ok((shipped, kept)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Judges `cwd`'s repository's worktrees, and with `remove` takes away those
     /// that may go (see `ClientMsg::PruneWorktrees`). Returns what merged was
     /// judged against, and each worktree.

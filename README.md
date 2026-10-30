@@ -373,6 +373,8 @@ valk todo                  # what's open, and where each one is
 valk todo launch 1         # claude in a worktree on fix/1-tab-rename-…, with a brief
 valk todo edit 1 -k chore  # reword it (-t, -b), change its kind or repository
 valk todo ship 1           # done: the worktree goes if it's clean, the branch if merged
+valk todo take 4 -b fix/x  # an agent says it's on #4 (and --pr URL once it's open)
+valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
 ```
 
 On the phone, the list icon in the inbox opens the board: Backlog, In progress,

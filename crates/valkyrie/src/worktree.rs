@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 #[derive(Subcommand)]
 pub enum WorktreeCmd {
@@ -82,34 +81,10 @@ fn ignored(verb: &str, entries: &[String]) -> String {
 
 /// `git fetch --prune origin`, quietly; whether `origin`'s branches are fresh enough
 /// to judge merged against. Without them only the main checkout's `HEAD` counts.
-fn fetch(dir: &Path) -> bool {
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .output()
-    };
-    match git(&["remote", "get-url", "origin"]) {
-        Ok(out) if out.status.success() => {}
-        _ => {
-            eprintln!("no remote origin: judging against this repository's HEAD only");
-            return false;
-        }
+pub(crate) fn fetch(dir: &Path) -> bool {
+    let fetched = valkyrie_proto::fetch_origin(dir, false);
+    if let Err(why) = &fetched {
+        eprintln!("{why}: judging against this repository's HEAD only");
     }
-    match git(&["fetch", "--prune", "--quiet", "origin"]) {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr);
-            let err = err.lines().next().unwrap_or("").trim();
-            eprintln!("couldn't fetch origin ({err}): judging against HEAD only");
-            false
-        }
-        Err(e) => {
-            eprintln!("couldn't run git ({e}): judging against HEAD only");
-            false
-        }
-    }
+    fetched.is_ok()
 }
