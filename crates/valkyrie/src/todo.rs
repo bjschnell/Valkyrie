@@ -30,6 +30,16 @@ pub enum TodoCmd {
         /// The detail, the text then being only the title.
         #[arg(short, long)]
         body: Option<String>,
+        /// Also take it for this session: work you're doing that nobody planned,
+        /// tracked like a taken item (from inside a valk session).
+        #[arg(long)]
+        take: bool,
+        /// With --take: the branch the work is on.
+        #[arg(long, requires = "take")]
+        branch: Option<String>,
+        /// With --take: the pull request's https:// URL.
+        #[arg(long, value_name = "URL", requires = "take")]
+        pr: Option<String>,
     },
     /// The open and proposed items (with --all, shipped and dropped ones too).
     List {
@@ -143,6 +153,9 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             no_folder,
             files,
             body,
+            take,
+            branch,
+            pr,
         } => {
             let mut text = text.join(" ");
             if text == "-" {
@@ -161,20 +174,27 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 .into_iter()
                 .map(std::path::absolute)
                 .collect::<std::io::Result<_>>()?;
-            let item = client
-                .add_item(NewItem {
-                    title: if body.is_some() {
-                        text.clone()
-                    } else {
-                        String::new()
-                    },
-                    body: body.unwrap_or(text),
-                    kind,
-                    cwd,
-                    attachments,
-                })
-                .await?;
-            println!("#{} {} ({})", item.id, item.title, folder(&item));
+            let new = NewItem {
+                title: if body.is_some() {
+                    text.clone()
+                } else {
+                    String::new()
+                },
+                body: body.unwrap_or(text),
+                kind,
+                cwd,
+                attachments,
+            };
+            let item = match take {
+                true => client.add_and_take(new, branch, pr).await?,
+                false => client.add_item(new).await?,
+            };
+            let taken = match (take, item.status) {
+                (false, _) => "",
+                (true, ItemStatus::Proposed) => ", taken; proposed until the user accepts it",
+                (true, _) => ", taken",
+            };
+            println!("#{} {} ({}){taken}", item.id, item.title, folder(&item));
             Ok(None)
         }
         TodoCmd::List { all, json } => {
@@ -195,13 +215,18 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             for i in shown {
                 println!(
-                    "#{:<4} {:<8} {:<12} {:<14} {}{}",
+                    "#{:<4} {:<8} {:<12} {:<14} {}{}{}",
                     i.id,
                     i.kind.as_str(),
                     lane(i, &sessions, boot),
                     short(&folder(i), 14),
                     i.title,
-                    if i.pr.is_some() { " (PR)" } else { "" }
+                    if i.pr.is_some() { " (PR)" } else { "" },
+                    if i.agent_filed() {
+                        " (agent-filed)"
+                    } else {
+                        ""
+                    }
                 );
             }
             Ok(None)
@@ -338,7 +363,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             let items = client.items().await?;
             let mut projects: Vec<PathBuf> = items
                 .into_iter()
-                .filter(|i| i.status == ItemStatus::Open && i.branch.is_some())
+                .filter(|i| (i.status == ItemStatus::Open || i.agent_filed()) && i.branch.is_some())
                 .filter_map(|i| i.project)
                 .collect();
             projects.sort();
@@ -350,10 +375,11 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             let done = if yes { "shipped" } else { "would ship" };
             for s in &shipped {
                 // An agent chose a branch a take set: worth a look before shipping.
-                let take = if s.branch_taken {
-                    " (set by a take)"
-                } else {
-                    ""
+                // One it filed itself isn't accepted yet: shipping it accepts it.
+                let take = match (s.branch_taken, s.filed) {
+                    (_, true) => " (agent-filed, not yet accepted)",
+                    (true, false) => " (set by a take)",
+                    (false, false) => "",
                 };
                 println!(
                     "#{} {}: {done} {}{take}, merged into {}",
@@ -428,7 +454,8 @@ fn facts(f: &valkyrie_proto::ItemFacts) -> String {
 /// with a pull request open, waiting on review unless that session needs you (a
 /// session holding several items would otherwise show them all at work).
 fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
-    if item.status != ItemStatus::Open {
+    // An agent's own filed work follows its session, though not accepted yet.
+    if item.status != ItemStatus::Open && !item.agent_filed() {
         return item.status.as_str().into();
     }
     let live = (item.boot == boot)
@@ -493,6 +520,20 @@ mod tests {
             pr: None,
             ..item.clone()
         };
+        let filed = Item {
+            status: ItemStatus::Proposed,
+            filed_by: Some((7, 4)),
+            ..plain.clone()
+        };
+        assert_eq!(lane(&filed, &[session(AgentState::Working)], 7), "working");
+        let proposed = Item {
+            filed_by: None,
+            ..filed.clone()
+        };
+        assert_eq!(
+            lane(&proposed, &[session(AgentState::Working)], 7),
+            "proposed"
+        );
         assert_eq!(lane(&plain, &[session(AgentState::Working)], 7), "working");
     }
 }

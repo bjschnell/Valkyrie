@@ -41,10 +41,46 @@ impl Registry {
         });
     }
 
-    pub(crate) fn add_item(&self, new: &NewItem, peer: Option<Peer>) -> Result<Reply> {
-        let by = self.caller(peer).agent.unwrap_or_else(|| "human".into());
-        let item = self.backlog.lock().unwrap().add(new, &by, now_secs())?;
-        tracing::info!(id = item.id, by, "backlog item added");
+    /// Writes an item down: an agent's is proposed until the user accepts it. With
+    /// `take` (its branch and pull request), it's also taken for the caller's
+    /// session in the same step, as `take_item` would: an agent tracking work it
+    /// does that nobody planned. The card follows that session; its text still
+    /// never becomes a prompt the user launches until they accept it (ADR-0012).
+    pub(crate) fn add_item(
+        &self,
+        new: &NewItem,
+        take: Option<(Option<&str>, Option<&str>)>,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        let caller = self.caller(peer);
+        let by = caller.agent.unwrap_or_else(|| "human".into());
+        let item = match take {
+            None => self.backlog.lock().unwrap().add(new, &by, now_secs())?,
+            Some((branch, pr)) => {
+                let Some(session) = caller.session else {
+                    bail!("add --take from inside a valk session");
+                };
+                let info = session.info();
+                if let Some(branch) = branch {
+                    worktree::valid(&info.cwd, branch)?;
+                }
+                if let Some(pr) = pr {
+                    backlog::pr_url(pr)?;
+                }
+                let project = valkyrie_context::project::in_git(&info.cwd)
+                    .then(|| valkyrie_context::project::root(&info.cwd));
+                let backlog = self.backlog.lock().unwrap();
+                let now = now_secs();
+                let filed = backlog.add_filed(new, &by, Some((self.boot, info.id)), now)?;
+                backlog.taken(filed.id, info.id, self.boot, &[], branch, pr, project, now)?
+            }
+        };
+        tracing::info!(
+            id = item.id,
+            by,
+            taken = take.is_some(),
+            "backlog item added"
+        );
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
@@ -207,12 +243,15 @@ impl Registry {
             bail!("take it from inside a valk session");
         };
         let item = self.backlog.lock().unwrap().get(id)?;
+        let info = session.info();
         match item.status {
             ItemStatus::Open => {}
+            // Its own work, written down with `add --take`: the session that filed
+            // it may take it again (to record the pull request) before it's accepted.
+            ItemStatus::Proposed if item.filed_by == Some((self.boot, info.id)) => {}
             ItemStatus::Proposed => bail!("#{id} is proposed; accept it first"),
             other => bail!("#{id} is {}; reopen it first", other.as_str()),
         }
-        let info = session.info();
         // Ship merged judges an item by its branch, so which branch it is can't be
         // an agent's to steer: a launch's is fixed, and one a take recorded only
         // the user replaces.
@@ -286,9 +325,12 @@ impl Registry {
             let (Some(project), Some(branch)) = (item.project.clone(), item.branch.clone()) else {
                 continue;
             };
-            if item.status != ItemStatus::Open {
+            // An agent's own work it filed and took ships too: the user's confirm
+            // is the acceptance.
+            if item.status != ItemStatus::Open && !item.agent_filed() {
                 continue;
             }
+            let filed = item.agent_filed();
             let (id, title) = (item.id, item.title.clone());
             judged.push(id);
             let checkout = item.checkout.clone().filter(|c| c.is_dir());
@@ -311,6 +353,7 @@ impl Registry {
                     title,
                     branch: judged_branch.clone(),
                     branch_taken,
+                    filed,
                     against,
                     note: None,
                 });
@@ -322,7 +365,7 @@ impl Registry {
                 let backlog = self.backlog.lock().unwrap();
                 match backlog.get(id) {
                     Ok(now)
-                        if now.status == ItemStatus::Open
+                        if now.status == item.status
                             && now.branch == item.branch
                             && now.checkout == item.checkout =>
                     {
@@ -349,6 +392,7 @@ impl Registry {
                     title,
                     branch: judged_branch.clone(),
                     branch_taken,
+                    filed,
                     against,
                     note: note.filter(|n| !n.is_empty()),
                 }),

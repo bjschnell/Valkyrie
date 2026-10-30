@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { byColumn, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, wouldShip } from "./backlog";
+import { agentFiled, byColumn, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, wouldShip } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -60,6 +60,19 @@ describe("lane", () => {
     expect(lane(i, [], 7)).toBe("review");
     expect(lane({ ...i, status: "shipped" }, [session(4, "working")], 7)).toBe("done");
     expect(lane({ ...i, status: "proposed" }, [], 7)).toBe("proposed");
+  });
+
+  it("follows the session of an agent's own filed work, until it's accepted", () => {
+    const filed = item({ status: "proposed", by: "claude", sessions: [4], filed_by: [7, 4] });
+    expect(agentFiled(filed)).toBe(true);
+    expect(lane(filed, [session(4, "working")], 7)).toBe("running");
+    expect(lane(filed, [session(4, "needs_input")], 7)).toBe("needs");
+    expect(lane({ ...filed, pr: "https://github.com/o/r/pull/7" }, [session(4, "working")], 7)).toBe("review");
+    expect(lane(filed, [], 7)).toBe("review");
+    // Proposed without taking it, it waits on you; accepted, it's no longer agent-filed.
+    expect(lane({ ...filed, filed_by: undefined }, [session(4, "working")], 7)).toBe("proposed");
+    expect(agentFiled({ ...filed, status: "open" })).toBe(false);
+    expect(lane({ ...filed, status: "shipped" }, [], 7)).toBe("done");
   });
 
   it("puts shipped and dropped items in done, whatever runs", () => {
@@ -191,6 +204,13 @@ describe("wouldShip", () => {
     expect(wouldShip(shipped, [{ id: 5, title: "", why: "not merged" }])).toBe(
       "Tap again to ship #3 fix/old (set by a take), merged into origin/main · #4 fix/4, merged into origin/main" +
         " · 1 not merged (as of the last fetch)",
+    );
+  });
+
+  it("marks what an agent filed and the user hasn't accepted", () => {
+    const shipped = [{ id: 6, title: "", branch: "fix/6", branch_taken: true, filed: true, against: "origin/main" }];
+    expect(wouldShip(shipped, [])).toBe(
+      "Tap again to ship #6 fix/6 (agent-filed, not yet accepted), merged into origin/main (as of the last fetch)",
     );
   });
 });

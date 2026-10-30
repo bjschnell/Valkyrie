@@ -62,6 +62,18 @@ impl Backlog {
     /// Writes `new` down as the next item. `by` is `human` or the agent asking,
     /// worked out by the daemon; an agent's waits, proposed, for the user.
     pub fn add(&self, new: &NewItem, by: &str, now: u64) -> Result<Item> {
+        self.add_filed(new, by, None, now)
+    }
+
+    /// Adds an item as `add` does, recording the daemon boot and session that
+    /// wrote it down to take it (`valk todo add --take`), if one did.
+    pub fn add_filed(
+        &self,
+        new: &NewItem,
+        by: &str,
+        filed_by: Option<(u64, SessionId)>,
+        now: u64,
+    ) -> Result<Item> {
         let (title, body) = clean(&new.title, &new.body)?;
         if new.attachments.len() > MAX_ATTACHMENTS {
             bail!("at most {MAX_ATTACHMENTS} attachments");
@@ -102,6 +114,7 @@ impl Backlog {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by,
             notes: Vec::new(),
             created: now,
             updated: now,
@@ -327,7 +340,7 @@ impl Backlog {
 
 /// Refuses a pull request that isn't one plain `https://` URL: it's shown as a
 /// link in the web app.
-fn pr_url(pr: &str) -> Result<()> {
+pub fn pr_url(pr: &str) -> Result<()> {
     // ASCII only: bidi and look-alike characters could make a link read as another.
     let ok = pr.is_ascii()
         && pr.starts_with("https://")
@@ -452,7 +465,7 @@ pub fn brief(item: &Item) -> String {
         }
     }
     text.push_str(&format!(
-        "\n(This is item #{} in my Valkyrie backlog. Anything else you find along the way goes in with `valk todo add`, not into this change. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "\n(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`; `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         item.id
     ));
     text
@@ -860,6 +873,7 @@ mod tests {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by: None,
             notes: Vec::new(),
             created: 0,
             updated: 0,

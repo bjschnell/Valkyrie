@@ -29,7 +29,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 17;
+pub const PROTOCOL: u32 = 18;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -360,6 +360,15 @@ pub enum ClientMsg {
     AddItem {
         req: ReqId,
         item: NewItem,
+        /// Also take it for the caller's session, with its branch and pull request
+        /// (protocol 18): an agent tracking work it does that nobody planned. From
+        /// inside a valk session only.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        take: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<String>,
     },
     /// Every backlog item. Replies `Items`.
     Items {

@@ -102,6 +102,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
              valk todo note -i 3 'merged upstream' > {tn}.tmp 2>&1; mv {tn}.tmp {tn}\n\
              valk todo take 5 > {h5}.tmp 2>&1; mv {h5}.tmp {h5}\n\
              valk todo take 5 --steal > {s5}.tmp 2>&1; mv {s5}.tmp {s5}\n\
+             valk todo add --take -k bug 'Found along the way' --branch fix/found > {af}.tmp 2>&1; mv {af}.tmp {af}\n\
+             valk todo take 6 --pr {pr} > {afp}.tmp 2>&1; mv {afp}.tmp {afp}\n\
+             valk todo note -i 6 'fixed the overflow too' > {afn}.tmp 2>&1; mv {afn}.tmp {afn}\n\
+             valk todo add 'For later' > {al}.tmp 2>&1; mv {al}.tmp {al}\n\
+             valk todo take 7 > {alt}.tmp 2>&1; mv {alt}.tmp {alt}\n\
              valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
              valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
@@ -119,6 +124,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             r1 = o("retake1"),
             h5 = o("held5"),
             l5 = o("launched5"),
+            af = o("add-take"),
+            afp = o("add-take-pr"),
+            afn = o("add-take-note"),
+            al = o("add-later"),
+            alt = o("take-later"),
             s5 = o("agent-steal5"),
             pr = PR,
         ),
@@ -248,6 +258,36 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     // A pull request open waits on review, whatever its session does.
     let three = list.lines().find(|l| l.starts_with("#3 ")).unwrap_or("");
     assert!(three.contains("PR open"), "{list}");
+
+    // What the agent fixed along the way, filed and taken in one go: proposed, but
+    // tracked like any taken item; and never launched before the user accepts it.
+    assert_eq!(
+        wait_for(&out.join("add-take")),
+        "#6 Found along the way (repo), taken; proposed until the user accepts it\n"
+    );
+    assert!(
+        wait_for(&out.join("add-take-pr"))
+            .contains("#6 Found along the way taken (branch fix/found, PR")
+    );
+    assert!(wait_for(&out.join("add-take-note")).starts_with("noted on #6"));
+    let six = list.lines().find(|l| l.starts_with("#6 ")).unwrap_or("");
+    assert!(
+        six.contains("PR open") && six.ends_with(" (PR) (agent-filed)"),
+        "{list}"
+    );
+    // Only its own: another proposed item still waits on the user.
+    assert!(wait_for(&out.join("add-later")).starts_with("#7 For later"));
+    let refused = wait_for(&out.join("take-later"));
+    assert!(
+        refused.contains("#7 is proposed; accept it first"),
+        "{refused}"
+    );
+    human("valk todo launch 6", "launch6");
+    let refused = wait_for(&out.join("launch6"));
+    assert!(
+        refused.contains("#6 is proposed; accept it first"),
+        "{refused}"
+    );
 
     // The agent's handoff landed on its own item, and only there.
     assert_eq!(
@@ -385,6 +425,10 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         &["commit", "-q", "--allow-empty", "-m", "wip"],
         &["checkout", "-q", "main"],
         &["merge", "-q", "--ff-only", "fix/3-clients"],
+        &["checkout", "-q", "-b", "fix/found"],
+        &["commit", "-q", "--allow-empty", "-m", "found it"],
+        &["checkout", "-q", "main"],
+        &["merge", "-q", "--ff-only", "fix/found"],
     ] {
         let done = git(args);
         assert!(done.status.success(), "{args:?}: {done:?}");
@@ -400,8 +444,16 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         )),
         "{would}"
     );
+    // Shipping the agent's own item is the user's confirm, and its acceptance.
     assert!(
-        would.contains("1 may ship: `valk todo ship --merged --yes`"),
+        would.contains(&format!(
+            "#6 Found along the way: would ship fix/found (agent-filed, not yet accepted), merged into main at {}\n",
+            repo_at.display()
+        )),
+        "{would}"
+    );
+    assert!(
+        would.contains("2 may ship: `valk todo ship --merged --yes`"),
         "{would}"
     );
     human("valk todo show 3", "still-open");
@@ -413,6 +465,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             "#3 Clients stay connected: shipped fix/3-clients (set by a take), merged into main at {}\n",
             repo_at.display()
         )),
+        "{merged}"
+    );
+    assert!(
+        merged
+            .contains("#6 Found along the way: shipped fix/found (agent-filed, not yet accepted)"),
         "{merged}"
     );
     assert!(
@@ -428,6 +485,10 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     let line = |id: &str| list.lines().find(|l| l.starts_with(id)).unwrap_or("");
     assert!(line("#3 ").contains("shipped"), "{list}");
     assert!(line("#3 ").ends_with(" (PR)"), "{list}");
+    assert!(
+        line("#6 ").contains("shipped") && !line("#6 ").contains("agent-filed"),
+        "{list}"
+    );
     assert!(!line("#4 ").contains("shipped"), "{list}");
     assert!(worktree.exists(), "#1 stays as it was");
 

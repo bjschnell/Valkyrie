@@ -1,7 +1,7 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 17;
+export const PROTOCOL = 18;
 
 export type SessionId = number;
 export type Size = { cols: number; rows: number };
@@ -176,6 +176,8 @@ export interface Item {
   checkout?: string;
   /** The pull request's URL, as `valk todo take --pr` recorded it. */
   pr?: string;
+  /** The daemon boot and session that wrote it down and took it (`valk todo add --take`). */
+  filed_by?: [number, number];
   /** Handoffs left on it, oldest first. */
   notes?: ItemNote[];
   /** Seconds since the epoch. */
@@ -210,6 +212,8 @@ export interface ShippedItem {
   /** The branch judged; `branch_taken` when a take, not a launch, set it. */
   branch: string;
   branch_taken?: boolean;
+  /** An agent filed it and it isn't accepted yet: shipping it accepts it. */
+  filed?: boolean;
   against: string;
   note?: string;
 }

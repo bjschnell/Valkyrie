@@ -377,6 +377,7 @@ valk todo edit 1 -k chore  # reword it (-t, -b), change its kind or repository
 valk todo ship 1           # done: the worktree goes if it's clean, the branch if merged
 valk todo take 4 -b fix/x  # an agent says it's on #4 (and --pr URL once it's open)
 valk todo take 4 --steal   # one session per item: hand #4 to your session anyway
+valk todo add --take -k bug "Off-by-one in resize" --branch fix/resize  # an agent tracks a fix nobody planned
 valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
 ```
 
@@ -386,7 +387,9 @@ finishes; one with a pull request open waits in Review unless its agent needs
 you. Edit a card there, with `e` on the TUI's backlog page (`b`), or with
 `valk todo edit`. A bug's brief tells the agent to reproduce it first; a feature's, to plan
 and ask before writing code. Agents can add items too, as proposals you accept
-before anything can start them.
+before anything can start them. An agent that fixes something along the way files
+and takes it in one go (`--take`), so its card follows the work; `ship --merged`
+lists it as agent-filed, and shipping it accepts it.
 
 ## How it's built
 

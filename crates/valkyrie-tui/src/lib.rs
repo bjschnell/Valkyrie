@@ -6132,6 +6132,7 @@ mod tests {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by: None,
             notes: Vec::new(),
             created: 0,
             updated: u64::from(id),

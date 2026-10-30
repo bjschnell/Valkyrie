@@ -27,12 +27,16 @@ export function liveSession(item: Item, sessions: SessionInfo[], boot: number): 
   return null;
 }
 
+/** Written down and taken by an agent for its own work, not accepted yet: it
+ * follows its session like an open item, and shipping it accepts it. */
+export const agentFiled = (item: Item) => item.status === "proposed" && !!item.filed_by;
+
 /** Where an item stands. One with a pull request open waits on review whatever its
  * session does, unless that needs you: a session that took several items would
  * otherwise show them all running. */
 export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
-  if (item.status === "proposed") return "proposed";
-  if (item.status !== "open") return "done";
+  if (item.status === "proposed" && !agentFiled(item)) return "proposed";
+  if (item.status !== "open" && !agentFiled(item)) return "done";
   const live = liveSession(item, sessions, boot);
   if (live) {
     switch (live.status.state) {
@@ -98,7 +102,9 @@ export function shippedSummary(shipped: ShippedItem[], kept: KeptItem[]): string
 /** What a first tap found, to check before the second ships it:
  * `Tap again to ship #3 fix/old (set by a take), merged into origin/main · …`. */
 export function wouldShip(shipped: ShippedItem[], kept: KeptItem[]): string {
-  const found = shipped.map((s) => `#${s.id} ${s.branch}${s.branch_taken ? " (set by a take)" : ""}, merged into ${s.against}`);
+  const mark = (s: ShippedItem) =>
+    s.filed ? " (agent-filed, not yet accepted)" : s.branch_taken ? " (set by a take)" : "";
+  const found = shipped.map((s) => `#${s.id} ${s.branch}${mark(s)}, merged into ${s.against}`);
   const notMerged = kept.filter((k) => k.why === "not merged").length;
   const rest = notMerged ? ` · ${notMerged} not merged` : "";
   return `Tap again to ship ${found.join(" · ")}${rest} (as of the last fetch)`;

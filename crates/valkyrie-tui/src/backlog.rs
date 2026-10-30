@@ -81,9 +81,11 @@ pub(crate) fn live<'a>(
 /// Where an item stands, from its newest live session: as the web board works it out.
 /// One with a pull request open waits on review whatever that session does, unless
 /// it needs you: a session that took several items would show them all running.
+/// An agent's own work it filed and took follows its session though not accepted.
 pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
     match item.status {
-        ItemStatus::Proposed => return Lane::Proposed,
+        ItemStatus::Proposed if !item.agent_filed() => return Lane::Proposed,
+        ItemStatus::Proposed => {}
         ItemStatus::Shipped | ItemStatus::Dropped => return Lane::Done,
         ItemStatus::Open => {}
     }
@@ -395,7 +397,7 @@ impl Page {
         let act = match key {
             b"\r" | b"\n" => match live {
                 Some(s) => Do::Attach(s),
-                None if lane == Lane::Proposed => Do::Say("accept it first: a".into()),
+                None if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
                 None if !launchable => {
                     Do::Say(format!("#{id} is {}: o reopens it", item.status.as_str()))
                 }
@@ -408,8 +410,10 @@ impl Page {
                 },
             },
             b"c" if launchable && item.project.is_some() => Do::Launch { id, agent: "codex" },
-            b"a" if lane == Lane::Proposed => Do::Status(id, ItemStatus::Open),
-            b"s" if item.status == ItemStatus::Open => Do::Status(id, ItemStatus::Shipped),
+            b"a" if item.status == ItemStatus::Proposed => Do::Status(id, ItemStatus::Open),
+            b"s" if item.status == ItemStatus::Open || item.agent_filed() => {
+                Do::Status(id, ItemStatus::Shipped)
+            }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
             b"o" if lane == Lane::Done => Do::Status(id, ItemStatus::Open),
             b"N" => {
@@ -499,6 +503,8 @@ impl Page {
             (None, Some((lane, item))) => {
                 let open = if live(item, sessions, boot).is_some() {
                     hint(" ↩ ", "open ")
+                } else if item.agent_filed() {
+                    hint(" a ", "accept ")
                 } else if *lane == Lane::Review {
                     hint(" ↩ ", "relaunch ")
                 } else {
@@ -632,9 +638,10 @@ pub(crate) fn answer(
     (arm, shipped_summary(shipped, kept, unfetched, said))
 }
 
-/// `S`'s one line: `ship #1 fix/a, #4 fix/b (take)? S again; 2 not merged; #9
-/// branch fix/x not found`, then `shipped #1 #4`. A branch a take set is marked,
-/// since an agent chose it. `unfetched` repositories were judged as last fetched.
+/// `S`'s one line: `ship #1 fix/a, #4 fix/b (take), #6 fix/c (take, agent-filed)?
+/// S again; 2 not merged; #9 branch fix/x not found`, then `shipped #1 #4`. A
+/// branch a take set is marked, since an agent chose it, and an item an agent
+/// filed that the user hasn't accepted, since shipping it accepts it. `unfetched` repositories were judged as last fetched.
 pub(crate) fn shipped_summary(
     shipped: &[ShippedItem],
     kept: &[KeptItem],
@@ -645,8 +652,14 @@ pub(crate) fn shipped_summary(
     let branches: Vec<String> = shipped
         .iter()
         .map(|s| {
-            let take = if s.branch_taken { " (take)" } else { "" };
-            format!("#{} {}{take}", s.id, s.branch)
+            let marks: Vec<&str> = [(s.branch_taken, "take"), (s.filed, "agent-filed")]
+                .into_iter()
+                .filter_map(|(on, mark)| on.then_some(mark))
+                .collect();
+            match marks.is_empty() {
+                true => format!("#{} {}", s.id, s.branch),
+                false => format!("#{} {} ({})", s.id, s.branch, marks.join(", ")),
+            }
         })
         .collect();
     let mut parts = vec![match (shipped, said) {
@@ -770,6 +783,10 @@ fn detail_lines(
         out.push(Line::from(
             format!(" by {}, waiting on you", item.by).fg(t.accent2),
         ));
+    } else if item.agent_filed() {
+        out.push(Line::from(
+            format!(" agent-filed by {}, not accepted yet: a", item.by).fg(t.accent2),
+        ));
     }
     if let Some(pr) = &item.pr {
         out.push(Line::from(format!(" pr: {pr}").fg(t.muted)));
@@ -843,6 +860,7 @@ mod tests {
             branch_taken: false,
             checkout: None,
             pr: None,
+            filed_by: None,
             notes: Vec::new(),
             created: 0,
             updated,
@@ -918,6 +936,53 @@ mod tests {
         assert_eq!(done, [19, 18, 17, 16, 15], "the newest five");
         // A restarted daemon's session 3 is someone else's: the item waits on review.
         assert_eq!(lane(&rows[0].1, &sessions, 8), Lane::Review);
+    }
+
+    #[test]
+    fn an_agents_own_filed_work_follows_its_session_until_accepted() {
+        let filed = Item {
+            status: ItemStatus::Proposed,
+            by: "claude".into(),
+            sessions: vec![4],
+            taken: vec![4],
+            filed_by: Some((7, 4)),
+            ..item(1, 1)
+        };
+        let working = [session(4, AgentState::Working)];
+        assert_eq!(lane(&filed, &working, 7), Lane::Running);
+        assert_eq!(
+            lane(&filed, &[session(4, AgentState::NeedsInput)], 7),
+            Lane::Needs
+        );
+        let pr = Item {
+            pr: Some("https://github.com/o/r/pull/7".into()),
+            ..filed.clone()
+        };
+        assert_eq!(lane(&pr, &working, 7), Lane::Review);
+        // Proposed by an agent without taking it: waits on the user, as before.
+        let proposed = Item {
+            filed_by: None,
+            ..filed.clone()
+        };
+        assert_eq!(lane(&proposed, &working, 7), Lane::Proposed);
+        let t = crate::theme::DRACULA;
+        let text: Vec<String> = detail_lines(&filed, Lane::Running, None, None, 0, &t)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text[2].contains("agent-filed by claude"), "{text:?}");
+        // Never launched before it's accepted; accepting it is a key away.
+        let rows = rows(&[filed], &[], 7);
+        assert_eq!(rows[0].0, Lane::Review, "taken: it waits on review");
+        let mut page = Page::default();
+        assert_eq!(
+            page.keys(b"\r", &rows, &[], 7),
+            [Do::Say("accept it first: a".into())]
+        );
+        assert_eq!(
+            page.keys(b"a", &rows, &[], 7),
+            [Do::Status(1, ItemStatus::Open)]
+        );
     }
 
     #[test]
@@ -1112,6 +1177,7 @@ mod tests {
             title: String::new(),
             branch: format!("fix/{id}"),
             branch_taken: id == 4,
+            filed: id == 6,
             against: "origin/main".into(),
             note: None,
         };
@@ -1138,6 +1204,14 @@ mod tests {
             shipped_summary(&found, &[kept(2, "not merged")], 0, Said::Confirm),
             "ship #1 fix/1, #4 fix/4 (take)? S again; 1 not merged"
         );
+        let filed = ShippedItem {
+            branch_taken: true,
+            ..shipped(6)
+        };
+        assert_eq!(
+            shipped_summary(&[filed], &[], 0, Said::Confirm),
+            "ship #6 fix/6 (take, agent-filed)? S again"
+        );
         assert_eq!(
             shipped_summary(&found, &[], 0, Said::Found),
             "merged: #1 fix/1, #4 fix/4 (take) (b, then S S to ship)"
@@ -1159,6 +1233,7 @@ mod tests {
             title: String::new(),
             branch: "fix/a".into(),
             branch_taken: false,
+            filed: false,
             against: "origin/main".into(),
             note: None,
         }];

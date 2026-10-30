@@ -1045,7 +1045,16 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }
-            ClientMsg::AddItem { req, item } => (req, registry.add_item(&item, peer)),
+            ClientMsg::AddItem {
+                req,
+                item,
+                take,
+                branch,
+                pr,
+            } => {
+                let take = take.then_some((branch.as_deref(), pr.as_deref()));
+                (req, registry.add_item(&item, take, peer))
+            }
             ClientMsg::Items { req } => (req, Ok(registry.items())),
             ClientMsg::ChangeItem { req, id, change } => {
                 (req, registry.change_item(id, change, peer).await)
