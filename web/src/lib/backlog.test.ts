@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { byColumn, byLane, editChange, factsLine, lane, liveSession } from "./backlog";
+import { byColumn, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, wouldShip } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -142,5 +142,44 @@ describe("editChange", () => {
     const seen = (first as { was: Item }).was;
     expect(seen.title).toBe("old");
     expect(editChange(seen, now, { ...mine, body: "B3" })).toEqual({ do: "edit", body: "B3" });
+  });
+});
+
+describe("prLink", () => {
+  it("links only a plain https URL", () => {
+    expect(prLink("https://github.com/o/r/pull/7")).toBe("https://github.com/o/r/pull/7");
+    expect(prLink(undefined)).toBeNull();
+    expect(prLink("http://github.com/o/r/pull/7")).toBeNull();
+    expect(prLink("javascript:alert(1)")).toBeNull();
+    expect(prLink("https://")).toBeNull();
+    expect(prLink("https://x/ y")).toBeNull();
+  });
+});
+
+describe("shippedSummary", () => {
+  it("names what shipped and counts what didn't, as of the last fetch", () => {
+    const shipped = [1, 4].map((id) => ({ id, title: "", branch: `fix/${id}`, against: "origin/main" }));
+    const kept = [
+      { id: 2, title: "", why: "not merged" },
+      { id: 3, title: "", why: "not merged" },
+      { id: 9, title: "", why: "branch fix/x not found" },
+    ];
+    expect(shippedSummary(shipped, kept)).toBe(
+      "Shipped #1 #4 · 2 not merged · #9 branch fix/x not found (as of the last fetch)",
+    );
+    expect(shippedSummary([], [])).toBe("Nothing merged to ship (as of the last fetch)");
+  });
+});
+
+describe("wouldShip", () => {
+  it("names each branch, marking one a take set", () => {
+    const shipped = [
+      { id: 3, title: "", branch: "fix/old", branch_taken: true, against: "origin/main" },
+      { id: 4, title: "", branch: "fix/4", against: "origin/main" },
+    ];
+    expect(wouldShip(shipped, [{ id: 5, title: "", why: "not merged" }])).toBe(
+      "Tap again to ship #3 fix/old (set by a take), merged into origin/main · #4 fix/4, merged into origin/main" +
+        " · 1 not merged (as of the last fetch)",
+    );
   });
 });

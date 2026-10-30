@@ -177,7 +177,7 @@ pub fn remove(
 
 /// Refuses what git couldn't name a branch, and what it would read as an option or
 /// expand (`-f`, `@{-1}`) rather than take as a name.
-fn valid(checkout: &Path, branch: &str) -> Result<()> {
+pub(crate) fn valid(checkout: &Path, branch: &str) -> Result<()> {
     let reference = format!("refs/heads/{branch}");
     if branch.starts_with('-') || git(checkout, &["check-ref-format", &reference]).is_err() {
         bail!("{branch:?} is not a valid branch name");
@@ -437,6 +437,20 @@ impl crate::Registry {
 /// default branch (with `remote`), and the main checkout's `HEAD` while that's on
 /// the default branch.
 fn tips(repo: &Path, remote: bool) -> (Vec<String>, Vec<String>) {
+    let named = named_tips(repo, remote);
+    let against = named.iter().map(|(name, _)| name.clone()).collect();
+    // `origin/main` and the main checkout's `HEAD` are often the same commit.
+    let mut seen = std::collections::HashSet::new();
+    let tips = named
+        .into_iter()
+        .map(|(_, tip)| tip)
+        .filter(|t| seen.insert(t.clone()))
+        .collect();
+    (against, tips)
+}
+
+/// `tips`, each commit with its name, e.g. (`origin/main`, its commit).
+fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
     let tip = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
     // `origin/HEAD` names it even offline; else whichever of main and master exists.
     let default = git_out(
@@ -456,12 +470,10 @@ fn tips(repo: &Path, remote: bool) -> (Vec<String>, Vec<String>) {
                 || tip(&format!("refs/remotes/origin/{b}")).is_ok()
         })
     });
-    let mut against = Vec::new();
-    let mut tips = Vec::new();
+    let mut named = Vec::new();
     if let Some(default) = &default {
         if remote && let Ok(at) = tip(&format!("refs/remotes/origin/{default}")) {
-            against.push(format!("origin/{default}"));
-            tips.push(at);
+            named.push((format!("origin/{default}"), at));
         }
         // Only on the default branch: a feature branch checked out there isn't
         // where work lands.
@@ -469,17 +481,121 @@ fn tips(repo: &Path, remote: bool) -> (Vec<String>, Vec<String>) {
         if on.is_ok_and(|on| &on == default)
             && let Ok(at) = tip("HEAD")
         {
-            against.push(format!("{default} at {}", repo.display()));
-            tips.push(at);
+            named.push((format!("{default} at {}", repo.display()), at));
         }
     }
-    // `origin/main` and the main checkout's `HEAD` are often the same commit.
+    named
+}
+
+/// Whether `branch` of `repo` is merged into the default branch, as last fetched
+/// (see `tips`): its local head, else `origin`'s, an ancestor of one of the tips or
+/// squashed into one. `Ok` names what it's merged into; `Err` says why it isn't.
+/// A branch with no work of its own isn't merged, though its head is an ancestor:
+/// it would ship an item nobody worked on. A local branch has work when its reflog
+/// shows a commit, cherry-pick or merge made on it (a fast-forward, pull, rebase,
+/// reset or rename isn't: each can leave it on a commit of the default branch).
+/// One only on `origin`, without a reflog, or made here as a copy of `origin`'s,
+/// has work when its head is off the tips' first-parent history: a pull request
+/// merged with a merge commit, or squashed, but not a branch pushed from an older
+/// main with nothing on it.
+pub fn branch_merged(repo: &Path, branch: &str) -> std::result::Result<String, String> {
+    if !project::in_git(repo) {
+        return Err(format!("{} is not a git repository", repo.display()));
+    }
+    if valid(repo, branch).is_err() {
+        return Err(format!("{branch:?} is not a valid branch name"));
+    }
+    let named = named_tips(repo, true);
+    let local = format!("refs/heads/{branch}");
+    let remote = format!("refs/remotes/origin/{branch}");
+    let rev = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
+    let (head, is_local) = match (rev(&local), rev(&remote)) {
+        (Ok(head), _) => (head, true),
+        (_, Ok(head)) => (head, false),
+        _ => return Err(format!("branch {branch} not found")),
+    };
+    // The default branch itself is always "merged" into itself.
+    if named.iter().any(|(name, _)| {
+        name == &format!("origin/{branch}") || name.starts_with(&format!("{branch} at "))
+    }) {
+        return Err(format!("{branch} is the default branch"));
+    }
+    let history = is_local
+        .then(|| git_out(repo, &["reflog", "show", "--format=%gs", &local]).ok())
+        .flatten()
+        .filter(|log| !log.is_empty());
+    // A fast-forward (`merge main: Fast-forward`) only moved it along main.
+    let made_here = |l: &str| {
+        ["commit", "cherry-pick", "merge"]
+            .iter()
+            .any(|w| l.starts_with(w))
+            && !l.ends_with(": Fast-forward")
+    };
+    let off_main = || !named.iter().any(|(_, tip)| first_parent(repo, &head, tip));
+    // Only a copy of `origin`'s branch, with no work here, may still hold work
+    // made elsewhere: off main's history, merged with a merge commit. Made from
+    // anything else (a feature branch merged since, as a launch from a checkout
+    // on one makes), its head is someone else's work.
+    let copied = |log: &str| {
+        log.lines().last().is_some_and(|created| {
+            [
+                format!("origin/{branch}"),
+                format!("refs/remotes/origin/{branch}"),
+            ]
+            .iter()
+            .any(|from| created == format!("branch: Created from {from}"))
+        })
+    };
+    let work = match history {
+        Some(log) => log.lines().any(made_here) || (copied(&log) && off_main()),
+        None => off_main(),
+    };
+    if !work {
+        return Err("no commits of its own".into());
+    }
     let mut seen = std::collections::HashSet::new();
-    let tips = tips
-        .into_iter()
-        .filter(|t| seen.insert(t.clone()))
-        .collect();
-    (against, tips)
+    let merged = named
+        .iter()
+        .filter(|(_, tip)| seen.insert(tip))
+        .find(|(_, tip)| ancestor(repo, &head, tip) || squashed(repo, &head, tip));
+    match merged {
+        Some((name, _)) => Ok(name.clone()),
+        None if named.is_empty() => Err("no default branch to judge against".into()),
+        None => Err("not merged".into()),
+    }
+}
+
+/// `branch_merged` for the worktree at `checkout`, so its own `HEAD` is what's
+/// judged; kept when it has something other than `branch` checked out.
+pub fn checkout_merged(
+    repo: &Path,
+    checkout: &Path,
+    branch: &str,
+) -> std::result::Result<String, String> {
+    let on = git_out(checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|_| format!("{} isn't on a branch", checkout.display()))?;
+    if on != branch {
+        return Err(format!("checkout is on {on}, not its branch"));
+    }
+    branch_merged(repo, branch)
+}
+
+/// Whether `head` is `tip` or on its first-parent history: where the default
+/// branch itself has been, not a branch merged into it.
+fn first_parent(repo: &Path, head: &str, tip: &str) -> bool {
+    if head == tip {
+        return true;
+    }
+    if !ancestor(repo, head, tip) {
+        return false;
+    }
+    // Only what's after `head`'s parents: a root commit has none, and that's fine.
+    let parents = format!("{head}^@");
+    git_out(
+        repo,
+        &["rev-list", "--first-parent", tip, "--not", &parents],
+    )
+    .is_ok_and(|list| list.lines().any(|c| c == head))
 }
 
 /// The `HEAD` of the worktree at `checkout`, when it's merged into `repo`'s default
@@ -874,6 +990,230 @@ mod tests {
         // Shipped once merged: the branch goes too, though `-d` would keep it.
         let (gone, said) = remove(&repo.main(), &at, Some("feat/7-b"), merged.as_deref());
         assert!(gone && !has_branch(&repo.main(), "feat/7-b"), "{said}");
+    }
+
+    #[test]
+    fn a_branch_is_merged_only_with_work_of_its_own_in_the_default_branch() {
+        let repo = Repo::new("branch-merged");
+        let main = repo.main();
+        let me = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        let commit = |dir: &Path, file: &str, message: &str| {
+            std::fs::write(dir.join(file), message).unwrap();
+            git(dir, &["add", file]).unwrap();
+            git(
+                dir,
+                &[&me[..], &["commit", "--quiet", "-m", message]].concat(),
+            )
+            .unwrap();
+        };
+        let here = format!("main at {}", main.display());
+
+        // Fast-forward merged in the main checkout.
+        git(&main, &["checkout", "--quiet", "-b", "fix/ff"]).unwrap();
+        commit(&main, "ff.txt", "ff");
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        git(&main, &["merge", "--quiet", "--ff-only", "fix/ff"]).unwrap();
+        assert_eq!(branch_merged(&main, "fix/ff"), Ok(here.clone()));
+
+        // Made and never committed on, then main moved past it: an ancestor, but
+        // nobody's work.
+        git(&main, &["branch", "fix/none"]).unwrap();
+        commit(&main, "later.txt", "later");
+        assert_eq!(
+            branch_merged(&main, "fix/none"),
+            Err("no commits of its own".into())
+        );
+
+        // Squash-merged from a worktree: not an ancestor, its change is one commit.
+        let at = create(&main, "fix/sq", None).unwrap().start;
+        commit(&at, "sq.txt", "one");
+        commit(&at, "sq.txt", "two");
+        git(&main, &["merge", "--squash", "--quiet", "fix/sq"]).unwrap();
+        git(
+            &main,
+            &[&me[..], &["commit", "--quiet", "-m", "sq (#2)"]].concat(),
+        )
+        .unwrap();
+        assert_eq!(branch_merged(&main, "fix/sq"), Ok(here.clone()));
+
+        let at = create(&main, "fix/open", None).unwrap().start;
+        commit(&at, "open.txt", "wip");
+        assert_eq!(branch_merged(&main, "fix/open"), Err("not merged".into()));
+        assert_eq!(
+            branch_merged(&main, "fix/gone"),
+            Err("branch fix/gone not found".into())
+        );
+        assert_eq!(
+            branch_merged(&main, "main"),
+            Err("main is the default branch".into())
+        );
+        assert!(branch_merged(&main, "-x").is_err());
+
+        // Only on origin: merged with a merge commit there, then cloned.
+        git(&main, &["checkout", "--quiet", "-b", "fix/remote"]).unwrap();
+        commit(&main, "remote.txt", "remote");
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        let no_ff = ["merge", "--quiet", "--no-ff", "-m", "merge", "fix/remote"];
+        git(&main, &[&me[..], &no_ff[..]].concat()).unwrap();
+        git(&main, &["branch", "fix/tip"]).unwrap();
+        git(&main, &["branch", "fix/old", "HEAD~3"]).unwrap();
+        let clone = repo.0.join("clone");
+        let from = main.to_string_lossy().into_owned();
+        let to = clone.to_string_lossy().into_owned();
+        git(&repo.0, &["clone", "--quiet", &from, &to]).unwrap();
+        assert_eq!(
+            branch_merged(&clone, "fix/remote"),
+            Ok("origin/main".into())
+        );
+        // Checked out from origin, nothing committed here: its reflog shows no work,
+        // but its head is off main's own history, merged with a merge commit.
+        git(
+            &clone,
+            &["branch", "--quiet", "fix/remote", "origin/fix/remote"],
+        )
+        .unwrap();
+        assert_eq!(
+            branch_merged(&clone, "fix/remote"),
+            Ok("origin/main".into())
+        );
+        // Its head is the tip itself: nothing to tell it from a fresh branch.
+        assert_eq!(
+            branch_merged(&clone, "fix/tip"),
+            Err("no commits of its own".into())
+        );
+        // Pushed from an older main with nothing on it: on main's own history.
+        assert_eq!(
+            branch_merged(&clone, "fix/old"),
+            Err("no commits of its own".into())
+        );
+    }
+
+    #[test]
+    fn a_pull_or_reset_onto_main_isnt_work() {
+        let repo = Repo::new("branch-moved");
+        let main = repo.main();
+        let me = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        let commit = |message: &str| {
+            std::fs::write(main.join(message), message).unwrap();
+            git(&main, &["add", message]).unwrap();
+            git(
+                &main,
+                &[&me[..], &["commit", "--quiet", "-m", message]].concat(),
+            )
+            .unwrap();
+        };
+        git(&main, &["branch", "fix/pulled"]).unwrap();
+        git(&main, &["branch", "fix/reset"]).unwrap();
+        commit("later");
+        // Brought up to main, as `git pull --ff-only` does, and moved there by hand.
+        git(&main, &["checkout", "--quiet", "fix/pulled"]).unwrap();
+        let pull = ["pull", "--quiet", "--ff-only", ".", "main"];
+        git(&main, &[&me[..], &pull[..]].concat()).unwrap();
+        git(&main, &["checkout", "--quiet", "fix/reset"]).unwrap();
+        git(&main, &["reset", "--quiet", "--hard", "main"]).unwrap();
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        for branch in ["fix/pulled", "fix/reset"] {
+            assert_eq!(
+                branch_merged(&main, branch),
+                Err("no commits of its own".into()),
+                "{branch}"
+            );
+        }
+        // The worktree's own branch is judged, so a launch's checkout counts as
+        // what it holds.
+        let at = create(&main, "fix/wt", None).unwrap().start;
+        assert_eq!(
+            checkout_merged(&main, &at, "fix/wt"),
+            Err("no commits of its own".into())
+        );
+        assert_eq!(
+            checkout_merged(&main, &at, "fix/other"),
+            Err("checkout is on fix/wt, not its branch".into())
+        );
+        std::fs::write(at.join("wt.txt"), "wt").unwrap();
+        git(&at, &["add", "wt.txt"]).unwrap();
+        git(&at, &[&me[..], &["commit", "--quiet", "-m", "wt"]].concat()).unwrap();
+        assert_eq!(
+            checkout_merged(&main, &at, "fix/wt"),
+            Err("not merged".into())
+        );
+        git(&main, &["merge", "--quiet", "--ff-only", "fix/wt"]).unwrap();
+        let here = format!("main at {}", main.display());
+        assert_eq!(checkout_merged(&main, &at, "fix/wt"), Ok(here));
+    }
+
+    #[test]
+    fn a_branch_made_on_a_feature_merged_since_isnt_work() {
+        let repo = Repo::new("branch-stacked");
+        let main = repo.main();
+        let me = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        git(&main, &["checkout", "--quiet", "-b", "feat/y"]).unwrap();
+        std::fs::write(main.join("y.txt"), "y").unwrap();
+        git(&main, &["add", "y.txt"]).unwrap();
+        git(
+            &main,
+            &[&me[..], &["commit", "--quiet", "-m", "y"]].concat(),
+        )
+        .unwrap();
+        // `Created from feat/y`, and a launch's worktree made while the main
+        // checkout is on feat/y (`Created from HEAD`): nothing of their own.
+        git(&main, &["branch", "fix/x", "feat/y"]).unwrap();
+        create(&main, "fix/n", None).unwrap();
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        let no_ff = [
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feat/y",
+            "feat/y",
+        ];
+        git(&main, &[&me[..], &no_ff[..]].concat()).unwrap();
+        for branch in ["fix/x", "fix/n"] {
+            assert_eq!(
+                branch_merged(&main, branch),
+                Err("no commits of its own".into()),
+                "{branch}"
+            );
+        }
+        let here = format!("main at {}", main.display());
+        assert_eq!(branch_merged(&main, "feat/y"), Ok(here));
+    }
+
+    #[test]
+    fn a_fast_forward_on_the_branch_isnt_work_but_a_merge_commit_is() {
+        let repo = Repo::new("branch-ff");
+        let main = repo.main();
+        let me = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        let commit = |message: &str| {
+            std::fs::write(main.join(message), message).unwrap();
+            git(&main, &["add", message]).unwrap();
+            git(
+                &main,
+                &[&me[..], &["commit", "--quiet", "-m", message]].concat(),
+            )
+            .unwrap();
+        };
+        git(&main, &["branch", "fix/ff"]).unwrap();
+        git(&main, &["branch", "fix/merge"]).unwrap();
+        commit("later");
+        // `merge main: Fast-forward`: only moved along main.
+        git(&main, &["checkout", "--quiet", "fix/ff"]).unwrap();
+        git(&main, &["merge", "--quiet", "--ff-only", "main"]).unwrap();
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        assert_eq!(
+            branch_merged(&main, "fix/ff"),
+            Err("no commits of its own".into())
+        );
+        // A real merge commit is work: here not merged back yet, then merged.
+        git(&main, &["checkout", "--quiet", "fix/merge"]).unwrap();
+        let no_ff = ["merge", "--quiet", "--no-ff", "-m", "merge main", "main"];
+        git(&main, &[&me[..], &no_ff[..]].concat()).unwrap();
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        assert_eq!(branch_merged(&main, "fix/merge"), Err("not merged".into()));
+        git(&main, &["merge", "--quiet", "--ff-only", "fix/merge"]).unwrap();
+        let here = format!("main at {}", main.display());
+        assert_eq!(branch_merged(&main, "fix/merge"), Ok(here));
     }
 
     #[test]

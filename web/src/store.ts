@@ -7,6 +7,7 @@ import type { Decision, Item, ItemChange, ItemFacts, Modes, NewItem, QueueItem, 
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
+import { shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { keyBytes, messageBytes, pathBytes, textBytes, type Key } from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
@@ -488,6 +489,32 @@ export async function noteItem(id: number, text: string): Promise<boolean> {
   } catch (e) {
     toast((e as Error).message);
     return false;
+  }
+}
+
+/** The ids of the open items whose branch is merged, as the daemon last fetched (it
+ * doesn't fetch, nor does `valk web`); with none, says why and returns none. */
+export async function checkMerged(): Promise<number[]> {
+  if (!conn) return [];
+  try {
+    const reply = await conn.request({ t: "ship_merged", dry_run: true, only: null });
+    if (reply.t !== "shipped") return [];
+    toast(reply.shipped.length ? wouldShip(reply.shipped, reply.kept) : shippedSummary(reply.shipped, reply.kept));
+    return reply.shipped.map((s) => s.id);
+  } catch (e) {
+    toast((e as Error).message);
+    return [];
+  }
+}
+
+/** Ships the items `checkMerged` found, those still merged, toasting what happened. */
+export async function shipMerged(only: number[]): Promise<void> {
+  if (!conn) return;
+  try {
+    const reply = await conn.request({ t: "ship_merged", dry_run: false, only });
+    if (reply.t === "shipped") toast(shippedSummary(reply.shipped, reply.kept));
+  } catch (e) {
+    toast((e as Error).message);
   }
 }
 

@@ -43,9 +43,9 @@ use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, DaemonInfo, Pushes};
 use valkyrie_proto::{
-    AgentState, AgentStatus, ClientBuild, Color, CursorShape, Decision, Item, ItemChange, Modes,
-    NewItem, Pane, QueueItem, ReviewAction, Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId,
-    SessionInfo, Side, Size, SpawnSpec, Style,
+    AgentState, AgentStatus, ClientBuild, Color, CursorShape, Decision, Item, ItemChange, KeptItem,
+    Modes, NewItem, Pane, QueueItem, ReviewAction, Row, ScreenUpdate, ScrollAnchor, ServerMsg,
+    SessionId, SessionInfo, ShippedItem, Side, Size, SpawnSpec, Style,
 };
 
 /// Ctrl-] — detach from the attached session, whatever the keys page maps.
@@ -168,6 +168,13 @@ impl std::fmt::Display for Restart {
 
 impl std::error::Error for Restart {}
 
+/// What the backlog's `S` task found (`asking`) or shipped.
+struct Shipping {
+    asking: bool,
+    unfetched: usize,
+    result: std::result::Result<(Vec<ShippedItem>, Vec<KeptItem>), String>,
+}
+
 struct App {
     client: Client,
     socket: PathBuf,
@@ -205,6 +212,10 @@ struct App {
     newer: Option<String>,
     /// The update check under way.
     newer_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    /// Where the backlog's `S` reports back from its task, while `run` reads it.
+    shipping: Option<mpsc::UnboundedSender<Shipping>>,
+    /// That task is under way: another `S` waits for it.
+    ship_busy: bool,
     /// The settings panel is open, its cursor on this field.
     settings_cursor: Option<usize>,
     /// The keys page is open (`.` on the home screen).
@@ -358,6 +369,8 @@ impl App {
             settings_file: settings::path(),
             newer: None,
             newer_rx: None,
+            shipping: None,
+            ship_busy: false,
             settings_cursor: None,
             keys_page: None,
             preview: None,
@@ -407,6 +420,8 @@ impl App {
             self.attach(id).await;
         }
         self.look_for_updates();
+        let (shipping_tx, mut shipping) = mpsc::unbounded_channel();
+        self.shipping = Some(shipping_tx);
 
         while !self.quit {
             self.draw(terminal)?;
@@ -465,6 +480,7 @@ impl App {
                         self.newer_rx = None;
                     }
                 }
+                Some(done) = shipping.recv() => self.on_shipping(done),
                 _ = anim.tick(), if self.animating() => {}
                 _ = sleep_until(self.pinger.next_due()), if self.pinger.next_due().is_some() => {
                     self.fire_pings();
@@ -1537,6 +1553,28 @@ impl App {
         self.newer_rx = Some(rx);
     }
 
+    fn shipping_tx(&self) -> Result<mpsc::UnboundedSender<Shipping>> {
+        self.shipping
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not ready to ship yet"))
+    }
+
+    /// What the backlog's `S` found, or shipped. Found, it waits on a second `S`
+    /// to ship exactly what was shown.
+    fn on_shipping(&mut self, done: Shipping) {
+        self.ship_busy = false;
+        let (shipped, kept) = match done.result {
+            Ok(found) => found,
+            Err(e) => return self.say(e),
+        };
+        let open = self.backlog.is_some();
+        let (arm, said) = backlog::answer(done.asking, open, &shipped, &kept, done.unfetched);
+        if let (Some(ids), Some(page)) = (arm, &mut self.backlog) {
+            page.ship_armed = Some(ids);
+        }
+        self.say(said);
+    }
+
     /// Steps a setting, keeps it, and lays the screen out again if the tabs moved.
     fn change(&mut self, field: Field, by: isize) {
         let before = self.settings;
@@ -2238,6 +2276,56 @@ impl App {
                     )
                     .await?;
                 self.say(format!("saved #{} {}", item.id, item.title));
+            }
+            Do::CheckMerged | Do::ShipMerged(_) if self.ship_busy => {
+                self.say("S is already under way".into());
+            }
+            Do::CheckMerged => {
+                // The daemon judges against `origin` as last fetched and can't fetch
+                // with the user's credentials, so fetch here first. Off the event
+                // loop: a fetch can take a while, and the answer comes back on
+                // `shipping`.
+                let mut projects: Vec<PathBuf> = self
+                    .items
+                    .iter()
+                    .filter(|i| i.status == valkyrie_proto::ItemStatus::Open && i.branch.is_some())
+                    .filter_map(|i| i.project.clone())
+                    .collect();
+                projects.sort();
+                projects.dedup();
+                let (client, tx) = (self.client.clone(), self.shipping_tx()?);
+                self.ship_busy = true;
+                self.say("fetching origin…".into());
+                tokio::spawn(async move {
+                    let unfetched = tokio::task::spawn_blocking(move || {
+                        projects
+                            .iter()
+                            .filter(|p| p.is_dir())
+                            .filter(|p| valkyrie_proto::fetch_origin(p, true).is_err())
+                            .count()
+                    })
+                    .await
+                    .unwrap_or_default();
+                    let result = client.ship_merged(true, None).await;
+                    let _ = tx.send(Shipping {
+                        asking: true,
+                        unfetched,
+                        result: result.map_err(|e| format!("{e:#}")),
+                    });
+                });
+            }
+            Do::ShipMerged(ids) => {
+                let (client, tx) = (self.client.clone(), self.shipping_tx()?);
+                self.ship_busy = true;
+                self.say("shipping…".into());
+                tokio::spawn(async move {
+                    let result = client.ship_merged(false, Some(ids)).await;
+                    let _ = tx.send(Shipping {
+                        asking: false,
+                        unfetched: 0,
+                        result: result.map_err(|e| format!("{e:#}")),
+                    });
+                });
             }
             Do::Add { kind, text } => {
                 // For the repository the TUI is in, or the attached tab is.
@@ -5729,8 +5817,11 @@ mod tests {
             by: "claude".into(),
             sessions: Vec::new(),
             boot: 0,
+            taken: Vec::new(),
             branch: None,
+            branch_taken: false,
             checkout: None,
+            pr: None,
             notes: Vec::new(),
             created: 0,
             updated: u64::from(id),

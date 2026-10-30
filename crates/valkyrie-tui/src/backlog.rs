@@ -9,7 +9,10 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
-use valkyrie_proto::{AgentState, Item, ItemFacts, ItemKind, ItemStatus, SessionId, SessionInfo};
+use valkyrie_proto::{
+    AgentState, Item, ItemFacts, ItemKind, ItemStatus, KeptItem, SessionId, SessionInfo,
+    ShippedItem,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Lane {
@@ -144,6 +147,8 @@ pub(crate) struct Page {
     pub(crate) typing: Option<Typing>,
     /// `x` was pressed once on this item: deleting has no undo, so it takes two.
     pub(crate) armed: Option<u32>,
+    /// What `S` found merged, waiting on a second `S` to ship exactly these.
+    pub(crate) ship_armed: Option<Vec<u32>>,
     /// The selected item's facts, for `(id, updated)`, read when the cursor lands.
     pub(crate) facts: Option<(u32, u64, Option<ItemFacts>)>,
     /// The start of a character a read cut off, while typing.
@@ -189,6 +194,10 @@ pub(crate) enum Do {
         kind: Option<ItemKind>,
         title: Option<String>,
     },
+    /// Fetch, then ask what's merged, to show before shipping it.
+    CheckMerged,
+    /// Ship these, the ones shown, if they're still merged.
+    ShipMerged(Vec<u32>),
     Say(String),
 }
 
@@ -207,6 +216,10 @@ impl Page {
             let key = next_key(keys);
             let whole = key.len() == keys.len();
             keys = &keys[key.len()..];
+            // Like `x x`: any other key, typing included, and it's not shipped.
+            if key != b"S" || self.typing.is_some() {
+                self.ship_armed = None;
+            }
             if let Some(typing) = &mut self.typing {
                 let text = match typing {
                     Typing::Add { text, .. }
@@ -284,6 +297,10 @@ impl Page {
                         text: LineEdit::default(),
                     })
                 }
+                b"S" => out.push(match self.ship_armed.take() {
+                    Some(ids) => Do::ShipMerged(ids),
+                    None => Do::CheckMerged,
+                }),
                 b"q" | b"b" | [0x03] => out.push(Do::Close),
                 b"\x1b" if whole => out.push(Do::Close),
                 _ => {
@@ -413,6 +430,7 @@ impl Page {
                 hint(" o ", "reopen "),
                 hint(" e ", "edit "),
                 hint(" x ", "delete "),
+                hint(" S ", "ship merged "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
             ]
@@ -428,6 +446,7 @@ impl Page {
                 [
                     open,
                     hint(" s ", "ship "),
+                    hint(" S ", "merged "),
                     hint(" e ", "edit "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
@@ -519,6 +538,74 @@ impl Page {
             );
         }
     }
+}
+
+/// What `S`'s answer was, for how to word it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Said {
+    /// Really shipped.
+    Shipped,
+    /// Found merged, the page waiting on a second `S`.
+    Confirm,
+    /// Found merged, with the page closed meanwhile: nothing waits.
+    Found,
+}
+
+/// What to do with `S`'s answer: the ids to arm the page with, if any, and the
+/// line to say. Worded from what was asked (`asking`, a dry run), never from
+/// whether the page is still open; only an open page is armed.
+pub(crate) fn answer(
+    asking: bool,
+    page_open: bool,
+    shipped: &[ShippedItem],
+    kept: &[KeptItem],
+    unfetched: usize,
+) -> (Option<Vec<u32>>, String) {
+    let said = match (asking, page_open) {
+        (false, _) => Said::Shipped,
+        (true, true) => Said::Confirm,
+        (true, false) => Said::Found,
+    };
+    let arm = (said == Said::Confirm && !shipped.is_empty())
+        .then(|| shipped.iter().map(|s| s.id).collect());
+    (arm, shipped_summary(shipped, kept, unfetched, said))
+}
+
+/// `S`'s one line: `ship #1 fix/a, #4 fix/b (take)? S again; 2 not merged; #9
+/// branch fix/x not found`, then `shipped #1 #4`. A branch a take set is marked,
+/// since an agent chose it. `unfetched` repositories were judged as last fetched.
+pub(crate) fn shipped_summary(
+    shipped: &[ShippedItem],
+    kept: &[KeptItem],
+    unfetched: usize,
+    said: Said,
+) -> String {
+    let ids: Vec<String> = shipped.iter().map(|s| format!("#{}", s.id)).collect();
+    let branches: Vec<String> = shipped
+        .iter()
+        .map(|s| {
+            let take = if s.branch_taken { " (take)" } else { "" };
+            format!("#{} {}{take}", s.id, s.branch)
+        })
+        .collect();
+    let mut parts = vec![match (shipped, said) {
+        ([], Said::Shipped) => "nothing shipped".to_owned(),
+        ([], _) => "nothing merged to ship".to_owned(),
+        (_, Said::Confirm) => format!("ship {}? S again", branches.join(", ")),
+        (_, Said::Found) => format!("merged: {} (b, then S S to ship)", branches.join(", ")),
+        (_, Said::Shipped) => format!("shipped {}", ids.join(" ")),
+    }];
+    let not_merged = kept.iter().filter(|k| k.why == "not merged").count();
+    if not_merged > 0 {
+        parts.push(format!("{not_merged} not merged"));
+    }
+    for k in kept.iter().filter(|k| k.why != "not merged") {
+        parts.push(format!("#{} {}", k.id, k.why));
+    }
+    if unfetched > 0 {
+        parts.push(format!("{unfetched} not fetched, judged as last fetched"));
+    }
+    parts.join("; ")
 }
 
 fn kind_color(kind: ItemKind, t: &Theme) -> style::Color {
@@ -619,6 +706,9 @@ fn detail_lines(
             format!(" by {}, waiting on you", item.by).fg(t.accent2),
         ));
     }
+    if let Some(pr) = &item.pr {
+        out.push(Line::from(format!(" pr: {pr}").fg(t.muted)));
+    }
     if let Some(f) = facts {
         let mut parts = vec![match f.ahead {
             1 => "1 commit".to_owned(),
@@ -655,7 +745,10 @@ fn detail_lines(
         let by = if n.by == "human" { "you" } else { &n.by };
         let ago = crate::age(n.at * 1000, now);
         out.push(Line::default());
-        out.push(Line::from(format!(" {by} · {ago}").fg(t.muted).bold()));
+        let took = if n.taken { " · from a take" } else { "" };
+        out.push(Line::from(
+            format!(" {by} · {ago}{took}").fg(t.muted).bold(),
+        ));
         for l in n.text.lines() {
             out.push(Line::from(format!(" {l}").fg(t.fg)));
         }
@@ -680,8 +773,11 @@ mod tests {
             by: "human".into(),
             sessions: Vec::new(),
             boot: 7,
+            taken: Vec::new(),
             branch: None,
+            branch_taken: false,
             checkout: None,
+            pr: None,
             notes: Vec::new(),
             created: 0,
             updated,
@@ -881,6 +977,134 @@ mod tests {
             press(&mut page, b"e\x15\r").is_empty(),
             "a blank title isn't saved"
         );
+    }
+
+    #[test]
+    fn capital_s_asks_then_ships_what_it_showed_but_not_while_typing() {
+        let rows = rows(&[item(1, 1)], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        assert_eq!(press(&mut page, b"S"), [Do::CheckMerged]);
+        assert_eq!(
+            page.keys(b"S", &[], &[], 7),
+            [Do::CheckMerged],
+            "with nothing selected too"
+        );
+        // What the check found arms it: the second S ships exactly those.
+        page.ship_armed = Some(vec![1, 4]);
+        assert_eq!(press(&mut page, b"S"), [Do::ShipMerged(vec![1, 4])]);
+        assert_eq!(press(&mut page, b"S"), [Do::CheckMerged], "once");
+        page.ship_armed = Some(vec![1]);
+        assert!(press(&mut page, b"j").is_empty());
+        assert_eq!(
+            press(&mut page, b"S"),
+            [Do::CheckMerged],
+            "another key disarms"
+        );
+        page.ship_armed = Some(vec![1]);
+        assert!(press(&mut page, b"NSent").is_empty(), "typed into the note");
+        assert_eq!(page.ship_armed, None);
+        assert_eq!(
+            press(&mut page, b"\r"),
+            [Do::Note {
+                id: 1,
+                text: "Sent".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_ship_merged_summary_counts_what_stayed() {
+        let shipped = |id| ShippedItem {
+            id,
+            title: String::new(),
+            branch: format!("fix/{id}"),
+            branch_taken: id == 4,
+            against: "origin/main".into(),
+            note: None,
+        };
+        let kept = |id, why: &str| KeptItem {
+            id,
+            title: String::new(),
+            why: why.into(),
+        };
+        assert_eq!(
+            shipped_summary(
+                &[shipped(1), shipped(4)],
+                &[
+                    kept(2, "not merged"),
+                    kept(3, "not merged"),
+                    kept(9, "no commits of its own")
+                ],
+                0,
+                Said::Shipped
+            ),
+            "shipped #1 #4; 2 not merged; #9 no commits of its own"
+        );
+        let found = [shipped(1), shipped(4)];
+        assert_eq!(
+            shipped_summary(&found, &[kept(2, "not merged")], 0, Said::Confirm),
+            "ship #1 fix/1, #4 fix/4 (take)? S again; 1 not merged"
+        );
+        assert_eq!(
+            shipped_summary(&found, &[], 0, Said::Found),
+            "merged: #1 fix/1, #4 fix/4 (take) (b, then S S to ship)"
+        );
+        assert_eq!(
+            shipped_summary(&[], &[], 1, Said::Confirm),
+            "nothing merged to ship; 1 not fetched, judged as last fetched"
+        );
+        assert_eq!(
+            shipped_summary(&[], &[], 0, Said::Shipped),
+            "nothing shipped"
+        );
+    }
+
+    #[test]
+    fn an_answer_arms_only_an_open_page_and_says_shipped_only_when_it_did() {
+        let found = [ShippedItem {
+            id: 1,
+            title: String::new(),
+            branch: "fix/a".into(),
+            branch_taken: false,
+            against: "origin/main".into(),
+            note: None,
+        }];
+        assert_eq!(
+            answer(true, true, &found, &[], 0),
+            (Some(vec![1]), "ship #1 fix/a? S again".into())
+        );
+        assert_eq!(
+            answer(true, false, &found, &[], 0),
+            (None, "merged: #1 fix/a (b, then S S to ship)".into())
+        );
+        assert_eq!(
+            answer(false, true, &found, &[], 0),
+            (None, "shipped #1".into())
+        );
+        assert_eq!(
+            answer(false, false, &[], &[], 0),
+            (None, "nothing shipped".into())
+        );
+        assert_eq!(
+            answer(true, true, &[], &[], 0),
+            (None, "nothing merged to ship".into())
+        );
+    }
+
+    #[test]
+    fn the_detail_shows_the_pull_request() {
+        let t = crate::theme::DRACULA;
+        let pr = "https://github.com/o/r/pull/7";
+        let taken = Item {
+            pr: Some(pr.into()),
+            ..item(1, 1)
+        };
+        let text: Vec<String> = detail_lines(&taken, Lane::Review, None, None, 0, &t)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text.contains(&format!(" pr: {pr}")), "{text:?}");
     }
 
     #[test]

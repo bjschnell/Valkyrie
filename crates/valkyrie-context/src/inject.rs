@@ -24,7 +24,9 @@ fn how_to_propose(valk: &str) -> String {
          outside what you're doing goes in the user's backlog, not into your change: \
          check `{valk} todo list --json` for it first, then `{valk} todo add -k \
          <bug|feature|chore> \"<title>\" --body \"<what, and how to reproduce it>\"`. It waits for \
-         the user to accept it."
+         the user to accept it. Working on an accepted item outside a launch, run `{valk} todo \
+         take N --branch <branch>` as you start, `{valk} todo take N --pr <url>` once the pull \
+         request is open, and leave a `{valk} todo note -i N`; shipping it is the user's."
     )
 }
 

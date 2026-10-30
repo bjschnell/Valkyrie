@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
-pub use backlog::{Item, ItemChange, ItemFacts, ItemKind, ItemNote, ItemStatus, NewItem};
+pub use backlog::{
+    Item, ItemChange, ItemFacts, ItemKind, ItemNote, ItemStatus, KeptItem, NewItem, ShippedItem,
+};
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
@@ -27,7 +29,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 15;
+pub const PROTOCOL: u32 = 16;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -387,6 +389,28 @@ pub enum ClientMsg {
         req: ReqId,
         id: u32,
     },
+    /// Claims an accepted item for the caller's session, as a launch would link it,
+    /// so its lane follows that session; and records its branch and pull request,
+    /// when given. From inside a valk session only, agent or user. Replies `Item`.
+    TakeItem {
+        req: ReqId,
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<String>,
+    },
+    /// Ships every open item whose branch is merged into the default branch, as
+    /// last fetched (the daemon doesn't fetch): the user only. With `dry_run`,
+    /// anyone may ask what would ship; `only` ships just those items, each checked
+    /// again, so what's shipped is what the user was shown. Replies `Shipped`.
+    ShipMerged {
+        req: ReqId,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only: Option<Vec<u32>>,
+    },
     /// Starts an agent on an item, in its own worktree unless `worktree` is false
     /// (a later launch goes back to the first one's). Replies `Session`.
     LaunchItem {
@@ -525,6 +549,12 @@ pub enum Reply {
     /// started in the repository itself).
     ItemFacts {
         facts: Option<ItemFacts>,
+    },
+    /// What `ShipMerged` shipped (or, as a dry run, would ship), and each open item
+    /// with a branch it kept, with why.
+    Shipped {
+        shipped: Vec<ShippedItem>,
+        kept: Vec<KeptItem>,
     },
     Worktrees {
         /// What merged was judged against, e.g. `origin/main` and `main at <repo>`;
@@ -793,6 +823,64 @@ pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
         }
     }
     Ok(path)
+}
+
+/// `git fetch --prune origin` in `dir`, quietly, with the credentials of whoever
+/// runs it: the CLI and the TUI, never the daemon. Says why not when `origin`'s
+/// branches couldn't be brought up to date, for the caller to tell the user.
+/// With `detach` (the TUI, which owns the terminal) nothing may ask for a
+/// password: git runs in a session of its own, where ssh has no `/dev/tty` to
+/// prompt on. The CLI leaves it the terminal, so ssh can ask there.
+pub fn fetch_origin(dir: &Path, detach: bool) -> Result<(), String> {
+    // Windows has no `/dev/tty` for ssh to prompt on behind the TUI's back.
+    #[cfg(not(unix))]
+    let _ = detach;
+    let git = |args: &[&str]| {
+        let mut git = std::process::Command::new("git");
+        git.no_window()
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null());
+        #[cfg(unix)]
+        if detach {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setsid is async-signal-safe.
+            unsafe {
+                git.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        git.output()
+    };
+    match git(&["remote", "get-url", "origin"]) {
+        Ok(out) if out.status.success() => {}
+        _ => return Err("no remote origin".into()),
+    }
+    // A remote's URL can name a command to run (`ext::`); never for a fetch made
+    // on the user's behalf.
+    let fetch = [
+        "-c",
+        "protocol.ext.allow=never",
+        "fetch",
+        "--prune",
+        "--quiet",
+        "origin",
+    ];
+    match git(&fetch) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let err = err.lines().next().unwrap_or("").trim().to_owned();
+            Err(format!("couldn't fetch origin ({err})"))
+        }
+        Err(e) => Err(format!("couldn't run git ({e})")),
+    }
 }
 
 /// The home directory from the password database, for when `$HOME` is unset.
