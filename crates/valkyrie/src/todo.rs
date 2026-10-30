@@ -220,6 +220,9 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             if title.is_none() && body.is_none() && kind.is_none() && dir.is_none() {
                 bail!("nothing to change: give --title, --body, --kind or --dir");
             }
+            if title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                bail!("the title can't be empty");
+            }
             let Some(i) = client.items().await?.into_iter().find(|i| i.id == id) else {
                 bail!("no item #{id}");
             };

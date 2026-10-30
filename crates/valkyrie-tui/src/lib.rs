@@ -2225,12 +2225,16 @@ impl App {
                 self.say(format!("noted on #{id}"));
             }
             Do::Edit { id, kind, title } => {
-                let body = self
+                // Its body as it is, since an edit replaces it too.
+                let Some(body) = self
                     .items
                     .iter()
                     .find(|i| i.id == id)
                     .map(|i| i.body.clone())
-                    .unwrap_or_default();
+                else {
+                    self.say(format!("no item #{id}"));
+                    return Ok(());
+                };
                 let (item, _) = self
                     .client
                     .change_item(

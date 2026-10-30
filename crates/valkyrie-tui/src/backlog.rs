@@ -401,6 +401,7 @@ impl Page {
             .concat(),
             (None, Some((Lane::Done, _))) => [
                 hint(" o ", "reopen "),
+                hint(" e ", "edit "),
                 hint(" x ", "delete "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
@@ -850,7 +851,7 @@ mod tests {
             [Do::Edit {
                 id: 1,
                 kind: ItemKind::Feature,
-                title: format!("X{}", &title[1..]),
+                title: format!("X{}", title.chars().skip(1).collect::<String>()),
             }]
         );
         assert!(
