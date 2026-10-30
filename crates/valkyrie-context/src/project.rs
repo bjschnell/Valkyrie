@@ -52,6 +52,10 @@ fn dot_git(git: &Path) -> Option<DotGit> {
     if meta.is_dir() {
         return git.join("HEAD").is_file().then_some(DotGit::Dir);
     }
+    // Not a FIFO or the like: reading one would hang the session-start hook.
+    if !meta.is_file() {
+        return None;
+    }
     let text = std::fs::read_to_string(git).ok()?;
     text.trim_start()
         .starts_with("gitdir:")

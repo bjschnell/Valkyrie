@@ -85,7 +85,12 @@ impl Backlog {
             } else {
                 ItemStatus::Proposed
             },
-            project: new.cwd.as_deref().map(project::root),
+            // Outside git there's no project to work in, whichever client asked.
+            project: new
+                .cwd
+                .as_deref()
+                .filter(|d| project::in_git(d))
+                .map(project::root),
             attachments,
             by: by.to_owned(),
             sessions: Vec::new(),
