@@ -227,6 +227,9 @@ pub struct Linked {
     /// only its creation (else its `HEAD` is one of those tips or the main
     /// checkout's `HEAD`).
     pub no_commits: bool,
+    /// Not an ancestor of a tip, but its whole change is one commit there: what a
+    /// squash merge leaves.
+    pub squashed: bool,
     /// Its branch's upstream is gone: the remote deleted it, as a merged pull
     /// request does, squashed ones included.
     pub upstream_gone: bool,
@@ -252,8 +255,8 @@ pub struct Survey {
 
 /// The linked worktrees of the repository holding `dir`, each checked for being
 /// merged: its `HEAD` an ancestor of `origin`'s default branch (with `remote`) or of
-/// the main checkout's `HEAD` when that's on the default branch too. A
-/// squash-merged branch isn't.
+/// the main checkout's `HEAD` when that's on the default branch too, or squashed
+/// into one of them (`squashed`).
 pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
     let canonical = |p: &Path| valkyrie_proto::canonical(p).unwrap_or_else(|_| p.to_path_buf());
     anyhow::ensure!(
@@ -322,6 +325,7 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         let merged = tips
             .iter()
             .any(|tip| git(&repo, &["merge-base", "--is-ancestor", &head, tip]).is_ok());
+        let squashed = !merged && tips.iter().any(|tip| squashed(&repo, &head, tip));
         // A branch's reflog says whether anything happened on it since it was made;
         // its tip can't, as a fast-forward merge leaves it equal to `origin/main`.
         // Without one (detached, or expired) its `HEAD` being one of the tips does.
@@ -357,6 +361,7 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
             branch,
             head,
             merged,
+            squashed,
             no_commits,
             upstream_gone,
             missing,
@@ -420,9 +425,9 @@ impl crate::Registry {
                 Some("you're in it".to_owned())
             } else if wt.locked {
                 Some("locked".to_owned())
-            } else if !wt.merged && wt.upstream_gone {
+            } else if !wt.merged && !wt.squashed && wt.upstream_gone {
                 Some("not merged (squash merge?)".to_owned())
-            } else if !wt.merged {
+            } else if !wt.merged && !wt.squashed {
                 Some("not merged".to_owned())
             } else if wt.no_commits {
                 Some("no commits of its own".to_owned())
@@ -442,6 +447,7 @@ impl crate::Registry {
                     })
                     .await?
                 }
+                None if wt.squashed => (false, "squash-merged".to_owned()),
                 None => (false, "merged".to_owned()),
             };
             worktrees.push(valkyrie_proto::Worktree {
@@ -462,6 +468,71 @@ impl crate::Registry {
             worktrees,
         })
     }
+}
+
+/// Whether `head`'s change since it left `tip`'s history is already in `tip` as a
+/// single commit, as a squash merge puts it there. Compared by patch id, as
+/// `git cherry` does: the same change, not a guess from a deleted upstream. A
+/// branch whose merged pull request took more than it holds stays unmerged.
+fn squashed(repo: &Path, head: &str, tip: &str) -> bool {
+    let Ok(base) = git_out(repo, &["merge-base", head, tip]) else {
+        return false;
+    };
+    let Some(mine) = git_raw(repo, &["diff", "--no-ext-diff", "--binary", &base, head])
+        .ok()
+        .and_then(|diff| patch_ids(repo, &diff).into_iter().next())
+    else {
+        // No change at all: nothing to find, and "no commits of its own" says why.
+        return false;
+    };
+    // The squash commit comes after the branch's last one; a day's slack for
+    // clocks, so a long-lived main isn't read whole.
+    let since = git_out(repo, &["log", "-1", "--format=%ct", head])
+        .ok()
+        .and_then(|t| t.parse::<u64>().ok())
+        .map_or_else(String::new, |t| {
+            format!("--since={}", t.saturating_sub(86_400))
+        });
+    let range = format!("{base}..{tip}");
+    let mut args = vec!["log", "-p", "--no-ext-diff", "--binary", "--no-merges"];
+    if !since.is_empty() {
+        args.push(&since);
+    }
+    args.push(&range);
+    git_raw(repo, &args).is_ok_and(|log| patch_ids(repo, &log).contains(&mine))
+}
+
+/// The patch ids `git patch-id --stable` gives the patches in `text`.
+fn patch_ids(repo: &Path, text: &str) -> Vec<String> {
+    use std::io::Write;
+    let child = Command::new("git")
+        .no_window()
+        .args(["patch-id", "--stable"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return Vec::new();
+    };
+    // Written from another thread: a big diff would fill both pipes.
+    let mut stdin = child.stdin.take();
+    let input = text.to_owned();
+    let writer = std::thread::spawn(move || {
+        if let Some(stdin) = &mut stdin {
+            let _ = stdin.write_all(input.as_bytes());
+        }
+    });
+    let out = child.wait_with_output();
+    let _ = writer.join();
+    out.map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Runs `git` in `dir`, returning what it printed as it is: for `-z` output.

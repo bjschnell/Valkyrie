@@ -131,6 +131,28 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
     commit(&squashed, "squash me");
     git(&squashed, &["push", "-q", "-u", "origin", "squashed"]);
     git(&repo, &["push", "-q", "origin", "--delete", "squashed"]);
+    // Squash-merged: two commits of its own land on origin as one, and origin's
+    // main moves on after it, so its HEAD is never an ancestor there.
+    let landed = add_at("landed", "merged");
+    std::fs::write(landed.join("feature.txt"), "one\n").unwrap();
+    git(&landed, &["add", "feature.txt"]);
+    commit(&landed, "feature, part one");
+    std::fs::write(landed.join("feature.txt"), "one\ntwo\n").unwrap();
+    git(&landed, &["commit", "-qam", "feature, part two"]);
+    let out_of = |o: std::process::Output| String::from_utf8(o.stdout).unwrap().trim().to_owned();
+    let tree = out_of(git(&landed, &["rev-parse", "landed^{tree}"]));
+    let squash = out_of(git(
+        &landed,
+        &["commit-tree", &tree, "-p", "merged", "-m", "feature (#1)"],
+    ));
+    let later = out_of(git(
+        &landed,
+        &["commit-tree", &tree, "-p", &squash, "-m", "later, empty"],
+    ));
+    git(
+        &repo,
+        &["push", "-q", "origin", &format!("{later}:refs/heads/main")],
+    );
     // Nothing committed since it was made: "merged" only because it's main itself.
     let fresh = add("fresh");
     let live = add("live");
@@ -203,6 +225,10 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         "{said}"
     );
     assert!(
+        line(&said, &landed).ends_with("(landed): squash-merged"),
+        "{said}"
+    );
+    assert!(
         line(&said, &fresh).ends_with("(fresh): no commits of its own"),
         "{said}"
     );
@@ -212,8 +238,10 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
     );
     // Never the main checkout.
     assert!(!said.contains(&format!("{} (", repo.display())), "{said}");
-    assert!(said.contains("1 may go"), "{said}");
-    for w in [&merged, &unmerged, &squashed, &dirty, &fresh, &live] {
+    assert!(said.contains("2 may go"), "{said}");
+    for w in [
+        &merged, &landed, &unmerged, &squashed, &dirty, &fresh, &live,
+    ] {
         assert!(w.exists(), "the dry run took {}", w.display());
     }
 
@@ -256,6 +284,11 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         "{said}"
     );
     assert!(!merged.exists(), "{said}");
+    assert!(
+        said.contains(&format!("took away {} and branch landed", landed.display())),
+        "{said}"
+    );
+    assert!(!landed.exists(), "{said}");
     for w in [&unmerged, &squashed, &dirty, &fresh, &live] {
         assert!(w.exists(), "{} went: {said}", w.display());
     }
