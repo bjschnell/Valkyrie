@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, editChange, factsLine, liveSession, prLink, type Lane } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, liveSession, prLink, type Lane } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
 import { addItem, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, sendFile, shipMerged, toast, useApp } from "../store";
@@ -171,6 +171,9 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const [busy, setBusy] = useState(false);
   const [agent, setAgent] = useState<Agent>(() => (read(AGENT_KEY) === "codex" ? "codex" : "claude"));
   const live = liveSession(item, sessions, boot);
+  // Accept, Open, Launch: Launch beside Open while only takes are live (it hands
+  // the item over), Accept beside it for an agent's own filed work.
+  const actions = cardActions(item, sessions, boot);
   const folder = item.project ? base(item.project) : null;
   const pr = prLink(item.pr);
 
@@ -368,34 +371,43 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
                   </button>
                 </>
               )}
-              {live ? (
-                <button className="primary" onClick={() => (location.hash = `#/s/${live.id}`)}>
-                  Open
-                </button>
-              ) : agentFiled(item) ? (
-                <button className="primary" disabled={busy} onClick={() => void status("open")}>
-                  Accept
-                </button>
-              ) : !item.project ? (
-                <button className="primary" onClick={() => (location.hash = `#/backlog/${item.id}`)}>
-                  Pick a folder
-                </button>
-              ) : (
-                <span className="launch">
-                  <select
-                    aria-label="Agent"
-                    value={agent}
-                    onChange={(e) => setAgent(e.target.value as Agent)}
-                    disabled={busy}
-                  >
-                    <option value="claude">Claude</option>
-                    <option value="codex">Codex</option>
-                  </select>
-                  <button className="primary" disabled={busy} onClick={() => void launch()}>
-                    {busy ? "Starting…" : lane === "review" ? "Relaunch" : "Launch"}
-                  </button>
-                </span>
-              )}
+              {actions.map((a, i) => {
+                const kind = i === actions.length - 1 ? "primary" : "ghost";
+                if (a === "accept")
+                  return (
+                    <button key={a} className={kind} disabled={busy} onClick={() => void status("open")}>
+                      Accept
+                    </button>
+                  );
+                if (a === "open")
+                  return (
+                    <button key={a} className={kind} onClick={() => (location.hash = `#/s/${live?.id}`)}>
+                      Open
+                    </button>
+                  );
+                if (a === "folder")
+                  return (
+                    <button key={a} className={kind} onClick={() => (location.hash = `#/backlog/${item.id}`)}>
+                      Pick a folder
+                    </button>
+                  );
+                return (
+                  <span key={a} className="launch">
+                    <select
+                      aria-label="Agent"
+                      value={agent}
+                      onChange={(e) => setAgent(e.target.value as Agent)}
+                      disabled={busy}
+                    >
+                      <option value="claude">Claude</option>
+                      <option value="codex">Codex</option>
+                    </select>
+                    <button className={kind} disabled={busy} onClick={() => void launch()}>
+                      {busy ? "Starting…" : lane === "review" ? "Relaunch" : "Launch"}
+                    </button>
+                  </span>
+                );
+              })}
             </>
           )}
         </div>

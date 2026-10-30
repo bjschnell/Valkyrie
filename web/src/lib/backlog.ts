@@ -27,9 +27,33 @@ export function liveSession(item: Item, sessions: SessionInfo[], boot: number): 
   return null;
 }
 
+/** An open item whose live sessions only took it: the user's launch hands it over, as
+ * `valk todo launch` does, so the card offers Launch beside Open. A take never locks
+ * the user out. */
+export function takenOnly(item: Item, sessions: SessionInfo[], boot: number): boolean {
+  if (item.status !== "open" || item.boot !== boot) return false;
+  const live = (item.sessions ?? []).filter((id) => sessions.some((s) => s.id === id && s.exited === null));
+  return live.length > 0 && live.every((id) => (item.taken ?? []).includes(id));
+}
+
 /** Written down and taken by an agent for its own work, not accepted yet: it
  * follows its session like an open item, and shipping it accepts it. */
 export const agentFiled = (item: Item) => item.status === "proposed" && !!item.filed_by;
+
+export type CardAction = "accept" | "open" | "launch" | "folder";
+
+/** What an open card offers, in order, the last one primary: Accept for an agent's own
+ * filed work (even while its session runs), Open for a live session, and Launch (or
+ * Pick a folder) when nothing holds it or only takes do. */
+export function cardActions(item: Item, sessions: SessionInfo[], boot: number): CardAction[] {
+  const live = liveSession(item, sessions, boot);
+  const out: CardAction[] = [];
+  if (agentFiled(item)) out.push("accept");
+  if (live) out.push("open");
+  if (agentFiled(item) || (live && !takenOnly(item, sessions, boot))) return out;
+  out.push(item.project ? "launch" : "folder");
+  return out;
+}
 
 /** Where an item stands. One with a pull request open waits on review whatever its
  * session does, unless that needs you: a session that took several items would

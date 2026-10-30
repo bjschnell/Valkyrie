@@ -110,6 +110,10 @@ pub struct Item {
     /// take it while it's still proposed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filed_by: Option<(u64, SessionId)>,
+    /// Shipped or dropped while still proposed: the user never accepted it, so
+    /// reopening it makes it proposed again rather than open.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unaccepted: bool,
     /// Handoffs left on it, oldest first: what an agent did and what's left, or
     /// the user's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

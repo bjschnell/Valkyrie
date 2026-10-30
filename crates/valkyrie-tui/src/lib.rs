@@ -6133,6 +6133,7 @@ mod tests {
             checkout: None,
             pr: None,
             filed_by: None,
+            unaccepted: false,
             notes: Vec::new(),
             created: 0,
             updated: u64::from(id),

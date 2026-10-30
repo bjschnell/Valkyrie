@@ -115,6 +115,7 @@ impl Backlog {
             checkout: None,
             pr: None,
             filed_by,
+            unaccepted: false,
             notes: Vec::new(),
             created: now,
             updated: now,
@@ -231,7 +232,22 @@ impl Backlog {
                     item.project = Some(root);
                 }
             }
-            ItemChange::Status { status } => item.status = *status,
+            ItemChange::Status { status } => {
+                // Shipped or dropped before the user accepted it (an agent's own
+                // work, shipped by the user's confirm): reopened, it's proposed
+                // again, so it still can't be launched unaccepted (ADR-0012).
+                match (item.status, *status) {
+                    (ItemStatus::Proposed, ItemStatus::Shipped | ItemStatus::Dropped) => {
+                        item.unaccepted = true;
+                        item.status = *status;
+                    }
+                    (_, ItemStatus::Open) if item.unaccepted => {
+                        item.unaccepted = false;
+                        item.status = ItemStatus::Proposed;
+                    }
+                    _ => item.status = *status,
+                }
+            }
         }
         item.updated = now;
         self.write(&item)?;
@@ -465,7 +481,7 @@ pub fn brief(item: &Item) -> String {
         }
     }
     text.push_str(&format!(
-        "\n(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`; `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "\n(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`, then `valk todo take N --pr <url>` and `valk todo note -i N \"…\"` with the N it printed (without -i N, both mean this item); `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         item.id
     ));
     text
@@ -801,6 +817,33 @@ mod tests {
     }
 
     #[test]
+    fn an_item_never_accepted_reopens_proposed() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let status = |status| ItemChange::Status { status };
+        // An agent's own work, shipped by the user's confirm, then reopened.
+        b.add_filed(&new("x", "", ItemKind::Bug), "claude", Some((7, 4)), 1)
+            .unwrap();
+        let item = b.change(1, &status(ItemStatus::Shipped), 2).unwrap();
+        assert!(item.unaccepted);
+        let item = b.change(1, &status(ItemStatus::Open), 3).unwrap();
+        assert_eq!(
+            (item.status, item.unaccepted),
+            (ItemStatus::Proposed, false)
+        );
+        // Accepted, it reopens open as before.
+        b.change(1, &status(ItemStatus::Open), 4).unwrap();
+        b.change(1, &status(ItemStatus::Dropped), 5).unwrap();
+        let item = b.change(1, &status(ItemStatus::Open), 6).unwrap();
+        assert_eq!(item.status, ItemStatus::Open);
+        // Dropped while proposed, too.
+        b.add(&new("y", "", ItemKind::Bug), "claude", 7).unwrap();
+        b.change(2, &status(ItemStatus::Dropped), 8).unwrap();
+        let item = b.change(2, &status(ItemStatus::Open), 9).unwrap();
+        assert_eq!(item.status, ItemStatus::Proposed);
+    }
+
+    #[test]
     fn a_steal_takes_the_item_from_the_sessions_it_was_with() {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
@@ -874,6 +917,7 @@ mod tests {
             checkout: None,
             pr: None,
             filed_by: None,
+            unaccepted: false,
             notes: Vec::new(),
             created: 0,
             updated: 0,

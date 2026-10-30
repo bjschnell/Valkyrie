@@ -162,7 +162,7 @@ impl Registry {
     }
 
     /// Whether `item` may be taken or launched (`how`) by the caller, whose own
-    /// session (`mine`) doesn't count: several agents on one backlog mustn't end up
+    /// session (`mine`: on a launch, only the user's) doesn't count: several agents on one backlog mustn't end up
     /// on the same item. Refused while a launch is starting a session on it, or
     /// while another live session is on it, naming that one, unless the caller
     /// hands it over: the user's steal, or the user's launch over sessions that
@@ -560,7 +560,12 @@ impl Registry {
         // One session on an item at a time; held from here until the new one is
         // recorded on it, so a take or launch meanwhile is refused too.
         let caller = self.caller(peer);
-        let mine = caller.session.as_ref().map(|s| s.info().id);
+        // The user's own session doesn't count; an agent's does, so it can't put a
+        // second live session on an item it holds.
+        let mine = match caller.agent {
+            None => caller.session.as_ref().map(|s| s.info().id),
+            Some(_) => None,
+        };
         let (from, _launching) = {
             let backlog = self.backlog.lock().unwrap();
             let from = self.claim(

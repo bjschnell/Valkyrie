@@ -178,6 +178,8 @@ export interface Item {
   pr?: string;
   /** The daemon boot and session that wrote it down and took it (`valk todo add --take`). */
   filed_by?: [number, number];
+  /** Shipped or dropped while still proposed: reopening makes it proposed again. */
+  unaccepted?: boolean;
   /** Handoffs left on it, oldest first. */
   notes?: ItemNote[];
   /** Seconds since the epoch. */

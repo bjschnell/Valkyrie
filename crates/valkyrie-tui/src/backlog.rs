@@ -78,6 +78,25 @@ pub(crate) fn live<'a>(
         .find_map(|id| sessions.iter().find(|s| s.id == *id && s.exited.is_none()))
 }
 
+/// An open item whose live sessions only took it: the user's launch hands it over,
+/// as `valk todo launch` does, so `↩` launches and `o` opens the session. A take
+/// never locks the user out.
+pub(crate) fn taken_only(item: &Item, sessions: &[SessionInfo], boot: u64) -> bool {
+    if item.status != ItemStatus::Open || item.boot != boot {
+        return false;
+    }
+    let mut live = item
+        .sessions
+        .iter()
+        .filter(|id| sessions.iter().any(|s| s.id == **id && s.exited.is_none()));
+    let first = live.next();
+    first.is_some()
+        && first
+            .into_iter()
+            .chain(live)
+            .all(|id| item.taken.contains(id))
+}
+
 /// Where an item stands, from its newest live session: as the web board works it out.
 /// One with a pull request open waits on review whatever that session does, unless
 /// it needs you: a session that took several items would show them all running.
@@ -393,18 +412,19 @@ impl Page {
     ) -> Vec<Do> {
         let id = item.id;
         let live = live(item, sessions, boot).map(|s| s.id);
-        let launchable = item.status == ItemStatus::Open && live.is_none();
+        let hand_over = taken_only(item, sessions, boot);
+        let launchable = item.status == ItemStatus::Open && (live.is_none() || hand_over);
         let act = match key {
             b"\r" | b"\n" => match live {
-                Some(s) => Do::Attach(s),
-                None if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
-                None if !launchable => {
+                Some(s) if !hand_over => Do::Attach(s),
+                _ if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
+                _ if !launchable => {
                     Do::Say(format!("#{id} is {}: o reopens it", item.status.as_str()))
                 }
-                None if item.project.is_none() => {
+                _ if item.project.is_none() => {
                     Do::Say(format!("#{id} has no folder yet: pick one in the web app"))
                 }
-                None => Do::Launch {
+                _ => Do::Launch {
                     id,
                     agent: "claude",
                 },
@@ -416,6 +436,7 @@ impl Page {
             }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
             b"o" if lane == Lane::Done => Do::Status(id, ItemStatus::Open),
+            b"o" if live.is_some() => Do::Attach(live.unwrap_or_default()),
             b"N" => {
                 self.typing = Some(Typing::Note {
                     id,
@@ -501,17 +522,18 @@ impl Page {
             ]
             .concat(),
             (None, Some((lane, item))) => {
-                let open = if live(item, sessions, boot).is_some() {
-                    hint(" ↩ ", "open ")
+                let open = if taken_only(item, sessions, boot) {
+                    [hint(" ↩ ", "launch "), hint(" o ", "open its session ")].concat()
+                } else if live(item, sessions, boot).is_some() {
+                    hint(" ↩ ", "open ").to_vec()
                 } else if item.agent_filed() {
-                    hint(" a ", "accept ")
+                    hint(" a ", "accept ").to_vec()
                 } else if *lane == Lane::Review {
-                    hint(" ↩ ", "relaunch ")
+                    hint(" ↩ ", "relaunch ").to_vec()
                 } else {
-                    hint(" ↩ ", "launch ")
+                    hint(" ↩ ", "launch ").to_vec()
                 };
-                [
-                    open,
+                let rest = [
                     hint(" s ", "ship "),
                     hint(" S ", "merged "),
                     hint(" e ", "edit "),
@@ -519,8 +541,8 @@ impl Page {
                     hint(" d ", "drop "),
                     hint(" n ", "new "),
                     hint(" esc ", "close "),
-                ]
-                .concat()
+                ];
+                [open, rest.concat()].concat()
             }
             (None, None) => [hint(" n ", "new "), hint(" esc ", "close ")].concat(),
         };
@@ -861,6 +883,7 @@ mod tests {
             checkout: None,
             pr: None,
             filed_by: None,
+            unaccepted: false,
             notes: Vec::new(),
             created: 0,
             updated,
@@ -939,6 +962,31 @@ mod tests {
     }
 
     #[test]
+    fn enter_launches_over_sessions_that_only_took_it_and_o_opens_them() {
+        let took = Item {
+            sessions: vec![3, 4],
+            taken: vec![4],
+            ..item(1, 1)
+        };
+        let working = |id| session(id, AgentState::Working);
+        // Only a take is live: the user's launch hands it over; o still attaches.
+        let rows = rows(std::slice::from_ref(&took), &[working(4)], 7);
+        let mut page = Page::default();
+        assert_eq!(
+            page.keys(b"\r", &rows, &[working(4)], 7),
+            [Do::Launch {
+                id: 1,
+                agent: "claude"
+            }]
+        );
+        assert_eq!(page.keys(b"o", &rows, &[working(4)], 7), [Do::Attach(4)]);
+        // Its launched session is live too: that one holds it, so ↩ attaches.
+        let live = [working(3), working(4)];
+        let rows = super::rows(&[took], &live, 7);
+        assert_eq!(page.keys(b"\r", &rows, &live, 7), [Do::Attach(4)]);
+    }
+
+    #[test]
     fn an_agents_own_filed_work_follows_its_session_until_accepted() {
         let filed = Item {
             status: ItemStatus::Proposed,
@@ -962,6 +1010,7 @@ mod tests {
         // Proposed by an agent without taking it: waits on the user, as before.
         let proposed = Item {
             filed_by: None,
+            unaccepted: false,
             ..filed.clone()
         };
         assert_eq!(lane(&proposed, &working, 7), Lane::Proposed);

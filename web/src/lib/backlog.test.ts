@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, byColumn, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, wouldShip } from "./backlog";
+import { agentFiled, byColumn, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, takenOnly, wouldShip } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -78,6 +78,33 @@ describe("lane", () => {
   it("puts shipped and dropped items in done, whatever runs", () => {
     expect(lane(item({ status: "shipped", sessions: [3] }), [session(3, "working")], 7)).toBe("done");
     expect(lane(item({ status: "dropped" }), [], 7)).toBe("done");
+  });
+});
+
+describe("takenOnly", () => {
+  it("is true while only sessions that took it are live, so the user may launch over them", () => {
+    const i = item({ sessions: [3, 4], taken: [4] });
+    expect(takenOnly(i, [session(4, "working")], 7)).toBe(true);
+    expect(takenOnly(i, [session(3, "idle"), session(4, "working")], 7)).toBe(false);
+    expect(takenOnly(i, [], 7)).toBe(false);
+    expect(takenOnly(i, [session(4, "working")], 8)).toBe(false);
+    expect(takenOnly({ ...i, status: "proposed" }, [session(4, "working")], 7)).toBe(false);
+  });
+});
+
+describe("cardActions", () => {
+  it("offers Launch beside Open only while takes alone are live", () => {
+    const i = item({ project: "/r", sessions: [3, 4], taken: [4] });
+    expect(cardActions(i, [session(4, "working")], 7)).toEqual(["open", "launch"]);
+    expect(cardActions(i, [session(3, "idle"), session(4, "working")], 7)).toEqual(["open"]);
+    expect(cardActions(i, [], 7)).toEqual(["launch"]);
+    expect(cardActions({ ...i, project: undefined }, [], 7)).toEqual(["folder"]);
+  });
+
+  it("offers Accept for an agent's own filed work, also while its session runs", () => {
+    const filed = item({ project: "/r", status: "proposed", sessions: [4], taken: [4], filed_by: [7, 4] });
+    expect(cardActions(filed, [session(4, "working")], 7)).toEqual(["accept", "open"]);
+    expect(cardActions(filed, [], 7)).toEqual(["accept"]);
   });
 });
 

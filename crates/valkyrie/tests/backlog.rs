@@ -107,6 +107,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
              valk todo note -i 6 'fixed the overflow too' > {afn}.tmp 2>&1; mv {afn}.tmp {afn}\n\
              valk todo add 'For later' > {al}.tmp 2>&1; mv {al}.tmp {al}\n\
              valk todo take 7 > {alt}.tmp 2>&1; mv {alt}.tmp {alt}\n\
+             valk todo launch 1 > {al1}.tmp 2>&1; mv {al1}.tmp {al1}\n\
              valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
              valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
@@ -129,6 +130,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             afn = o("add-take-note"),
             al = o("add-later"),
             alt = o("take-later"),
+            al1 = o("agent-relaunch1"),
             s5 = o("agent-steal5"),
             pr = PR,
         ),
@@ -280,6 +282,15 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     let refused = wait_for(&out.join("take-later"));
     assert!(
         refused.contains("#7 is proposed; accept it first"),
+        "{refused}"
+    );
+    // An agent's own session counts: it can't put a second one on its item.
+    let refused = wait_for(&out.join("agent-relaunch1"));
+    assert!(
+        refused.contains(&format!(
+            "#1 is already being worked on in session {}",
+            launched.trim()
+        )) && refused.contains("leave it to that session"),
         "{refused}"
     );
     human("valk todo launch 6", "launch6");
