@@ -90,11 +90,13 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             "#!/bin/sh\nfor a; do last=$a; done\npwd > {p}\n\
              valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
              valk todo note -i 2 'not mine' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
+             valk todo edit 1 -t 'Done already' > {e}.tmp 2>&1; mv {e}.tmp {e}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
             b = o("brief"),
             p = o("pwd"),
             n = o("note"),
             x = o("not-mine"),
+            e = o("agent-edit"),
         ),
     )
     .unwrap();
@@ -139,6 +141,25 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
 
     human("valk todo add --no-folder 'Someone else'", "add2");
     wait_for(&out.join("add2"));
+    // Reworded and made a chore; the body, left out, stays.
+    human(
+        "valk todo edit 2 -t 'Someone else, renamed' -k chore -b 'the detail'",
+        "edit",
+    );
+    assert_eq!(
+        wait_for(&out.join("edit")),
+        "#2 Someone else, renamed [chore] (no folder)\n"
+    );
+    human("valk todo edit 2 -k bug", "edit2");
+    assert_eq!(
+        wait_for(&out.join("edit2")),
+        "#2 Someone else, renamed [bug] (no folder)\n"
+    );
+    human("valk todo show 2", "show2");
+    assert!(
+        wait_for(&out.join("show2")).contains("\nthe detail\n"),
+        "the body is kept"
+    );
     human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -178,6 +199,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         wait_for(&out.join("note")),
         "noted on #1 Tab rename eats the last letter\n"
     );
+    let edited = wait_for(&out.join("agent-edit"));
+    assert!(edited.contains("is for the user"), "{edited}");
     let refused = wait_for(&out.join("not-mine"));
     assert!(
         refused.contains("only the item its session was launched for"),

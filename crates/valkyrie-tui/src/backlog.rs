@@ -128,6 +128,12 @@ pub(crate) enum Typing {
     Add { kind: ItemKind, text: LineEdit },
     /// A handoff note on item `id`.
     Note { id: u32, text: LineEdit },
+    /// Item `id`'s title, and its kind with Tab; the body stays as it is.
+    Edit {
+        id: u32,
+        kind: ItemKind,
+        text: LineEdit,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -160,12 +166,26 @@ fn decode(partial: &mut Vec<u8>, bytes: &[u8]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
-    Launch { id: u32, agent: &'static str },
+    Launch {
+        id: u32,
+        agent: &'static str,
+    },
     Attach(SessionId),
     Status(u32, ItemStatus),
     Delete(u32),
-    Add { kind: ItemKind, text: String },
-    Note { id: u32, text: String },
+    Add {
+        kind: ItemKind,
+        text: String,
+    },
+    Note {
+        id: u32,
+        text: String,
+    },
+    Edit {
+        id: u32,
+        kind: ItemKind,
+        title: String,
+    },
     Say(String),
 }
 
@@ -186,7 +206,9 @@ impl Page {
             keys = &keys[key.len()..];
             if let Some(typing) = &mut self.typing {
                 let text = match typing {
-                    Typing::Add { text, .. } | Typing::Note { text, .. } => text,
+                    Typing::Add { text, .. }
+                    | Typing::Note { text, .. }
+                    | Typing::Edit { text, .. } => text,
                 };
                 if key.len() == 1 && key[0] >= 0x20 && key[0] != 0x7f {
                     typed.push(key[0]);
@@ -209,11 +231,18 @@ impl Page {
                                     text: text.text().trim().into(),
                                 });
                             }
+                            Typing::Edit { id, kind, text } if !text.text().trim().is_empty() => {
+                                out.push(Do::Edit {
+                                    id,
+                                    kind,
+                                    title: text.text().trim().into(),
+                                });
+                            }
                             _ => {}
                         }
                     }
                     b"\t" => {
-                        if let Typing::Add { kind, .. } = typing {
+                        if let Typing::Add { kind, .. } | Typing::Edit { kind, .. } = typing {
                             let at = ItemKind::ALL.iter().position(|k| k == kind).unwrap_or(0);
                             *kind = ItemKind::ALL[(at + 1) % ItemKind::ALL.len()];
                         }
@@ -256,7 +285,10 @@ impl Page {
                 }
             }
         }
-        if let Some(Typing::Add { text, .. } | Typing::Note { text, .. }) = &mut self.typing {
+        if let Some(
+            Typing::Add { text, .. } | Typing::Note { text, .. } | Typing::Edit { text, .. },
+        ) = &mut self.typing
+        {
             text.insert(&decode(&mut self.partial, &typed));
         }
         out
@@ -297,6 +329,14 @@ impl Page {
                 self.typing = Some(Typing::Note {
                     id,
                     text: LineEdit::default(),
+                });
+                return Vec::new();
+            }
+            b"e" => {
+                self.typing = Some(Typing::Edit {
+                    id,
+                    kind: item.kind,
+                    text: LineEdit::new(item.title.clone()),
                 });
                 return Vec::new();
             }
@@ -342,11 +382,18 @@ impl Page {
                 hint(" esc ", "cancel "),
             ]
             .concat(),
+            (Some(Typing::Edit { .. }), _) => [
+                hint(" ↩ ", "save "),
+                hint(" tab ", "kind "),
+                hint(" esc ", "cancel "),
+            ]
+            .concat(),
             (Some(Typing::Note { .. }), _) => {
                 [hint(" ↩ ", "note "), hint(" esc ", "cancel ")].concat()
             }
             (None, Some((Lane::Proposed, _))) => [
                 hint(" a ", "accept "),
+                hint(" e ", "edit "),
                 hint(" x ", "delete "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
@@ -370,6 +417,7 @@ impl Page {
                 [
                     open,
                     hint(" s ", "ship "),
+                    hint(" e ", "edit "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
                     hint(" n ", "new "),
@@ -518,6 +566,11 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             text,
         ),
         Typing::Note { id, text } => (format!(" note on #{id} "), t.accent, text),
+        Typing::Edit { id, kind, text } => (
+            format!(" #{id} {} ", kind.as_str()),
+            kind_color(*kind, t),
+            text,
+        ),
     };
     let room = width.saturating_sub(label.chars().count() + 1);
     let mut spans = vec![label.fg(t.bg).bg(color).bold(), " ".into()];
@@ -773,6 +826,36 @@ mod tests {
                 kind: ItemKind::Bug,
                 text: "old ug".into()
             }]
+        );
+    }
+
+    #[test]
+    fn e_edits_the_title_and_kind_in_place() {
+        let rows = rows(&[item(1, 1)], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        let title = rows[0].1.title.clone();
+        assert!(press(&mut page, b"e").is_empty());
+        assert!(
+            matches!(&page.typing, Some(Typing::Edit { id: 1, text, .. }) if text.text() == title),
+            "starts from the title, cursor at its end"
+        );
+        assert!(
+            press(&mut page, b"\x1b").is_empty(),
+            "esc keeps it as it was"
+        );
+        assert_eq!(page.typing, None);
+        assert_eq!(
+            press(&mut page, b"e\x1b[H\x1b[3~X\t\r"),
+            [Do::Edit {
+                id: 1,
+                kind: ItemKind::Feature,
+                title: format!("X{}", &title[1..]),
+            }]
+        );
+        assert!(
+            press(&mut page, b"e\x15\r").is_empty(),
+            "a blank title isn't saved"
         );
     }
 

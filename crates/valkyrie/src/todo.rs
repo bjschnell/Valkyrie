@@ -39,6 +39,22 @@ pub enum TodoCmd {
     },
     /// Accept an item an agent proposed, so it can be started.
     Accept { id: u32 },
+    /// Reword it, change its kind, or move it to another repository. What you
+    /// don't give stays as it is.
+    #[command(arg_required_else_help = true)]
+    Edit {
+        id: u32,
+        #[arg(short, long)]
+        title: Option<String>,
+        /// The detail; `-` reads it from stdin, `""` clears it.
+        #[arg(short, long)]
+        body: Option<String>,
+        #[arg(short, long, value_parser = parse_kind)]
+        kind: Option<ItemKind>,
+        /// The repository it's for.
+        #[arg(short = 'C', long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Leave a handoff: what changed, what's left, what to check. It shows on the
     /// item and goes into the brief of its next launch.
     Note {
@@ -192,6 +208,44 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 let by = if n.by == "human" { "you" } else { &n.by };
                 println!("\nnote from {by}:\n{}", n.text);
             }
+            Ok(None)
+        }
+        TodoCmd::Edit {
+            id,
+            title,
+            body,
+            kind,
+            dir,
+        } => {
+            if title.is_none() && body.is_none() && kind.is_none() && dir.is_none() {
+                bail!("nothing to change: give --title, --body, --kind or --dir");
+            }
+            let Some(i) = client.items().await?.into_iter().find(|i| i.id == id) else {
+                bail!("no item #{id}");
+            };
+            let body = match body.as_deref() {
+                Some("-") => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                    text
+                }
+                Some(b) => b.to_owned(),
+                None => i.body,
+            };
+            let change = ItemChange::Edit {
+                title: title.unwrap_or(i.title),
+                body,
+                kind: kind.unwrap_or(i.kind),
+                cwd: dir.map(std::path::absolute).transpose()?,
+            };
+            let (item, _) = client.change_item(id, change).await?;
+            println!(
+                "#{} {} [{}] ({})",
+                item.id,
+                item.title,
+                item.kind.as_str(),
+                folder(&item)
+            );
             Ok(None)
         }
         TodoCmd::Note { text, id } => {
