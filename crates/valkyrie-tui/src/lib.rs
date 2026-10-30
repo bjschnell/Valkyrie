@@ -2224,6 +2224,31 @@ impl App {
                 self.client.note_item(id, text).await?;
                 self.say(format!("noted on #{id}"));
             }
+            Do::Edit { id, kind, title } => {
+                // Its body as it is, since an edit replaces it too.
+                let Some(body) = self
+                    .items
+                    .iter()
+                    .find(|i| i.id == id)
+                    .map(|i| i.body.clone())
+                else {
+                    self.say(format!("no item #{id}"));
+                    return Ok(());
+                };
+                let (item, _) = self
+                    .client
+                    .change_item(
+                        id,
+                        ItemChange::Edit {
+                            title,
+                            body,
+                            kind,
+                            cwd: None,
+                        },
+                    )
+                    .await?;
+                self.say(format!("saved #{} {}", item.id, item.title));
+            }
             Do::Add { kind, text } => {
                 // For the repository the TUI is in, or the attached tab is.
                 let here = self.attached_cwd().or_else(|| std::env::current_dir().ok());
