@@ -90,7 +90,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     std::fs::write(
         &agent,
         format!(
-            "#!/bin/sh\nfor a; do last=$a; done\npwd > {p}\n\
+            "#!/bin/sh\nfor a; do last=$a; done\n\
+             if [ \"$VALK_ITEM\" = 5 ]; then echo on5 > {l5}; exec sleep 60; fi\npwd > {p}\n\
              valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
              valk todo note -i 2 'not mine' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
              valk todo edit 1 -t 'Done already' > {e}.tmp 2>&1; mv {e}.tmp {e}\n\
@@ -117,6 +118,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             r4 = o("retake4"),
             r1 = o("retake1"),
             h5 = o("held5"),
+            l5 = o("launched5"),
             s5 = o("agent-steal5"),
             pr = PR,
         ),
@@ -210,14 +212,6 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "hold5",
     );
     assert!(wait_for(&out.join("take5")).contains("#5 Held elsewhere taken"));
-    human("valk todo launch 5", "launch5");
-    let refused = wait_for(&out.join("launch5"));
-    assert!(
-        refused.contains(&format!(
-            "#5 is already being worked on in session {holder} (sh, \"hold5\")"
-        )),
-        "{refused}"
-    );
     human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -299,8 +293,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     let refused = wait_for(&out.join("held5"));
     assert!(
         refused.contains(&format!(
-            "#5 is already being worked on in session {holder}"
-        )) && refused.contains("stop it first or take it with --steal"),
+            "#5 is already being worked on in session {holder} (sh, \"hold5\"); leave it to that session"
+        )) && !refused.contains("--steal"),
         "{refused}"
     );
     let refused = wait_for(&out.join("agent-steal5"));
@@ -321,7 +315,10 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "steal5-tab",
     );
     let refused = wait_for(&out.join("take5-again"));
-    assert!(refused.contains("--steal"), "{refused}");
+    assert!(
+        refused.contains("stop it first or take it with --steal"),
+        "{refused}"
+    );
     assert!(wait_for(&out.join("steal5")).contains("#5 Held elsewhere taken"));
     human("valk todo list --json", "list-json");
     let items: serde_json::Value = serde_json::from_str(&wait_for(&out.join("list-json"))).unwrap();
@@ -334,6 +331,36 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     assert_eq!(
         five["sessions"],
         serde_json::json!([stealer.parse::<u32>().unwrap()])
+    );
+    // A take never locks the user out: their launch hands it over, and the old
+    // session keeps running. One launched on it does hold it.
+    human("valk todo launch 5", "launch5");
+    let on5 = wait_for(&out.join("launch5")).trim().to_owned();
+    assert_eq!(wait_for(&out.join("launched5")), "on5\n");
+    human("valk todo list --json", "list-json2");
+    let items: serde_json::Value =
+        serde_json::from_str(&wait_for(&out.join("list-json2"))).unwrap();
+    let five = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == 5)
+        .unwrap();
+    assert_eq!(
+        five["sessions"],
+        serde_json::json!([on5.parse::<u32>().unwrap()])
+    );
+    human("valk ls", "ls");
+    assert!(
+        wait_for(&out.join("ls")).contains("steal5-tab"),
+        "still running"
+    );
+    human("valk todo launch 5", "relaunch5");
+    let refused = wait_for(&out.join("relaunch5"));
+    assert!(
+        refused.contains(&format!("#5 is already being worked on in session {on5}"))
+            && refused.contains("attach to it, or stop it first"),
+        "{refused}"
     );
 
     human("valk todo show 3", "show3");

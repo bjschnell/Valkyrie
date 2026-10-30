@@ -125,20 +125,47 @@ impl Registry {
             .collect()
     }
 
-    /// Refuses when another session than `mine` is on `item`, or a launch is
-    /// starting one, naming it, and says what to do instead (`or`): several agents
-    /// on one backlog mustn't end up on the same item.
-    fn free(&self, item: &Item, mine: Option<SessionId>, or: &str) -> Result<()> {
+    /// Whether `item` may be taken or launched (`how`) by the caller, whose own
+    /// session (`mine`) doesn't count: several agents on one backlog mustn't end up
+    /// on the same item. Refused while a launch is starting a session on it, or
+    /// while another live session is on it, naming that one, unless the caller
+    /// hands it over: the user's steal, or the user's launch over sessions that
+    /// only took it (a take never locks the user out). Returns the sessions it's
+    /// handed over from, which leave the item; they keep running.
+    fn claim(
+        &self,
+        item: &Item,
+        mine: Option<SessionId>,
+        agent: bool,
+        how: Claim,
+    ) -> Result<Vec<SessionId>> {
         let id = item.id;
         if self.launching.lock().unwrap().contains(&id) {
-            bail!("#{id} is being launched right now; {or}");
+            bail!("#{id} is being launched right now; try again in a moment");
         }
-        let Some(session) = self
-            .holders(item, mine)
-            .first()
-            .and_then(|&s| self.get(s).ok())
-        else {
-            return Ok(());
+        let holders = self.holders(item, mine);
+        let Some(&newest) = holders.first() else {
+            return Ok(holders);
+        };
+        let launched = holders.iter().find(|s| !item.taken.contains(s)).copied();
+        let hand_over = match how {
+            Claim::Take { steal } => steal,
+            Claim::Launch => !agent && launched.is_none(),
+        };
+        if hand_over {
+            return Ok(holders);
+        }
+        let or = match how {
+            _ if agent => "leave it to that session",
+            Claim::Take { .. } => "stop it first or take it with --steal",
+            Claim::Launch => "attach to it, or stop it first",
+        };
+        let blocker = match how {
+            Claim::Launch => launched.unwrap_or(newest),
+            Claim::Take { .. } => newest,
+        };
+        let Ok(session) = self.get(blocker) else {
+            bail!("#{id} is already being worked on in session {blocker}; {or}");
         };
         let info = session.info();
         let agent = session.agent_behind().unwrap_or_else(|| {
@@ -147,13 +174,14 @@ impl Registry {
                 .file_name()
                 .map_or("shell".into(), |n| n.to_string_lossy().into_owned())
         });
-        let name = match info.name.chars().count() > 24 {
-            true => format!("{}…", info.name.chars().take(23).collect::<String>()),
-            false => info.name.clone(),
-        };
+        let mut name = backlog::one_line(&info.name);
+        if name.chars().count() > 24 {
+            name = format!("{}…", name.chars().take(23).collect::<String>());
+        }
         bail!(
-            "#{id} is already being worked on in session {} ({agent}, \"{name}\"); {or}",
-            info.id
+            "#{id} is already being worked on in session {} ({}, \"{name}\"); {or}",
+            info.id,
+            backlog::one_line(&agent)
         );
     }
 
@@ -204,17 +232,12 @@ impl Registry {
         let item = {
             let backlog = self.backlog.lock().unwrap();
             let item = backlog.get(id)?;
-            let from = match steal {
-                true => self.holders(&item, Some(info.id)),
-                false => {
-                    self.free(
-                        &item,
-                        Some(info.id),
-                        "stop it first or take it with --steal",
-                    )?;
-                    Vec::new()
-                }
-            };
+            let from = self.claim(
+                &item,
+                Some(info.id),
+                caller.agent.is_some(),
+                Claim::Take { steal },
+            )?;
             backlog.taken(
                 id,
                 info.id,
@@ -476,6 +499,7 @@ impl Registry {
         worktree: bool,
         size: Size,
         env: Vec<(String, Option<String>)>,
+        peer: Option<Peer>,
     ) -> Result<Reply> {
         if !matches!(agent, "claude" | "codex") {
             bail!("an item starts claude or codex, not {agent}");
@@ -491,11 +515,18 @@ impl Registry {
         };
         // One session on an item at a time; held from here until the new one is
         // recorded on it, so a take or launch meanwhile is refused too.
-        let _launching = {
+        let caller = self.caller(peer);
+        let mine = caller.session.as_ref().map(|s| s.info().id);
+        let (from, _launching) = {
             let backlog = self.backlog.lock().unwrap();
-            self.free(&backlog.get(id)?, None, "attach to it, or stop it first")?;
+            let from = self.claim(
+                &backlog.get(id)?,
+                mine,
+                caller.agent.is_some(),
+                Claim::Launch,
+            )?;
             self.launching.lock().unwrap().insert(id);
-            Launching(self, id)
+            (from, Launching(self, id))
         };
         let branch = item
             .branch
@@ -525,14 +556,28 @@ impl Registry {
             return Ok(reply);
         };
         let checkout = new_worktree.map(|b| (b, checkout_of(info)));
-        self.backlog
-            .lock()
-            .unwrap()
-            .launched(id, info.id, self.boot, checkout, now_secs())?;
+        self.backlog.lock().unwrap().launched(
+            id,
+            info.id,
+            self.boot,
+            &from,
+            checkout,
+            now_secs(),
+        )?;
         tracing::info!(id, session = info.id, "launched a backlog item");
         self.refresh_items();
         Ok(reply)
     }
+}
+
+/// What `Registry::claim` is asked for.
+#[derive(Clone, Copy)]
+enum Claim {
+    /// A take; `steal` (the user's) hands the item over from whoever has it.
+    Take {
+        steal: bool,
+    },
+    Launch,
 }
 
 /// Marks an item as being launched until dropped, whatever becomes of the launch.
@@ -548,4 +593,54 @@ impl Drop for Launching<'_> {
 /// repository's root.
 fn checkout_of(info: &SessionInfo) -> PathBuf {
     valkyrie_context::project::checkout(&info.cwd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_claims_an_item_while_a_launch_is_starting_on_it() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let new = NewItem {
+            title: "x".into(),
+            body: String::new(),
+            kind: Default::default(),
+            cwd: None,
+            attachments: Vec::new(),
+        };
+        let item = registry
+            .backlog
+            .lock()
+            .unwrap()
+            .add(&new, "human", 1)
+            .unwrap();
+        let take = |steal| registry.claim(&item, Some(3), false, Claim::Take { steal });
+        assert_eq!(take(false).unwrap(), Vec::<SessionId>::new());
+        {
+            registry.launching.lock().unwrap().insert(item.id);
+            let _launching = Launching(&registry, item.id);
+            for steal in [false, true] {
+                let refused = take(steal).unwrap_err().to_string();
+                assert!(refused.contains("being launched right now"), "{refused}");
+            }
+            let refused = registry.claim(&item, None, false, Claim::Launch);
+            assert!(refused.is_err(), "nor a second launch");
+        }
+        // Its guard dropped, whatever became of the launch: free again.
+        assert!(take(false).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

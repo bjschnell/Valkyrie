@@ -1083,7 +1083,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 size,
                 env,
             } => {
-                let result = registry.launch_item(id, &agent, worktree, size, env).await;
+                let result = registry
+                    .launch_item(id, &agent, worktree, size, env, peer)
+                    .await;
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }

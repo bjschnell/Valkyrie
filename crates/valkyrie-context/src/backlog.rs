@@ -225,12 +225,14 @@ impl Backlog {
         Ok(item)
     }
 
-    /// Records a session started on `id`, and the checkout it runs in.
+    /// Records a session started on `id`, and the checkout it runs in. Launched
+    /// `from` sessions that only took it (the user's launch), it's no longer theirs.
     pub fn launched(
         &self,
         id: u32,
         session: SessionId,
         boot: u64,
+        from: &[SessionId],
         checkout: Option<(String, PathBuf)>,
         now: u64,
     ) -> Result<Item> {
@@ -240,6 +242,7 @@ impl Backlog {
             item.taken.clear();
             item.boot = boot;
         }
+        leave(&mut item, from);
         item.sessions.push(session);
         if let Some((branch, path)) = checkout {
             item.branch = Some(branch);
@@ -280,8 +283,7 @@ impl Backlog {
             item.boot = boot;
         }
         if !from.is_empty() {
-            item.sessions.retain(|s| !from.contains(s));
-            item.taken.retain(|s| !from.contains(s));
+            leave(&mut item, from);
             // The newest, so the lane follows it rather than an older one of its own.
             if let Some(at) = item.sessions.iter().position(|&s| s == session) {
                 item.sessions.remove(at);
@@ -336,6 +338,18 @@ fn pr_url(pr: &str) -> Result<()> {
         bail!("a pull request is one https:// URL, at most {MAX_PR} characters");
     }
     Ok(())
+}
+
+/// Takes `from` off the item: they no longer steer its lane or note it.
+fn leave(item: &mut Item, from: &[SessionId]) {
+    item.sessions.retain(|s| !from.contains(s));
+    item.taken.retain(|s| !from.contains(s));
+}
+
+/// `text` on one line without control or bidi characters, as a title is kept: for
+/// text from elsewhere (a session's name) put into a message.
+pub fn one_line(text: &str) -> String {
+    file::one_line(&shown(text, false))
 }
 
 fn display(p: &Option<PathBuf>) -> String {
@@ -713,11 +727,11 @@ mod tests {
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Feature), "human", 1).unwrap();
         let wt = Some(("feat/1-x".to_owned(), PathBuf::from("/r-feat-1-x")));
-        b.launched(1, 4, 77, wt, 2).unwrap();
-        let item = b.launched(1, 5, 77, None, 3).unwrap();
+        b.launched(1, 4, 77, &[], wt, 2).unwrap();
+        let item = b.launched(1, 5, 77, &[], None, 3).unwrap();
         assert_eq!(item.sessions, [4, 5]);
         assert_eq!(item.branch.as_deref(), Some("feat/1-x"));
-        let item = b.launched(1, 1, 78, None, 4).unwrap();
+        let item = b.launched(1, 1, 78, &[], None, 4).unwrap();
         assert!(!item.branch_taken, "a launch's branch");
         assert_eq!((item.sessions.as_slice(), item.boot), (&[1][..], 78));
         assert_eq!(item.checkout, Some(PathBuf::from("/r-feat-1-x")));
@@ -778,7 +792,7 @@ mod tests {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
-        b.launched(1, 3, 77, None, 2).unwrap();
+        b.launched(1, 3, 77, &[], None, 2).unwrap();
         b.taken(1, 4, 77, &[], None, None, None, 3).unwrap();
         b.taken(1, 5, 77, &[], None, None, None, 4).unwrap();
         // 4 takes it back from 3 and 5: now the newest, the lane follows it.
@@ -787,6 +801,13 @@ mod tests {
             (item.sessions.as_slice(), item.taken.as_slice()),
             (&[4][..], &[4][..])
         );
+        // The user's launch over a take: 4 leaves it, the new session 6 has it.
+        let item = b.launched(1, 6, 77, &[4], None, 6).unwrap();
+        assert_eq!(
+            (item.sessions.as_slice(), item.taken.as_slice()),
+            (&[6][..], &[][..])
+        );
+        assert_eq!(one_line("a\u{202e}b\nc\x1b[2J"), "a b c [2J");
     }
 
     #[test]
@@ -794,7 +815,7 @@ mod tests {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
-        b.launched(1, 3, 77, None, 2).unwrap();
+        b.launched(1, 3, 77, &[], None, 2).unwrap();
         let item = b.taken(1, 3, 77, &[], None, None, None, 3).unwrap();
         assert_eq!(
             (item.sessions.as_slice(), item.taken.as_slice()),
@@ -803,7 +824,7 @@ mod tests {
         let item = b.taken(1, 4, 77, &[], None, None, None, 3).unwrap();
         assert_eq!(item.taken, [4]);
         // A new daemon's ids are someone else's.
-        assert!(b.launched(1, 4, 78, None, 4).unwrap().taken.is_empty());
+        assert!(b.launched(1, 4, 78, &[], None, 4).unwrap().taken.is_empty());
 
         b.note(1, "claude", "from the launch", false, 5).unwrap();
         let item = b
