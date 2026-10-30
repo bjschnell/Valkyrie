@@ -250,6 +250,9 @@ struct App {
     /// An Alt key has come through, so the terminal sends Option as Meta, or isn't
     /// a Mac's: no hint about it is needed.
     alt_works: bool,
+    /// Bracketed paste is on in the outer terminal for a backlog prompt
+    /// (`sync_paste`).
+    paste_forced: bool,
     /// The tab under the mouse, and since when: resting there peeks at it.
     hover_tab: Option<(usize, Instant)>,
     /// The attached tab's other panes, when it is split; `view` is the focused one.
@@ -387,6 +390,7 @@ impl App {
             tab_drag: None,
             rail_hover: false,
             alt_works: false,
+            paste_forced: false,
             hover_tab: None,
             others: Vec::new(),
             layout: None,
@@ -427,7 +431,10 @@ impl App {
             self.draw(terminal)?;
             tokio::select! {
                 bytes = stdin.recv() => match bytes {
-                    Some(bytes) => self.on_input(bytes).await,
+                    Some(bytes) => {
+                        self.on_input(bytes).await;
+                        self.sync_paste();
+                    }
                     None => break,
                 },
                 msg = pushes.recv() => {
@@ -535,6 +542,7 @@ impl App {
                 self.others.clear();
                 self.layout = None;
                 let _ = reset_terminal_modes();
+                self.paste_forced = false;
                 "the daemon restarted; restorable sessions came back with new ids".into()
             };
             if let Err(e) = self.client.watch_queue().await {
@@ -665,6 +673,7 @@ impl App {
         self.menu = None;
         self.reviewing = None;
         let _ = reset_terminal_modes();
+        self.paste_forced = false;
         let _ = self.client.detach().await;
         self.refresh().await;
         // The preview showed a peeked tab, or nothing, while attached.
@@ -681,6 +690,10 @@ impl App {
             return self.keys_page_keys(&bytes);
         }
         if self.backlog.is_some() {
+            // A mouse report cut off by the read isn't typed into a prompt.
+            if let Some(cut) = mouse::unfinished(&bytes) {
+                self.partial = bytes.split_off(cut);
+            }
             return self.backlog_keys(&bytes).await;
         }
         if self.settings_cursor.is_some() {
@@ -700,12 +713,13 @@ impl App {
                     self.hover_tab = None;
                 }
                 match (&self.view, input) {
-                    // Detached mid-read: the rest belongs to the home screen.
-                    (None, Input::Bytes(rest)) => {
-                        for key in home_keys(&rest, &self.settings.keys) {
-                            Box::pin(self.on_home_key(key)).await;
-                        }
+                    // A key earlier in the read opened the backlog page.
+                    (_, Input::Bytes(rest)) if self.backlog.is_some() => {
+                        Box::pin(self.backlog_keys(&rest)).await;
                     }
+                    (_, Input::Mouse(_)) if self.backlog.is_some() => {}
+                    // Detached mid-read: the rest belongs to the home screen.
+                    (None, Input::Bytes(rest)) => Box::pin(self.home_input(&rest)).await,
                     (None, Input::Mouse(_)) => {}
                     (Some(_), Input::Mouse(_)) if self.reviewing.is_some() => {}
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
@@ -735,8 +749,13 @@ impl App {
             return self.rename_keys(&bytes).await;
         }
         self.option_hint(&bytes);
-        for (key, end) in home_keys_at(&bytes, &self.settings.keys) {
-            self.on_home_key(key).await;
+        self.home_input(&bytes).await;
+    }
+
+    /// Keys on the home screen.
+    async fn home_input(&mut self, bytes: &[u8]) {
+        for (key, end) in home_keys_at(bytes, &self.settings.keys) {
+            Box::pin(self.on_home_key(key)).await;
             // The rest of the read is the backlog page's, once a key opened it.
             if self.backlog.is_some() {
                 return self.backlog_keys(&bytes[end..]).await;
@@ -828,14 +847,14 @@ impl App {
         if keys.is_empty() {
             return;
         }
-        if self.menu.is_some() {
+        if self.backlog.is_some() {
+            self.backlog_keys(keys).await;
+        } else if self.menu.is_some() {
             self.menu_keys(keys).await;
         } else if self.view.is_some() {
             self.on_keys(keys.to_vec()).await;
         } else {
-            for key in home_keys(keys, &self.settings.keys) {
-                self.on_home_key(key).await;
-            }
+            self.home_input(keys).await;
         }
     }
 
@@ -887,6 +906,13 @@ impl App {
                 }
             }
             Action::Pane => self.cycle_focus(1),
+            Action::Capture => {
+                self.open_backlog().await;
+                if let Some(page) = &mut self.backlog {
+                    page.typing = Some(backlog::Typing::add());
+                    page.capture = true;
+                }
+            }
         }
     }
 
@@ -926,6 +952,12 @@ impl App {
                 keys = &keys[toggle.len()..];
                 self.tab_mode = false;
                 continue;
+            }
+            // The capture key works here too, so a thought isn't lost to the strip.
+            if let Some((Action::Capture, len)) = self.settings.keys.at(keys) {
+                self.tab_mode = false;
+                self.on_direct(Action::Capture).await;
+                return self.backlog_keys(&keys[len..]).await;
             }
             let key = next_key(keys);
             // A lone Esc is a key; Esc with more after it is Alt plus that key.
@@ -1081,6 +1113,20 @@ impl App {
             // A name fits a tab.
             name.truncate(NAME_MAX);
         }
+    }
+
+    /// Bracketed paste on in the outer terminal while a backlog prompt is open, so a
+    /// multi-line paste reaches it as one, at home too; after, the program's mode.
+    fn sync_paste(&mut self) {
+        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some());
+        if want == self.paste_forced {
+            return;
+        }
+        self.paste_forced = want;
+        let program = self.view.as_ref().is_some_and(|v| v.modes.bracketed_paste);
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[?2004{}", if want || program { 'h' } else { 'l' });
+        let _ = out.flush();
     }
 
     /// A Mac's Option typed a character where an Alt key was meant (the terminal
@@ -2221,11 +2267,40 @@ impl App {
         let Some(page) = &mut self.backlog else {
             return;
         };
+        let mut bytes = bytes;
+        // The capture key on the open page starts a new item, as `n` does.
+        if page.typing.is_none()
+            && let Some((Action::Capture, len)) = self.settings.keys.at(bytes)
+        {
+            page.typing = Some(backlog::Typing::add());
+            bytes = &bytes[len..];
+        }
         let todo = page.keys(bytes, &rows, &self.sessions, boot);
         for act in todo {
+            // An item that couldn't be added goes back in the prompt, not lost.
+            let retry = match &act {
+                backlog::Do::Add { kind, text } => Some(backlog::Typing::Add {
+                    kind: *kind,
+                    text: edit::LineEdit::new(text.clone()),
+                }),
+                _ => None,
+            };
             if let Err(e) = self.backlog_do(act).await {
                 self.say(format!("{e:#}"));
+                if let (Some(page), Some(retry)) = (&mut self.backlog, retry)
+                    && page.typing.is_none()
+                {
+                    page.typing = Some(retry);
+                }
             }
+        }
+        // A capture is done once its item is added or cancelled: back where it began.
+        if self
+            .backlog
+            .as_ref()
+            .is_some_and(|p| p.capture && p.typing.is_none())
+        {
+            self.backlog = None;
         }
         self.backlog_facts().await;
     }
@@ -2403,6 +2478,7 @@ impl App {
             .and_then(|panes| panes.into_iter().find(|p| p.0 == session))
             .map_or((0, 0), |(_, r)| (r.x, r.y));
         let focused = self.view.as_ref().is_some_and(|v| v.id == session);
+        let forced = self.paste_forced;
         let Some(view) = self.pane_mut(session) else {
             return Ok(false);
         };
@@ -2412,7 +2488,10 @@ impl App {
                 let before = (view.modes, view.shape);
                 view.apply(update);
                 if focused && before != (view.modes, view.shape) {
-                    write_modes(view.modes, Some(view.shape))?;
+                    // A backlog prompt keeps bracketed paste on (`sync_paste`).
+                    let mut modes = view.modes;
+                    modes.bracketed_paste |= forced;
+                    write_modes(modes, Some(view.shape))?;
                 }
                 mouse_changed = mouse::modes(before.0) != mouse::modes(view.modes);
             }
@@ -4474,6 +4553,7 @@ fn session_hints(map: &Keymap) -> Vec<(String, &'static str, Option<Action>)> {
             (Action::PrevTab, "prev"),
             (Action::Last, "last"),
             (Action::NewTab, "new"),
+            (Action::Capture, "capture"),
         ]
         .into_iter()
         .filter_map(hint),
@@ -4842,6 +4922,7 @@ enum HomeKey {
     Quit,
 }
 
+#[cfg(test)]
 fn home_keys(bytes: &[u8], map: &Keymap) -> Vec<HomeKey> {
     home_keys_at(bytes, map)
         .into_iter()
@@ -5789,6 +5870,235 @@ mod tests {
         assert_eq!(notice(&app).as_deref(), Some("nothing else needs you"));
         assert_eq!(app.view.as_ref().map(|v| v.id), Some(2));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Alt-a opens the backlog page typing a new bug, from a session, tab mode or
+    /// home; ↩ adds it and Esc or ^C cancels, and either goes back where it began.
+    /// Nothing after the ↩ in the same read runs as a page command, a pasted line
+    /// break is a space, and an item the daemon refused stays in the prompt.
+    #[tokio::test]
+    async fn capture_key_adds_an_item_and_goes_back() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, ItemKind, NewItem, Reply};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-capture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        // Windows' accept takes `&mut`.
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        // A daemon that adds items, refuses one titled "fail" and every change, and
+        // keeps what it was sent.
+        let seen: Arc<Mutex<Vec<ClientMsg>>> = Arc::default();
+        let kept = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                kept.lock().unwrap().push(msg.clone());
+                let refused = |req, message: &str| ServerMsg::Err {
+                    req,
+                    message: message.into(),
+                };
+                let answer = match msg {
+                    ClientMsg::AddItem { req, item: new } if new.body == "fail" => {
+                        refused(req, "the daemon said no")
+                    }
+                    ClientMsg::AddItem { req, item: new } => {
+                        let id = kept
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|m| matches!(m, ClientMsg::AddItem { item, .. } if item.body != "fail"))
+                            .count() as u32;
+                        let item = Item {
+                            id,
+                            title: new.body.clone(),
+                            body: String::new(),
+                            kind: new.kind,
+                            status: valkyrie_proto::ItemStatus::Open,
+                            project: None,
+                            attachments: Vec::new(),
+                            by: "human".into(),
+                            sessions: Vec::new(),
+                            boot: 0,
+                            taken: Vec::new(),
+                            branch: None,
+                            branch_taken: false,
+                            checkout: None,
+                            pr: None,
+                            notes: Vec::new(),
+                            created: 0,
+                            updated: 0,
+                        };
+                        let reply = Reply::Item {
+                            item: Box::new(item),
+                            note: None,
+                        };
+                        ServerMsg::Ok { req, reply }
+                    }
+                    ClientMsg::ChangeItem { req, .. } => refused(req, "no changes here"),
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = (1..=2).map(info).collect();
+        app.view = Some(Attached::new(2, "two".into(), None));
+        // An open item, selected when the page opens.
+        app.on_push(ServerMsg::Items {
+            items: vec![Item {
+                id: 9,
+                title: "Already here".into(),
+                body: String::new(),
+                kind: ItemKind::Bug,
+                status: valkyrie_proto::ItemStatus::Open,
+                project: Some("/r/app".into()),
+                attachments: Vec::new(),
+                by: "human".into(),
+                sessions: Vec::new(),
+                boot: 0,
+                taken: Vec::new(),
+                branch: None,
+                branch_taken: false,
+                checkout: None,
+                pr: None,
+                notes: Vec::new(),
+                created: 0,
+                updated: 1,
+            }],
+        })
+        .unwrap();
+        let typing = |app: &App| match &app.backlog {
+            Some(backlog::Page {
+                typing: Some(backlog::Typing::Add { kind, text }),
+                ..
+            }) => Some((*kind, text.text().to_string())),
+            _ => None,
+        };
+        let capturing = |app: &App| app.backlog.as_ref().is_some_and(|p| p.capture);
+        let notice = |app: &App| app.view.as_ref().unwrap().notice.clone().map(|n| n.0);
+        let added = |seen: &Arc<Mutex<Vec<ClientMsg>>>| -> Vec<NewItem> {
+            let seen = seen.lock().unwrap();
+            let added = seen.iter().filter_map(|m| match m {
+                ClientMsg::AddItem { item, .. } if item.body != "fail" => Some(item.clone()),
+                _ => None,
+            });
+            added.collect()
+        };
+        let changed = |seen: &Arc<Mutex<Vec<ClientMsg>>>| {
+            let seen = seen.lock().unwrap();
+            seen.iter()
+                .any(|m| matches!(m, ClientMsg::ChangeItem { .. }))
+        };
+
+        // A Mac's Option-a types `å`, a letter in its own right: no hint, and it
+        // goes to the program.
+        app.on_keys("å".as_bytes().to_vec()).await;
+        assert_eq!(notice(&app), None);
+        assert!(app.backlog.is_none());
+
+        // From a session: what follows Alt-a in the same read is the item's text.
+        app.on_keys(b"\x1batab eats".to_vec()).await;
+        assert!(capturing(&app));
+        assert_eq!(typing(&app), Some((ItemKind::Bug, "tab eats".into())));
+        // Keys after ↩ in the same read are dropped: `s` doesn't ship #9.
+        app.on_input(b" a letter\rs".to_vec()).await;
+        assert!(app.backlog.is_none(), "back to the session");
+        assert!(!changed(&seen), "nothing shipped");
+        assert_eq!(app.view.as_ref().map(|v| v.id), Some(2));
+        assert_eq!(notice(&app).as_deref(), Some("added #1 tab eats a letter"));
+        let first = added(&seen)[0].clone();
+        assert_eq!(
+            (first.kind, first.body.as_str()),
+            (ItemKind::Bug, "tab eats a letter")
+        );
+
+        // A bracketed paste across reads is one item, its line breaks spaces.
+        app.on_keys(b"\x1ba\x1b[200~error: boom\r\n".to_vec()).await;
+        app.on_input(b"  at main.rs:3\n\x1b[201~\r".to_vec()).await;
+        assert!(app.backlog.is_none());
+        assert_eq!(added(&seen)[1].body, "error: boom at main.rs:3");
+
+        // A paste's end marker split across reads is still seen.
+        app.on_keys(b"\x1ba\x1b[200~abc\x1b[20".to_vec()).await;
+        app.on_input(b"1~\r".to_vec()).await;
+        assert!(app.backlog.is_none());
+        assert_eq!(added(&seen)[2].body, "abc");
+        // A paste that never ends: Esc still cancels.
+        app.on_keys(b"\x1ba\x1b[200~lost\r".to_vec()).await;
+        assert_eq!(typing(&app), Some((ItemKind::Bug, "lost ".into())));
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.backlog.is_none());
+        assert_eq!(added(&seen).len(), 3);
+
+        // Esc and ^C cancel, back to the session, nothing added.
+        for cancel in [b"\x1b", b"\x03"] {
+            app.on_keys(b"\x1ba".to_vec()).await;
+            assert_eq!(typing(&app), Some((ItemKind::Bug, String::new())));
+            app.on_input(b"half a thought".to_vec()).await;
+            app.on_input(cancel.to_vec()).await;
+            assert!(app.backlog.is_none());
+            assert_eq!(app.view.as_ref().map(|v| v.id), Some(2));
+        }
+        assert_eq!(added(&seen).len(), 3);
+
+        // Refused: the prompt comes back as it was, the reason in the bar.
+        app.on_keys(b"\x1ba\tfail\r".to_vec()).await;
+        assert_eq!(typing(&app), Some((ItemKind::Feature, "fail".into())));
+        assert!(capturing(&app));
+        assert_eq!(notice(&app).as_deref(), Some("the daemon said no"));
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.backlog.is_none());
+
+        // From tab mode too, which it leaves; Tab cycles the kind.
+        app.tab_mode = true;
+        app.on_keys(b"\x1ba\t".to_vec()).await;
+        assert!(!app.tab_mode);
+        assert_eq!(typing(&app), Some((ItemKind::Feature, String::new())));
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.backlog.is_none());
+
+        // From home, in one read: the page closes and home stays.
+        app.view = None;
+        app.on_input(b"\x1baidea\r".to_vec()).await;
+        assert!(app.backlog.is_none());
+        assert_eq!(app.status, "added #4 idea");
+
+        // `n` on a page opened with `b` keeps the page open after adding, and so
+        // does Alt-a there.
+        app.on_input(b"bnx\r".to_vec()).await;
+        assert!(app.backlog.as_ref().is_some_and(|p| p.typing.is_none()));
+        app.on_input(b"\x1bay\r".to_vec()).await;
+        assert!(app.backlog.is_some() && !capturing(&app));
+        assert_eq!(added(&seen).len(), 6);
+        app.on_input(b"q".to_vec()).await;
+
+        // Unbound, Alt-a goes to the program.
+        app.settings.keys.bind(Action::Capture, None);
+        app.view = Some(Attached::new(2, "two".into(), None));
+        app.on_keys(b"\x1ba".to_vec()).await;
+        assert!(app.backlog.is_none());
+        let sent = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Input { session: 2, data } if data == b"\x1ba"))
+        };
+        for _ in 0..200 {
+            if sent() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sent(), "Alt-a reached the program");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `.` on the home screen opens the keys page. Enter waits for a key and maps
