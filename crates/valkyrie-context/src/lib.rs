@@ -734,6 +734,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&base);
             let repo = base.join("repo");
             std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
             let repo = std::fs::canonicalize(repo).unwrap();
             let store = Store::new(base.join("state/context"));
             Self { base, store, repo }

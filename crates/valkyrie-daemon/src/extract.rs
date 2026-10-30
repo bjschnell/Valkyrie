@@ -231,7 +231,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
     };
     // Outside a repository there's no project to learn for.
     let root = valkyrie_context::project::root(&info.cwd);
-    if !root.join(".git").exists() {
+    if !valkyrie_context::project::in_git(&root) {
         session.take_failures();
         return false;
     }
@@ -438,7 +438,7 @@ async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[St
         return false;
     };
     let root = valkyrie_context::project::root(&info.cwd);
-    if !root.join(".git").exists() {
+    if !valkyrie_context::project::in_git(&root) {
         return false;
     }
     let Ok(tail) = tokio::task::spawn_blocking(move || read_tail(&chat)).await else {

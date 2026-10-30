@@ -10,15 +10,13 @@ pub fn root(dir: &Path) -> PathBuf {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     for top in dir.ancestors() {
         let git = top.join(".git");
-        let Ok(meta) = std::fs::symlink_metadata(&git) else {
-            continue;
-        };
-        if meta.is_dir() {
-            return top.to_path_buf();
+        match dot_git(&git) {
+            Some(DotGit::Dir) => return top.to_path_buf(),
+            // A linked worktree's `.git` is a file naming its private git dir, whose
+            // `commondir` leads back to the main repository's `.git`.
+            Some(DotGit::File) => return main_worktree(&git).unwrap_or_else(|| top.to_path_buf()),
+            None => {}
         }
-        // A linked worktree's `.git` is a file naming its private git dir, whose
-        // `commondir` leads back to the main repository's `.git`.
-        return main_worktree(&git).unwrap_or_else(|| top.to_path_buf());
     }
     dir
 }
@@ -28,8 +26,36 @@ pub fn root(dir: &Path) -> PathBuf {
 pub fn checkout(dir: &Path) -> PathBuf {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     dir.ancestors()
-        .find(|top| std::fs::symlink_metadata(top.join(".git")).is_ok())
+        .find(|top| dot_git(&top.join(".git")).is_some())
         .map_or_else(|| dir.clone(), Path::to_path_buf)
+}
+
+/// Whether `dir` is in a git checkout.
+pub fn in_git(dir: &Path) -> bool {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    dir.ancestors()
+        .any(|top| dot_git(&top.join(".git")).is_some())
+}
+
+enum DotGit {
+    /// A repository's own git dir.
+    Dir,
+    /// A linked worktree's `gitdir:` pointer.
+    File,
+}
+
+/// What `git` (a `.git` path) is, if git would take it for one: a directory needs a
+/// `HEAD`, a file a `gitdir:` line. A stray empty `.git` (say `/tmp/.git`) would
+/// otherwise make every folder under it a project.
+fn dot_git(git: &Path) -> Option<DotGit> {
+    let meta = std::fs::metadata(git).ok()?;
+    if meta.is_dir() {
+        return git.join("HEAD").is_file().then_some(DotGit::Dir);
+    }
+    let text = std::fs::read_to_string(git).ok()?;
+    text.trim_start()
+        .starts_with("gitdir:")
+        .then_some(DotGit::File)
 }
 
 /// `HEAD` of the checkout at `dir`, short; `None` outside git.
@@ -101,9 +127,25 @@ mod tests {
     fn a_subdirectory_resolves_to_the_repo_root() {
         let repo = tmp("sub");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::create_dir_all(repo.join("src/deep")).unwrap();
         assert_eq!(root(&repo.join("src/deep")), repo);
+        assert!(in_git(&repo.join("src/deep")));
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn a_stray_empty_git_dir_is_not_a_repository() {
+        let base = tmp("stray");
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join("work")).unwrap();
+        let work = base.join("work");
+        if !base.ancestors().skip(1).any(in_git) {
+            assert_eq!(root(&work), work);
+            assert_eq!(checkout(&work), work);
+            assert!(!in_git(&work));
+        }
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -126,7 +168,7 @@ mod tests {
         let dir = tmp("plain");
         // A temp dir could sit inside a repo on some machines; only check the
         // fallback when it doesn't.
-        if !dir.ancestors().any(|d| d.join(".git").exists()) {
+        if !in_git(&dir) {
             assert_eq!(root(&dir), dir);
         }
         std::fs::remove_dir_all(dir).unwrap();

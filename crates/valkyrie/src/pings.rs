@@ -499,6 +499,7 @@ mod tests {
         let repo = dir.join("repo");
         let other = dir.join("other");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::create_dir_all(&other).unwrap();
         // A transcript for the Stop hook that carries no message.
         let transcript = dir.join("t.jsonl");
@@ -641,6 +642,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("valkyrie-pings-gone-{}", std::process::id()));
         let repo = dir.join("valk");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let ask = |cwd: &Path| {
             [
                 json!({"k": "hook", "t": 1, "agent": "claude",
