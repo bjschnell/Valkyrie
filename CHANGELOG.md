@@ -3,6 +3,46 @@
 Releases from 0.1.0 on follow [Semantic Versioning](https://semver.org) and are
 written by release-please from [Conventional Commits](docs/releasing.md).
 
+## [0.5.0](https://github.com/bjschnell/Valkyrie/compare/v0.4.0...v0.5.0) (2026-10-30)
+
+
+### Features
+
+* **backlog:** agents file, take and track their own work ([af3252b](https://github.com/bjschnell/Valkyrie/commit/af3252b5a8fff933618ee576152daad6db095782))
+* **backlog:** one session per item, and an open PR shows in review ([0b58a03](https://github.com/bjschnell/Valkyrie/commit/0b58a03f2e99d40edff1798949dfb0a9cccc0307))
+* **backlog:** one session per item, PR open shows review, agents track their own work ([9e0b350](https://github.com/bjschnell/Valkyrie/commit/9e0b3504e5d7889c96e84010efe4e26009511b54))
+* **backlog:** take an item from a session, ship every merged one at once ([1074773](https://github.com/bjschnell/Valkyrie/commit/1074773055be54d20330a5f9f785ff892a81308f))
+* **backlog:** take an item from a session, ship every merged one at once ([6eb328e](https://github.com/bjschnell/Valkyrie/commit/6eb328e25c8ec4a88ea6688795dccca1cc824608))
+* **tui:** Alt-a captures a backlog item from anywhere ([b43f946](https://github.com/bjschnell/Valkyrie/commit/b43f946499904a8e48d9c92f217b54979510cffc))
+* **tui:** Alt-a captures a backlog item from anywhere ([5e2e393](https://github.com/bjschnell/Valkyrie/commit/5e2e39381df807d88dfbc6bb1a6afd81c071d5a4))
+
+
+### Bug Fixes
+
+* **backlog:** a take never locks the user out of an item ([a232f5d](https://github.com/bjschnell/Valkyrie/commit/a232f5d2e410e09ab238c4c02e772b41f9691293))
+* **backlog:** after a web clash, move on only the clashing fields ([e39da1f](https://github.com/bjschnell/Valkyrie/commit/e39da1f89c2967e8b041f3aa549c92df1605363e))
+* **backlog:** an edit changes only the fields it gives ([cfd77f5](https://github.com/bjschnell/Valkyrie/commit/cfd77f5c2c0c21c5a1bf6f9cf8036d6fbbb09bb3))
+* **backlog:** an edit changes only the fields it gives ([03ddf1e](https://github.com/bjschnell/Valkyrie/commit/03ddf1ef05c1de7a09e756d94184f2b53ca268eb))
+* **backlog:** edit an item from the TUI and the CLI ([7c09780](https://github.com/bjschnell/Valkyrie/commit/7c097807e5bc70cf02359bc8f3c63cb0d10ee4d7))
+* **backlog:** edit an item from the TUI and the CLI ([9bd713c](https://github.com/bjschnell/Valkyrie/commit/9bd713c25d6985655ffc3e08f1dee9bc3c6a0560))
+* **backlog:** refuse a blank edit title; show e on done items ([a64ce79](https://github.com/bjschnell/Valkyrie/commit/a64ce796b76f064d3590cd1e467e4a3adc19a8f0))
+* **backlog:** send only changed fields from the TUI; let a web clash be saved over ([3d99c01](https://github.com/bjschnell/Valkyrie/commit/3d99c01daa5c787d4bc20b4c6ca1f30f57f78b43))
+* **backlog:** the user wins from the TUI and web, and reopening keeps the gate ([cca2dea](https://github.com/bjschnell/Valkyrie/commit/cca2dea2d474bdcd4bed172fc8ec204a4953c54e))
+* **context:** ignore a stray .git that git wouldn't take for a repository ([ccd8ffb](https://github.com/bjschnell/Valkyrie/commit/ccd8ffb5428290d93d4f9225c9bcd912ccb513b2))
+* **context:** ignore a stray .git that git wouldn't take for a repository ([fb6185e](https://github.com/bjschnell/Valkyrie/commit/fb6185e3e7e2db9fc0db9f24f38a4b32aa8b0db6))
+* **context:** skip non-file .git entries; leave a backlog item outside git without a project ([09a2c66](https://github.com/bjschnell/Valkyrie/commit/09a2c6661054dc382e0d52624a439f6480be4370))
+* **proto:** don't leave fetch_origin's detach unused on Windows ([de556f8](https://github.com/bjschnell/Valkyrie/commit/de556f8f983b48f8726d721a25c10f87e46fd0fe))
+* **tui:** cap a pasted name before Enter saves it; tidy prompt edge cases ([17cf218](https://github.com/bjschnell/Valkyrie/commit/17cf218ec3745abbf6fa22ab81b24bb8d1ccd340))
+* **tui:** move the cursor in the rename and backlog prompts; color a new item by kind ([f1db2a5](https://github.com/bjschnell/Valkyrie/commit/f1db2a5c9af590ca88f5dfa7d0bfb4dd5f103f9a))
+* **tui:** move the cursor in the rename and backlog prompts; color a new item by kind ([218f2f0](https://github.com/bjschnell/Valkyrie/commit/218f2f0c88a7dbc406e3b07ef082198aa19e3d54))
+* **upgrade:** clients follow the daemon's binary; valk upgrade names clients left behind ([bba8e6d](https://github.com/bjschnell/Valkyrie/commit/bba8e6d4652b19838ac5547111b8477c83672631))
+* **upgrade:** follow the daemon's binary and name clients left behind ([17ac8d0](https://github.com/bjschnell/Valkyrie/commit/17ac8d0bcf8dfa0db44708d44921631d4eb15147))
+* **upgrade:** name only the clients still waited on; treat pid 0 as gone ([85a8256](https://github.com/bjschnell/Valkyrie/commit/85a825684a33f511e3368290f070edb7b7028a15))
+* **upgrade:** trust a daemon's binary only from our own user ([93aab44](https://github.com/bjschnell/Valkyrie/commit/93aab444ec2bbf3e0c51c563fac707d8813163b0))
+* **worktree:** match squashes byte for byte, whitespace kept; ship deletes a squashed branch ([391fa1e](https://github.com/bjschnell/Valkyrie/commit/391fa1edfb1934bd160c9b941a27dee95c17a81d))
+* **worktree:** prune and ship find squash-merged branches ([7d0b10d](https://github.com/bjschnell/Valkyrie/commit/7d0b10dc107bb6ea2391bd4a7d6f6b6ebedf1e11))
+* **worktree:** prune finds squash-merged branches by patch id ([134a503](https://github.com/bjschnell/Valkyrie/commit/134a503de57e2efb4eb21ec4ca657e21187e62d9)), closes [#45](https://github.com/bjschnell/Valkyrie/issues/45)
+
 ## [0.4.0](https://github.com/bjschnell/Valkyrie/compare/v0.3.0...v0.4.0) (2026-10-29)
 
 
