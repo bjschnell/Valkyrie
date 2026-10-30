@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
-use valkyrie_proto::{SessionId, Size, SpawnSpec};
+use valkyrie_proto::{ConnectedClient, SessionId, Size, SpawnSpec};
 
 /// Set when `valk web` restarts itself as the upgraded binary.
 const WEB_RESTARTED: &str = "VALK_WEB_RESTARTED";
@@ -489,6 +489,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 init_logging();
                 // Now, while it names this binary: an upgrade renames a new one over it.
                 let exe = std::env::current_exe();
+                valkyrie_proto::binary_id();
                 // Set across the restart below. By then the process may have left the
                 // terminal (or agent) that started it, so whether to print a pairing
                 // code was decided at the first start: never again after.
@@ -505,11 +506,12 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     restarted,
                 })
                 .await;
-                // Upgraded: carry on as the new binary, which serves the new app.
+                // Upgraded: carry on as the daemon's binary (else this one's
+                // replacement), which serves the new app.
                 #[cfg(unix)]
                 if let Err(e) = &result
-                    && e.downcast_ref::<valkyrie_web::Upgraded>().is_some()
-                    && let Ok(exe) = exe
+                    && let Some(upgraded) = e.downcast_ref::<valkyrie_web::Upgraded>()
+                    && let Some(exe) = upgraded.daemon.follow(exe.ok())
                 {
                     use std::os::unix::process::CommandExt;
                     let failed = std::process::Command::new(&exe)
@@ -782,6 +784,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
     let before = client.hello_info().await.context(PREDATES)?;
     anyhow::ensure!(before.protocol >= 3, PREDATES);
     let sessions = client.list().await?.len();
+    let following = connected_clients(socket).await.map_or(0, |c| c.len());
     client.upgrade(exe.clone()).await?;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -808,6 +811,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
                     exe.display(),
                     now.protocol
                 );
+                left_behind(socket, following, now.protocol).await;
                 return Ok(());
             }
             #[cfg(unix)]
@@ -829,6 +833,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
                     "daemon now runs {} (protocol {protocol}, generation {after}); {kept}/{sessions} sessions kept",
                     exe.display()
                 );
+                left_behind(socket, following, protocol).await;
                 return Ok(());
             }
         }
@@ -837,6 +842,50 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
             "the daemon did not come back; see {}",
             valkyrie_proto::state_dir().join("daemon.log").display()
         );
+    }
+}
+
+/// The clients connected to the daemon that say which build they are (the TUI and
+/// `valk web`). On a connection of its own: a daemon from before `Clients` hangs up
+/// on it.
+async fn connected_clients(socket: &Path) -> Option<Vec<ConnectedClient>> {
+    let (client, _) = Client::connect(socket).await.ok()?;
+    client.clients().await.ok()
+}
+
+/// After an upgrade, waits for the `following` clients connected before it to come
+/// back on the daemon's build (a TUI within a second, `valk web` within a few), and
+/// names any still on another build or protocol: those didn't follow.
+async fn left_behind(socket: &Path, following: usize, protocol: u32) {
+    if following == 0 {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut clients = Vec::new();
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        clients = connected_clients(socket).await.unwrap_or_default();
+        if clients.iter().filter(|c| c.current).count() >= following {
+            return;
+        }
+    }
+    for ConnectedClient { client, .. } in clients.iter().filter(|c| !c.current) {
+        let who = match client.kind.as_str() {
+            "tui" => "a TUI",
+            "web" => "valk web",
+            other => other,
+        };
+        if client.protocol != protocol {
+            println!(
+                "{who} (pid {}) still speaks protocol {}; restart it",
+                client.pid, client.protocol
+            );
+        } else {
+            println!(
+                "{who} (pid {}) still runs another valk than the daemon; restart it",
+                client.pid
+            );
+        }
     }
 }
 

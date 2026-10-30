@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use valkyrie_proto::client::{Client, DaemonInfo};
-use valkyrie_proto::{AgentState, AskKind, Decision, QueueItem, ServerMsg, SessionId};
+use valkyrie_proto::{AgentState, AskKind, ClientBuild, Decision, QueueItem, ServerMsg, SessionId};
 
 /// How long without a keypress before you count as away.
 const AWAY_MS: u64 = 90_000;
@@ -265,12 +265,17 @@ async fn watch_daemon(
     daemon: &mut Option<DaemonInfo>,
 ) -> Result<()> {
     let (client, mut pushes) = Client::connect(&app.socket).await?;
-    let info = client.hello_info().await?;
+    let info = client.hello_as(ClientBuild::this("web")).await?;
     app.set_dev(info.dev);
-    if daemon
-        .replace(info)
-        .is_some_and(|before| info.upgraded_from(&before))
-    {
+    // Another protocol is only followed to the daemon's own binary: this one,
+    // unreplaced, would just fail to start against it.
+    let upgraded = daemon
+        .as_ref()
+        .is_some_and(|before| info.upgraded_from(before))
+        || (info.protocol != valkyrie_proto::PROTOCOL && info.follow(None).is_some());
+    *daemon = Some(info.clone());
+    if upgraded {
+        *app.upgraded_to.lock().unwrap() = Some(info);
         app.upgraded.notify_one();
     }
     client.watch_queue().await?;

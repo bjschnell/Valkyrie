@@ -42,9 +42,9 @@ use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, DaemonInfo, Pushes};
 use valkyrie_proto::{
-    AgentState, AgentStatus, Color, CursorShape, Decision, Item, ItemChange, Modes, NewItem, Pane,
-    QueueItem, ReviewAction, Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId, SessionInfo,
-    Side, Size, SpawnSpec, Style,
+    AgentState, AgentStatus, ClientBuild, Color, CursorShape, Decision, Item, ItemChange, Modes,
+    NewItem, Pane, QueueItem, ReviewAction, Row, ScreenUpdate, ScrollAnchor, ServerMsg, SessionId,
+    SessionInfo, Side, Size, SpawnSpec, Style,
 };
 
 /// Ctrl-] — detach from the attached session, whatever the keys page maps.
@@ -98,6 +98,7 @@ pub async fn run(
 ) -> Result<()> {
     // Now, while it names this binary: an upgrade renames a new one over it.
     let exe = std::env::current_exe();
+    valkyrie_proto::binary_id();
     // Raw mode, the alternate screen and ratatui's panic hook; then the same
     // terminal behind `Quiet`.
     drop(ratatui::try_init()?);
@@ -120,7 +121,7 @@ pub async fn run(
     #[cfg(unix)]
     if let Err(e) = &result
         && let Some(restart) = e.downcast_ref::<Restart>()
-        && let Ok(exe) = exe
+        && let Some(exe) = restart.daemon.follow(exe.ok())
     {
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(&exe);
@@ -137,26 +138,27 @@ pub async fn run(
     result
 }
 
-/// The daemon came back from an upgrade: `valk upgrade` replaced the binary this
-/// TUI was started from, and this one is out of date even when it still speaks the
-/// protocol. On Unix `run` then restarts the TUI as that binary, on the same session.
+/// The daemon came back from an upgrade, or speaks another protocol: this TUI is
+/// out of date even when it still speaks the protocol. On Unix `run` then restarts
+/// the TUI as the daemon's binary (else the one it was started from, which the
+/// upgrade replaced), on the same session.
 #[derive(Debug)]
 struct Restart {
-    /// The protocol the daemon now speaks.
-    protocol: u32,
+    /// What the daemon said when it came back.
+    daemon: DaemonInfo,
     #[cfg_attr(windows, allow(dead_code))]
     attach: Option<SessionId>,
 }
 
 impl std::fmt::Display for Restart {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if self.protocol == valkyrie_proto::PROTOCOL {
+        if self.daemon.protocol == valkyrie_proto::PROTOCOL {
             write!(f, "the daemon was upgraded; run the new valk")
         } else {
             write!(
                 f,
                 "the daemon now speaks protocol {}, this valk {}; run the new valk",
-                self.protocol,
+                self.daemon.protocol,
                 valkyrie_proto::PROTOCOL
             )
         }
@@ -394,7 +396,7 @@ impl App {
         // Only redraws, for the working spinner; runs while one is on screen.
         let mut anim = tokio::time::interval(SPIN_EVERY);
         anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        self.daemon = self.client.hello_info().await.ok();
+        self.daemon = self.client.hello_as(ClientBuild::this("tui")).await.ok();
         self.report_cell(None);
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
@@ -485,16 +487,16 @@ impl App {
             let Ok((client, pushes)) = Client::connect(&self.socket).await else {
                 continue;
             };
-            let info = match client.hello_info().await {
+            let info = match client.hello_as(ClientBuild::this("tui")).await {
                 Ok(info)
                     if info.protocol == valkyrie_proto::PROTOCOL
-                        && !self.daemon.is_some_and(|d| info.upgraded_from(&d)) =>
+                        && !self.daemon.as_ref().is_some_and(|d| info.upgraded_from(d)) =>
                 {
                     info
                 }
                 Ok(info) => {
                     return Err(Restart {
-                        protocol: info.protocol,
+                        daemon: info,
                         attach: self.view.as_ref().map(|v| v.id),
                     }
                     .into());
@@ -504,7 +506,7 @@ impl App {
             self.client = client;
             // Session ids start over in a restarted daemon: re-attaching by id could
             // land in an unrelated program.
-            let same = self.daemon.is_some_and(|d| d.boot == info.boot);
+            let same = self.daemon.as_ref().is_some_and(|d| d.boot == info.boot);
             if !same {
                 self.pinger.reset();
             }
@@ -2136,7 +2138,7 @@ impl App {
 
     /// The daemon's boot, to tell this daemon's sessions from a restarted one's.
     fn boot(&self) -> u64 {
-        self.daemon.map_or(0, |d| d.boot)
+        self.daemon.as_ref().map_or(0, |d| d.boot)
     }
 
     fn backlog_rows(&self) -> Vec<(backlog::Lane, Item)> {

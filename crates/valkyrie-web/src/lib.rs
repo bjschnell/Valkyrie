@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use valkyrie_proto::ClientMsg;
+use valkyrie_proto::client::DaemonInfo;
 use valkyrie_proto::codec::{read_frame, write_frame};
 
 /// The built app (`web/dist`, committed, so building `valk` needs no Node).
@@ -54,10 +55,14 @@ pub struct Options {
     pub restarted: bool,
 }
 
-/// `run` ends with this once the daemon has been upgraded: this server's binary
-/// was replaced, and with it the app it serves. The caller restarts as the new one.
+/// `run` ends with this once the daemon has been upgraded, or speaks another
+/// protocol: this server's binary is out of date, and with it the app it serves.
+/// The caller restarts as the daemon's binary (`DaemonInfo::follow`).
 #[derive(Debug)]
-pub struct Upgraded;
+pub struct Upgraded {
+    /// What the daemon said when it came back.
+    pub daemon: DaemonInfo,
+}
 
 impl std::fmt::Display for Upgraded {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -90,8 +95,10 @@ pub(crate) struct App {
     push: Option<push::Sender>,
     /// Connected web apps on screen right now.
     visible: AtomicUsize,
-    /// Told when the daemon comes back from an upgrade.
+    /// Told when the daemon comes back from an upgrade, with what it said in
+    /// `upgraded_to`.
     upgraded: tokio::sync::Notify,
+    upgraded_to: std::sync::Mutex<Option<DaemonInfo>>,
     /// The daemon said it is a development one (`Hello::dev`) on the connection the
     /// queue watch holds now; false until it says so, and as soon as that drops.
     dev: AtomicBool,
@@ -172,6 +179,7 @@ pub async fn run(opts: Options) -> Result<()> {
         push,
         visible: AtomicUsize::new(0),
         upgraded: tokio::sync::Notify::new(),
+        upgraded_to: std::sync::Mutex::default(),
         dev: AtomicBool::new(false),
     });
     tokio::spawn(notify::run(app.clone()));
@@ -193,7 +201,10 @@ pub async fn run(opts: Options) -> Result<()> {
         .with_state(app);
     tokio::select! {
         served = axum::serve(listener, router) => Ok(served?),
-        _ = watch.upgraded.notified() => Err(Upgraded.into()),
+        _ = watch.upgraded.notified() => {
+            let daemon = watch.upgraded_to.lock().unwrap().take();
+            Err(Upgraded { daemon: daemon.context("upgraded with no Hello")? }.into())
+        }
     }
 }
 
@@ -802,6 +813,7 @@ mod tests {
             push: None,
             visible: AtomicUsize::new(0),
             upgraded: tokio::sync::Notify::new(),
+            upgraded_to: std::sync::Mutex::default(),
             dev: AtomicBool::new(false),
         };
         assert!(

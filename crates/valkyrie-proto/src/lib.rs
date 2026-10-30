@@ -103,6 +103,62 @@ pub struct Worktree {
     pub ignored: Vec<String>,
 }
 
+/// A client that stays connected, as its `Hello` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientBuild {
+    /// `tui` or `web`.
+    pub kind: String,
+    pub pid: u32,
+    /// The protocol it speaks.
+    pub protocol: u32,
+    /// Its binary, from `binary_id`; `None` where that's unknown (Windows).
+    #[serde(default)]
+    pub binary: Option<(u64, u64)>,
+}
+
+impl ClientBuild {
+    /// This process, as a client of the given kind.
+    pub fn this(kind: &str) -> ClientBuild {
+        ClientBuild {
+            kind: kind.into(),
+            pid: std::process::id(),
+            protocol: PROTOCOL,
+            binary: binary_id(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectedClient {
+    pub client: ClientBuild,
+    /// It speaks the daemon's protocol and runs the daemon's binary (as far as
+    /// either side knows its binary).
+    pub current: bool,
+}
+
+/// This process's executable as (device, inode): two processes with the same one
+/// run the same build. Kept from the first call, so call it at startup: on macOS
+/// an upgrade renames a new binary over the path later. Linux asks for the running
+/// file itself. `None` on Windows.
+pub fn binary_id() -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        static ID: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+        *ID.get_or_init(|| {
+            let exe = if cfg!(target_os = "linux") {
+                PathBuf::from("/proc/self/exe")
+            } else {
+                std::env::current_exe().ok()?
+            };
+            let meta = std::fs::metadata(exe).ok()?;
+            Some((meta.dev(), meta.ino()))
+        })
+    }
+    #[cfg(windows)]
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: SessionId,
@@ -132,6 +188,15 @@ pub struct SessionInfo {
 pub enum ClientMsg {
     /// Version check. A daemon older than protocol 2 doesn't know it and hangs up.
     Hello {
+        req: ReqId,
+        /// Sent by the clients that stay connected (the TUI, `valk web`), so the
+        /// daemon can tell `valk upgrade` which ones run an older build.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<ClientBuild>,
+    },
+    /// The connected clients that said who they are in their `Hello`. Replies
+    /// `Clients`. A daemon from before it hangs up.
+    Clients {
         req: ReqId,
     },
     Spawn {
@@ -419,6 +484,14 @@ pub enum Reply {
         /// whose web server lets any browser in with the fixed `dev-token`.
         #[serde(default)]
         dev: bool,
+        /// The binary the daemon runs as: a client following an upgrade restarts as
+        /// this one, so it ends up on the daemon's build whichever valk it started
+        /// from. `None` from a daemon before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exe: Option<PathBuf>,
+    },
+    Clients {
+        clients: Vec<ConnectedClient>,
     },
     Session {
         info: SessionInfo,
