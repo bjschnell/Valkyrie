@@ -1039,6 +1039,7 @@ impl App {
                 break;
             };
             name.insert(&String::from_utf8_lossy(&std::mem::take(&mut typed)));
+            name.truncate(NAME_MAX);
             match key {
                 b"\r" | b"\n" => {
                     let (id, name) = (*id, name.text().trim().to_string());

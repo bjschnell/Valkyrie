@@ -224,6 +224,9 @@ impl Page {
                         text.key(k);
                     }
                 }
+                if self.typing.is_none() {
+                    self.partial.clear();
+                }
                 continue;
             }
             let here = rows.get(self.cursor).map(|(l, i)| (*l, i));

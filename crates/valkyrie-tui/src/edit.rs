@@ -85,6 +85,9 @@ impl LineEdit {
         let under = chars.next();
         let after = chars.as_str();
         let cursor = under.map_or(1, |c| c.width().unwrap_or(0).max(1));
+        if room < cursor + 1 {
+            return Vec::new();
+        }
         // What's before the cursor, from its end, as fits with the cursor.
         let mut shown = before;
         let mut cut = false;
