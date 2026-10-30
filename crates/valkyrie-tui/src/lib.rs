@@ -6,6 +6,7 @@
 
 mod backlog;
 mod clip;
+mod edit;
 mod keys;
 mod links;
 mod mouse;
@@ -221,7 +222,7 @@ struct App {
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
-    renaming: Option<(SessionId, String)>,
+    renaming: Option<(SessionId, edit::LineEdit)>,
     /// A tab's menu, opened with a right click or Alt-w.
     menu: Option<Menu>,
     /// The decisions to review, opened over a session with `d` in tab mode, its
@@ -927,7 +928,7 @@ impl App {
                             .iter()
                             .find(|s| s.id == view.id)
                             .map_or_else(|| view.name.clone(), |s| s.name.clone());
-                        self.renaming = Some((view.id, name));
+                        self.renaming = Some((view.id, edit::LineEdit::new(name)));
                         self.tab_mode = false;
                         // What follows `r` in the same read is the new name.
                         return Box::pin(self.rename_keys(keys)).await;
@@ -1022,12 +1023,10 @@ impl App {
     }
 
     /// Keys while a name is being typed: Enter saves (blank: back to the directory's
-    /// name), Esc cancels, Backspace and Ctrl-U erase.
+    /// name), Esc cancels, and the rest edit it (`LineEdit::key`).
     async fn rename_keys(&mut self, mut keys: &[u8]) {
         let mut typed = Vec::new();
-        while let Some((id, name)) = &mut self.renaming
-            && !keys.is_empty()
-        {
+        while self.renaming.is_some() && !keys.is_empty() {
             let key = next_key(keys);
             let whole = key.len() == keys.len();
             keys = &keys[key.len()..];
@@ -1035,10 +1034,15 @@ impl App {
                 typed.push(key[0]);
                 continue;
             }
-            name.push_str(&String::from_utf8_lossy(&std::mem::take(&mut typed)));
+            let tabs = self.is_tabs_key(key);
+            let Some((id, name)) = &mut self.renaming else {
+                break;
+            };
+            name.insert(&String::from_utf8_lossy(&std::mem::take(&mut typed)));
+            name.truncate(NAME_MAX);
             match key {
                 b"\r" | b"\n" => {
-                    let (id, name) = (*id, name.trim().to_string());
+                    let (id, name) = (*id, name.text().trim().to_string());
                     self.renaming = None;
                     let name = (!name.is_empty()).then_some(name);
                     if let Err(e) = self.client.rename(id, name).await {
@@ -1046,22 +1050,18 @@ impl App {
                     }
                     self.refresh().await;
                 }
-                [0x7f] | [0x08] => {
-                    name.pop();
-                }
-                [0x15] => name.clear(),
                 b"\x1b" if whole => self.renaming = None,
                 [0x03] => self.renaming = None,
-                k if self.is_tabs_key(k) => self.renaming = None,
-                _ => {}
+                _ if tabs => self.renaming = None,
+                k => {
+                    name.key(k);
+                }
             }
         }
         if let Some((_, name)) = &mut self.renaming {
-            name.push_str(&String::from_utf8_lossy(&typed));
+            name.insert(&String::from_utf8_lossy(&typed));
             // A name fits a tab.
-            while name.chars().count() > NAME_MAX {
-                name.pop();
-            }
+            name.truncate(NAME_MAX);
         }
     }
 
@@ -1361,7 +1361,7 @@ impl App {
             .iter()
             .find(|s| s.id == id)
             .map(|s| s.name.clone());
-        self.renaming = Some((id, name.unwrap_or_default()));
+        self.renaming = Some((id, edit::LineEdit::new(name.unwrap_or_default())));
     }
 
     /// Does what a menu item says. Closing a session that runs an agent asks first.
@@ -2102,7 +2102,7 @@ impl App {
                         .iter()
                         .find(|s| s.id == id)
                         .map(|s| s.name.clone());
-                    self.renaming = Some((id, name.unwrap_or_default()));
+                    self.renaming = Some((id, edit::LineEdit::new(name.unwrap_or_default())));
                 }
             }
             HomeKey::Quit => self.quit = true,
@@ -3353,12 +3353,12 @@ impl App {
                 String::new()
             };
             let top = match &self.renaming {
-                Some((id, typed)) if *id == s.id => Line::from(vec![
-                    mark.fg(t.accent).bold(),
-                    "✎ ".fg(t.accent),
-                    fit(typed, width.saturating_sub(4)).fg(t.fg),
-                    "▏".fg(t.accent),
-                ]),
+                Some((id, typed)) if *id == s.id => Line::from(
+                    [mark.fg(t.accent).bold(), "✎ ".fg(t.accent)]
+                        .into_iter()
+                        .chain(typed.spans(width.saturating_sub(3), t))
+                        .collect::<Vec<_>>(),
+                ),
                 _ => {
                     let name_color = if queued { color } else { t.fg };
                     let icon = if minimal {
@@ -3572,11 +3572,11 @@ impl App {
                 String::new()
             };
             let top = match &self.renaming {
-                Some((id, typed)) if *id == s.id => Line::from(vec![
-                    " ✎ ".fg(t.accent),
-                    fit(typed, width.saturating_sub(4)).fg(t.fg),
-                    "▏".fg(t.accent),
-                ]),
+                Some((id, typed)) if *id == s.id => Line::from(
+                    std::iter::once(" ✎ ".fg(t.accent))
+                        .chain(typed.spans(width.saturating_sub(3), t))
+                        .collect::<Vec<_>>(),
+                ),
                 _ => {
                     let icon = if minimal {
                         format!("{} ", state_icon(state, spin))
@@ -4178,12 +4178,12 @@ fn header_line(
 }
 
 /// The home screen's rename prompt.
-fn rename_line(id: SessionId, typed: &str, t: &Theme) -> Line<'static> {
+fn rename_line(id: SessionId, typed: &edit::LineEdit, t: &Theme) -> Line<'static> {
     let mut spans = vec![
         format!(" rename #{id} ").fg(t.bg).bg(t.accent).bold(),
-        format!(" {typed}").fg(t.fg),
-        "▏".fg(t.accent),
+        " ".into(),
     ];
+    spans.extend(typed.spans(NAME_MAX + 1, t));
     for (key, what) in [("↩", "save"), ("esc", "cancel"), ("blank", "folder name")] {
         spans.push(" ".into());
         spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
@@ -5551,14 +5551,19 @@ mod tests {
 
         // r renames the attached tab; typing edits, Esc cancels.
         app.on_keys(vec![TABS_KEY, b'r']).await;
-        assert_eq!(app.renaming, Some((2, "proj2".into())));
+        assert_eq!(renaming(&app), Some((2, "proj2".into())));
         app.on_keys(b"\x7f\x7f\x7f\x7f\x7fapi \xc3\xa9".to_vec())
             .await;
-        assert_eq!(app.renaming, Some((2, "api é".into())));
+        assert_eq!(renaming(&app), Some((2, "api é".into())));
         let lines = draw(&app, &mut terminal);
         assert!(lines[0].contains("✎ api é▏"), "{}", lines[0]);
+        // The cursor moves: ← twice, then typing goes in before the é.
+        app.on_keys(b"\x1b[D\x1b[Dx\x1b[F!".to_vec()).await;
+        assert_eq!(renaming(&app), Some((2, "apix é!".into())));
+        app.on_keys(b"\x1b[H\x1b[3~\x1b[F".to_vec()).await;
+        assert_eq!(renaming(&app), Some((2, "pix é!".into())));
         app.on_keys(b"\x15".to_vec()).await;
-        assert_eq!(app.renaming, Some((2, String::new())));
+        assert_eq!(renaming(&app), Some((2, String::new())));
         app.on_keys(b"\x1b".to_vec()).await;
         assert_eq!(app.renaming, None);
         // A right click on a tab starts the same prompt.
@@ -5575,7 +5580,7 @@ mod tests {
         app.on_mouse(Mouse::at(MouseKind::Press, rect.x + 3, rect.y + 1))
             .await;
         assert_eq!(app.menu, None);
-        assert_eq!(app.renaming, Some((3, "proj3".into())));
+        assert_eq!(renaming(&app), Some((3, "proj3".into())));
         app.on_keys(b"\x1b".to_vec()).await;
         // Close on an agent's tab asks first; Esc keeps the session.
         app.tab_click(tabs, right).await;
@@ -5606,7 +5611,7 @@ mod tests {
         app.tab_click(tabs, left).await;
         assert_eq!(app.renaming, None);
         app.tab_click(tabs, left).await;
-        assert_eq!(app.renaming, Some((2, "proj2".into())));
+        assert_eq!(renaming(&app), Some((2, "proj2".into())));
         app.on_keys(b"\x1b".to_vec()).await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -5842,6 +5847,13 @@ mod tests {
         app.on_input(b"\x1b".to_vec()).await;
         assert_eq!(app.keys_page, None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The tab being renamed, and its name so far.
+    fn renaming(app: &App) -> Option<(SessionId, String)> {
+        app.renaming
+            .as_ref()
+            .map(|(id, name)| (*id, name.text().to_owned()))
     }
 
     fn draw_menu_lines(app: &App) -> Vec<String> {

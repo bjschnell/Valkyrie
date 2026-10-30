@@ -2,6 +2,7 @@
 //! session. The same lanes as the web board, as one list, since four columns don't
 //! fit a terminal; the selected item's detail beside or below it.
 
+use crate::edit::LineEdit;
 use crate::theme::Theme;
 use crate::{fit, next_key};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -124,9 +125,9 @@ const DONE_SHOWN: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Typing {
     /// A new item: Tab cycles its kind.
-    Add { kind: ItemKind, text: String },
+    Add { kind: ItemKind, text: LineEdit },
     /// A handoff note on item `id`.
-    Note { id: u32, text: String },
+    Note { id: u32, text: LineEdit },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -191,21 +192,21 @@ impl Page {
                     typed.push(key[0]);
                     continue;
                 }
-                text.push_str(&decode(&mut self.partial, &std::mem::take(&mut typed)));
+                text.insert(&decode(&mut self.partial, &std::mem::take(&mut typed)));
                 match key {
                     b"\r" | b"\n" => {
                         let typing = self.typing.take().unwrap();
                         match typing {
-                            Typing::Add { kind, text } if !text.trim().is_empty() => {
+                            Typing::Add { kind, text } if !text.text().trim().is_empty() => {
                                 out.push(Do::Add {
                                     kind,
-                                    text: text.trim().into(),
+                                    text: text.text().trim().into(),
                                 });
                             }
-                            Typing::Note { id, text } if !text.trim().is_empty() => {
+                            Typing::Note { id, text } if !text.text().trim().is_empty() => {
                                 out.push(Do::Note {
                                     id,
-                                    text: text.trim().into(),
+                                    text: text.text().trim().into(),
                                 });
                             }
                             _ => {}
@@ -217,13 +218,14 @@ impl Page {
                             *kind = ItemKind::ALL[(at + 1) % ItemKind::ALL.len()];
                         }
                     }
-                    [0x7f] | [0x08] => {
-                        text.pop();
-                    }
-                    [0x15] => text.clear(),
                     b"\x1b" if whole => self.typing = None,
                     [0x03] => self.typing = None,
-                    _ => {}
+                    k => {
+                        text.key(k);
+                    }
+                }
+                if self.typing.is_none() {
+                    self.partial.clear();
                 }
                 continue;
             }
@@ -241,7 +243,7 @@ impl Page {
                 b"n" => {
                     self.typing = Some(Typing::Add {
                         kind: ItemKind::Bug,
-                        text: String::new(),
+                        text: LineEdit::default(),
                     })
                 }
                 b"q" | b"b" | [0x03] => out.push(Do::Close),
@@ -255,7 +257,7 @@ impl Page {
             }
         }
         if let Some(Typing::Add { text, .. } | Typing::Note { text, .. }) = &mut self.typing {
-            text.push_str(&decode(&mut self.partial, &typed));
+            text.insert(&decode(&mut self.partial, &typed));
         }
         out
     }
@@ -294,7 +296,7 @@ impl Page {
             b"N" => {
                 self.typing = Some(Typing::Note {
                     id,
-                    text: String::new(),
+                    text: LineEdit::default(),
                 });
                 return Vec::new();
             }
@@ -431,7 +433,7 @@ impl Page {
         }
         if let Some(typing) = &self.typing {
             lines.push(Line::default());
-            lines.push(typing_line(typing, t));
+            lines.push(typing_line(typing, list.width as usize, t));
             cursor_line = lines.len() - 1;
         }
         let room = list.height.max(1) as usize;
@@ -507,16 +509,20 @@ pub(crate) fn home_line(item: &Item, lane: Lane, width: usize, t: &Theme) -> Lin
     ])
 }
 
-fn typing_line(typing: &Typing, t: &Theme) -> Line<'static> {
-    let (label, text) = match typing {
-        Typing::Add { kind, text } => (format!(" new {} ", kind.as_str()), text),
-        Typing::Note { id, text } => (format!(" note on #{id} "), text),
+fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
+    // A new item's label takes its kind's color, as the list shows it.
+    let (label, color, text) = match typing {
+        Typing::Add { kind, text } => (
+            format!(" new {} ", kind.as_str()),
+            kind_color(*kind, t),
+            text,
+        ),
+        Typing::Note { id, text } => (format!(" note on #{id} "), t.accent, text),
     };
-    Line::from(vec![
-        label.fg(t.bg).bg(t.accent).bold(),
-        format!(" {text}").fg(t.fg),
-        "▏".fg(t.accent),
-    ])
+    let room = width.saturating_sub(label.chars().count() + 1);
+    let mut spans = vec![label.fg(t.bg).bg(color).bold(), " ".into()];
+    spans.extend(text.spans(room, t));
+    Line::from(spans)
 }
 
 /// The selected item in full: its state, body, facts and notes.
@@ -758,5 +764,33 @@ mod tests {
             }]
         );
         assert_eq!(page.typing, None);
+
+        // The cursor moves: a word typed back at the start, and Delete there.
+        assert!(press(&mut page, b"nbug\x1b[Hold \x1b[3~").is_empty());
+        assert_eq!(
+            press(&mut page, b"\r"),
+            [Do::Add {
+                kind: ItemKind::Bug,
+                text: "old ug".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_new_item_label_takes_its_kinds_color() {
+        let t = crate::theme::DRACULA;
+        let label = |kind| {
+            let typing = Typing::Add {
+                kind,
+                text: LineEdit::default(),
+            };
+            typing_line(&typing, 40, &t).spans[0].style.bg
+        };
+        assert_eq!(label(ItemKind::Bug), Some(kind_color(ItemKind::Bug, &t)));
+        assert_eq!(
+            label(ItemKind::Feature),
+            Some(kind_color(ItemKind::Feature, &t))
+        );
+        assert_ne!(label(ItemKind::Bug), label(ItemKind::Feature));
     }
 }
