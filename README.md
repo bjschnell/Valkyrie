@@ -214,6 +214,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
 | | `Alt-n` | each session that needs you, then back where you started |
 | | `Alt-t` · `Alt-w` · `Alt-o` | new shell tab · close tab · next pane |
+| | `Alt-a` | add a bug or idea into the backlog (`↩` adds, `Esc` cancels), then back where you were |
 | Attached | `^\` | actions (below) |
 | | `^]` | back home |
 | Actions | `s` / `v` · `p` | split below / beside · the pane's menu |
@@ -365,7 +366,8 @@ Every worktree of a repo shares its decisions, which are kept in
 ### Backlog
 
 Write a bug or an idea down when it comes up, on your phone or in a terminal, and
-start an agent on it later with one tap.
+start an agent on it later with one tap. In the TUI, `Alt-a` writes one down from
+anywhere, a session included, and takes you back.
 
 ```sh
 valk todo add -k bug -f shot.png "Tab rename eats the last letter"

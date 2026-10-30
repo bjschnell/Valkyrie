@@ -26,12 +26,14 @@ pub enum Action {
     Close,
     /// The next pane of a split tab.
     Pane,
+    /// The backlog page, straight into a new item, then back where you were.
+    Capture,
     /// The tab at this place, from 0.
     Tab(u8),
 }
 
 impl Action {
-    pub const ALL: [Action; 18] = [
+    pub const ALL: [Action; 19] = [
         Action::Tabs,
         Action::Home,
         Action::NewTab,
@@ -41,6 +43,7 @@ impl Action {
         Action::Needing,
         Action::Close,
         Action::Pane,
+        Action::Capture,
         Action::Tab(0),
         Action::Tab(1),
         Action::Tab(2),
@@ -68,6 +71,7 @@ impl Action {
             Action::Needing => "needs_you".into(),
             Action::Close => "close_tab".into(),
             Action::Pane => "next_pane".into(),
+            Action::Capture => "capture".into(),
             Action::Tab(i) => format!("tab_{}", i + 1),
         }
     }
@@ -84,6 +88,7 @@ impl Action {
             Action::Needing => "Next needing you".into(),
             Action::Close => "Close tab".into(),
             Action::Pane => "Next pane".into(),
+            Action::Capture => "Add to backlog".into(),
             Action::Tab(i) => format!("Tab {}", i + 1),
         }
     }
@@ -99,6 +104,7 @@ impl Action {
             Action::Needing => Key::Alt(b'n'),
             Action::Close => Key::Alt(b'w'),
             Action::Pane => Key::Alt(b'o'),
+            Action::Capture => Key::Alt(b'a'),
             Action::Tab(i) => Key::Alt(b'1' + i),
         })
     }

@@ -141,6 +141,16 @@ pub(crate) enum Typing {
     },
 }
 
+impl Typing {
+    /// A new item, a bug until Tab says otherwise (`n`, and the capture key).
+    pub(crate) fn add() -> Typing {
+        Typing::Add {
+            kind: ItemKind::Bug,
+            text: LineEdit::default(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Page {
     pub(crate) cursor: usize,
@@ -151,6 +161,15 @@ pub(crate) struct Page {
     pub(crate) ship_armed: Option<Vec<u32>>,
     /// The selected item's facts, for `(id, updated)`, read when the cursor lands.
     pub(crate) facts: Option<(u32, u64, Option<ItemFacts>)>,
+    /// Opened by the capture key straight into a new item: the page closes once
+    /// it's added or cancelled.
+    pub(crate) capture: bool,
+    /// Inside a bracketed paste while typing; `true` right after a line break, so
+    /// a run of them, and the indent after, becomes one space.
+    paste: Option<bool>,
+    /// An escape sequence a read cut off while typing, joined to the next read so
+    /// a paste's end marker split in two is still seen.
+    held: Vec<u8>,
     /// The start of a character a read cut off, while typing.
     partial: Vec<u8>,
 }
@@ -205,13 +224,15 @@ impl Page {
     /// Handles `keys` against `rows` (from `rows`), returning what to do, in order.
     pub(crate) fn keys(
         &mut self,
-        mut keys: &[u8],
+        keys: &[u8],
         rows: &[(Lane, Item)],
         sessions: &[SessionInfo],
         boot: u64,
     ) -> Vec<Do> {
         let mut out = Vec::new();
         let mut typed = Vec::new();
+        let joined = [std::mem::take(&mut self.held).as_slice(), keys].concat();
+        let mut keys: &[u8] = &joined;
         while !keys.is_empty() {
             let key = next_key(keys);
             let whole = key.len() == keys.len();
@@ -226,6 +247,42 @@ impl Page {
                     | Typing::Note { text, .. }
                     | Typing::Edit { text, .. } => text,
                 };
+                // A CSI sequence the read cut off waits for the rest.
+                let cut = key.len() == 2 || !(0x40..=0x7e).contains(&key[key.len() - 1]);
+                if whole && key.starts_with(b"\x1b[") && cut {
+                    self.held = key.to_vec();
+                    break;
+                }
+                // Esc or ^C on its own ends a paste whose end marker never came, and
+                // then does what it always does: the prompt can't trap you.
+                if (whole && key == b"\x1b") || key == [0x03] {
+                    self.paste = None;
+                }
+                // A paste is text, its line breaks spaces: a pasted error doesn't end
+                // the prompt and run its other lines as keys.
+                if let Some(after_break) = &mut self.paste {
+                    match key {
+                        b"\x1b[201~" => self.paste = None,
+                        b"\r" | b"\n" | b"\t" => {
+                            if !*after_break {
+                                typed.push(b' ');
+                            }
+                            *after_break = true;
+                        }
+                        // The next line's indent goes into that one space too.
+                        b" " if *after_break => {}
+                        [b] if *b >= 0x20 && *b != 0x7f => {
+                            typed.push(*b);
+                            *after_break = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if key == b"\x1b[200~" {
+                    self.paste = Some(false);
+                    continue;
+                }
                 if key.len() == 1 && key[0] >= 0x20 && key[0] != 0x7f {
                     typed.push(key[0]);
                     continue;
@@ -277,6 +334,12 @@ impl Page {
                 }
                 if self.typing.is_none() {
                     self.partial.clear();
+                    self.paste = None;
+                    self.held.clear();
+                    // A capture is over: the rest of the read is no command.
+                    if self.capture {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -291,12 +354,7 @@ impl Page {
                 }
                 b"g" => self.cursor = 0,
                 b"G" => self.cursor = rows.len().saturating_sub(1),
-                b"n" => {
-                    self.typing = Some(Typing::Add {
-                        kind: ItemKind::Bug,
-                        text: LineEdit::default(),
-                    })
-                }
+                b"n" => self.typing = Some(Typing::add()),
                 b"S" => out.push(match self.ship_armed.take() {
                     Some(ids) => Do::ShipMerged(ids),
                     None => Do::CheckMerged,
