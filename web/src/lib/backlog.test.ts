@@ -117,9 +117,11 @@ describe("editChange", () => {
 
   it("refuses a field changed both here and elsewhere", () => {
     const now = { ...was, body: "rewritten on the phone" };
-    expect(editChange(was, now, { ...mine, body: "mine" })).toMatch(/body changed elsewhere/);
+    const clash = editChange(was, now, { ...mine, body: "mine" });
+    expect(clash).toMatchObject({ clash: expect.stringMatching(/body changed elsewhere/) });
     // Saving again, from what's there now, replaces it.
-    expect(editChange(now, now, { ...mine, body: "mine" })).toEqual({ do: "edit", body: "mine" });
+    const seen = (clash as { was: Item }).was;
+    expect(editChange(seen, now, { ...mine, body: "mine" })).toEqual({ do: "edit", body: "mine" });
     // Whitespace the daemon trims away is no change, and no clash.
     expect(editChange(was, was, { ...mine, body: "detail\n" })).toBeNull();
     expect(editChange(was, now, { ...mine, body: "rewritten on the phone " })).toEqual({
@@ -131,5 +133,14 @@ describe("editChange", () => {
       do: "edit",
       body: "rewritten on the phone",
     });
+  });
+
+  it("after a clash, still leaves alone what changed elsewhere and not here", () => {
+    const now = { ...was, title: "A2", body: "B2" };
+    const first = editChange(was, now, { ...mine, body: "B3" });
+    expect(first).toMatchObject({ clash: expect.stringMatching(/'s body changed/) });
+    const seen = (first as { was: Item }).was;
+    expect(seen.title).toBe("old");
+    expect(editChange(seen, now, { ...mine, body: "B3" })).toEqual({ do: "edit", body: "B3" });
   });
 });
