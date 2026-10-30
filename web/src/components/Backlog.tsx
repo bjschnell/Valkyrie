@@ -247,6 +247,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
             {live.name} · {live.status.state.replace("_", " ")}
           </div>
         )}
+        {lane === "review" && pr && <div className="item-live">PR open</div>}
         {!expanded && lane === "review" && latest && (
           <p className="item-handoff" onClick={() => setExpanded(true)}>
             <span className="item-handoff-by">

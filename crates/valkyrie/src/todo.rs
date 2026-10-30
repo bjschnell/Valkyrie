@@ -4,7 +4,9 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use std::path::PathBuf;
 use valkyrie_proto::client::Client;
-use valkyrie_proto::{Item, ItemChange, ItemKind, ItemStatus, NewItem, SessionInfo, Size};
+use valkyrie_proto::{
+    AgentState, Item, ItemChange, ItemKind, ItemStatus, NewItem, SessionInfo, Size,
+};
 
 #[derive(Subcommand)]
 pub enum TodoCmd {
@@ -95,6 +97,9 @@ pub enum TodoCmd {
         /// The pull request's https:// URL.
         #[arg(long, value_name = "URL")]
         pr: Option<String>,
+        /// Take it from the session already on it (yours to do, not an agent's).
+        #[arg(long)]
+        steal: bool,
     },
     /// Mark it done. Takes away the worktree its launch made, unless it has changes,
     /// and the branch, if it's merged.
@@ -304,8 +309,13 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             println!("{}", info.id);
             Ok(None)
         }
-        TodoCmd::Take { id, branch, pr } => {
-            let item = client.take_item(id, branch, pr).await?;
+        TodoCmd::Take {
+            id,
+            branch,
+            pr,
+            steal,
+        } => {
+            let item = client.take_item(id, branch, pr, steal).await?;
             let mut has = Vec::new();
             if let Some(b) = &item.branch {
                 has.push(format!("branch {b}"));
@@ -414,7 +424,9 @@ fn facts(f: &valkyrie_proto::ItemFacts) -> String {
     format!("{}: {}", f.branch, parts.join(", "))
 }
 
-/// Where an open item is: not started, or what its newest live session is doing.
+/// Where an open item is: not started, or what its newest live session is doing;
+/// with a pull request open, waiting on review unless that session needs you (a
+/// session holding several items would otherwise show them all at work).
 fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
     if item.status != ItemStatus::Open {
         return item.status.as_str().into();
@@ -427,7 +439,11 @@ fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
                 .find_map(|id| sessions.iter().find(|s| s.id == *id && s.exited.is_none()))
         })
         .flatten();
+    let needs =
+        |s: &SessionInfo| matches!(s.status.state, AgentState::NeedsInput | AgentState::Blocked);
     match live {
+        Some(s) if needs(s) => s.status.state.label().into(),
+        _ if item.pr.is_some() => "PR open".into(),
         Some(s) => s.status.state.label().into(),
         None if item.checkout.is_some() || !item.sessions.is_empty() => "to review".into(),
         None => "backlog".into(),
@@ -445,5 +461,38 @@ fn short(s: &str, n: usize) -> String {
     match s.chars().count() > n {
         true => format!("{}…", s.chars().take(n - 1).collect::<String>()),
         false => s.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pull_request_open_waits_on_review_unless_its_session_needs_you() {
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "id": 1, "title": "x", "kind": "bug", "status": "open", "by": "human",
+            "sessions": [4], "boot": 7, "pr": "https://github.com/o/r/pull/7",
+            "created": 0, "updated": 0,
+        }))
+        .unwrap();
+        let session = |state| {
+            let mut s: SessionInfo = serde_json::from_value(serde_json::json!({
+                "id": 4, "name": "", "command": [], "cwd": "/", "pid": null,
+                "created_unix": 0, "title": null, "clients": 0, "exited": null,
+            }))
+            .unwrap();
+            s.status.state = state;
+            s
+        };
+        let lane_with = |state| lane(&item, &[session(state)], 7);
+        assert_eq!(lane_with(AgentState::Working), "PR open");
+        assert_eq!(lane_with(AgentState::NeedsInput), "needs input");
+        assert_eq!(lane(&item, &[], 7), "PR open");
+        let plain = Item {
+            pr: None,
+            ..item.clone()
+        };
+        assert_eq!(lane(&plain, &[session(AgentState::Working)], 7), "working");
     }
 }

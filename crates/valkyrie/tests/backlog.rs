@@ -99,6 +99,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
              valk todo take 4 -b fix/3-clients > {r4}.tmp 2>&1; mv {r4}.tmp {r4}\n\
              valk todo take 1 -b fix/3-clients > {r1}.tmp 2>&1; mv {r1}.tmp {r1}\n\
              valk todo note -i 3 'merged upstream' > {tn}.tmp 2>&1; mv {tn}.tmp {tn}\n\
+             valk todo take 5 > {h5}.tmp 2>&1; mv {h5}.tmp {h5}\n\
+             valk todo take 5 --steal > {s5}.tmp 2>&1; mv {s5}.tmp {s5}\n\
              valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
              valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
@@ -114,6 +116,8 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             sm = o("agent-ship-merged"),
             r4 = o("retake4"),
             r1 = o("retake1"),
+            h5 = o("held5"),
+            s5 = o("agent-steal5"),
             pr = PR,
         ),
     )
@@ -188,6 +192,32 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         wait_for(&out.join("human-take")).contains("from inside a valk session"),
         "outside every session there's nothing to follow"
     );
+    // One session at a time on an item: the user's own, here, holds #5.
+    human("valk todo add 'Held elsewhere'", "add5");
+    wait_for(&out.join("add5"));
+    let in_session = |script: &str, name: &str| {
+        let cmd = format!("valk new --name {name} -- sh -c '{script}; exec sleep 60'");
+        human(&cmd, name);
+        let id = wait_for(&out.join(name));
+        assert!(id.trim().parse::<u32>().is_ok(), "{id}");
+        id.trim().to_owned()
+    };
+    let holder = in_session(
+        &format!(
+            "valk todo take 5 > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            o = o("take5")
+        ),
+        "hold5",
+    );
+    assert!(wait_for(&out.join("take5")).contains("#5 Held elsewhere taken"));
+    human("valk todo launch 5", "launch5");
+    let refused = wait_for(&out.join("launch5"));
+    assert!(
+        refused.contains(&format!(
+            "#5 is already being worked on in session {holder} (sh, \"hold5\")"
+        )),
+        "{refused}"
+    );
     human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -221,6 +251,9 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         std::thread::sleep(Duration::from_millis(200));
     };
     assert!(list.contains("#1") && list.contains("to review"), "{list}");
+    // A pull request open waits on review, whatever its session does.
+    let three = list.lines().find(|l| l.starts_with("#3 ")).unwrap_or("");
+    assert!(three.contains("PR open"), "{list}");
 
     // The agent's handoff landed on its own item, and only there.
     assert_eq!(
@@ -262,6 +295,47 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     assert!(refused.contains("only the user changes that"), "{refused}");
     let refused = wait_for(&out.join("retake1"));
     assert!(refused.contains("its launch's branch"), "{refused}");
+    // Nor take #5 from the session on it, which only the user may.
+    let refused = wait_for(&out.join("held5"));
+    assert!(
+        refused.contains(&format!(
+            "#5 is already being worked on in session {holder}"
+        )) && refused.contains("stop it first or take it with --steal"),
+        "{refused}"
+    );
+    let refused = wait_for(&out.join("agent-steal5"));
+    assert!(refused.contains("is for the user"), "{refused}");
+    // The user, in another session, is refused too, then hands it over with --steal.
+    let take = |name: &str, steal: &str| {
+        format!(
+            "valk todo take 5{steal} > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            o = o(name)
+        )
+    };
+    let stealer = in_session(
+        &format!(
+            "{}; {}",
+            take("take5-again", ""),
+            take("steal5", " --steal")
+        ),
+        "steal5-tab",
+    );
+    let refused = wait_for(&out.join("take5-again"));
+    assert!(refused.contains("--steal"), "{refused}");
+    assert!(wait_for(&out.join("steal5")).contains("#5 Held elsewhere taken"));
+    human("valk todo list --json", "list-json");
+    let items: serde_json::Value = serde_json::from_str(&wait_for(&out.join("list-json"))).unwrap();
+    let five = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == 5)
+        .unwrap();
+    assert_eq!(
+        five["sessions"],
+        serde_json::json!([stealer.parse::<u32>().unwrap()])
+    );
+
     human("valk todo show 3", "show3");
     let show = wait_for(&out.join("show3"));
     assert!(show.contains(&format!("\npr: {PR}\n")), "{show}");

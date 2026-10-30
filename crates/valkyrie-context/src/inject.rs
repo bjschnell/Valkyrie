@@ -26,7 +26,8 @@ fn how_to_propose(valk: &str) -> String {
          <bug|feature|chore> \"<title>\" --body \"<what, and how to reproduce it>\"`. It waits for \
          the user to accept it. Working on an accepted item outside a launch, run `{valk} todo \
          take N --branch <branch>` as you start, `{valk} todo take N --pr <url>` once the pull \
-         request is open, and leave a `{valk} todo note -i N`; shipping it is the user's."
+         request is open, and leave a `{valk} todo note -i N`; shipping it is the user's. A take \
+         is refused while another session is on the item: leave that one to it."
     )
 }
 

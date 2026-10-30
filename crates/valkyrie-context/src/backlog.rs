@@ -254,7 +254,9 @@ impl Backlog {
     /// Records `session` taking item `id`, as `launched` does but with no checkout
     /// of its own: it may be working in the main one, which shipping must never
     /// take away. A session already on it isn't listed twice. Sets the branch and
-    /// pull request when given, and the repository when it has none yet. Whether
+    /// pull request when given, and the repository when it has none yet. Taken
+    /// `from` other sessions (the user's steal), it's no longer theirs: they leave
+    /// its sessions, and `session` is its newest, so the lane follows it. Whether
     /// the item may be taken, and the branch's name, are the daemon's to check.
     #[allow(clippy::too_many_arguments)]
     pub fn taken(
@@ -262,6 +264,7 @@ impl Backlog {
         id: u32,
         session: SessionId,
         boot: u64,
+        from: &[SessionId],
         branch: Option<&str>,
         pr: Option<&str>,
         project: Option<PathBuf>,
@@ -275,6 +278,15 @@ impl Backlog {
             item.sessions.clear();
             item.taken.clear();
             item.boot = boot;
+        }
+        if !from.is_empty() {
+            item.sessions.retain(|s| !from.contains(s));
+            item.taken.retain(|s| !from.contains(s));
+            // The newest, so the lane follows it rather than an older one of its own.
+            if let Some(at) = item.sessions.iter().position(|&s| s == session) {
+                item.sessions.remove(at);
+                item.sessions.push(session);
+            }
         }
         // A session launched on it stays launched: its notes still go into the brief.
         if !item.sessions.contains(&session) {
@@ -718,7 +730,7 @@ mod tests {
         b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
         let pr = "https://github.com/o/r/pull/7";
         let item = b
-            .taken(1, 4, 77, Some("fix/x"), None, Some("/r".into()), 2)
+            .taken(1, 4, 77, &[], Some("fix/x"), None, Some("/r".into()), 2)
             .unwrap();
         assert_eq!(
             (item.sessions.as_slice(), item.taken.as_slice()),
@@ -730,14 +742,14 @@ mod tests {
         );
         assert_eq!(item.project, Some(PathBuf::from("/r")));
         // Taken again by the same session: the PR is added, the rest stays.
-        let item = b.taken(1, 4, 77, None, Some(pr), None, 3).unwrap();
+        let item = b.taken(1, 4, 77, &[], None, Some(pr), None, 3).unwrap();
         assert_eq!(item.sessions, [4], "not listed twice");
         assert_eq!(
             (item.branch.as_deref(), item.pr.as_deref(), item.updated),
             (Some("fix/x"), Some(pr), 3)
         );
         let item = b
-            .taken(1, 5, 77, Some("fix/y"), None, Some("/other".into()), 4)
+            .taken(1, 5, 77, &[], Some("fix/y"), None, Some("/other".into()), 4)
             .unwrap();
         assert_eq!(item.sessions, [4, 5]);
         assert_eq!(item.branch.as_deref(), Some("fix/y"));
@@ -754,11 +766,27 @@ mod tests {
             &format!("https://{}", "x".repeat(MAX_PR)),
         ] {
             assert!(
-                b.taken(1, 5, 77, None, Some(bad), None, 5).is_err(),
+                b.taken(1, 5, 77, &[], None, Some(bad), None, 5).is_err(),
                 "{bad}"
             );
         }
         assert_eq!(b.get(1).unwrap().pr.as_deref(), Some(pr));
+    }
+
+    #[test]
+    fn a_steal_takes_the_item_from_the_sessions_it_was_with() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
+        b.launched(1, 3, 77, None, 2).unwrap();
+        b.taken(1, 4, 77, &[], None, None, None, 3).unwrap();
+        b.taken(1, 5, 77, &[], None, None, None, 4).unwrap();
+        // 4 takes it back from 3 and 5: now the newest, the lane follows it.
+        let item = b.taken(1, 4, 77, &[3, 5], None, None, None, 5).unwrap();
+        assert_eq!(
+            (item.sessions.as_slice(), item.taken.as_slice()),
+            (&[4][..], &[4][..])
+        );
     }
 
     #[test]
@@ -767,12 +795,12 @@ mod tests {
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
         b.launched(1, 3, 77, None, 2).unwrap();
-        let item = b.taken(1, 3, 77, None, None, None, 3).unwrap();
+        let item = b.taken(1, 3, 77, &[], None, None, None, 3).unwrap();
         assert_eq!(
             (item.sessions.as_slice(), item.taken.as_slice()),
             (&[3][..], &[][..])
         );
-        let item = b.taken(1, 4, 77, None, None, None, 3).unwrap();
+        let item = b.taken(1, 4, 77, &[], None, None, None, 3).unwrap();
         assert_eq!(item.taken, [4]);
         // A new daemon's ids are someone else's.
         assert!(b.launched(1, 4, 78, None, 4).unwrap().taken.is_empty());

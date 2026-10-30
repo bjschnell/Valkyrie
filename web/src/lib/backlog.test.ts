@@ -51,6 +51,17 @@ describe("lane", () => {
     expect(liveSession(i, [session(3, "working")], 8)).toBeNull();
   });
 
+  it("waits on review with a pull request open, unless its session needs you", () => {
+    const i = item({ sessions: [4], pr: "https://github.com/o/r/pull/7" });
+    expect(lane(i, [session(4, "working")], 7)).toBe("review");
+    expect(lane(i, [session(4, "stale")], 7)).toBe("review");
+    expect(lane(i, [session(4, "needs_input")], 7)).toBe("needs");
+    expect(lane(i, [session(4, "blocked")], 7)).toBe("needs");
+    expect(lane(i, [], 7)).toBe("review");
+    expect(lane({ ...i, status: "shipped" }, [session(4, "working")], 7)).toBe("done");
+    expect(lane({ ...i, status: "proposed" }, [], 7)).toBe("proposed");
+  });
+
   it("puts shipped and dropped items in done, whatever runs", () => {
     expect(lane(item({ status: "shipped", sessions: [3] }), [session(3, "working")], 7)).toBe("done");
     expect(lane(item({ status: "dropped" }), [], 7)).toBe("done");

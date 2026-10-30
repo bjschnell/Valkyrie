@@ -871,6 +871,7 @@ mod tests {
             id: 1,
             branch: None,
             pr: None,
+            steal: false,
         };
         assert!(!allowed(&take));
         let ship = ClientMsg::ShipMerged {

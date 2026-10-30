@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use valkyrie_context::backlog;
 use valkyrie_proto::{
-    Item, ItemChange, ItemStatus, KeptItem, NewItem, Reply, SessionInfo, ShippedItem, Size,
-    SpawnSpec,
+    Item, ItemChange, ItemStatus, KeptItem, NewItem, Reply, SessionId, SessionInfo, ShippedItem,
+    Size, SpawnSpec,
 };
 
 /// Every item, pushed to queue watchers with the queue.
@@ -111,17 +111,69 @@ impl Registry {
         Ok((item, note))
     }
 
+    /// The sessions other than `mine` still running on `item` on this daemon, by
+    /// launch or take, newest first.
+    fn holders(&self, item: &Item, mine: Option<SessionId>) -> Vec<SessionId> {
+        if item.boot != self.boot {
+            return Vec::new();
+        }
+        item.sessions
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&s| Some(s) != mine && self.get(s).is_ok_and(|s| !s.exited()))
+            .collect()
+    }
+
+    /// Refuses when another session than `mine` is on `item`, or a launch is
+    /// starting one, naming it, and says what to do instead (`or`): several agents
+    /// on one backlog mustn't end up on the same item.
+    fn free(&self, item: &Item, mine: Option<SessionId>, or: &str) -> Result<()> {
+        let id = item.id;
+        if self.launching.lock().unwrap().contains(&id) {
+            bail!("#{id} is being launched right now; {or}");
+        }
+        let Some(session) = self
+            .holders(item, mine)
+            .first()
+            .and_then(|&s| self.get(s).ok())
+        else {
+            return Ok(());
+        };
+        let info = session.info();
+        let agent = session.agent_behind().unwrap_or_else(|| {
+            let program = info.command.first().map(PathBuf::from).unwrap_or_default();
+            program
+                .file_name()
+                .map_or("shell".into(), |n| n.to_string_lossy().into_owned())
+        });
+        let name = match info.name.chars().count() > 24 {
+            true => format!("{}…", info.name.chars().take(23).collect::<String>()),
+            false => info.name.clone(),
+        };
+        bail!(
+            "#{id} is already being worked on in session {} ({agent}, \"{name}\"); {or}",
+            info.id
+        );
+    }
+
     /// Claims item `id` for the caller's session, as a launch links one, so its
     /// lane follows that session and the session may leave notes on it. Agents may:
     /// it's how one working through accepted items outside a launch says which it's
-    /// on. No checkout is recorded, since the session may be in the main one.
+    /// on. No checkout is recorded, since the session may be in the main one. One
+    /// session at a time: another live one on it refuses the take, unless the user
+    /// `steal`s it, which hands it to their session.
     pub(crate) fn take_item(
         &self,
         id: u32,
         branch: Option<&str>,
         pr: Option<&str>,
+        steal: bool,
         peer: Option<Peer>,
     ) -> Result<Reply> {
+        if steal {
+            self.vouch(peer, "taking an item from another session")?;
+        }
         let caller = self.caller(peer);
         let Some(session) = caller.session else {
             bail!("take it from inside a valk session");
@@ -148,15 +200,32 @@ impl Registry {
         }
         let project = valkyrie_context::project::in_git(&info.cwd)
             .then(|| valkyrie_context::project::root(&info.cwd));
-        let item = self.backlog.lock().unwrap().taken(
-            id,
-            info.id,
-            self.boot,
-            branch,
-            pr,
-            project,
-            now_secs(),
-        )?;
+        // Checked and recorded under one lock, so two takes can't both find it free.
+        let item = {
+            let backlog = self.backlog.lock().unwrap();
+            let item = backlog.get(id)?;
+            let from = match steal {
+                true => self.holders(&item, Some(info.id)),
+                false => {
+                    self.free(
+                        &item,
+                        Some(info.id),
+                        "stop it first or take it with --steal",
+                    )?;
+                    Vec::new()
+                }
+            };
+            backlog.taken(
+                id,
+                info.id,
+                self.boot,
+                &from,
+                branch,
+                pr,
+                project,
+                now_secs(),
+            )?
+        };
         let by = caller.agent.unwrap_or_else(|| "human".into());
         tracing::info!(id, session = info.id, by, "backlog item taken");
         self.refresh_items();
@@ -420,6 +489,14 @@ impl Registry {
         let Some(project) = item.project.clone() else {
             bail!("#{id} has no folder yet; pick the repository it's for");
         };
+        // One session on an item at a time; held from here until the new one is
+        // recorded on it, so a take or launch meanwhile is refused too.
+        let _launching = {
+            let backlog = self.backlog.lock().unwrap();
+            self.free(&backlog.get(id)?, None, "attach to it, or stop it first")?;
+            self.launching.lock().unwrap().insert(id);
+            Launching(self, id)
+        };
         let branch = item
             .branch
             .clone()
@@ -455,6 +532,15 @@ impl Registry {
         tracing::info!(id, session = info.id, "launched a backlog item");
         self.refresh_items();
         Ok(reply)
+    }
+}
+
+/// Marks an item as being launched until dropped, whatever becomes of the launch.
+struct Launching<'a>(&'a Registry, u32);
+
+impl Drop for Launching<'_> {
+    fn drop(&mut self) {
+        self.0.launching.lock().unwrap().remove(&self.1);
     }
 }
 

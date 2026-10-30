@@ -79,6 +79,8 @@ pub(crate) fn live<'a>(
 }
 
 /// Where an item stands, from its newest live session: as the web board works it out.
+/// One with a pull request open waits on review whatever that session does, unless
+/// it needs you: a session that took several items would show them all running.
 pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
     match item.status {
         ItemStatus::Proposed => return Lane::Proposed,
@@ -88,11 +90,12 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
     if let Some(s) = live(item, sessions, boot) {
         return match s.status.state {
             AgentState::NeedsInput | AgentState::Blocked => Lane::Needs,
+            _ if item.pr.is_some() => Lane::Review,
             AgentState::Working | AgentState::Stale => Lane::Running,
             _ => Lane::Review,
         };
     }
-    if item.checkout.is_some() || !item.sessions.is_empty() {
+    if item.pr.is_some() || item.checkout.is_some() || !item.sessions.is_empty() {
         Lane::Review
     } else {
         Lane::Backlog
@@ -750,6 +753,10 @@ fn detail_lines(
         ]),
         Line::from(vec![
             format!(" {} ", lane.title()).fg(lane.color(t)).bold(),
+            match lane == Lane::Review && item.pr.is_some() {
+                true => "· PR open ".fg(t.muted),
+                false => "".into(),
+            },
             match live {
                 Some(s) => format!("· tab {} {} ", s.id, s.status.state.label()).fg(t.muted),
                 None => "".into(),
@@ -911,6 +918,33 @@ mod tests {
         assert_eq!(done, [19, 18, 17, 16, 15], "the newest five");
         // A restarted daemon's session 3 is someone else's: the item waits on review.
         assert_eq!(lane(&rows[0].1, &sessions, 8), Lane::Review);
+    }
+
+    #[test]
+    fn a_pull_request_open_waits_on_review_unless_its_session_needs_you() {
+        let pr = |id| Item {
+            sessions: vec![4],
+            pr: Some("https://github.com/o/r/pull/7".into()),
+            ..item(id, 1)
+        };
+        let lane_with = |state| lane(&pr(1), &[session(4, state)], 7);
+        assert_eq!(lane_with(AgentState::Working), Lane::Review);
+        assert_eq!(lane_with(AgentState::Idle), Lane::Review);
+        assert_eq!(lane_with(AgentState::NeedsInput), Lane::Needs);
+        assert_eq!(lane_with(AgentState::Blocked), Lane::Needs);
+        // Gone, or a restarted daemon's: still waiting on review.
+        assert_eq!(lane(&pr(1), &[], 7), Lane::Review);
+        let shipped = Item {
+            status: ItemStatus::Shipped,
+            ..pr(1)
+        };
+        assert_eq!(lane(&shipped, &[], 7), Lane::Done);
+        let t = crate::theme::DRACULA;
+        let text: Vec<String> = detail_lines(&pr(1), Lane::Review, None, None, 0, &t)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(text[1].contains("review · PR open"), "{text:?}");
     }
 
     #[test]

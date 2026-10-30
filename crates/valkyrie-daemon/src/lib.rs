@@ -147,6 +147,9 @@ struct Registry {
     backlog: Mutex<valkyrie_context::backlog::Backlog>,
     /// Every backlog item, pushed with the queue.
     items: watch::Sender<backlog::Items>,
+    /// Items a launch is starting a session on, not yet recorded on the item: a
+    /// second launch or a take meanwhile would put two sessions on one.
+    launching: Mutex<HashSet<u32>>,
     /// The connected clients that said who they are in their `Hello`, by
     /// connection, for `valk upgrade` to name the ones left on an old build.
     clients: Mutex<HashMap<u64, ClientBuild>>,
@@ -458,6 +461,7 @@ fn new_registry(
             state_dir.join("backlog"),
         )),
         items: watch::Sender::new(Arc::default()),
+        launching: Mutex::default(),
         clients: Mutex::default(),
         next_conn: AtomicU64::new(0),
     });
@@ -1054,9 +1058,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 id,
                 branch,
                 pr,
+                steal,
             } => (
                 req,
-                registry.take_item(id, branch.as_deref(), pr.as_deref(), peer),
+                registry.take_item(id, branch.as_deref(), pr.as_deref(), steal, peer),
             ),
             ClientMsg::ShipMerged { req, dry_run, only } => {
                 (req, registry.ship_merged(dry_run, only, peer).await)

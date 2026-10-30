@@ -495,12 +495,13 @@ impl Client {
     }
 
     /// Claims an item for the session this process runs in, with its branch and
-    /// pull request if given.
+    /// pull request if given; `steal` takes it from another session (the user's).
     pub async fn take_item(
         &self,
         id: u32,
         branch: Option<String>,
         pr: Option<String>,
+        steal: bool,
     ) -> Result<crate::Item> {
         match self
             .request(|req| ClientMsg::TakeItem {
@@ -508,6 +509,7 @@ impl Client {
                 id,
                 branch,
                 pr,
+                steal,
             })
             .await?
         {

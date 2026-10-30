@@ -27,6 +27,9 @@ export function liveSession(item: Item, sessions: SessionInfo[], boot: number): 
   return null;
 }
 
+/** Where an item stands. One with a pull request open waits on review whatever its
+ * session does, unless that needs you: a session that took several items would
+ * otherwise show them all running. */
 export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
   if (item.status === "proposed") return "proposed";
   if (item.status !== "open") return "done";
@@ -38,13 +41,13 @@ export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
         return "needs";
       case "working":
       case "stale":
-        return "running";
+        return item.pr ? "review" : "running";
       default:
         // Done with its turn, idle or interrupted: its work is waiting on you.
         return "review";
     }
   }
-  return item.checkout || (item.sessions?.length ?? 0) > 0 ? "review" : "backlog";
+  return item.pr || item.checkout || (item.sessions?.length ?? 0) > 0 ? "review" : "backlog";
 }
 
 /** Items by lane, each lane newest first; the done ones by when they were closed. */
