@@ -28,7 +28,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::RecvError;
@@ -37,7 +37,8 @@ use tokio::task::JoinHandle;
 use valkyrie_proto::codec::{read_frame, write_frame};
 use valkyrie_proto::ipc::{Listener, Stream};
 use valkyrie_proto::{
-    ClientMsg, Decision, Pane, QueueItem, Reply, ReqId, ServerMsg, SessionId, Side,
+    ClientBuild, ClientMsg, ConnectedClient, Decision, Pane, QueueItem, Reply, ReqId, ServerMsg,
+    SessionId, Side,
 };
 
 /// Format of the state handed across an upgrade exec (ADR-0006). An upgrade is only
@@ -146,9 +147,30 @@ struct Registry {
     backlog: Mutex<valkyrie_context::backlog::Backlog>,
     /// Every backlog item, pushed with the queue.
     items: watch::Sender<backlog::Items>,
+    /// The connected clients that said who they are in their `Hello`, by
+    /// connection, for `valk upgrade` to name the ones left on an old build.
+    clients: Mutex<HashMap<u64, ClientBuild>>,
+    next_conn: AtomicU64,
 }
 
 impl Registry {
+    /// `Reply::Clients`: a client is current on this daemon's protocol and binary.
+    fn clients(&self) -> Reply {
+        let ours = valkyrie_proto::binary_id();
+        let clients = self
+            .clients
+            .lock()
+            .unwrap()
+            .values()
+            .map(|client| ConnectedClient {
+                current: client.protocol == valkyrie_proto::PROTOCOL
+                    && (client.binary.is_none() || ours.is_none() || client.binary == ours),
+                client: client.clone(),
+            })
+            .collect();
+        Reply::Clients { clients }
+    }
+
     /// Every session, in tab order.
     fn all(&self) -> Vec<Arc<Session>> {
         let mut all: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
@@ -436,7 +458,11 @@ fn new_registry(
             state_dir.join("backlog"),
         )),
         items: watch::Sender::new(Arc::default()),
+        clients: Mutex::default(),
+        next_conn: AtomicU64::new(0),
     });
+    // Now, before an upgrade can rename a new binary over this one's path.
+    valkyrie_proto::binary_id();
     registry.refresh_proposals();
     registry.refresh_items();
     Ok((registry, rx))
@@ -844,6 +870,7 @@ impl Attachment {
 async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // Who is asking, for requests an agent may not make (ADR-0007 §4).
     let peer = context::Peer::of(&stream);
+    let conn = registry.next_conn.fetch_add(1, Ordering::Relaxed);
     // Whether this connection is an agent's (`Some(Some(agent))`), worked out the
     // first time it starts or types into a session: those sessions then count as
     // the agent's doing, so it can't launder a decision through them.
@@ -870,15 +897,25 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             Err(e) => break Err(e),
         };
         let (req, result) = match msg {
-            ClientMsg::Hello { req } => (
-                req,
-                Ok(Reply::Hello {
-                    protocol: valkyrie_proto::PROTOCOL,
-                    generation: registry.generation,
-                    boot: registry.boot,
-                    dev: registry.dev,
-                }),
-            ),
+            ClientMsg::Hello { req, client } => {
+                // Only the kinds `valk upgrade` names; anything else is ignored.
+                if let Some(client) = client
+                    && matches!(client.kind.as_str(), "tui" | "web")
+                {
+                    registry.clients.lock().unwrap().insert(conn, client);
+                }
+                (
+                    req,
+                    Ok(Reply::Hello {
+                        protocol: valkyrie_proto::PROTOCOL,
+                        generation: registry.generation,
+                        boot: registry.boot,
+                        dev: registry.dev,
+                        exe: Some(registry.host.hook_exe.clone()),
+                    }),
+                )
+            }
+            ClientMsg::Clients { req } => (req, Ok(registry.clients())),
             ClientMsg::Input { session, data } => {
                 if let Ok(s) = registry.get(session) {
                     if let Some(agent) = driver.get_or_insert_with(|| registry.caller(peer).agent) {
@@ -1153,6 +1190,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     if let Some(task) = queue_watch {
         task.abort();
     }
+    registry.clients.lock().unwrap().remove(&conn);
     writer.abort();
     ended
 }

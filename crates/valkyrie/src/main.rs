@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
-use valkyrie_proto::{SessionId, Size, SpawnSpec};
+use valkyrie_proto::{ConnectedClient, SessionId, Size, SpawnSpec};
 
 /// Set when `valk web` restarts itself as the upgraded binary.
 const WEB_RESTARTED: &str = "VALK_WEB_RESTARTED";
@@ -489,6 +489,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 init_logging();
                 // Now, while it names this binary: an upgrade renames a new one over it.
                 let exe = std::env::current_exe();
+                valkyrie_proto::binary_id();
                 // Set across the restart below. By then the process may have left the
                 // terminal (or agent) that started it, so whether to print a pairing
                 // code was decided at the first start: never again after.
@@ -505,11 +506,12 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     restarted,
                 })
                 .await;
-                // Upgraded: carry on as the new binary, which serves the new app.
+                // Upgraded: carry on as the daemon's binary (else this one's
+                // replacement), which serves the new app.
                 #[cfg(unix)]
                 if let Err(e) = &result
-                    && e.downcast_ref::<valkyrie_web::Upgraded>().is_some()
-                    && let Ok(exe) = exe
+                    && let Some(upgraded) = e.downcast_ref::<valkyrie_web::Upgraded>()
+                    && let Some(exe) = upgraded.daemon.follow(exe.ok())
                 {
                     use std::os::unix::process::CommandExt;
                     let failed = std::process::Command::new(&exe)
@@ -782,6 +784,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
     let before = client.hello_info().await.context(PREDATES)?;
     anyhow::ensure!(before.protocol >= 3, PREDATES);
     let sessions = client.list().await?.len();
+    let following = connected_clients(socket).await.unwrap_or_default();
     client.upgrade(exe.clone()).await?;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -808,6 +811,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
                     exe.display(),
                     now.protocol
                 );
+                left_behind(socket, following, now.protocol).await;
                 return Ok(());
             }
             #[cfg(unix)]
@@ -829,6 +833,7 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
                     "daemon now runs {} (protocol {protocol}, generation {after}); {kept}/{sessions} sessions kept",
                     exe.display()
                 );
+                left_behind(socket, following, protocol).await;
                 return Ok(());
             }
         }
@@ -837,6 +842,106 @@ async fn upgrade(socket: &Path, exe: Option<PathBuf>) -> Result<()> {
             "the daemon did not come back; see {}",
             valkyrie_proto::state_dir().join("daemon.log").display()
         );
+    }
+}
+
+/// The clients connected to the daemon that say which build they are (the TUI and
+/// `valk web`). On a connection of its own: a daemon from before `Clients` hangs up
+/// on it.
+async fn connected_clients(socket: &Path) -> Option<Vec<ConnectedClient>> {
+    let (client, _) = Client::connect(socket).await.ok()?;
+    client.clients().await.ok()
+}
+
+/// How long `valk upgrade` waits for clients to follow. Debug builds take
+/// `VALK_FOLLOW_WAIT_MS`, for tests.
+fn follow_wait() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("VALK_FOLLOW_WAIT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(10)
+}
+
+/// After an upgrade, waits for each client connected before it (by pid, which an
+/// exec keeps) to come back on the daemon's build or to be gone (a TUI follows
+/// within a second, `valk web` within a few), and names any still on another build
+/// or protocol: those didn't follow.
+async fn left_behind(socket: &Path, before: Vec<ConnectedClient>, protocol: u32) {
+    let mut waiting: Vec<u32> = before.iter().map(|c| c.client.pid).collect();
+    if waiting.is_empty() {
+        return;
+    }
+    match waiting.len() {
+        1 => println!("waiting for 1 client to follow…"),
+        n => println!("waiting for {n} clients to follow…"),
+    }
+    let deadline = std::time::Instant::now() + follow_wait();
+    let mut conn: Option<Client> = None;
+    let mut clients = Vec::new();
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if conn.is_none() {
+            conn = Client::connect(socket).await.ok().map(|(client, _)| client);
+        }
+        let Some(client) = &conn else { continue };
+        match client.clients().await {
+            Ok(now) => clients = now,
+            Err(_) => {
+                conn = None;
+                continue;
+            }
+        }
+        waiting
+            .retain(|&pid| alive(pid) && !clients.iter().any(|c| c.client.pid == pid && c.current));
+        if waiting.is_empty() {
+            return;
+        }
+    }
+    // Only those still waited on: one that connected after the upgrade isn't news.
+    for ConnectedClient { client, .. } in clients
+        .iter()
+        .filter(|c| !c.current && waiting.contains(&c.client.pid))
+    {
+        // Only the kinds the daemon keeps; never print what a peer sent as is.
+        let who = match client.kind.as_str() {
+            "tui" => "a TUI",
+            "web" => "valk web",
+            _ => "a client",
+        };
+        if client.protocol != protocol {
+            println!(
+                "{who} (pid {}) still speaks protocol {}; restart it",
+                client.pid, client.protocol
+            );
+        } else {
+            println!(
+                "{who} (pid {}) still runs another valk than the daemon; restart it",
+                client.pid
+            );
+        }
+    }
+}
+
+/// Whether process `pid` still exists (Windows can't tell, so says yes).
+fn alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Pid 0 would signal our own process group, and always look alive.
+        let Ok(pid @ 1..) = i32::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 only checks that the process exists.
+        let sent = unsafe { libc::kill(pid, 0) };
+        sent == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        true
     }
 }
 

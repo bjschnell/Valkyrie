@@ -774,6 +774,87 @@ fn only_a_dev_daemon_says_so_and_an_upgrade_keeps_its_mode() {
     }
 }
 
+/// After a handoff `Hello` names the new binary, which clients follow, and `valk
+/// upgrade` names the connected clients that came back on another build.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "upgrade hands off on unix")]
+fn upgrade_names_the_clients_left_on_an_old_build() {
+    use std::os::unix::fs::MetadataExt;
+    use valkyrie_proto::ClientBuild;
+    use valkyrie_proto::client::Client;
+    let d = Daemon::start("left-behind");
+    let bin = std::fs::metadata(BIN).unwrap();
+    // Live pids: `valk upgrade` stops waiting for one that is gone.
+    let mut stale = Command::new("sleep").arg("30").spawn().unwrap();
+    let following = ClientBuild {
+        kind: "tui".into(),
+        pid: std::process::id(),
+        protocol: valkyrie_proto::PROTOCOL,
+        binary: Some((bin.dev(), bin.ino())),
+    };
+    let behind = ClientBuild {
+        kind: "web".into(),
+        pid: stale.id(),
+        binary: Some((0, 0)),
+        ..following.clone()
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Clients that reconnect after the handoff, as the TUI and `valk web` do.
+    for build in [following, behind] {
+        let socket = d.socket.clone();
+        rt.spawn(async move {
+            loop {
+                if let Ok((client, mut pushes)) = Client::connect(&socket).await
+                    && client.hello_as(build.clone()).await.is_ok()
+                {
+                    while pushes.recv().await.is_some() {}
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+    }
+    let hello = || {
+        rt.block_on(async {
+            let (client, _) = Client::connect(&d.socket).await.unwrap();
+            client.hello_info().await.unwrap()
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rt.block_on(async {
+        let (client, _) = Client::connect(&d.socket).await.unwrap();
+        client.clients().await.unwrap().len()
+    }) < 2
+    {
+        assert!(Instant::now() < deadline, "clients did not connect");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let out = valk(&d.socket, &d.dir)
+        .env("VALK_FOLLOW_WAIT_MS", "2000")
+        .args(["upgrade", "--exe", BIN])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("generation 1"), "{text}");
+    assert!(text.contains("waiting for 2 clients to follow"), "{text}");
+    let behind = format!(
+        "valk web (pid {}) still runs another valk than the daemon",
+        stale.id()
+    );
+    assert!(text.contains(&behind), "{text}");
+    assert!(
+        !text.contains(&format!("pid {})", std::process::id())),
+        "{text}"
+    );
+    let _ = stale.kill();
+    let _ = stale.wait();
+    assert_eq!(
+        hello().exe,
+        Some(valkyrie_proto::canonical(Path::new(BIN)).unwrap())
+    );
+}
+
 /// A `valk web` with no terminal and no parents (double-forked and `setsid`) may
 /// have been started by anyone, an agent included, so it must not print a pairing
 /// link: the bridge counts as human only for the devices already paired.

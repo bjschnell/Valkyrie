@@ -169,9 +169,10 @@ Cascadia Mono.
 platform, checks its checksum, puts it in place of the `valk` you ran, and hands the
 running daemon to it. On Linux and macOS every session keeps running; on Windows they
 restart as described above. On Linux and macOS everything else follows: an open TUI
-restarts into the new `valk` on the same tab, `valk web` restarts itself as the new
-binary, and an open web app reloads (if you're typing in a field, once you leave
-it). On Windows an open TUI reconnects, and only a newer protocol needs a restart. Run it from a shell tab inside Valkyrie or from any terminal.
+restarts into the daemon's new `valk` on the same tab, `valk web` restarts itself as
+that binary, and an open web app reloads (if you're typing in a field, once you leave
+it). If a TUI or `valk web` stays on an older build, `valk upgrade` names it so you can
+restart it. On Windows an open TUI reconnects, and only a newer protocol needs a restart. Run it from a shell tab inside Valkyrie or from any terminal.
 
 - The home screen says so too, at the right of its header (`↑ v0.0.2 (abc1234)
   valk upgrade`). It asks GitHub at most once a day and keeps the answer in

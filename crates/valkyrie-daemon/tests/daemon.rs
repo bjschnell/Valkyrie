@@ -1285,3 +1285,79 @@ async fn unread_skills_are_flagged_then_retired() {
         [(idle.id, idle.updated)]
     );
 }
+
+/// `Hello` names the daemon's binary for clients to follow, and `Clients` lists the
+/// clients that said who they are, each current only on the daemon's protocol and
+/// binary. A connection that closes leaves the list.
+#[tokio::test]
+async fn clients_say_their_build_and_the_daemon_tells_who_is_behind() {
+    use valkyrie_proto::ClientBuild;
+    let (client, _pushes, dir) = start().await;
+    let socket = dir.join("run/o.sock");
+    let info = client.hello_info().await.unwrap();
+    assert_eq!(info.exe.as_deref(), Some(Path::new("valk")));
+    assert!(client.clients().await.unwrap().is_empty(), "a plain Hello");
+
+    let current = ClientBuild::this("tui");
+    let old_protocol = ClientBuild {
+        protocol: valkyrie_proto::PROTOCOL - 1,
+        pid: 2,
+        ..ClientBuild::this("web")
+    };
+    let other_binary = ClientBuild {
+        pid: 3,
+        binary: Some((0, 0)),
+        ..ClientBuild::this("web")
+    };
+    // Not a kind `valk upgrade` names: never listed.
+    let stranger = ClientBuild {
+        kind: "\x1b]0;pwned\x07".into(),
+        pid: 5,
+        ..ClientBuild::this("tui")
+    };
+    let mut held = Vec::new();
+    for build in [&current, &old_protocol, &other_binary, &stranger] {
+        let (c, p) = Client::connect(&socket).await.unwrap();
+        c.hello_as(build.clone()).await.unwrap();
+        held.push((c, p));
+    }
+    let mut clients = client.clients().await.unwrap();
+    clients.sort_by_key(|c| c.client.pid);
+    let seen: Vec<_> = clients.iter().map(|c| (c.client.pid, c.current)).collect();
+    assert_eq!(
+        seen,
+        [(2, false), (3, false), (current.pid, true)],
+        "{clients:?}"
+    );
+
+    drop(held);
+
+    // A connection of its own to close: a dropped `Client` keeps its socket open.
+    let mut raw = valkyrie_proto::ipc::connect(&socket).await.unwrap();
+    let hello = valkyrie_proto::ClientMsg::Hello {
+        req: 1,
+        client: Some(ClientBuild { pid: 4, ..current }),
+    };
+    valkyrie_proto::codec::write_frame(&mut raw, &hello)
+        .await
+        .unwrap();
+    let _: Option<valkyrie_proto::ServerMsg> =
+        valkyrie_proto::codec::read_frame(&mut raw).await.unwrap();
+    let listed = async || {
+        client
+            .clients()
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.client.pid == 4)
+    };
+    assert!(listed().await);
+    drop(raw);
+    for _ in 0..100 {
+        if !listed().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("a closed connection is still listed");
+}

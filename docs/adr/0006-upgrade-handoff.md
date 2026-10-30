@@ -32,7 +32,7 @@ Option 2.
    5. Adoption is best effort. A missing transcript gives a blank screen, and a missing log is recreated. If a session still can't be adopted, its program is reaped rather than left a zombie.
    6. Its `Hello` reports `generation + 1` and the same `boot`, so the client can confirm the switch happened. A daemon that restarted instead has a different `boot`.
 6. **Failure:** if `execve` itself fails, the daemon puts `CLOEXEC` back, unfreezes (restarts readers, writers and accepting) and replies with the error.
-7. **Clients:** connected clients get EOF at exec. The TUI reconnects automatically and re-attaches to the session it was showing, but only when `boot` matches; after a real restart, ids start over. If the new daemon speaks another protocol, the TUI execs the binary it was started from (which the upgrade renamed a new one over) as `valk attach <session>`.
+7. **Clients:** connected clients get EOF at exec. The TUI reconnects automatically and re-attaches to the session it was showing, but only when `boot` matches; after a real restart, ids start over. If the new daemon speaks another protocol, the TUI execs the binary it was started from (which the upgrade renamed a new one over) as `valk attach <session>`. Since 2026-10-29 it execs the binary the daemon's `Hello` names (`exe`) when there is one (DESIGN, "Following the daemon's binary").
 8. **Getting the binary:** a release build (one with `VALK_COMMIT`, set by release.yml) first fetches the latest release over `curl`, checks it against its `.sha256` and renames it over itself, then does the above with it. It compares the commit the release's tag points at, not the tag, since a release can be replaced under the same tag. A build from source skips this step.
 
 ## Consequences

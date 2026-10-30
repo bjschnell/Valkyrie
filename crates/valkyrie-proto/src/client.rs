@@ -1,7 +1,10 @@
 //! Async daemon client: request/response matching plus a stream of server pushes.
 
 use crate::codec::{read_frame, write_frame};
-use crate::{ClientMsg, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size, SpawnSpec};
+use crate::{
+    ClientBuild, ClientMsg, ConnectedClient, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size,
+    SpawnSpec,
+};
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +20,8 @@ pub struct Client {
     pending: Pending,
     closed: Arc<AtomicBool>,
     next: Arc<AtomicU64>,
+    /// The daemon runs as this user, so the binary its `Hello` names may be run.
+    same_user: bool,
 }
 
 /// Screen and image pushes held for a consumer that isn't reading (a TUI whose
@@ -68,7 +73,7 @@ impl Pushes {
 }
 
 /// What `Hello` tells about the daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonInfo {
     pub protocol: u32,
     /// Upgrade handoffs so far (ADR-0006).
@@ -77,6 +82,8 @@ pub struct DaemonInfo {
     pub boot: u64,
     /// A development daemon (`valk daemon --dev`).
     pub dev: bool,
+    /// The binary it runs as, when it says.
+    pub exe: Option<PathBuf>,
 }
 
 impl DaemonInfo {
@@ -86,6 +93,15 @@ impl DaemonInfo {
     pub fn upgraded_from(&self, before: &DaemonInfo) -> bool {
         self.boot == before.boot && self.generation > before.generation
     }
+
+    /// What a client following the daemon restarts as: the daemon's binary when it
+    /// names one that is there, else `own`, the binary the client started from.
+    pub fn follow(&self, own: Option<PathBuf>) -> Option<PathBuf> {
+        self.exe
+            .clone()
+            .filter(|exe| exe.is_absolute() && exe.is_file())
+            .or(own)
+    }
 }
 
 impl Client {
@@ -94,6 +110,7 @@ impl Client {
             crate::ensure_private_dir(dir)?;
         }
         let stream = crate::ipc::connect(path).await?;
+        let same_user = crate::ipc::peer_is_me(&stream);
         let (mut rd, mut wr) = tokio::io::split(stream);
         let (out, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
         let (push_tx, push_rx) = mpsc::unbounded_channel();
@@ -151,6 +168,7 @@ impl Client {
                 pending,
                 closed,
                 next: Arc::new(AtomicU64::new(1)),
+                same_user,
             },
             Pushes { rx: push_rx, lag },
         ))
@@ -183,18 +201,39 @@ impl Client {
     }
 
     pub async fn hello_info(&self) -> Result<DaemonInfo> {
-        match self.request(|req| ClientMsg::Hello { req }).await? {
+        self.hello_from(None).await
+    }
+
+    /// `hello_info` from a client that stays connected, saying which build it is.
+    pub async fn hello_as(&self, me: ClientBuild) -> Result<DaemonInfo> {
+        self.hello_from(Some(me)).await
+    }
+
+    async fn hello_from(&self, client: Option<ClientBuild>) -> Result<DaemonInfo> {
+        match self.request(|req| ClientMsg::Hello { req, client }).await? {
             Reply::Hello {
                 protocol,
                 generation,
                 boot,
                 dev,
+                exe,
             } => Ok(DaemonInfo {
                 protocol,
                 generation,
                 boot,
                 dev,
+                // A socket another user listens on mustn't pick what this one runs.
+                exe: exe.filter(|_| self.same_user),
             }),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The connected clients that said who they are, and whether each is on the
+    /// daemon's build.
+    pub async fn clients(&self) -> Result<Vec<ConnectedClient>> {
+        match self.request(|req| ClientMsg::Clients { req }).await? {
+            Reply::Clients { clients } => Ok(clients),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -560,9 +599,30 @@ mod tests {
             generation,
             boot,
             dev: false,
+            exe: None,
         };
         assert!(at(7, 1).upgraded_from(&at(7, 0)));
         assert!(!at(7, 1).upgraded_from(&at(7, 1)));
         assert!(!at(8, 0).upgraded_from(&at(7, 1)));
+    }
+
+    /// A client follows the daemon's binary when it is there, else its own.
+    #[test]
+    fn a_client_follows_the_daemons_binary_when_there_is_one() {
+        let own = Some(PathBuf::from("/own/valk"));
+        let daemon = |exe: Option<PathBuf>| DaemonInfo {
+            protocol: crate::PROTOCOL,
+            generation: 0,
+            boot: 0,
+            dev: false,
+            exe,
+        };
+        let here = std::env::current_exe().unwrap();
+        assert_eq!(daemon(Some(here.clone())).follow(own.clone()), Some(here));
+        let gone = PathBuf::from("/no/such/valk");
+        assert_eq!(daemon(Some(gone)).follow(own.clone()), own);
+        assert_eq!(daemon(Some("valk".into())).follow(own.clone()), own);
+        assert_eq!(daemon(None).follow(own.clone()), own);
+        assert_eq!(daemon(None).follow(None), None);
     }
 }
