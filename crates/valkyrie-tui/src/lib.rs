@@ -2230,9 +2230,9 @@ impl App {
                     .change_item(
                         id,
                         ItemChange::Edit {
-                            title: Some(title),
+                            title,
                             body: None,
-                            kind: Some(kind),
+                            kind,
                             cwd: None,
                         },
                     )

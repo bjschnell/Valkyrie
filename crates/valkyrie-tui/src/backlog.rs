@@ -128,11 +128,13 @@ pub(crate) enum Typing {
     Add { kind: ItemKind, text: LineEdit },
     /// A handoff note on item `id`.
     Note { id: u32, text: LineEdit },
-    /// Item `id`'s title, and its kind with Tab; the body stays as it is.
+    /// Item `id`'s title, and its kind with Tab; the body stays as it is. `was`
+    /// holds both as the prompt opened, so only what changed here is sent.
     Edit {
         id: u32,
         kind: ItemKind,
         text: LineEdit,
+        was: (String, ItemKind),
     },
 }
 
@@ -181,10 +183,11 @@ pub(crate) enum Do {
         id: u32,
         text: String,
     },
+    /// Only what was changed: `None` leaves it as it is.
     Edit {
         id: u32,
-        kind: ItemKind,
-        title: String,
+        kind: Option<ItemKind>,
+        title: Option<String>,
     },
     Say(String),
 }
@@ -231,12 +234,18 @@ impl Page {
                                     text: text.text().trim().into(),
                                 });
                             }
-                            Typing::Edit { id, kind, text } if !text.text().trim().is_empty() => {
-                                out.push(Do::Edit {
-                                    id,
-                                    kind,
-                                    title: text.text().trim().into(),
-                                });
+                            Typing::Edit {
+                                id,
+                                kind,
+                                text,
+                                was,
+                            } if !text.text().trim().is_empty() => {
+                                let title = text.text().trim();
+                                let title = (title != was.0).then(|| title.to_owned());
+                                let kind = (kind != was.1).then_some(kind);
+                                if title.is_some() || kind.is_some() {
+                                    out.push(Do::Edit { id, kind, title });
+                                }
                             }
                             _ => {}
                         }
@@ -337,6 +346,7 @@ impl Page {
                     id,
                     kind: item.kind,
                     text: LineEdit::new(item.title.clone()),
+                    was: (item.title.clone(), item.kind),
                 });
                 return Vec::new();
             }
@@ -567,7 +577,7 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             text,
         ),
         Typing::Note { id, text } => (format!(" note on #{id} "), t.accent, text),
-        Typing::Edit { id, kind, text } => (
+        Typing::Edit { id, kind, text, .. } => (
             format!(" #{id} {} ", kind.as_str()),
             kind_color(*kind, t),
             text,
@@ -850,9 +860,22 @@ mod tests {
             press(&mut page, b"e\x1b[H\x1b[3~X\t\r"),
             [Do::Edit {
                 id: 1,
-                kind: ItemKind::Feature,
-                title: format!("X{}", title.chars().skip(1).collect::<String>()),
+                kind: Some(ItemKind::Feature),
+                title: Some(format!("X{}", title.chars().skip(1).collect::<String>())),
             }]
+        );
+        // Only what changed here goes, so a title changed elsewhere meanwhile stays.
+        assert_eq!(
+            press(&mut page, b"e\t\r"),
+            [Do::Edit {
+                id: 1,
+                kind: Some(ItemKind::Feature),
+                title: None,
+            }]
+        );
+        assert!(
+            press(&mut page, b"e\r").is_empty(),
+            "nothing changed, nothing sent"
         );
         assert!(
             press(&mut page, b"e\x15\r").is_empty(),

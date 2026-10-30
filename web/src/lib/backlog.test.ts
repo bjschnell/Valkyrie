@@ -118,6 +118,14 @@ describe("editChange", () => {
   it("refuses a field changed both here and elsewhere", () => {
     const now = { ...was, body: "rewritten on the phone" };
     expect(editChange(was, now, { ...mine, body: "mine" })).toMatch(/body changed elsewhere/);
+    // Saving again, from what's there now, replaces it.
+    expect(editChange(now, now, { ...mine, body: "mine" })).toEqual({ do: "edit", body: "mine" });
+    // Whitespace the daemon trims away is no change, and no clash.
+    expect(editChange(was, was, { ...mine, body: "detail\n" })).toBeNull();
+    expect(editChange(was, now, { ...mine, body: "rewritten on the phone " })).toEqual({
+      do: "edit",
+      body: "rewritten on the phone ",
+    });
     // The same text on both sides isn't a clash.
     expect(editChange(was, now, { ...mine, body: "rewritten on the phone" })).toEqual({
       do: "edit",

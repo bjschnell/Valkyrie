@@ -81,7 +81,8 @@ export function factsLine(f: ItemFacts): string {
 /**
  * The edit to send: only the fields changed in the editor (`null` if none), so a
  * change made elsewhere since it opened stays. A field changed both here and
- * there is refused, as a message, rather than one quietly winning.
+ * there is refused, as a message, rather than one quietly winning. Text is
+ * compared trimmed, as the daemon stores it.
  */
 export function editChange(
   was: Item | null,
@@ -92,8 +93,11 @@ export function editChange(
   const change: Extract<ItemChange, { do: "edit" }> = { do: "edit" };
   const clash: string[] = [];
   const field = <K extends "title" | "body" | "kind" | "project">(k: K, value: Item[K]) => {
-    if (value === was[k]) return false;
-    if (now && now[k] !== was[k] && now[k] !== value) clash.push(k === "project" ? "repository" : k);
+    const norm = (v: Item[K] | undefined) => (typeof v === "string" ? v.trim() : v);
+    const [mineV, wasV] = [norm(value), norm(was[k])];
+    if (mineV === wasV) return false;
+    const nowV = now ? norm(now[k]) : wasV;
+    if (nowV !== wasV && nowV !== mineV) clash.push(k === "project" ? "repository" : k);
     return true;
   };
   if (field("title", mine.title)) change.title = mine.title;
@@ -101,6 +105,6 @@ export function editChange(
   if (field("kind", mine.kind)) change.kind = mine.kind;
   if (mine.project !== null && field("project", mine.project)) change.cwd = mine.project;
   if (clash.length)
-    return `#${was.id}'s ${clash.join(" and ")} changed elsewhere since you opened it: go back and edit it again`;
+    return `#${was.id}'s ${clash.join(" and ")} changed elsewhere since you opened it: save again to replace it`;
   return Object.keys(change).length > 1 ? change : null;
 }

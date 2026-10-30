@@ -163,3 +163,42 @@ pub enum ItemChange {
     /// made, when nothing is left in it.
     Status { status: ItemStatus },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_edit_carries_only_what_it_changes() {
+        let edit: ItemChange = serde_json::from_str(r#"{"do":"edit","title":"x"}"#).unwrap();
+        let ItemChange::Edit {
+            title,
+            body,
+            kind,
+            cwd,
+        } = &edit
+        else {
+            panic!("{edit:?}");
+        };
+        assert_eq!(
+            (title.as_deref(), body, kind, cwd),
+            (Some("x"), &None, &None, &None)
+        );
+        assert_eq!(
+            serde_json::to_string(&edit).unwrap(),
+            r#"{"do":"edit","title":"x"}"#
+        );
+        // An older client sends every field, and still gets them all changed.
+        let full: ItemChange =
+            serde_json::from_str(r#"{"do":"edit","title":"x","body":"y","kind":"bug","cwd":null}"#)
+                .unwrap();
+        assert!(matches!(
+            full,
+            ItemChange::Edit {
+                body: Some(_),
+                kind: Some(ItemKind::Bug),
+                ..
+            }
+        ));
+    }
+}

@@ -430,6 +430,8 @@ export function ItemEditor({ id }: { id: number | null }) {
       } else {
         const change = editChange(loaded.current, item, { title, body: text, kind, project: folder || null });
         if (typeof change === "string") {
+          // Seen now: saving again replaces the other change with this one.
+          loaded.current = item;
           toast(change);
           return;
         }

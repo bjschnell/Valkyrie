@@ -188,6 +188,14 @@ impl Backlog {
                 kind,
                 cwd,
             } => {
+                if title.is_none() && body.is_none() && kind.is_none() && cwd.is_none() {
+                    bail!("nothing to change");
+                }
+                // A blank title is taken from the body when adding; here it would
+                // quietly move the body's first line.
+                if title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                    bail!("the title can't be empty");
+                }
                 (item.title, item.body) = clean(
                     title.as_deref().unwrap_or(&item.title),
                     body.as_deref().unwrap_or(&item.body),
@@ -510,6 +518,23 @@ mod tests {
             (item.title.as_str(), item.body.as_str(), item.kind),
             ("z", "more", ItemKind::Bug)
         );
+        let blank = ItemChange::Edit {
+            title: Some(" ".into()),
+            body: None,
+            kind: None,
+            cwd: None,
+        };
+        assert!(
+            b.change(1, &blank, 2).is_err(),
+            "a blank title isn't taken from the body"
+        );
+        let nothing = ItemChange::Edit {
+            title: None,
+            body: None,
+            kind: None,
+            cwd: None,
+        };
+        assert!(b.change(1, &nothing, 2).is_err());
         b.change(
             1,
             &ItemChange::Status {
