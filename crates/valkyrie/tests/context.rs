@@ -71,6 +71,7 @@ fn agents_only_propose_and_never_review() {
     for d in [&bin, &repo.join(".git"), &out] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
     let path = format!(
         "{}:{}",
@@ -217,6 +218,7 @@ fn corrections_become_proposals() {
     for d in [&bin, &repo.join(".git"), &out] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
     let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
     std::fs::set_permissions(
@@ -357,6 +359,7 @@ fn failures_become_proposals() {
     for d in [&bin, &repo.join(".git"), &out] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
     let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
     std::fs::set_permissions(
@@ -498,6 +501,7 @@ fn skills_are_indexed_patched_learned_and_exported() {
     for d in [&bin, &repo.join(".git"), &out, &dir.join("agent")] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
     let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
     std::fs::set_permissions(
@@ -788,6 +792,7 @@ fn agents_hear_about_their_siblings() {
     for d in [&bin, &repo.join(".git"), &out] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
     std::fs::set_permissions(
         dir.join("run"),
@@ -927,6 +932,7 @@ fn handoff_resumes_a_session_for_another_agent() {
     for d in [&bin, &repo.join(".git"), &out] {
         std::fs::create_dir_all(d).unwrap();
     }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
     std::fs::set_permissions(
         dir.join("run"),
@@ -1164,6 +1170,7 @@ fn mcp_serves_and_proposes_decisions() {
     let daemon = Daemon { dir: dir.clone() };
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
     std::fs::set_permissions(
         dir.join("run"),

@@ -108,7 +108,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 (Some(dir), _) => Some(std::path::absolute(dir)?),
                 (None, _) => {
                     let here = std::env::current_dir()?;
-                    in_git(&here).then_some(here)
+                    valkyrie_context::project::in_git(&here).then_some(here)
                 }
             };
             let attachments = files
@@ -295,8 +295,4 @@ fn short(s: &str, n: usize) -> String {
         true => format!("{}…", s.chars().take(n - 1).collect::<String>()),
         false => s.to_owned(),
     }
-}
-
-fn in_git(dir: &std::path::Path) -> bool {
-    dir.ancestors().any(|d| d.join(".git").exists())
 }

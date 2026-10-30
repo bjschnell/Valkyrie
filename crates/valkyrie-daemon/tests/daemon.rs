@@ -1086,6 +1086,7 @@ async fn decisions_are_proposed_pushed_and_listed() {
     let (client, mut pushes, dir) = start().await;
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(repo.join("src")).unwrap();
     let repo = std::fs::canonicalize(repo).unwrap();
     client.watch_queue().await.unwrap();
@@ -1224,6 +1225,7 @@ async fn unread_skills_are_flagged_then_retired() {
     let _ = std::fs::remove_dir_all(&*dir);
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     let repo = std::fs::canonicalize(repo).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

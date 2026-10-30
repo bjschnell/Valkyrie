@@ -41,7 +41,7 @@ pub fn create(dir: &Path, branch: &str, name: Option<&str>) -> Result<Made> {
     let dir = canonical(dir);
     let checkout = canonical(&project::checkout(&dir));
     anyhow::ensure!(
-        checkout.join(".git").exists(),
+        project::in_git(&checkout),
         "{} is not in a git repository",
         dir.display()
     );
@@ -257,7 +257,7 @@ pub struct Survey {
 pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
     let canonical = |p: &Path| valkyrie_proto::canonical(p).unwrap_or_else(|_| p.to_path_buf());
     anyhow::ensure!(
-        project::checkout(dir).join(".git").exists(),
+        project::in_git(dir),
         "{} is not in a git repository",
         dir.display()
     );

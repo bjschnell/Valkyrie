@@ -275,6 +275,7 @@ fn context_hook_follows_the_setting_and_the_sessions_own_hooks() {
     let dir = temp("context-switch");
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(dir.join("config/valkyrie")).unwrap();
     let run = |args: &[&str], envs: &[(&str, &str)]| {
         let mut cmd = valk(&dir.join("run/none.sock"), &dir);
@@ -998,6 +999,7 @@ fn context_hook_gives_decisions_at_session_start_only() {
     let dir = temp("context-hook");
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     let run = |agent: &str, session: bool, payload: String| {
         let mut cmd = valk(&dir.join("run/none.sock"), &dir);
         cmd.env("VALK_CONTEXT", dir.join("context"));
