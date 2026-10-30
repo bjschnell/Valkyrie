@@ -832,6 +832,9 @@ pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
 /// password: git runs in a session of its own, where ssh has no `/dev/tty` to
 /// prompt on. The CLI leaves it the terminal, so ssh can ask there.
 pub fn fetch_origin(dir: &Path, detach: bool) -> Result<(), String> {
+    // Windows has no `/dev/tty` for ssh to prompt on behind the TUI's back.
+    #[cfg(not(unix))]
+    let _ = detach;
     let git = |args: &[&str]| {
         let mut git = std::process::Command::new("git");
         git.no_window()
