@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { byColumn, byLane, factsLine, lane, liveSession } from "./backlog";
+import { byColumn, byLane, editChange, factsLine, lane, liveSession } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -93,5 +93,35 @@ describe("factsLine", () => {
     expect(
       factsLine({ branch: "fix/1-x", ahead: 1, commits: ["abc x"], diff: "1 file changed, 2 insertions(+)", dirty: 3 }),
     ).toBe("1 commit · 1 file changed, 2 insertions(+) · 3 not committed");
+  });
+});
+
+describe("editChange", () => {
+  const was = item({ title: "old", body: "detail", project: "/r/a" });
+  const mine = { title: "old", body: "detail", kind: "bug" as const, project: "/r/a" };
+
+  it("sends only what was changed here", () => {
+    expect(editChange(was, was, mine)).toBeNull();
+    expect(editChange(was, was, { ...mine, title: "new" })).toEqual({ do: "edit", title: "new" });
+    expect(editChange(was, was, { ...mine, kind: "chore", project: "/r/b" })).toEqual({
+      do: "edit",
+      kind: "chore",
+      cwd: "/r/b",
+    });
+  });
+
+  it("keeps a change made elsewhere to a field not touched here", () => {
+    const now = { ...was, body: "rewritten on the phone" };
+    expect(editChange(was, now, { ...mine, title: "new" })).toEqual({ do: "edit", title: "new" });
+  });
+
+  it("refuses a field changed both here and elsewhere", () => {
+    const now = { ...was, body: "rewritten on the phone" };
+    expect(editChange(was, now, { ...mine, body: "mine" })).toMatch(/body changed elsewhere/);
+    // The same text on both sides isn't a clash.
+    expect(editChange(was, now, { ...mine, body: "rewritten on the phone" })).toEqual({
+      do: "edit",
+      body: "rewritten on the phone",
+    });
   });
 });

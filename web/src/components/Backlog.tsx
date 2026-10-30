@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, base, byColumn, factsLine, liveSession, type Lane } from "../lib/backlog";
+import { COLUMNS, base, byColumn, editChange, factsLine, liveSession, type Lane } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
 import { addItem, changeItem, deleteItem, itemFacts, launchItem, noteItem, sendFile, toast, useApp } from "../store";
@@ -371,12 +371,13 @@ export function ItemEditor({ id }: { id: number | null }) {
   const [busy, setBusy] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const loaded = useRef(false);
+  // The item as the editor opened it, to send only what was changed here.
+  const loaded = useRef<Item | null>(item);
 
   // An edit opened before the items arrived fills in once they do.
   useEffect(() => {
     if (!item || loaded.current) return;
-    loaded.current = true;
+    loaded.current = item;
     setKind(item.kind);
     setTitle(item.title);
     setText(item.body);
@@ -426,8 +427,13 @@ export function ItemEditor({ id }: { id: number | null }) {
         saved = await addItem({ title: "", body: text, kind, cwd: folder || null, attachments: ready });
         write(DRAFT_KEY, null);
         write(FOLDER_KEY, folder || null);
-      } else if (!(await changeItem(id, { do: "edit", title, body: text, kind, cwd: folder || null }))) {
-        return;
+      } else {
+        const change = editChange(loaded.current, item, { title, body: text, kind, project: folder || null });
+        if (typeof change === "string") {
+          toast(change);
+          return;
+        }
+        if (change && !(await changeItem(id, change))) return;
       }
       navigator.vibrate?.(10);
       if (andLaunch && saved !== null) {

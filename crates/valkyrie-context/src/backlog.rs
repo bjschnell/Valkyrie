@@ -188,8 +188,13 @@ impl Backlog {
                 kind,
                 cwd,
             } => {
-                (item.title, item.body) = clean(title, body)?;
-                item.kind = *kind;
+                (item.title, item.body) = clean(
+                    title.as_deref().unwrap_or(&item.title),
+                    body.as_deref().unwrap_or(&item.body),
+                )?;
+                if let Some(kind) = kind {
+                    item.kind = *kind;
+                }
                 if let Some(cwd) = cwd {
                     let root = project::root(cwd);
                     if item.checkout.is_some() && item.project.as_ref() != Some(&root) {
@@ -487,12 +492,24 @@ mod tests {
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Feature), "human", 1).unwrap();
         let edit = ItemChange::Edit {
-            title: "y".into(),
-            body: "more".into(),
-            kind: ItemKind::Bug,
+            title: Some("y".into()),
+            body: Some("more".into()),
+            kind: Some(ItemKind::Bug),
             cwd: None,
         };
         b.change(1, &edit, 2).unwrap();
+        // Only what an edit gives changes: a body edited elsewhere in between stays.
+        let retitle = ItemChange::Edit {
+            title: Some("z".into()),
+            body: None,
+            kind: None,
+            cwd: None,
+        };
+        let item = b.change(1, &retitle, 2).unwrap();
+        assert_eq!(
+            (item.title.as_str(), item.body.as_str(), item.kind),
+            ("z", "more", ItemKind::Bug)
+        );
         b.change(
             1,
             &ItemChange::Status {
@@ -504,7 +521,7 @@ mod tests {
         let item = b.get(1).unwrap();
         assert_eq!(
             (item.title.as_str(), item.kind, item.status, item.updated),
-            ("y", ItemKind::Bug, ItemStatus::Shipped, 3)
+            ("z", ItemKind::Bug, ItemStatus::Shipped, 3)
         );
         assert!(b.change(9, &edit, 4).is_err());
     }

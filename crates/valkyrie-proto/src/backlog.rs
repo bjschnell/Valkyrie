@@ -147,11 +147,15 @@ pub struct NewItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum ItemChange {
-    /// Rewords it, or moves it to another repository (`cwd: None` keeps it where it is).
+    /// Rewords it, or moves it to another repository. Only what's given changes,
+    /// so an edit made from an older copy doesn't put back what it didn't touch.
     Edit {
-        title: String,
-        body: String,
-        kind: ItemKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ItemKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathBuf>,
     },
