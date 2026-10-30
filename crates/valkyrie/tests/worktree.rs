@@ -153,6 +153,10 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         &repo,
         &["push", "-q", "origin", &format!("{later}:refs/heads/main")],
     );
+    // Squashed the same way, then re-indented after the merge: work of its own.
+    let respaced = add_at("respaced", "landed");
+    std::fs::write(respaced.join("feature.txt"), "one\n  two\n").unwrap();
+    git(&respaced, &["commit", "-qam", "indent"]);
     // Nothing committed since it was made: "merged" only because it's main itself.
     let fresh = add("fresh");
     let live = add("live");
@@ -229,6 +233,10 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         "{said}"
     );
     assert!(
+        line(&said, &respaced).ends_with("(respaced): not merged"),
+        "{said}"
+    );
+    assert!(
         line(&said, &fresh).ends_with("(fresh): no commits of its own"),
         "{said}"
     );
@@ -240,7 +248,7 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
     assert!(!said.contains(&format!("{} (", repo.display())), "{said}");
     assert!(said.contains("2 may go"), "{said}");
     for w in [
-        &merged, &landed, &unmerged, &squashed, &dirty, &fresh, &live,
+        &merged, &landed, &respaced, &unmerged, &squashed, &dirty, &fresh, &live,
     ] {
         assert!(w.exists(), "the dry run took {}", w.display());
     }
@@ -289,7 +297,7 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         "{said}"
     );
     assert!(!landed.exists(), "{said}");
-    for w in [&unmerged, &squashed, &dirty, &fresh, &live] {
+    for w in [&respaced, &unmerged, &squashed, &dirty, &fresh, &live] {
         assert!(w.exists(), "{} went: {said}", w.display());
     }
     let branches = String::from_utf8(git(&repo, &["branch", "--list"]).stdout).unwrap();
@@ -299,7 +307,9 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
         .collect();
     assert_eq!(
         names,
-        ["dirty", "fresh", "live", "main", "squashed", "unmerged"],
+        [
+            "dirty", "fresh", "live", "main", "respaced", "squashed", "unmerged"
+        ],
         "{said}"
     );
     drop(daemon);

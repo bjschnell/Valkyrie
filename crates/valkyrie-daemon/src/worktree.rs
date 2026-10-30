@@ -265,43 +265,8 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         dir.display()
     );
     let repo = canonical(&project::root(dir));
-    let tip = |reference: &str| git_out(&repo, &["rev-parse", "--verify", "--quiet", reference]);
-    // `origin/HEAD` names it even offline; else whichever of main and master exists.
-    let default = git_out(
-        &repo,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    )
-    .ok()
-    .and_then(|name| name.strip_prefix("origin/").map(str::to_owned))
-    .or_else(|| {
-        ["main", "master"].into_iter().map(str::to_owned).find(|b| {
-            tip(&format!("refs/heads/{b}")).is_ok()
-                || tip(&format!("refs/remotes/origin/{b}")).is_ok()
-        })
-    });
-    let mut against = Vec::new();
-    let mut tips = Vec::new();
-    if let Some(default) = &default {
-        if remote && let Ok(at) = tip(&format!("refs/remotes/origin/{default}")) {
-            against.push(format!("origin/{default}"));
-            tips.push(at);
-        }
-        // Only on the default branch: a feature branch checked out there isn't
-        // where work lands.
-        let on = git_out(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
-        if on.is_ok_and(|on| &on == default)
-            && let Ok(at) = tip("HEAD")
-        {
-            against.push(format!("{default} at {}", repo.display()));
-            tips.push(at);
-        }
-    }
-    let main_head = tip("HEAD").ok();
+    let (against, tips) = tips(&repo, remote);
+    let main_head = git_out(&repo, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok();
 
     let listed = git_raw(&repo, &["worktree", "list", "--porcelain", "-z"])?;
     let mut linked = Vec::new();
@@ -322,9 +287,7 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         let path = canonical(Path::new(path));
         let head = head.to_owned();
         let branch = field("branch").map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_owned());
-        let merged = tips
-            .iter()
-            .any(|tip| git(&repo, &["merge-base", "--is-ancestor", &head, tip]).is_ok());
+        let merged = tips.iter().any(|tip| ancestor(&repo, &head, tip));
         let squashed = !merged && tips.iter().any(|tip| squashed(&repo, &head, tip));
         // A branch's reflog says whether anything happened on it since it was made;
         // its tip can't, as a fast-forward merge leaves it equal to `origin/main`.
@@ -470,6 +433,71 @@ impl crate::Registry {
     }
 }
 
+/// What merged is judged against in `repo`, by name and by commit: `origin`'s
+/// default branch (with `remote`), and the main checkout's `HEAD` while that's on
+/// the default branch.
+fn tips(repo: &Path, remote: bool) -> (Vec<String>, Vec<String>) {
+    let tip = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
+    // `origin/HEAD` names it even offline; else whichever of main and master exists.
+    let default = git_out(
+        repo,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .ok()
+    .and_then(|name| name.strip_prefix("origin/").map(str::to_owned))
+    .or_else(|| {
+        ["main", "master"].into_iter().map(str::to_owned).find(|b| {
+            tip(&format!("refs/heads/{b}")).is_ok()
+                || tip(&format!("refs/remotes/origin/{b}")).is_ok()
+        })
+    });
+    let mut against = Vec::new();
+    let mut tips = Vec::new();
+    if let Some(default) = &default {
+        if remote && let Ok(at) = tip(&format!("refs/remotes/origin/{default}")) {
+            against.push(format!("origin/{default}"));
+            tips.push(at);
+        }
+        // Only on the default branch: a feature branch checked out there isn't
+        // where work lands.
+        let on = git_out(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+        if on.is_ok_and(|on| &on == default)
+            && let Ok(at) = tip("HEAD")
+        {
+            against.push(format!("{default} at {}", repo.display()));
+            tips.push(at);
+        }
+    }
+    // `origin/main` and the main checkout's `HEAD` are often the same commit.
+    let mut seen = std::collections::HashSet::new();
+    let tips = tips
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect();
+    (against, tips)
+}
+
+/// The `HEAD` of the worktree at `checkout`, when it's merged into `repo`'s default
+/// branch, a squash merge included (as `survey` judges, against `origin` as last
+/// fetched): what `remove` takes as `merged_at`, so a squash-merged branch goes
+/// with the worktree rather than staying because `git branch -d` can't tell.
+pub fn merged_head(repo: &Path, checkout: &Path) -> Option<String> {
+    let head = git_out(checkout, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok()?;
+    let (_, tips) = tips(repo, true);
+    tips.iter()
+        .any(|tip| ancestor(repo, &head, tip) || squashed(repo, &head, tip))
+        .then_some(head)
+}
+
+fn ancestor(repo: &Path, head: &str, tip: &str) -> bool {
+    git(repo, &["merge-base", "--is-ancestor", head, tip]).is_ok()
+}
+
 /// Whether `head`'s change since it left `tip`'s history is already in `tip` as a
 /// single commit, as a squash merge puts it there. Compared by patch id, as
 /// `git cherry` does: the same change, not a guess from a deleted upstream. A
@@ -478,10 +506,7 @@ fn squashed(repo: &Path, head: &str, tip: &str) -> bool {
     let Ok(base) = git_out(repo, &["merge-base", head, tip]) else {
         return false;
     };
-    let Some(mine) = git_raw(repo, &["diff", "--no-ext-diff", "--binary", &base, head])
-        .ok()
-        .and_then(|diff| patch_ids(repo, &diff).into_iter().next())
-    else {
+    let Some(mine) = patch_ids(repo, &["diff", &base, head]).into_iter().next() else {
         // No change at all: nothing to find, and "no commits of its own" says why.
         return false;
     };
@@ -494,45 +519,53 @@ fn squashed(repo: &Path, head: &str, tip: &str) -> bool {
             format!("--since={}", t.saturating_sub(86_400))
         });
     let range = format!("{base}..{tip}");
-    let mut args = vec!["log", "-p", "--no-ext-diff", "--binary", "--no-merges"];
+    let mut args = vec!["log", "-p", "--no-merges", "--format=medium"];
     if !since.is_empty() {
         args.push(&since);
     }
     args.push(&range);
-    git_raw(repo, &args).is_ok_and(|log| patch_ids(repo, &log).contains(&mine))
+    patch_ids(repo, &args).contains(&mine)
 }
 
-/// The patch ids `git patch-id --stable` gives the patches in `text`.
-fn patch_ids(repo: &Path, text: &str) -> Vec<String> {
-    use std::io::Write;
-    let child = Command::new("git")
+/// The patch ids of what `git <args>` prints, a diff or a `log -p`, piped straight
+/// into `git patch-id --verbatim`: as bytes, since a lossy decode would make two
+/// different non-UTF-8 changes one, and with whitespace kept (unlike `--stable`),
+/// since an indent changed after the merge is work of its own. Line numbers don't
+/// count, so a main that moved on still matches. Empty when either fails.
+fn patch_ids(repo: &Path, args: &[&str]) -> Vec<String> {
+    use std::process::Stdio;
+    let source = Command::new("git")
         .no_window()
-        .args(["patch-id", "--stable"])
+        .args(&args[..1])
+        .args(["--no-ext-diff", "--no-color", "--binary"])
+        .args(&args[1..])
         .current_dir(repo)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn();
-    let Ok(mut child) = child else {
+    let Ok(mut source) = source else {
         return Vec::new();
     };
-    // Written from another thread: a big diff would fill both pipes.
-    let mut stdin = child.stdin.take();
-    let input = text.to_owned();
-    let writer = std::thread::spawn(move || {
-        if let Some(stdin) = &mut stdin {
-            let _ = stdin.write_all(input.as_bytes());
-        }
-    });
-    let out = child.wait_with_output();
-    let _ = writer.join();
-    out.map(|o| {
-        String::from_utf8_lossy(&o.stdout)
+    let Some(diff) = source.stdout.take() else {
+        let _ = source.wait();
+        return Vec::new();
+    };
+    let ids = Command::new("git")
+        .no_window()
+        .args(["patch-id", "--verbatim"])
+        .current_dir(repo)
+        .stdin(diff)
+        .stderr(Stdio::null())
+        .output();
+    let read = source.wait().is_ok_and(|s| s.success());
+    match ids {
+        Ok(out) if read && out.status.success() => String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
-            .collect()
-    })
-    .unwrap_or_default()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Runs `git` in `dir`, returning what it printed as it is: for `-z` output.
@@ -792,6 +825,55 @@ mod tests {
         let (gone, said) = remove(&repo.main(), &at, Some("feat/5-v"), Some(&now));
         assert!(gone && !at.exists(), "{said}");
         assert!(!has_branch(&repo.main(), "feat/5-v"), "{said}");
+    }
+
+    #[test]
+    fn a_squash_merge_counts_as_merged_and_only_for_exactly_its_change() {
+        let repo = Repo::new("squash");
+        let commit = |dir: &Path, message: &str| {
+            let me = ["-c", "user.name=t", "-c", "user.email=t@t"];
+            git(
+                dir,
+                &[&me[..], &["commit", "--quiet", "-am", message]].concat(),
+            )
+            .unwrap();
+        };
+        let squash = |branch: &str| {
+            git(&repo.main(), &["merge", "--squash", "--quiet", branch]).unwrap();
+            commit(&repo.main(), &format!("{branch} (#1)"));
+        };
+        // Two commits squashed into one on main, which then moves on.
+        let at = create(&repo.main(), "feat/6-s", None).unwrap().start;
+        std::fs::write(at.join("src/lib.rs"), "def f():\n    return 1\n").unwrap();
+        commit(&at, "one");
+        std::fs::write(at.join("src/lib.rs"), "def f():\n    return 2\n").unwrap();
+        commit(&at, "two");
+        squash("feat/6-s");
+        std::fs::write(repo.main().join("README"), "later\n").unwrap();
+        git(&repo.main(), &["add", "README"]).unwrap();
+        commit(&repo.main(), "later");
+        let head = git_out(&at, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(merged_head(&repo.main(), &at), Some(head));
+        // An indent changed after the merge is work of its own.
+        std::fs::write(at.join("src/lib.rs"), "def f():\nreturn 2\n").unwrap();
+        commit(&at, "dedent");
+        assert_eq!(merged_head(&repo.main(), &at), None);
+
+        // So is a byte changed in a file that isn't UTF-8.
+        let at = create(&repo.main(), "feat/7-b", None).unwrap().start;
+        std::fs::write(at.join("src/lib.rs"), b"caf\xe9\n").unwrap();
+        commit(&at, "latin-1");
+        squash("feat/7-b");
+        let merged = merged_head(&repo.main(), &at);
+        assert!(merged.is_some());
+        std::fs::write(at.join("src/lib.rs"), b"caf\xe8\n").unwrap();
+        commit(&at, "another byte");
+        assert_eq!(merged_head(&repo.main(), &at), None);
+        git(&at, &["reset", "--quiet", "--hard", "HEAD~1"]).unwrap();
+
+        // Shipped once merged: the branch goes too, though `-d` would keep it.
+        let (gone, said) = remove(&repo.main(), &at, Some("feat/7-b"), merged.as_deref());
+        assert!(gone && !has_branch(&repo.main(), "feat/7-b"), "{said}");
     }
 
     #[test]
