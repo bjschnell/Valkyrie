@@ -875,7 +875,10 @@ async fn left_behind(socket: &Path, before: Vec<ConnectedClient>, protocol: u32)
     if waiting.is_empty() {
         return;
     }
-    println!("waiting for {} clients to follow…", waiting.len());
+    match waiting.len() {
+        1 => println!("waiting for 1 client to follow…"),
+        n => println!("waiting for {n} clients to follow…"),
+    }
     let deadline = std::time::Instant::now() + follow_wait();
     let mut conn: Option<Client> = None;
     let mut clients = Vec::new();
@@ -898,7 +901,11 @@ async fn left_behind(socket: &Path, before: Vec<ConnectedClient>, protocol: u32)
             return;
         }
     }
-    for ConnectedClient { client, .. } in clients.iter().filter(|c| !c.current) {
+    // Only those still waited on: one that connected after the upgrade isn't news.
+    for ConnectedClient { client, .. } in clients
+        .iter()
+        .filter(|c| !c.current && waiting.contains(&c.client.pid))
+    {
         // Only the kinds the daemon keeps; never print what a peer sent as is.
         let who = match client.kind.as_str() {
             "tui" => "a TUI",
@@ -923,7 +930,8 @@ async fn left_behind(socket: &Path, before: Vec<ConnectedClient>, protocol: u32)
 fn alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        let Ok(pid) = i32::try_from(pid) else {
+        // Pid 0 would signal our own process group, and always look alive.
+        let Ok(pid @ 1..) = i32::try_from(pid) else {
             return false;
         };
         // SAFETY: signal 0 only checks that the process exists.
