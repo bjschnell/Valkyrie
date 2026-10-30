@@ -1,7 +1,7 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 14;
+export const PROTOCOL = 15;
 
 export type SessionId = number;
 export type Size = { cols: number; rows: number };
@@ -204,7 +204,7 @@ export interface NewItem {
 }
 
 export type ItemChange =
-  | { do: "edit"; title: string; body: string; kind: ItemKind; cwd: string | null }
+  | { do: "edit"; title?: string; body?: string; kind?: ItemKind; cwd?: string | null }
   | { do: "status"; status: ItemStatus };
 
 /** Requests, without the `req` id the client adds. */

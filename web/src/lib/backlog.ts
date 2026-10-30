@@ -1,7 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
-import type { Item, ItemFacts, SessionInfo } from "../proto";
+import type { Item, ItemChange, ItemFacts, ItemKind, SessionInfo } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -76,4 +76,43 @@ export function factsLine(f: ItemFacts): string {
   if (f.diff) parts.push(f.diff);
   if (f.dirty > 0) parts.push(`${f.dirty} not committed`);
   return parts.join(" · ");
+}
+
+/**
+ * The edit to send: only the fields changed in the editor (`null` if none), so a
+ * change made elsewhere since it opened stays. A field changed both here and
+ * there is refused, as a message, rather than one quietly winning, with `was`
+ * moved on for those fields only: saving again then replaces them, and still
+ * leaves alone every other field changed elsewhere. Text is compared trimmed,
+ * as the daemon stores it.
+ */
+export function editChange(
+  was: Item | null,
+  now: Item | null,
+  mine: { title: string; body: string; kind: ItemKind; project: string | null },
+): ItemChange | { clash: string; was: Item } | null {
+  if (!was) return null;
+  const change: Extract<ItemChange, { do: "edit" }> = { do: "edit" };
+  const clash: string[] = [];
+  let seen = was;
+  const field = <K extends "title" | "body" | "kind" | "project">(k: K, value: Item[K]) => {
+    const norm = (v: Item[K] | undefined) => (typeof v === "string" ? v.trim() : v);
+    const [mineV, wasV] = [norm(value), norm(was[k])];
+    if (mineV === wasV) return false;
+    const nowV = now ? norm(now[k]) : wasV;
+    if (now && nowV !== wasV && nowV !== mineV) {
+      clash.push(k === "project" ? "repository" : k);
+      seen = { ...seen, [k]: now[k] };
+    }
+    return true;
+  };
+  if (field("title", mine.title)) change.title = mine.title;
+  if (field("body", mine.body)) change.body = mine.body;
+  if (field("kind", mine.kind)) change.kind = mine.kind;
+  if (mine.project !== null && field("project", mine.project)) change.cwd = mine.project;
+  if (clash.length) {
+    const what = clash.join(" and ");
+    return { clash: `#${was.id}'s ${what} changed elsewhere since you opened it: save again to replace it`, was: seen };
+  }
+  return Object.keys(change).length > 1 ? change : null;
 }

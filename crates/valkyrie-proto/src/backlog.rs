@@ -147,15 +147,58 @@ pub struct NewItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum ItemChange {
-    /// Rewords it, or moves it to another repository (`cwd: None` keeps it where it is).
+    /// Rewords it, or moves it to another repository. Only what's given changes,
+    /// so an edit made from an older copy doesn't put back what it didn't touch.
     Edit {
-        title: String,
-        body: String,
-        kind: ItemKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ItemKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathBuf>,
     },
     /// Ships, drops or reopens it. Shipping also takes away a worktree its launch
     /// made, when nothing is left in it.
     Status { status: ItemStatus },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_edit_carries_only_what_it_changes() {
+        let edit: ItemChange = serde_json::from_str(r#"{"do":"edit","title":"x"}"#).unwrap();
+        let ItemChange::Edit {
+            title,
+            body,
+            kind,
+            cwd,
+        } = &edit
+        else {
+            panic!("{edit:?}");
+        };
+        assert_eq!(
+            (title.as_deref(), body, kind, cwd),
+            (Some("x"), &None, &None, &None)
+        );
+        assert_eq!(
+            serde_json::to_string(&edit).unwrap(),
+            r#"{"do":"edit","title":"x"}"#
+        );
+        // An older client sends every field, and still gets them all changed.
+        let full: ItemChange =
+            serde_json::from_str(r#"{"do":"edit","title":"x","body":"y","kind":"bug","cwd":null}"#)
+                .unwrap();
+        assert!(matches!(
+            full,
+            ItemChange::Edit {
+                body: Some(_),
+                kind: Some(ItemKind::Bug),
+                ..
+            }
+        ));
+    }
 }

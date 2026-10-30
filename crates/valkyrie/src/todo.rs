@@ -223,22 +223,18 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             if title.as_deref().is_some_and(|t| t.trim().is_empty()) {
                 bail!("the title can't be empty");
             }
-            let Some(i) = client.items().await?.into_iter().find(|i| i.id == id) else {
-                bail!("no item #{id}");
-            };
-            let body = match body.as_deref() {
-                Some("-") => {
+            let body = match body {
+                Some(b) if b == "-" => {
                     let mut text = String::new();
                     std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-                    text
+                    Some(text)
                 }
-                Some(b) => b.to_owned(),
-                None => i.body,
+                b => b,
             };
             let change = ItemChange::Edit {
-                title: title.unwrap_or(i.title),
+                title,
                 body,
-                kind: kind.unwrap_or(i.kind),
+                kind,
                 cwd: dir.map(std::path::absolute).transpose()?,
             };
             let (item, _) = client.change_item(id, change).await?;
