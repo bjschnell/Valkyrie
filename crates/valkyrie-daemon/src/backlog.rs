@@ -150,7 +150,10 @@ impl Registry {
         }
         let branch = item.branch.clone();
         Ok(tokio::task::spawn_blocking(move || {
-            worktree::remove(&project, &checkout, branch.as_deref(), None)
+            // Merged, squash merges included: then the branch goes too, though
+            // `git branch -d` would keep a squashed one.
+            let merged = worktree::merged_head(&project, &checkout);
+            worktree::remove(&project, &checkout, branch.as_deref(), merged.as_deref())
         })
         .await?)
     }

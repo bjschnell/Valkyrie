@@ -8,7 +8,8 @@ use std::process::{Command, Stdio};
 #[derive(Subcommand)]
 pub enum WorktreeCmd {
     /// Take away this repository's worktrees whose branch is merged into origin's
-    /// default branch (or the main checkout's, when it's on that branch), with the
+    /// default branch (or the main checkout's, when it's on that branch), squash
+    /// merges included, with the
     /// branch, unless a session runs in one, a backlog item is on it, it has no
     /// commits of its own, or it has changes. Only says what it would do without
     /// --yes; either way it first runs `git fetch --prune origin`, with your
