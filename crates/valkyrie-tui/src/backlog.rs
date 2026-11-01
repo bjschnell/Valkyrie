@@ -1352,7 +1352,11 @@ mod tests {
                 let line = item_line(&item(1, 1), lane, true, width, &t);
                 let text = line.to_string();
                 assert!(text.contains(lane.title()), "{lane:?} at {width}: {text:?}");
-                assert_eq!(line.width(), width as usize, "{lane:?} at {width}: {text:?}");
+                assert_eq!(
+                    line.width(),
+                    width as usize,
+                    "{lane:?} at {width}: {text:?}"
+                );
             }
         }
     }
