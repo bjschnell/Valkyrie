@@ -3807,6 +3807,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "unicode-width",
+ "valkyrie-context",
  "valkyrie-proto",
  "windows-sys 0.61.2",
 ]
@@ -3832,6 +3833,7 @@ dependencies = [
  "similar",
  "tokio",
  "tracing",
+ "valkyrie-context",
  "valkyrie-proto",
 ]
 

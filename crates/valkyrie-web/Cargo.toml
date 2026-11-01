@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 valkyrie-proto.workspace = true
+valkyrie-context.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
