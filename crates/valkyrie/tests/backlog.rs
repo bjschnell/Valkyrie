@@ -290,7 +290,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         refused.contains(&format!(
             "#1 is already being worked on in session {}",
             launched.trim()
-        )) && refused.contains("leave it to that session"),
+        )) && refused.contains("you're already on it"),
         "{refused}"
     );
     human("valk todo launch 6", "launch6");

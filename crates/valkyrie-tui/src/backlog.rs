@@ -147,6 +147,9 @@ pub(crate) fn rows(items: &[Item], sessions: &[SessionInfo], boot: u64) -> Vec<(
 }
 
 /// Done items shown at the bottom of the page.
+/// The longest escape sequence held over to the next read while typing.
+const HELD_MAX: usize = 32;
+
 const DONE_SHOWN: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,8 +274,10 @@ impl Page {
                     | Typing::Note { text, .. }
                     | Typing::Edit { text, .. } => text,
                 };
-                // A CSI sequence the read cut off waits for the rest.
-                let cut = key.len() == 2 || !(0x40..=0x7e).contains(&key[key.len() - 1]);
+                // A CSI sequence the read cut off waits for the rest, but only so
+                // long: past `HELD_MAX` it's not a sequence, and Esc must still work.
+                let cut = key.len() <= HELD_MAX
+                    && (key.len() == 2 || !(0x40..=0x7e).contains(&key[key.len() - 1]));
                 if whole && key.starts_with(b"\x1b[") && cut {
                     self.held = key.to_vec();
                     break;
@@ -1359,5 +1364,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_stray_csi_before_esc_does_not_hold_the_prompt() {
+        let mut page = Page {
+            typing: Some(Typing::add()),
+            ..Page::default()
+        };
+        page.keys(b"\x1b[\x1b", &[], &[], 7);
+        assert!(page.typing.is_none(), "Esc cancels at once");
+        assert!(page.held.is_empty());
+    }
+
+    #[test]
+    fn a_cut_sequence_is_held_only_briefly() {
+        let mut page = Page {
+            typing: Some(Typing::add()),
+            ..Page::default()
+        };
+        page.keys(b"\x1b[1;", &[], &[], 7);
+        assert_eq!(page.held, b"\x1b[1;");
+        let mut page = Page {
+            typing: Some(Typing::add()),
+            ..Page::default()
+        };
+        page.keys(&[b"\x1b[".as_slice(), &[b'1'; 40]].concat(), &[], &[], 7);
+        assert!(page.held.is_empty(), "past the cap it isn't held");
     }
 }
