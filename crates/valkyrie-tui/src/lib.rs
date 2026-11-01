@@ -36,7 +36,7 @@ use ratatui::widgets::{
 use settings::{Field, Settings, TabSide, TabStyle};
 pub use settings::{context_enabled, on_context_change};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use theme::{Theme, state_icon};
 use tokio::sync::mpsc;
@@ -2416,7 +2416,7 @@ impl App {
             Do::Add { kind, text } => {
                 // For the repository the TUI is in, or the attached tab is.
                 let here = self.attached_cwd().or_else(|| std::env::current_dir().ok());
-                let cwd = here.filter(|d| d.ancestors().any(|a| a.join(".git").exists()));
+                let cwd = here.filter(|d| in_repository(d));
                 let item = self
                     .client
                     .add_item(NewItem {
@@ -5010,10 +5010,39 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
     keys
 }
 
+/// Whether `dir` is in a git repository (as the CLI and daemon see it).
+fn in_repository(dir: &Path) -> bool {
+    valkyrie_context::project::in_git(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use valkyrie_proto::{Cursor, Span};
+
+    /// A stray empty `.git` above the cwd isn't a repository, so `n` mustn't file
+    /// the item under it (backlog #13).
+    #[test]
+    fn a_stray_empty_git_dir_is_not_a_repository() {
+        let base = std::env::temp_dir().join(format!("valk-tui-stray-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join("y")).unwrap();
+        let real = base.join("repo");
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        std::fs::write(real.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        let strays_above = base.ancestors().skip(1).any(in_repository);
+        let (stray, filed) = (
+            in_repository(&base.join("y")),
+            in_repository(&real.join("src")),
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+        assert!(filed, "a real repository still counts");
+        if !strays_above {
+            assert!(!stray, "an empty .git is not a repository");
+        }
+    }
 
     /// The default map's keys go past the program; Esc before `[` or `O` is a
     /// sequence, and an Alt key no one here claims is the program's.

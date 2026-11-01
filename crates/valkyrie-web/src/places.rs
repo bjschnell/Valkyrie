@@ -44,7 +44,7 @@ pub fn place(path: &Path, home: &Path) -> Place {
     Place {
         path: path.to_string_lossy().into_owned(),
         label: label(path, home),
-        git: path.join(".git").exists(),
+        git: valkyrie_context::project::is_checkout(path),
     }
 }
 
@@ -74,7 +74,10 @@ pub fn repos(home: &Path) -> Vec<Place> {
                 continue;
             }
             let git = path.join(".git");
-            if let Ok(meta) = git.metadata() {
+            if let (true, Ok(meta)) = (
+                valkyrie_context::project::is_checkout(&path),
+                git.metadata(),
+            ) {
                 // The index changes with most git work; the directory itself rarely.
                 let touched = git
                     .join("index")
@@ -129,7 +132,7 @@ pub fn list(path: &str, home: &Path) -> std::io::Result<Listing> {
     Ok(Listing {
         label: label(&path, home),
         parent: path.parent().map(|p| p.to_string_lossy().into_owned()),
-        git: path.join(".git").exists(),
+        git: valkyrie_context::project::is_checkout(&path),
         dirs: dirs.iter().map(|d| place(d, home)).collect(),
         path: path.to_string_lossy().into_owned(),
     })
@@ -163,6 +166,11 @@ mod tests {
             std::fs::create_dir_all(home.join(dir)).unwrap();
         }
         std::fs::write(home.join("repos/a.txt"), "").unwrap();
+        // A real repository has a HEAD; a stray empty `.git` is not one.
+        for repo in ["repos/a", "repos/b", "repos/.hidden", "code/c"] {
+            std::fs::write(home.join(repo).join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        std::fs::create_dir_all(home.join("repos/stray/.git")).unwrap();
         let mut labels: Vec<String> = repos(&home).into_iter().map(|p| p.label).collect();
         labels.sort();
         assert_eq!(labels, ["~/code/c", "~/repos/a", "~/repos/b"]);
@@ -172,9 +180,15 @@ mod tests {
         let names: Vec<&str> = listing.dirs.iter().map(|d| d.label.as_str()).collect();
         assert_eq!(
             names,
-            ["~/repos/a", "~/repos/b", "~/repos/plain", "~/repos/.hidden"]
+            [
+                "~/repos/a",
+                "~/repos/b",
+                "~/repos/plain",
+                "~/repos/stray",
+                "~/repos/.hidden"
+            ]
         );
-        assert!(listing.dirs[0].git && !listing.dirs[2].git);
+        assert!(listing.dirs[0].git && !listing.dirs[2].git && !listing.dirs[3].git);
         assert!(list("~/nope", &home).is_err());
         std::fs::remove_dir_all(&home).unwrap();
     }

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 valkyrie-proto.workspace = true
+valkyrie-context.workspace = true
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 tokio.workspace = true
 anyhow.workspace = true
