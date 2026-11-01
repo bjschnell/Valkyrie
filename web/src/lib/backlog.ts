@@ -70,8 +70,11 @@ export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
       case "working":
       case "stale":
         return item.pr ? "review" : "running";
+      case "interrupted":
+        // An Esc-interrupted turn finished nothing: it isn't up for review.
+        return item.pr ? "review" : "running";
       default:
-        // Done with its turn, idle or interrupted: its work is waiting on you.
+        // Done with its turn or idle: its work is waiting on you.
         return "review";
     }
   }

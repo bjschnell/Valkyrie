@@ -112,7 +112,8 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
         return match s.status.state {
             AgentState::NeedsInput | AgentState::Blocked => Lane::Needs,
             _ if item.pr.is_some() => Lane::Review,
-            AgentState::Working | AgentState::Stale => Lane::Running,
+            // An Esc-interrupted turn finished nothing: it isn't up for review.
+            AgentState::Working | AgentState::Stale | AgentState::Interrupted => Lane::Running,
             _ => Lane::Review,
         };
     }
@@ -1031,6 +1032,32 @@ mod tests {
         assert_eq!(
             page.keys(b"a", &rows, &[], 7),
             [Do::Status(1, ItemStatus::Open)]
+        );
+    }
+
+    #[test]
+    fn an_interrupted_session_is_not_review_ready_until_it_has_a_pull_request() {
+        let taken = Item {
+            sessions: vec![4],
+            ..item(1, 1)
+        };
+        // Esc-interrupted mid-turn: nothing in it is complete, so it isn't up for review.
+        assert_eq!(
+            lane(&taken, &[session(4, AgentState::Interrupted)], 7),
+            Lane::Running
+        );
+        // A finished turn is.
+        assert_eq!(
+            lane(&taken, &[session(4, AgentState::ReviewReady)], 7),
+            Lane::Review
+        );
+        let pr = Item {
+            pr: Some("https://github.com/o/r/pull/7".into()),
+            ..taken
+        };
+        assert_eq!(
+            lane(&pr, &[session(4, AgentState::Interrupted)], 7),
+            Lane::Review
         );
     }
 
