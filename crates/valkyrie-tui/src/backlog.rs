@@ -726,13 +726,16 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
         .map_or("no folder".into(), |n| n.to_string_lossy().into_owned());
     let head = format!(" #{:<4}", item.id);
     let kind = format!("{:<8}", item.kind.as_str());
+    // The lane as a column too, so a row still says its state when the heading scrolls away.
+    let state = format!("{:<12}", lane.title());
     let folder = format!("  {}", fit(&folder, 16));
-    let room =
-        (width as usize).saturating_sub(head.len() + kind.len() + folder.chars().count() + 1);
+    let room = (width as usize)
+        .saturating_sub(head.len() + kind.len() + state.len() + folder.chars().count() + 1);
     let title_fg = if lane == Lane::Done { t.muted } else { t.fg };
     let mut line = Line::from(vec![
         head.fg(t.muted),
         kind.fg(kind_color(item.kind, t)),
+        state.fg(lane.color(t)),
         // Padded, so the folders line up at the right.
         format!("{:<room$}", fit(&item.title, room)).fg(title_fg),
         folder.fg(t.muted),
@@ -1371,6 +1374,23 @@ mod tests {
             Some(kind_color(ItemKind::Feature, &t))
         );
         assert_ne!(label(ItemKind::Bug), label(ItemKind::Feature));
+    }
+
+    #[test]
+    fn each_row_shows_its_state_and_still_fits_the_width() {
+        let t = crate::theme::DRACULA;
+        for lane in Lane::ORDER {
+            for width in [40u16, 80] {
+                let line = item_line(&item(1, 1), lane, true, width, &t);
+                let text = line.to_string();
+                assert!(text.contains(lane.title()), "{lane:?} at {width}: {text:?}");
+                assert_eq!(
+                    line.width(),
+                    width as usize,
+                    "{lane:?} at {width}: {text:?}"
+                );
+            }
+        }
     }
 
     #[test]
