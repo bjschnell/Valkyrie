@@ -379,6 +379,8 @@ valk todo take 4 -b fix/x  # an agent says it's on #4 (and --pr URL once it's op
 valk todo take 4 --steal   # one session per item: hand #4 to your session anyway
 valk todo add --take -k bug "Off-by-one in resize" --branch fix/resize  # an agent tracks a fix nobody planned
 valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
+valk todo note -i 4 "left: X"   # a handoff, kept for the item's next launch
+valk todo accept 5         # also: show, drop, reopen, rm
 ```
 
 On the phone, the list icon in the inbox opens the board: Backlog, In progress,
