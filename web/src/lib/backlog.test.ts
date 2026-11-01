@@ -43,6 +43,13 @@ describe("lane", () => {
     expect(liveSession(i, [session(3, "working"), session(4, "working", 0)], 7)?.id).toBe(3);
   });
 
+  it("keeps an interrupted session running: nothing in it is complete", () => {
+    const i = item({ sessions: [4] });
+    expect(lane(i, [session(4, "interrupted")], 7)).toBe("running");
+    expect(lane(i, [session(4, "review_ready")], 7)).toBe("review");
+    expect(lane({ ...i, pr: "https://github.com/o/r/pull/7" }, [session(4, "interrupted")], 7)).toBe("review");
+  });
+
   it("waits on review once its sessions are gone, or belong to another daemon", () => {
     const i = item({ sessions: [3], checkout: "/r-fix-1-t" });
     expect(lane(i, [], 7)).toBe("review");
