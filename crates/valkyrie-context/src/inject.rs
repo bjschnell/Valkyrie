@@ -81,14 +81,33 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
              working around it.\n\n"
         ));
         let footer_room = propose.len() + 120;
+        // Every decision gets at least its title, so a low-ranked kind (patterns
+        // come after constraints, gotchas and decisions) isn't cut whole once a
+        // project has a dozen long ones. Bodies fill what the titles leave, in
+        // rank order; once one has to go, the rest go too.
+        let titles: Vec<String> = active.iter().map(|d| entry(d, now, false)).collect();
+        let mut rest: usize = titles.iter().map(String::len).sum();
+        let mut bodies = true;
         let mut shown = 0;
-        for d in &active {
-            let line = entry(d, now);
+        for (d, title) in active.iter().zip(&titles) {
+            rest -= title.len();
+            let full = entry(d, now, true);
+            let line = if bodies && out.len() + full.len() + rest + footer_room <= budget {
+                full
+            } else {
+                bodies = false;
+                title.clone()
+            };
             if out.len() + line.len() + footer_room > budget {
                 break;
             }
             out.push_str(&line);
             shown += 1;
+        }
+        if !bodies {
+            out.push_str(&format!(
+                "(Bodies left out to fit: `{valk} decisions show <id>` prints one.)\n"
+            ));
         }
         if shown < active.len() {
             out.push_str(&format!(
@@ -136,13 +155,13 @@ fn index(skills: &[&Decision], valk: &str) -> String {
     out
 }
 
-fn entry(d: &Decision, now: u64) -> String {
+fn entry(d: &Decision, now: u64, with_body: bool) -> String {
     let mut line = format!("- #{} [{}] {}", d.id, d.kind.as_str(), d.title);
     if crate::stale::due(d, now).is_some() {
         line.push_str(" (due for re-checking: it may be out of date)");
     }
     let body = crate::file::one_line(&d.body);
-    if !body.is_empty() {
+    if with_body && !body.is_empty() {
         line.push_str(": ");
         if body.chars().count() > MAX_SHOWN_BODY {
             line.extend(body.chars().take(MAX_SHOWN_BODY));
@@ -239,6 +258,31 @@ mod tests {
         assert!(text.len() <= BUDGET, "{}", text.len());
         assert!(text.contains("more not shown"));
         assert!(text.contains("valk decide"));
+    }
+
+    #[test]
+    fn long_bodies_never_cut_a_low_ranked_decision_whole() {
+        use DecisionKind as K;
+        // A dozen constraints, gotchas and decisions with near-maximal bodies
+        // used to fill the budget before any pattern was reached.
+        let kinds = [K::Constraint, K::Gotcha, K::Decision];
+        let mut all: Vec<Decision> = (1..=12)
+            .map(|i| d(i, kinds[i as usize % 3], DecisionStatus::Active, 0))
+            .collect();
+        all.push(d(13, K::Pattern, DecisionStatus::Active, 0));
+        for x in &mut all {
+            x.body = "y".repeat(490);
+        }
+        let text = block(Path::new("/r/app"), &all, BUDGET, "valk");
+        assert!(text.len() <= BUDGET, "{}", text.len());
+        for i in 1..=13 {
+            assert!(text.contains(&format!("- #{i} [")), "#{i} missing:\n{text}");
+        }
+        assert!(text.contains("- #13 [pattern] Title 13\n"), "{text}");
+        assert!(text.contains("Bodies left out"));
+        assert!(!text.contains("more not shown"));
+        // The highest-ranked (constraints, newest id first) keep their bodies.
+        assert!(text.contains("Title 12: yyy"), "{text}");
     }
 
     #[test]
