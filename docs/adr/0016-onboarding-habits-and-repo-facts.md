@@ -17,9 +17,9 @@ Those settings mix two kinds of thing:
 - **`until` is the user's habit.** The author ships to a PR at home and at work, in every repository. Asking for it again in each one is noise.
 - **`checks` is a fact about the repository.** It differs per repository and can usually be read from its files.
 
-Because the two are stored together per project, each new repository starts with no policy until the user writes one, or until phase 3 has seen two stops there. The author's work machine shows the cost: a dozen repositories, the same habit in each, and no policy anywhere.
+Because the two are stored together per project, each new repository starts with no policy until the user writes one, or until phase 3 has seen two stops there. The author's work machine shows the cost: the same habit in every work repository, and no policy in any of them.
 
-The work machine also showed a CI setup ADR-0013 doesn't handle. The code is on GitHub, but CI runs elsewhere and doesn't post statuses back to the PR. The author's agent watches builds through an MCP server and an API, and reports back. `gh` sees no checks, so `pr-red` never fires, and the `ci-fix` template as written never runs. The author also wrote a skill there that does the ship-and-watch-CI loop by hand. That's what this ADR should make unnecessary.
+CI setups vary too. At the author's work, the code is on GitHub and Bamboo builds it. Bamboo posts build status to the PR, so `gh` sees it and `pr-red` works, and agents read the build logs through Bamboo's API (PR #73's links in the `ci-fix` reason cover that). Other teams' CI posts nothing to the forge, and only the agent can reach it, through an MCP server, an API or a CLI. There `pr-red` never fires and `ci-fix` never runs. The author also wrote a skill at work that does the ship-and-watch-CI loop by hand. That's what this ADR and ADR-0013 together should make unnecessary.
 
 Learning alone (ADR-0013 phase 3) is slow at the start: nothing happens until two matching stops. Asking alone goes stale and asks things code could find out. So Valkyrie detects what it can, asks once for what it can't, and keeps learning from replies to correct both.
 
@@ -49,7 +49,7 @@ Learning alone (ADR-0013 phase 3) is slow at the start: nothing happens until tw
 
 ## Consequences
 - A new repository gets the user's habit at once, and its checks after one card.
-- The author's work repositories need one first-run answer and one card each, instead of a hand-written policy each. The work skill that ships and watches CI can be retired once `ci: agent` lands.
+- The author's work repositories need one first-run answer and one card each, instead of a hand-written policy each. They're `ci: gh`, so the work skill that ships and watches CI can be retired once `ci-fix` lands (#38). `ci: agent` is for teams whose CI doesn't report to the forge.
 - Two scopes means "where does this setting come from?" has two answers. `valk decisions show` for a project prints the combined policy and says where each setting came from.
 - Drafting `checks` from CI configuration can pick steps that need secrets or services. The card shows the draft before anything runs, and a check that fails for reasons outside the code is the first thing phase 3 should learn from.
 - `ci: agent` relies on the agent's tools and its honesty about the result. It's capped and logged, and the merge stays the user's (ADR-0015).
