@@ -346,9 +346,12 @@ How it works:
    and never pushes the default branch. How far is yours to set, once:
 
    ```sh
-   valk decide -k policy "Ship finished work as a pull request" \
-     $'template: ship\nuntil: pr\nchecks: cargo fmt --check && cargo clippy && cargo test'
+   printf '%s\n' 'template: ship' 'until: pr' \
+     'checks: cargo fmt --check && cargo clippy && cargo test' |
+     valk decide -k policy "Ship finished work as a pull request" -
    ```
+
+   (The body comes on stdin with `-`, which works the same in bash, zsh and fish.)
 
    `until` is `commit`, `push` or `pr`; `checks` is optional. The agent gets the
    template, never your body as prose, and only once a turn. The queue doesn't
