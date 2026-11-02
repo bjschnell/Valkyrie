@@ -392,7 +392,8 @@ pub fn found(d: &Value) -> Option<Found> {
         kind: d["kind"]
             .as_str()
             .and_then(DecisionKind::parse)
-            .filter(|k| *k != DecisionKind::Skill)
+            // Nor a policy: only its own proposal path (ADR-0013 §4) writes one.
+            .filter(|k| !matches!(k, DecisionKind::Skill | DecisionKind::Policy))
             .unwrap_or_default(),
         title: clip(title, 150),
         body: clip(d["body"].as_str().unwrap_or("").trim(), 600),

@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// What sort of thing a decision records. Constraints rank first when injected; a
-/// skill is a procedure, listed by title and read in full when needed (ADR-0011).
+/// skill is a procedure, listed by title and read in full when needed (ADR-0011);
+/// a policy picks a template Valkyrie's hooks enforce (ADR-0013), its body
+/// settings, not prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {
@@ -16,16 +18,18 @@ pub enum DecisionKind {
     Gotcha,
     Fix,
     Skill,
+    Policy,
 }
 
 impl DecisionKind {
-    pub const ALL: [DecisionKind; 6] = [
+    pub const ALL: [DecisionKind; 7] = [
         Self::Decision,
         Self::Constraint,
         Self::Pattern,
         Self::Gotcha,
         Self::Fix,
         Self::Skill,
+        Self::Policy,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -36,6 +40,7 @@ impl DecisionKind {
             Self::Gotcha => "gotcha",
             Self::Fix => "fix",
             Self::Skill => "skill",
+            Self::Policy => "policy",
         }
     }
 

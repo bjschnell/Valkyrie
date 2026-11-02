@@ -9,6 +9,7 @@ pub mod handoff;
 pub mod inject;
 pub mod mine;
 pub mod model;
+pub mod policy;
 pub mod project;
 pub mod retro;
 pub mod skill;
@@ -680,6 +681,11 @@ fn clean(title: &str, body: &str, kind: DecisionKind) -> Result<(String, String)
         bail!("title is over {MAX_TITLE} characters; put the detail in the body");
     }
     let body = shown(body, true).trim().to_owned();
+    if kind == DecisionKind::Policy
+        && let Err(e) = policy::parse(&body)
+    {
+        bail!("{e}");
+    }
     if kind == DecisionKind::Skill {
         if body.chars().count() > MAX_SKILL_BODY {
             bail!("body is over {MAX_SKILL_BODY} characters; a skill is one procedure");

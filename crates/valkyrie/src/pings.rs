@@ -108,6 +108,10 @@ pub struct Ping {
     cwd: Option<PathBuf>,
 }
 
+/// A Claude stop a `ship` policy kept going (ADR-0013 §5): the hook answered it,
+/// so it never reached you. Not one of [`KINDS`].
+pub const KEPT_GOING: &str = "kept going";
+
 /// Work states that leave the next step to you, whatever the reply says.
 const SHORT: &[&str] = &["uncommitted", "unpushed", "no-pr", "pr-red"];
 
@@ -219,7 +223,24 @@ fn read_log(
                 if let Some(dir) = p["cwd"].as_str() {
                     cwd = Some(dir.into());
                 }
-                if p["hook_event_name"] == "Stop" {
+                if p["hook_event_name"] == "Stop" && !p["valk_continued"].is_null() {
+                    // A stop a policy answered for you (ADR-0013): not a turn end,
+                    // but what the policy saved you.
+                    if line["t"].as_u64().unwrap_or(0) >= since_ms {
+                        last_end = None;
+                        out.push(Ping {
+                            kind: KEPT_GOING,
+                            session: stem.to_owned(),
+                            t: line["t"].as_u64().unwrap_or(0),
+                            seen: false,
+                            summary: String::new(),
+                            ask: None,
+                            source: None,
+                            work: p["valk_continued"]["state"].as_str().map(str::to_owned),
+                            cwd: cwd.clone(),
+                        });
+                    }
+                } else if p["hook_event_name"] == "Stop" {
                     stop = Some(Stop {
                         message: p["last_assistant_message"].as_str().map(str::to_owned),
                         transcript: p["transcript_path"].as_str().map(PathBuf::from),
@@ -448,6 +469,13 @@ pub fn report(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Result<S
     )?;
     writeln!(s, "  no reply recorded           {unknown}")?;
     writeln!(s, "  (last reply read from: {})", sources.join(", "))?;
+    let kept = pings.iter().filter(|p| p.kind == KEPT_GOING).count();
+    if kept > 0 {
+        writeln!(
+            s,
+            "  kept going by a policy      {kept} (not counted above)"
+        )?;
+    }
     let recorded: Vec<&&Ping> = ends.iter().filter(|p| p.work.is_some()).collect();
     if !recorded.is_empty() {
         let mut by: BTreeMap<&str, usize> = BTreeMap::new();
@@ -760,9 +788,22 @@ mod tests {
                     false,
                 ),
                 work(4100, "uncommitted"),
+                // A stop the ship policy answered: never a turn end, counted apart.
+                json!({"k": "hook", "t": 5000, "agent": "claude", "payload": {
+                    "hook_event_name": "Stop", "cwd": dir,
+                    "valk_continued": {"policy": 9, "state": "uncommitted", "until": "pr"}}}),
             ],
         );
         let pings = collect(&dir, 0, None).unwrap();
+        let kept: Vec<_> = pings.iter().filter(|p| p.kind == KEPT_GOING).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].work.as_deref(), Some("uncommitted"));
+        let pings: Vec<Ping> = pings.into_iter().filter(|p| p.kind != KEPT_GOING).collect();
+        assert!(
+            report(&collect(&dir, 0, None).unwrap(), 1, 0, 86_400_000)
+                .unwrap()
+                .contains("kept going by a policy      1")
+        );
         let ends: Vec<_> = pings.iter().filter(|p| p.kind == "turn ended").collect();
         let works: Vec<_> = ends.iter().map(|p| p.work.as_deref()).collect();
         assert_eq!(works, [Some("unpushed"), Some("no-pr"), Some("clean")]);

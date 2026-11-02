@@ -3,6 +3,13 @@
 //! The hook runs inside the agent on every event, so its contract is strict: print
 //! nothing (stdout becomes model context on some events), always exit 0 (exit 2
 //! blocks the agent), return in milliseconds, and do nothing outside Valkyrie.
+//!
+//! One exception, by the user's own accepted policy (ADR-0013 §5): on Claude's
+//! `Stop`, when an active `ship` policy finds the work short of where the user
+//! ships it, the hook prints Claude's block with the policy's text, and tells the
+//! daemon the turn goes on. It's this hook rather than the context hook so the one
+//! process that reports the stop also decides it: the queue never shows a turn
+//! end the agent didn't take.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -16,8 +23,12 @@ const MAX_STRING: usize = 4096;
 /// Payloads larger than this are dropped rather than forwarded.
 const MAX_PAYLOAD: u64 = 8 * 1024 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_millis(300);
+/// Longest the `ship` policy waits on `gh` for a pull request: Claude gives the
+/// hook 5 s, and an unanswered lookup lets the stop through.
+const GH_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Never fails and never prints; errors only go to `$VALK_HOOK_LOG` if set.
+/// Never fails; prints only a policy's block (see the module doc); errors only go
+/// to `$VALK_HOOK_LOG` if set.
 pub fn run(agent: &str, socket: &Path, ambient: bool) {
     // The session was launched with this hook in its own arguments.
     if ambient && std::env::var_os("VALK_SESSION_HOOKS").is_some() {
@@ -57,7 +68,28 @@ fn forward(agent: &str, socket: &Path) -> Result<()> {
     if raw.len() as u64 > MAX_PAYLOAD {
         anyhow::bail!("payload over {MAX_PAYLOAD} bytes, dropped");
     }
-    let payload = slim(serde_json::from_slice(&raw)?);
+    let mut payload = slim(serde_json::from_slice(&raw)?);
+    let block = (agent == "claude")
+        .then(|| ship_block(&mut payload))
+        .flatten();
+    let sent = send(socket, session, agent, sent_us, payload);
+    // Blocked whether or not the daemon heard: the policy is the user's either way.
+    if let Some(reason) = block {
+        println!(
+            "{}",
+            serde_json::json!({"decision": "block", "reason": reason})
+        );
+    }
+    sent
+}
+
+fn send(
+    socket: &Path,
+    session: valkyrie_proto::SessionId,
+    agent: &str,
+    sent_us: u64,
+    payload: Value,
+) -> Result<()> {
     let frame = valkyrie_proto::codec::encode(&ClientMsg::Hook {
         session,
         agent: agent.to_owned(),
@@ -71,6 +103,47 @@ fn forward(agent: &str, socket: &Path) -> Result<()> {
     valkyrie_proto::ipc::exchange(socket, &frame, false, SEND_TIMEOUT)
         .with_context(|| format!("connect {}", socket.display()))?;
     Ok(())
+}
+
+/// On a main-thread `Stop`, the project's `ship` policy (ADR-0013): the text to
+/// keep the turn going when the work is short of where the user ships it, with
+/// the payload marked so the daemon doesn't count a turn end. Once per turn:
+/// Claude says `stop_hook_active` when the stop follows a block.
+fn ship_block(payload: &mut Value) -> Option<String> {
+    use valkyrie_context::policy;
+    use valkyrie_daemon::work;
+    if payload["hook_event_name"] != "Stop"
+        || payload["stop_hook_active"] == true
+        || !payload["agent_id"].is_null()
+        || !valkyrie_tui::context_enabled()
+    {
+        return None;
+    }
+    let cwd = PathBuf::from(payload["cwd"].as_str()?);
+    let root = valkyrie_context::project::root(&cwd);
+    let decisions = valkyrie_context::Store::new(crate::context::store_base()).load(&root);
+    let (id, ship) = policy::ship(&decisions)?;
+    let pr = |dir: &Path, branch: &str| {
+        if ship.until == policy::Until::Pr {
+            work::gh_pr(dir, branch, GH_TIMEOUT)
+        } else {
+            // Nothing past a push matters to this policy.
+            work::Pr::Unknown
+        }
+    };
+    let (state, branch, _) = work::state(&cwd, &pr)?;
+    let state = state.as_str();
+    if !policy::short(&ship, state) {
+        return None;
+    }
+    payload["valk_continued"] =
+        serde_json::json!({"policy": id, "state": state, "until": ship.until.as_str()});
+    Some(policy::reason(
+        id,
+        &ship,
+        state,
+        branch.as_deref().unwrap_or(""),
+    ))
 }
 
 /// Drops tool output and caps long strings; the final reply is kept whole because
