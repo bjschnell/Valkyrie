@@ -15,6 +15,31 @@ fn temp(name: &str) -> PathBuf {
     dir
 }
 
+/// A daemon a test started itself, killed when the test ends however it ends: an
+/// assert failing before the test's own `kill` used to leave it running for good.
+struct KillOnDrop(std::process::Child);
+
+impl std::ops::Deref for KillOnDrop {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for KillOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Already gone when the test killed it itself.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn valk(socket: &Path, state: &Path) -> Command {
     let mut cmd = Command::new(BIN);
     cmd.env("VALK_SOCKET", socket)
@@ -68,11 +93,13 @@ fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
 fn hook_reaches_the_daemon_quickly() {
     let dir = temp("e2e");
     let socket = dir.join("run/o.sock");
-    let mut daemon = valk(&socket, &dir)
-        .arg("daemon")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
@@ -343,12 +370,14 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let mut daemon = valk(&socket, &dir)
-        .env("CLAUDE_CONFIG_DIR", &claude_dir)
-        .arg("daemon")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .env("CLAUDE_CONFIG_DIR", &claude_dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let spawn = |command: &[&str]| {
         (0..100)
             .find_map(|_| {
@@ -411,11 +440,13 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
 fn ambient_observer_reports_a_typed_claude_once() {
     let dir = temp("ambient-observer");
     let socket = dir.join("run/o.sock");
-    let mut daemon = valk(&socket, &dir)
-        .arg("daemon")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
@@ -606,11 +637,13 @@ fn upgrade_keeps_sessions_and_refuses_a_foreign_binary() {
         text
     };
     // The daemon in the foreground, so the test owns and reaps it.
-    let mut daemon = valk(&socket, &dir)
-        .arg("daemon")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while !socket.exists() {
         assert!(Instant::now() < deadline, "daemon did not start");
@@ -997,11 +1030,13 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     let socket = dir.join("run/o.sock");
     let proj = dir.join("myproj");
     std::fs::create_dir_all(&proj).unwrap();
-    let mut daemon = valk(&socket, &dir)
-        .arg("daemon")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
