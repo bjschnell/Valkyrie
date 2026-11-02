@@ -449,11 +449,11 @@ fn tips(repo: &Path, remote: bool) -> (Vec<String>, Vec<String>) {
     (against, tips)
 }
 
-/// `tips`, each commit with its name, e.g. (`origin/main`, its commit).
-fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
+/// The repository's default branch: what `origin/HEAD` names, even offline; else
+/// whichever of main and master exists.
+pub(crate) fn default_branch(repo: &Path) -> Option<String> {
     let tip = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
-    // `origin/HEAD` names it even offline; else whichever of main and master exists.
-    let default = git_out(
+    git_out(
         repo,
         &[
             "symbolic-ref",
@@ -469,7 +469,13 @@ fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
             tip(&format!("refs/heads/{b}")).is_ok()
                 || tip(&format!("refs/remotes/origin/{b}")).is_ok()
         })
-    });
+    })
+}
+
+/// `tips`, each commit with its name, e.g. (`origin/main`, its commit).
+fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
+    let tip = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
+    let default = default_branch(repo);
     let mut named = Vec::new();
     if let Some(default) = &default {
         if remote && let Ok(at) = tip(&format!("refs/remotes/origin/{default}")) {
@@ -705,7 +711,7 @@ fn git_raw(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Runs `git` in `dir`, returning what it printed, trimmed.
-fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(git_raw(dir, args)?.trim().to_owned())
 }
 

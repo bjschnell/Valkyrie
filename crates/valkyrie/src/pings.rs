@@ -102,7 +102,20 @@ pub struct Ping {
     /// Where a turn end's reply was read from: `hook`, `transcript`, `summary`, or
     /// `none` when nothing recorded one.
     pub source: Option<&'static str>,
+    /// Where a turn end left its work (ADR-0013 §1): `clean`, `uncommitted`,
+    /// `unpushed`, `no-pr` or `pr-red`; `None` before the daemon recorded it.
+    pub work: Option<String>,
     cwd: Option<PathBuf>,
+}
+
+/// Work states that leave the next step to you, whatever the reply says.
+const SHORT: &[&str] = &["uncommitted", "unpushed", "no-pr", "pr-red"];
+
+impl Ping {
+    /// A turn end that left work short of shipping.
+    pub fn short(&self) -> bool {
+        self.work.as_deref().is_some_and(|w| SHORT.contains(&w))
+    }
 }
 
 /// The summary the tracker gives a turn still waiting on background work.
@@ -191,6 +204,9 @@ fn read_log(
     // tracker repeats that turn end once the work is done, under a new seq.
     let mut ended: Option<String> = None;
     let mut background = false;
+    // The last ping this log added, when it's a turn end: the daemon writes where
+    // that turn left its work a moment later, once git has been read.
+    let mut last_end: Option<usize> = None;
     // A live session's last line may be half written.
     for line in text
         .lines()
@@ -257,6 +273,7 @@ fn read_log(
                     ask = asking(&reply);
                     source = Some(if from.is_empty() { "none" } else { from });
                 }
+                last_end = (kind == "turn ended").then_some(out.len());
                 out.push(Ping {
                     kind,
                     session: stem.to_owned(),
@@ -265,8 +282,14 @@ fn read_log(
                     summary,
                     ask,
                     source,
+                    work: None,
                     cwd: cwd.clone(),
                 });
+            }
+            "work" => {
+                if let Some(i) = last_end.take() {
+                    out[i].work = line["state"].as_str().map(str::to_owned);
+                }
             }
             _ => {}
         }
@@ -407,17 +430,41 @@ pub fn report(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Result<S
     for p in &ends {
         *sources.entry(p.source.unwrap_or("none")).or_default() += 1;
     }
-    let unknown = sources.get("none").copied().unwrap_or(0);
+    // Left short of shipping without asking: a statement ("I haven't pushed")
+    // hands you the next step as surely as a question.
+    let short = ends.iter().filter(|p| p.ask.is_none() && p.short()).count();
+    let unknown = ends
+        .iter()
+        .filter(|p| p.ask.is_none() && !p.short() && p.source == Some("none"))
+        .count();
     let sources: Vec<String> = sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
     writeln!(s, "\nTurn ends: {}", ends.len())?;
     writeln!(s, "  ended asking you something  {}", asks.len())?;
+    writeln!(s, "  left work short of shipping {short}")?;
     writeln!(
         s,
         "  just finished               {}",
-        ends.len() - asks.len() - unknown
+        ends.len() - asks.len() - short - unknown
     )?;
     writeln!(s, "  no reply recorded           {unknown}")?;
     writeln!(s, "  (last reply read from: {})", sources.join(", "))?;
+    let recorded: Vec<&&Ping> = ends.iter().filter(|p| p.work.is_some()).collect();
+    if !recorded.is_empty() {
+        let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+        for p in &recorded {
+            *by.entry(p.work.as_deref().unwrap_or("")).or_default() += 1;
+        }
+        let states: Vec<String> = ["uncommitted", "unpushed", "no-pr", "pr-red", "clean"]
+            .iter()
+            .map(|w| format!("{w} {}", by.get(w).copied().unwrap_or(0)))
+            .collect();
+        writeln!(
+            s,
+            "  (work at {} turn ends: {})",
+            recorded.len(),
+            states.join(", ")
+        )?;
+    }
 
     let questions = pings.iter().filter(|p| p.kind == "question");
     let questions: Vec<&str> = questions.map(|p| p.summary.as_str()).collect();
@@ -456,6 +503,7 @@ pub fn json(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Value {
             "summary": p.summary,
             "ask": p.ask,
             "source": p.source,
+            "work": p.work,
             "cwd": p.cwd,
         })).collect::<Vec<_>>(),
     })
@@ -675,6 +723,65 @@ mod tests {
         assert!(text.contains("in 0 sessions"), "{text}");
         assert!(text.contains("Questions: 0"), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_turn_that_leaves_work_unshipped_is_counted_whatever_it_says() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-pings-work-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let work = |t: u64, state: &str| json!({"k": "work", "t": t, "state": state});
+        write_log(
+            &dir,
+            "2-1",
+            &[
+                // A statement, not a question: only the work line shows it stalled.
+                stop(
+                    1000,
+                    &dir,
+                    Some("Committed as 6120299. I haven't pushed."),
+                    None,
+                ),
+                state(1000, 1, "review_ready", None, "Committed.", false),
+                work(1500, "unpushed"),
+                // Asked, and short too: counted once, as asking.
+                stop(2000, &dir, Some("Want me to open the PR?"), None),
+                state(2000, 2, "review_ready", None, "Pushed.", false),
+                work(2600, "no-pr"),
+                stop(3000, &dir, Some("PR is up and green."), None),
+                state(3000, 3, "review_ready", None, "PR up.", false),
+                work(3100, "clean"),
+                // A work line only ever belongs to the turn end right before it.
+                state(
+                    4000,
+                    4,
+                    "needs_input",
+                    Some("question"),
+                    "Which one?",
+                    false,
+                ),
+                work(4100, "uncommitted"),
+            ],
+        );
+        let pings = collect(&dir, 0, None).unwrap();
+        let ends: Vec<_> = pings.iter().filter(|p| p.kind == "turn ended").collect();
+        let works: Vec<_> = ends.iter().map(|p| p.work.as_deref()).collect();
+        assert_eq!(works, [Some("unpushed"), Some("no-pr"), Some("clean")]);
+        assert!(
+            pings
+                .iter()
+                .all(|p| p.kind == "turn ended" || p.work.is_none())
+        );
+        let text = report(&pings, 1, 0, 86_400_000).unwrap();
+        assert!(text.contains("ended asking you something  1"), "{text}");
+        assert!(text.contains("left work short of shipping 1"), "{text}");
+        assert!(text.contains("just finished               1"), "{text}");
+        assert!(
+            text.contains(
+                "work at 3 turn ends: uncommitted 0, unpushed 1, no-pr 1, pr-red 0, clean 1"
+            ),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

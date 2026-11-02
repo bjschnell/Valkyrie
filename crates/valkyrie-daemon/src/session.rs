@@ -799,6 +799,12 @@ impl Session {
         }
     }
 
+    /// Records where the agent left its work when a turn ended (ADR-0013 §1), for
+    /// `valk pings`. Written after the turn end's own line, once git has been read.
+    pub fn log_work(&self, work: Value) {
+        self.state.lock().unwrap().log(now_ms(), "work", work);
+    }
+
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
     /// inherits `VALK_SESSION`, so only the session's own agent may drive it (a
     /// `codex exec` run by Claude must not); a plain shell session takes any agent.

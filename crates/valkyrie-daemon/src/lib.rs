@@ -10,6 +10,7 @@ mod foreground;
 mod pty;
 mod restore;
 mod session;
+mod work;
 mod worktree;
 
 pub use restore::path as restore_path;
@@ -955,8 +956,22 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 payload,
             } => {
                 let turn_ended = payload["hook_event_name"] == "Stop";
+                // The main thread's turn, not a subagent's, and where it ran.
+                let work_in = (turn_ended && payload["agent_id"].is_null())
+                    .then(|| payload["cwd"].as_str().map(std::path::PathBuf::from))
+                    .flatten();
                 match registry.get(session) {
-                    Ok(s) => s.hook(&agent, sent_us, payload),
+                    Ok(s) => {
+                        s.hook(&agent, sent_us, payload);
+                        // Git and `gh` take a while; the record can wait, the hook can't.
+                        if let Some(cwd) = work_in {
+                            tokio::task::spawn_blocking(move || {
+                                if let Some(work) = work::at(&cwd) {
+                                    s.log_work(work);
+                                }
+                            });
+                        }
+                    }
                     Err(_) => tracing::debug!(session, "hook for unknown session"),
                 }
                 if turn_ended {
