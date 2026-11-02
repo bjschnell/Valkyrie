@@ -173,6 +173,7 @@ impl Registry {
         item: &Item,
         mine: Option<SessionId>,
         agent: bool,
+        caller: Option<SessionId>,
         how: Claim,
     ) -> Result<Vec<SessionId>> {
         let id = item.id;
@@ -192,14 +193,14 @@ impl Registry {
             return Ok(holders);
         }
         let or = match how {
+            _ if agent && caller == Some(blocker_of(how, launched, newest)) => {
+                "you're already on it"
+            }
             _ if agent => "leave it to that session",
             Claim::Take { .. } => "stop it first or take it with --steal",
             Claim::Launch => "attach to it, or stop it first",
         };
-        let blocker = match how {
-            Claim::Launch => launched.unwrap_or(newest),
-            Claim::Take { .. } => newest,
-        };
+        let blocker = blocker_of(how, launched, newest);
         let Ok(session) = self.get(blocker) else {
             bail!("#{id} is already being worked on in session {blocker}; {or}");
         };
@@ -275,6 +276,7 @@ impl Registry {
                 &item,
                 Some(info.id),
                 caller.agent.is_some(),
+                Some(info.id),
                 Claim::Take { steal },
             )?;
             backlog.taken(
@@ -572,6 +574,7 @@ impl Registry {
                 &backlog.get(id)?,
                 mine,
                 caller.agent.is_some(),
+                caller.session.as_ref().map(|s| s.info().id),
                 Claim::Launch,
             )?;
             self.launching.lock().unwrap().insert(id);
@@ -616,6 +619,14 @@ impl Registry {
         tracing::info!(id, session = info.id, "launched a backlog item");
         self.refresh_items();
         Ok(reply)
+    }
+}
+
+/// The session a refused claim names: the launch's own, else the newest holder.
+fn blocker_of(how: Claim, launched: Option<SessionId>, newest: SessionId) -> SessionId {
+    match how {
+        Claim::Launch => launched.unwrap_or(newest),
+        Claim::Take { .. } => newest,
     }
 }
 
@@ -676,7 +687,7 @@ mod tests {
             .unwrap()
             .add(&new, "human", 1)
             .unwrap();
-        let take = |steal| registry.claim(&item, Some(3), false, Claim::Take { steal });
+        let take = |steal| registry.claim(&item, Some(3), false, Some(3), Claim::Take { steal });
         assert_eq!(take(false).unwrap(), Vec::<SessionId>::new());
         {
             registry.launching.lock().unwrap().insert(item.id);
@@ -685,7 +696,7 @@ mod tests {
                 let refused = take(steal).unwrap_err().to_string();
                 assert!(refused.contains("being launched right now"), "{refused}");
             }
-            let refused = registry.claim(&item, None, false, Claim::Launch);
+            let refused = registry.claim(&item, None, false, None, Claim::Launch);
             assert!(refused.is_err(), "nor a second launch");
         }
         // Its guard dropped, whatever became of the launch: free again.

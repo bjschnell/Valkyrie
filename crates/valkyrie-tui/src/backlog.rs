@@ -113,7 +113,8 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
         return match s.status.state {
             AgentState::NeedsInput | AgentState::Blocked => Lane::Needs,
             _ if item.pr.is_some() => Lane::Review,
-            AgentState::Working | AgentState::Stale => Lane::Running,
+            // An Esc-interrupted turn finished nothing: it isn't up for review.
+            AgentState::Working | AgentState::Stale | AgentState::Interrupted => Lane::Running,
             _ => Lane::Review,
         };
     }
@@ -148,6 +149,9 @@ pub(crate) fn rows(items: &[Item], sessions: &[SessionInfo], boot: u64) -> Vec<(
 }
 
 /// Done items shown at the bottom of the page.
+/// The longest escape sequence held over to the next read while typing.
+const HELD_MAX: usize = 32;
+
 const DONE_SHOWN: usize = 5;
 
 /// Which items the page shows (`r` cycles it): every repository's, one
@@ -326,8 +330,10 @@ impl Page {
                     | Typing::Note { text, .. }
                     | Typing::Edit { text, .. } => text,
                 };
-                // A CSI sequence the read cut off waits for the rest.
-                let cut = key.len() == 2 || !(0x40..=0x7e).contains(&key[key.len() - 1]);
+                // A CSI sequence the read cut off waits for the rest, but only so
+                // long: past `HELD_MAX` it's not a sequence, and Esc must still work.
+                let cut = key.len() <= HELD_MAX
+                    && (key.len() == 2 || !(0x40..=0x7e).contains(&key[key.len() - 1]));
                 if whole && key.starts_with(b"\x1b[") && cut {
                     self.held = key.to_vec();
                     break;
@@ -791,13 +797,16 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
         .map_or("no folder".into(), |n| n.to_string_lossy().into_owned());
     let head = format!(" #{:<4}", item.id);
     let kind = format!("{:<8}", item.kind.as_str());
+    // The lane as a column too, so a row still says its state when the heading scrolls away.
+    let state = format!("{:<12}", lane.title());
     let folder = format!("  {}", fit(&folder, 16));
-    let room =
-        (width as usize).saturating_sub(head.len() + kind.len() + folder.chars().count() + 1);
+    let room = (width as usize)
+        .saturating_sub(head.len() + kind.len() + state.len() + folder.chars().count() + 1);
     let title_fg = if lane == Lane::Done { t.muted } else { t.fg };
     let mut line = Line::from(vec![
         head.fg(t.muted),
         kind.fg(kind_color(item.kind, t)),
+        state.fg(lane.color(t)),
         // Padded, so the folders line up at the right.
         format!("{:<room$}", fit(&item.title, room)).fg(title_fg),
         folder.fg(t.muted),
@@ -1102,6 +1111,32 @@ mod tests {
         assert_eq!(
             page.keys(b"a", &rows, &[], 7),
             [Do::Status(1, ItemStatus::Open)]
+        );
+    }
+
+    #[test]
+    fn an_interrupted_session_is_not_review_ready_until_it_has_a_pull_request() {
+        let taken = Item {
+            sessions: vec![4],
+            ..item(1, 1)
+        };
+        // Esc-interrupted mid-turn: nothing in it is complete, so it isn't up for review.
+        assert_eq!(
+            lane(&taken, &[session(4, AgentState::Interrupted)], 7),
+            Lane::Running
+        );
+        // A finished turn is.
+        assert_eq!(
+            lane(&taken, &[session(4, AgentState::ReviewReady)], 7),
+            Lane::Review
+        );
+        let pr = Item {
+            pr: Some("https://github.com/o/r/pull/7".into()),
+            ..taken
+        };
+        assert_eq!(
+            lane(&pr, &[session(4, AgentState::Interrupted)], 7),
+            Lane::Review
         );
     }
 
@@ -1454,5 +1489,49 @@ mod tests {
         // And `r` asks for it, with or without items shown.
         let mut page = Page::default();
         assert_eq!(page.keys(b"r", &[], &[], 7), [Do::NextRepo]);
+    }
+
+    #[test]
+    fn each_row_shows_its_state_and_still_fits_the_width() {
+        let t = crate::theme::DRACULA;
+        for lane in Lane::ORDER {
+            for width in [40u16, 80] {
+                let line = item_line(&item(1, 1), lane, true, width, &t);
+                let text = line.to_string();
+                assert!(text.contains(lane.title()), "{lane:?} at {width}: {text:?}");
+                assert_eq!(
+                    line.width(),
+                    width as usize,
+                    "{lane:?} at {width}: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stray_csi_before_esc_does_not_hold_the_prompt() {
+        let mut page = Page {
+            typing: Some(Typing::add()),
+            ..Page::default()
+        };
+        page.keys(b"\x1b[\x1b", &[], &[], 7);
+        assert!(page.typing.is_none(), "Esc cancels at once");
+        assert!(page.held.is_empty());
+    }
+
+    #[test]
+    fn a_cut_sequence_is_held_only_briefly() {
+        let mut page = Page {
+            typing: Some(Typing::add()),
+            ..Page::default()
+        };
+        page.keys(b"\x1b[1;", &[], &[], 7);
+        assert_eq!(page.held, b"\x1b[1;");
+        let mut page = Page {
+            typing: Some(Typing::add()),
+            ..Page::default()
+        };
+        page.keys(&[b"\x1b[".as_slice(), &[b'1'; 40]].concat(), &[], &[], 7);
+        assert!(page.held.is_empty(), "past the cap it isn't held");
     }
 }

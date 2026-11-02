@@ -871,9 +871,13 @@ pub fn fetch_origin(dir: &Path, detach: bool) -> Result<(), String> {
         }
         git.output()
     };
+    match git(&["rev-parse", "--git-dir"]) {
+        Ok(out) if out.status.success() => {}
+        _ => return Err(format!("{} is not a git repository", dir.display())),
+    }
     match git(&["remote", "get-url", "origin"]) {
         Ok(out) if out.status.success() => {}
-        _ => return Err("no remote origin".into()),
+        _ => return Err(format!("{} has no remote origin", dir.display())),
     }
     // A remote's URL can name a command to run (`ext::`); never for a fetch made
     // on the user's behalf.
@@ -950,6 +954,28 @@ mod tests {
         std::os::unix::fs::symlink(&fresh, &link).unwrap();
         assert!(ensure_private_dir(&link).is_err());
 
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_failed_fetch_names_the_folder() {
+        let base = std::env::temp_dir().join(format!("valkyrie-fetch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&base)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let err = fetch_origin(&base, false).unwrap_err();
+        assert_eq!(err, format!("{} is not a git repository", base.display()));
+        git(&["init", "--quiet"]);
+        let err = fetch_origin(&base, false).unwrap_err();
+        assert_eq!(err, format!("{} has no remote origin", base.display()));
         std::fs::remove_dir_all(&base).unwrap();
     }
 

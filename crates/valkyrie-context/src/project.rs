@@ -37,6 +37,11 @@ pub fn in_git(dir: &Path) -> bool {
         .any(|top| dot_git(&top.join(".git")).is_some())
 }
 
+/// Whether `dir` itself is a git checkout (not merely inside one).
+pub fn is_checkout(dir: &Path) -> bool {
+    dot_git(&dir.join(".git")).is_some()
+}
+
 enum DotGit {
     /// A repository's own git dir.
     Dir,

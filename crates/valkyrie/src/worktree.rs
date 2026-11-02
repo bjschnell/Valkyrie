@@ -84,7 +84,7 @@ fn ignored(verb: &str, entries: &[String]) -> String {
 pub(crate) fn fetch(dir: &Path) -> bool {
     let fetched = valkyrie_proto::fetch_origin(dir, false);
     if let Err(why) = &fetched {
-        eprintln!("{why}: judging against this repository's HEAD only");
+        eprintln!("{why}: judging it against the main checkout's HEAD only");
     }
     fetched.is_ok()
 }
