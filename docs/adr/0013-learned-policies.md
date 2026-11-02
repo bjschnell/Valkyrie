@@ -68,6 +68,8 @@ The user's line for what an agent may decide: anything code, scripts or infrastr
 4. The `ci-fix` template (`gh`).
 5. Measurement in `health`.
 
+[ADR-0016](0016-onboarding-habits-and-repo-facts.md) splits a policy's settings into the user's habits and each repository's facts, and adds `ci: agent`. Its phases 1–2 come before phases 3–4 here.
+
 ## Consequences
 - **Every stop costs a `git status` and an upstream check** in the session's directory, inside the daemon rather than the hook. A huge repository should make this skip, not slow the hook. The 300 ms limit holds either way.
 - **Public repositories.** `ship` with `<until>` at `push` or `pr` sends code to the remote before the user has read it. Valkyrie doesn't decide whether that's fine. It goes only as far as the user's own replies did, and the proposal says when the remote is public.
