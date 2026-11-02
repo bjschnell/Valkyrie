@@ -494,13 +494,16 @@ export async function noteItem(id: number, text: string): Promise<boolean> {
 
 /** The ids of the open items whose branch is merged, as the daemon last fetched (it
  * doesn't fetch, nor does `valk web`); with none, says why and returns none. */
-export async function checkMerged(): Promise<number[]> {
+export async function checkMerged(shown: (id: number) => boolean = () => true): Promise<number[]> {
   if (!conn) return [];
   try {
     const reply = await conn.request({ t: "ship_merged", dry_run: true, only: null });
     if (reply.t !== "shipped") return [];
-    toast(reply.shipped.length ? wouldShip(reply.shipped, reply.kept) : shippedSummary(reply.shipped, reply.kept));
-    return reply.shipped.map((s) => s.id);
+    // Only the items the board shows, so a filtered board never ships another repository's.
+    const shipped = reply.shipped.filter((s) => shown(s.id));
+    const kept = reply.kept.filter((k) => shown(k.id));
+    toast(shipped.length ? wouldShip(shipped, kept) : shippedSummary(shipped, kept));
+    return shipped.map((s) => s.id);
   } catch (e) {
     toast((e as Error).message);
     return [];

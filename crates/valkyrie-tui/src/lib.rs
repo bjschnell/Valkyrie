@@ -1614,6 +1614,17 @@ impl App {
             Err(e) => return self.say(e),
         };
         let open = self.backlog.is_some();
+        // Asking, a filtered page offers only its own repository's items.
+        let (shipped, kept) = match self.backlog.as_ref().map(|p| &p.repo) {
+            Some(repo) if done.asking => {
+                let shown = |id: u32| self.items.iter().any(|i| i.id == id && repo.holds(i));
+                (
+                    shipped.into_iter().filter(|s| shown(s.id)).collect(),
+                    kept.into_iter().filter(|k| shown(k.id)).collect(),
+                )
+            }
+            _ => (shipped, kept),
+        };
         let (arm, said) = backlog::answer(done.asking, open, &shipped, &kept, done.unfetched);
         if let (Some(ids), Some(page)) = (arm, &mut self.backlog) {
             page.ship_armed = Some(ids);
@@ -2225,8 +2236,16 @@ impl App {
         self.daemon.as_ref().map_or(0, |d| d.boot)
     }
 
+    /// The open page's rows: the items of the repository it shows.
     fn backlog_rows(&self) -> Vec<(backlog::Lane, Item)> {
-        backlog::rows(&self.items, &self.sessions, self.boot())
+        let repo = self.backlog.as_ref().map(|p| &p.repo);
+        let items: Vec<Item> = self
+            .items
+            .iter()
+            .filter(|i| repo.is_none_or(|r| r.holds(i)))
+            .cloned()
+            .collect();
+        backlog::rows(&items, &self.sessions, self.boot())
     }
 
     async fn open_backlog(&mut self) {
@@ -2360,9 +2379,15 @@ impl App {
                 // with the user's credentials, so fetch here first. Off the event
                 // loop: a fetch can take a while, and the answer comes back on
                 // `shipping`.
+                let repo = self
+                    .backlog
+                    .as_ref()
+                    .map(|p| p.repo.clone())
+                    .unwrap_or_default();
                 let mut projects: Vec<PathBuf> = self
                     .items
                     .iter()
+                    .filter(|i| repo.holds(i))
                     .filter(|i| i.status == valkyrie_proto::ItemStatus::Open && i.branch.is_some())
                     .filter_map(|i| i.project.clone())
                     .collect();
@@ -2402,10 +2427,25 @@ impl App {
                     });
                 });
             }
+            Do::NextRepo => {
+                if let Some(page) = &mut self.backlog {
+                    page.repo = page.repo.next(&self.items);
+                    page.cursor = 0;
+                    page.armed = None;
+                }
+            }
             Do::Add { kind, text } => {
-                // For the repository the TUI is in, or the attached tab is.
+                // For the repository the page shows, else the one the TUI is in, or
+                // the attached tab is.
+                let repo = self.backlog.as_ref().map(|p| p.repo.clone());
                 let here = self.attached_cwd().or_else(|| std::env::current_dir().ok());
-                let cwd = here.filter(|d| d.ancestors().any(|a| a.join(".git").exists()));
+                let cwd = match repo.unwrap_or_default() {
+                    backlog::Repo::In(root) => Some(root),
+                    backlog::Repo::NoFolder => None,
+                    backlog::Repo::All => {
+                        here.filter(|d| d.ancestors().any(|a| a.join(".git").exists()))
+                    }
+                };
                 let item = self
                     .client
                     .add_item(NewItem {
@@ -2744,11 +2784,11 @@ impl App {
         };
         // Backlog items waiting on the user (to review, stuck, proposed), only while
         // there are some; `b` opens the whole backlog.
-        let waiting: Vec<(backlog::Lane, Item)> = self
-            .backlog_rows()
-            .into_iter()
-            .filter(|(lane, _)| lane.waits())
-            .collect();
+        let waiting: Vec<(backlog::Lane, Item)> =
+            backlog::rows(&self.items, &self.sessions, self.boot())
+                .into_iter()
+                .filter(|(lane, _)| lane.waits())
+                .collect();
         let backlog_height = match waiting.len() {
             0 => 0,
             n => (n.min(BACKLOG_ROWS) as u16 + 2)
@@ -6201,6 +6241,60 @@ mod tests {
         ] {
             assert!(shown.contains(want), "{want}: {shown}");
         }
+
+        // `r` shows one repository's items, named in the title; a check then offers
+        // only those to ship.
+        app.on_push(ServerMsg::Items {
+            items: vec![
+                item(1, "Tab rename eats a letter", Open),
+                item(2, "Flaky exit test", Proposed),
+                Item {
+                    project: Some("/r/lib".into()),
+                    ..item(3, "Lib leaks a socket", Open)
+                },
+            ],
+        })
+        .unwrap();
+        assert_eq!(app.backlog_rows().len(), 3);
+        app.on_input(b"r".to_vec()).await;
+        let page = app.backlog.clone().unwrap();
+        assert_eq!(page.repo, backlog::Repo::In("/r/app".into()));
+        let rows: Vec<u32> = app.backlog_rows().iter().map(|(_, i)| i.id).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows.contains(&3));
+        terminal
+            .draw(|f| {
+                page.draw(
+                    f,
+                    &app.backlog_rows(),
+                    &app.sessions,
+                    0,
+                    0,
+                    app.settings.theme,
+                )
+            })
+            .unwrap();
+        assert!(
+            text(&terminal).contains(" Backlog app 2 open"),
+            "{}",
+            text(&terminal)
+        );
+        let merged = |id: u32| valkyrie_proto::ShippedItem {
+            id,
+            title: String::new(),
+            branch: format!("fix/{id}"),
+            branch_taken: false,
+            filed: false,
+            against: "origin/main".into(),
+            note: None,
+        };
+        app.on_shipping(Shipping {
+            asking: true,
+            unfetched: 0,
+            result: Ok((vec![merged(1), merged(3)], Vec::new())),
+        });
+        assert_eq!(app.backlog.as_ref().unwrap().ship_armed, Some(vec![1]));
+
         app.on_input(b"q".to_vec()).await;
         assert!(app.backlog.is_none());
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, liveSession, prLink, type Lane } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, inRepo, liveSession, prLink, repoChoices, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
 import { addItem, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, sendFile, shipMerged, toast, useApp } from "../store";
@@ -11,6 +11,10 @@ type Agent = "claude" | "codex";
 const AGENT_KEY = "valk.backlog.agent";
 const FOLDER_KEY = "valk.backlog.folder";
 const DRAFT_KEY = "valk.backlog.draft";
+/** The repository the board shows, `""` for no folder; absent for every one. */
+const REPO_KEY = "valk.backlog.repo";
+/** The picker's value for every repository: no project path is relative. */
+const ALL = "*";
 
 const read = (key: string) => {
   try {
@@ -46,10 +50,20 @@ const EDGE: Record<Lane, string> = {
  * follows that session, so nothing here is moved by hand.
  */
 export function Backlog() {
-  const items = useApp((s) => s.items);
+  const all = useApp((s) => s.items);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [showDone, setShowDone] = useState(false);
+  const choices = repoChoices(all);
+  const [picked, setPicked] = useState<RepoFilter>(() => read(REPO_KEY));
+  // A repository whose items are all gone shows every one rather than an empty board.
+  const repo = picked !== null && choices.some((c) => c.repo === picked) ? picked : null;
+  const pick = (r: RepoFilter) => {
+    setPicked(r);
+    setReady(null);
+    write(REPO_KEY, r);
+  };
+  const items = all.filter((i) => inRepo(i, repo));
   const columns = byColumn(items, sessions, boot);
   const open = items.length - columns.done.length;
   // Only items with a branch can be found merged.
@@ -72,7 +86,7 @@ export function Backlog() {
         await shipMerged(ready);
         setReady(null);
       } else {
-        const found = await checkMerged();
+        const found = await checkMerged((id) => items.some((i) => i.id === id));
         if (found.length) setReady(found);
       }
     } finally {
@@ -119,7 +133,31 @@ export function Backlog() {
         </button>
       </header>
       <main className="inbox backlog">
-        {open === 0 && (
+        {(choices.length > 1 || repo !== null) && (
+          <div className="backlog-filter">
+            <select
+              aria-label="Repository"
+              value={repo ?? ALL}
+              onChange={(e) => pick(e.target.value === ALL ? null : e.target.value)}
+            >
+              <option value={ALL}>Every repository</option>
+              {choices.map((c) => (
+                <option key={c.repo} value={c.repo} title={c.repo || undefined}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {open === 0 && repo !== null && (
+          <div className="calm backlog-calm">
+            <div className="calm-title">Nothing open here</div>
+            <button className="ghost" onClick={() => pick(null)}>
+              Show every repository
+            </button>
+          </div>
+        )}
+        {open === 0 && repo === null && (
           <div className="calm backlog-calm">
             <div className="calm-title">Nothing written down</div>
             <div className="calm-sub">
@@ -438,7 +476,10 @@ export function ItemEditor({ id }: { id: number | null }) {
   const [kind, setKind] = useState<ItemKind>(item?.kind ?? "bug");
   const [title, setTitle] = useState(item?.title ?? "");
   const [text, setText] = useState(() => item?.body ?? (id === null ? (read(DRAFT_KEY) ?? "") : ""));
-  const [folder, setFolder] = useState<string>(() => item?.project ?? (id === null ? (read(FOLDER_KEY) ?? "") : ""));
+  const [folder, setFolder] = useState<string>(
+    // A new item goes where the board is filtered to, else where the last one went.
+    () => item?.project ?? (id === null ? read(REPO_KEY) || (read(FOLDER_KEY) ?? "") : ""),
+  );
   const [places, setPlaces] = useState<Places | null>(null);
   const [files, setFiles] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);

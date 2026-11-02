@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use std::path::PathBuf;
 use valkyrie_proto::{
     AgentState, Item, ItemFacts, ItemKind, ItemStatus, KeptItem, SessionId, SessionInfo,
     ShippedItem,
@@ -149,6 +150,56 @@ pub(crate) fn rows(items: &[Item], sessions: &[SessionInfo], boot: u64) -> Vec<(
 /// Done items shown at the bottom of the page.
 const DONE_SHOWN: usize = 5;
 
+/// Which items the page shows (`r` cycles it): every repository's, one
+/// repository's (its main root, as items keep it), or those with no folder yet.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) enum Repo {
+    #[default]
+    All,
+    In(PathBuf),
+    NoFolder,
+}
+
+impl Repo {
+    pub(crate) fn holds(&self, item: &Item) -> bool {
+        match self {
+            Repo::All => true,
+            Repo::In(root) => item.project.as_ref() == Some(root),
+            Repo::NoFolder => item.project.is_none(),
+        }
+    }
+
+    /// The one after this: every repository, then each one `items` are for by
+    /// name, then no folder if any item has none, and round again.
+    pub(crate) fn next(&self, items: &[Item]) -> Repo {
+        let mut roots: Vec<&PathBuf> = items.iter().filter_map(|i| i.project.as_ref()).collect();
+        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
+        roots.dedup();
+        let mut cycle = vec![Repo::All];
+        cycle.extend(roots.into_iter().map(|r| Repo::In(r.clone())));
+        if items.iter().any(|i| i.project.is_none()) {
+            cycle.push(Repo::NoFolder);
+        }
+        // One whose items are all gone moves on to every repository.
+        match cycle.iter().position(|r| r == self) {
+            Some(at) => cycle[(at + 1) % cycle.len()].clone(),
+            None => Repo::All,
+        }
+    }
+
+    /// What the page's title says it shows; nothing for every repository.
+    fn label(&self) -> Option<String> {
+        match self {
+            Repo::All => None,
+            Repo::In(root) => Some(root.file_name().map_or_else(
+                || root.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )),
+            Repo::NoFolder => Some("no folder".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Typing {
     /// A new item: Tab cycles its kind.
@@ -188,6 +239,8 @@ pub(crate) struct Page {
     /// Opened by the capture key straight into a new item: the page closes once
     /// it's added or cancelled.
     pub(crate) capture: bool,
+    /// The repository whose items it shows; new ones are written down for it.
+    pub(crate) repo: Repo,
     /// Inside a bracketed paste while typing; `true` right after a line break, so
     /// a run of them, and the indent after, becomes one space.
     paste: Option<bool>,
@@ -241,6 +294,8 @@ pub(crate) enum Do {
     CheckMerged,
     /// Ship these, the ones shown, if they're still merged.
     ShipMerged(Vec<u32>),
+    /// Show the next repository's items (`Repo::next`).
+    NextRepo,
     Say(String),
 }
 
@@ -379,6 +434,7 @@ impl Page {
                 b"g" => self.cursor = 0,
                 b"G" => self.cursor = rows.len().saturating_sub(1),
                 b"n" => self.typing = Some(Typing::add()),
+                b"r" => out.push(Do::NextRepo),
                 b"S" => out.push(match self.ship_armed.take() {
                     Some(ids) => Do::ShipMerged(ids),
                     None => Do::CheckMerged,
@@ -508,6 +564,7 @@ impl Page {
                 hint(" a ", "accept "),
                 hint(" e ", "edit "),
                 hint(" x ", "delete "),
+                hint(" r ", "repo "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
             ]
@@ -517,6 +574,7 @@ impl Page {
                 hint(" e ", "edit "),
                 hint(" x ", "delete "),
                 hint(" S ", "ship merged "),
+                hint(" r ", "repo "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
             ]
@@ -539,21 +597,34 @@ impl Page {
                     hint(" e ", "edit "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
+                    hint(" r ", "repo "),
                     hint(" n ", "new "),
                     hint(" esc ", "close "),
                 ];
                 [open, rest.concat()].concat()
             }
-            (None, None) => [hint(" n ", "new "), hint(" esc ", "close ")].concat(),
+            (None, None) => [
+                hint(" r ", "repo "),
+                hint(" n ", "new "),
+                hint(" esc ", "close "),
+            ]
+            .concat(),
         };
         let open = rows.iter().filter(|(l, _)| *l != Lane::Done).count();
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(style::Style::new().fg(t.accent))
-            .title(Line::from(vec![
-                " Backlog ".fg(t.fg).bold(),
-                format!("{open} open ").fg(t.muted),
-            ]))
+            .title(Line::from(
+                [
+                    vec![" Backlog ".fg(t.fg).bold()],
+                    self.repo
+                        .label()
+                        .map(|r| vec![format!("{r} ").fg(t.accent).bold()])
+                        .unwrap_or_default(),
+                    vec![format!("{open} open ").fg(t.muted)],
+                ]
+                .concat(),
+            ))
             .title_bottom(Line::from(hints).centered())
             .style(style::Style::new().bg(t.panel).fg(t.fg));
         let inner = block.inner(rect);
@@ -1339,5 +1410,49 @@ mod tests {
             Some(kind_color(ItemKind::Feature, &t))
         );
         assert_ne!(label(ItemKind::Bug), label(ItemKind::Feature));
+    }
+
+    #[test]
+    fn r_cycles_every_repository_then_each_by_name_then_no_folder() {
+        let at = |id, project: Option<&str>| Item {
+            project: project.map(PathBuf::from),
+            ..item(id, 1)
+        };
+        let items = [
+            at(1, Some("/w/zeta")),
+            at(2, Some("/home/alpha")),
+            at(3, None),
+            at(4, Some("/w/zeta")),
+        ];
+        let mut repo = Repo::All;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            repo = repo.next(&items);
+            seen.push(repo.clone());
+        }
+        assert_eq!(
+            seen,
+            [
+                Repo::In("/home/alpha".into()),
+                Repo::In("/w/zeta".into()),
+                Repo::NoFolder,
+                Repo::All,
+            ]
+        );
+        let held = |r: Repo| {
+            items
+                .iter()
+                .filter(|i| r.holds(i))
+                .map(|i| i.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(held(Repo::In("/w/zeta".into())), [1, 4]);
+        assert_eq!(held(Repo::NoFolder), [3]);
+        assert_eq!(held(Repo::All), [1, 2, 3, 4]);
+        // One whose items are gone starts over.
+        assert_eq!(Repo::In("/gone".into()).next(&items), Repo::All);
+        // And `r` asks for it, with or without items shown.
+        let mut page = Page::default();
+        assert_eq!(page.keys(b"r", &[], &[], 7), [Do::NextRepo]);
     }
 }
