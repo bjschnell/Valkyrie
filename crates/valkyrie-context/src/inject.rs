@@ -40,7 +40,9 @@ fn rank(kind: DecisionKind) -> u8 {
         DecisionKind::Decision => 2,
         DecisionKind::Pattern => 3,
         DecisionKind::Fix => 4,
-        DecisionKind::Skill => 5,
+        // Enforced by the hooks, so its title is all an agent needs.
+        DecisionKind::Policy => 5,
+        DecisionKind::Skill => 6,
     }
 }
 
@@ -161,7 +163,8 @@ fn entry(d: &Decision, now: u64, with_body: bool) -> String {
         line.push_str(" (due for re-checking: it may be out of date)");
     }
     let body = crate::file::one_line(&d.body);
-    if with_body && !body.is_empty() {
+    // A policy's body is settings for the hooks, not something to follow by reading.
+    if with_body && d.kind != DecisionKind::Policy && !body.is_empty() {
         line.push_str(": ");
         if body.chars().count() > MAX_SHOWN_BODY {
             line.extend(body.chars().take(MAX_SHOWN_BODY));

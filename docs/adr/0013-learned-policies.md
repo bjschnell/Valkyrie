@@ -44,13 +44,15 @@ The user's line for what an agent may decide: anything code, scripts or infrastr
    - **What the proposal shows:** the replies it quotes, the template's full text, and a `<checks>` the model drafted from the project's CI configuration (`.github/workflows/*`, `.gitlab-ci.yml` and the like). If there is none, it drafts from the commands that passed before the user's last approvals (ADR-0011 §5). The user can edit `<checks>` while accepting.
    - **Review:** it appears in the review queue like any proposal. Agents can propose a policy, and only the user can accept one (ADR-0007).
    - **Limits:** one active policy per template per project. A rejected template isn't offered again in that project for 30 days.
-5. **The context hook enforces it, on `Stop`.** `Stop` joins `valk context-hook`'s events. The observer `valk hook` stays silent, as ADR-0005 requires.
-   - **Lookup:** the hook asks the daemon for the stop's state and the project's active policies, giving up after 300 ms as `siblings()` does.
+5. **The observer hook enforces it, on `Stop`** (changed in phase 2 from "the context hook": see below). On Claude's main-thread `Stop`, `valk hook claude` reads the project's active `ship` policy and the work state in the hook's `cwd` itself.
    - **When it blocks:** only when a policy matches and the payload's `stop_hook_active` is false. It then prints Claude Code's block output with the template's text, so the agent keeps going instead of stopping. That's one nudge per turn, so it can't loop.
-   - **When it stays quiet:** outside a Valkyrie session, with the Context setting off, or when nothing matches.
-   - **Codex:** policies reach Codex only as text in the decisions block until its `Stop` hook is shown to support blocking.
+   - **What the daemon hears:** the same Stop, marked `valk_continued` (policy, state, until). The tracker doesn't count it as a turn end, so the queue never shows *finished* for a turn the agent didn't take, no `work` line is written, and the extractor doesn't read a turn that hasn't ended.
+   - **Why the observer, not the context hook:** Claude runs a stop's hooks in parallel. With the context hook deciding, the observer's Stop would usually reach the daemon first and the queue would flash *finished* (and sound) before the block took effect, and `pings` would count the stop as a stall. One process that both reports and decides has no race. ADR-0005's "the observer prints nothing" gets one exception: the user's own accepted policy.
+   - **Waiting on `gh`:** only for `until: pr` on a pushed branch, at most 3 s (Claude gives the hook 5). No answer lets the stop through.
+   - **When it stays quiet:** outside a Valkyrie session, with the Context setting off, on a subagent's stop, or when nothing matches.
+   - **Codex:** policies reach Codex only as a title in the decisions block until its `Stop` hook is shown to support blocking.
 6. **Every action is logged and measured.**
-   - **Log:** each block is appended to `policy.jsonl`: session, policy, state and time.
+   - **Log:** each blocked stop is in the session's event log, marked `valk_continued`, and `valk pings` counts them as *kept going by a policy*. (Phase 2 dropped the separate `policy.jsonl`: the event log already has the session, policy, state and time.)
    - **Handled:** the session's next stop was `clean`, or a PR opened, with no prompt from the user in between.
    - **Overridden:** the user interrupted, or answered the block's outcome with something that isn't routine.
    - **Health:** `valk decisions health` reports a policy overridden in three or more sessions, to reword or retire, as ADR-0011 §6 does for decisions.

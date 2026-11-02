@@ -10,7 +10,7 @@ mod foreground;
 mod pty;
 mod restore;
 mod session;
-mod work;
+pub mod work;
 mod worktree;
 
 pub use restore::path as restore_path;
@@ -955,7 +955,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 sent_us,
                 payload,
             } => {
-                let turn_ended = payload["hook_event_name"] == "Stop";
+                // A Stop a policy kept going (ADR-0013 §5) isn't the end of a turn: the
+                // agent is still at it, and nothing should say it finished.
+                let turn_ended =
+                    payload["hook_event_name"] == "Stop" && payload["valk_continued"].is_null();
                 // The main thread's turn, not a subagent's, and where it ran.
                 let work_in = (turn_ended && payload["agent_id"].is_null())
                     .then(|| payload["cwd"].as_str().map(std::path::PathBuf::from))

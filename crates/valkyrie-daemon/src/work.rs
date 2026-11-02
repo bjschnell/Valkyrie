@@ -61,7 +61,7 @@ pub enum Pr {
 
 /// The work at a stop in `cwd`. `None` outside a git repository.
 pub fn at(cwd: &Path) -> Option<Value> {
-    let (state, branch, pr) = state(cwd, &gh_pr)?;
+    let (state, branch, pr) = state(cwd, &|dir, branch| gh_pr(dir, branch, GH_TIMEOUT))?;
     Some(json!({"state": state.as_str(), "branch": branch, "pr": pr}))
 }
 
@@ -124,8 +124,8 @@ pub fn state(
     Some((state, Some(branch), url))
 }
 
-/// Asks `gh` about `branch`'s pull request.
-fn gh_pr(cwd: &Path, branch: &str) -> Pr {
+/// Asks `gh` about `branch`'s pull request, giving up after `timeout`.
+pub fn gh_pr(cwd: &Path, branch: &str, timeout: Duration) -> Pr {
     let child = Command::new("gh")
         .no_window()
         .args([
@@ -147,7 +147,7 @@ fn gh_pr(cwd: &Path, branch: &str) -> Pr {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < GH_TIMEOUT => {
+            Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             _ => {
