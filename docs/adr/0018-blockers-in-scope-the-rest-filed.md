@@ -15,12 +15,13 @@ The backlog should work with the agent's default, not against it: hold what's ou
 ## Decision
 1. **Blocking fixes stay in scope.** An agent fixes what it has to in order to deliver its task, as part of that change.
 2. **Everything else is filed, not fixed.** Anything else it finds broken stays out of the change and goes in with `valk todo add` (proposed), its body saying what, how to reproduce it, and how much it matters. The instructions say this is the right call, not a fix skipped.
-3. **Acceptance is the user's choice of work, and it doesn't stall the agent.** Once the user accepts an item it's open, and the agent that filed it (or any other) takes it with `valk todo take N` and carries on. Telling the filing session that its item was accepted is backlog #53.
-4. **`add --take` tracks a session's own work.** A session working without a backlog item (an ad-hoc one) still records its task with `valk todo add --take`, as ADR-0012 §1 allows. It isn't the path for side findings.
-5. **Nothing here is enforced.** It's wording in the session-start block and the launch brief. The daemon's rules from ADR-0012 are unchanged.
+3. **The user's yes in the session is enough for the agent's own finds.** When its task is done, the agent says what it filed and offers to fix it there, or to leave it for a fresh launch from the backlog. Context argues both ways: the session that found it already knows it, which suits a small fix, while a big one deserves a fresh agent in its own worktree. If the user says go ahead, the agent takes its find (`valk todo take N --branch B`) and fixes it on its own branch and pull request. The user doesn't have to go to the board. Shipping it is the acceptance, as ADR-0012 §3 already has it.
+4. **The daemon records the filer on every add.** `Item.filed_by` is set for an agent's plain `valk todo add` in a session, not only for `--take`, so the filer's take of its own proposed item (already allowed by ADR-0012 §1) works for finds too. This adds no new exposure. An agent could already file and take in one step with `add --take`; this is the version where it asks first. A card follows its session's lane only once it's taken (`Item::agent_filed` needs a take); filed and untaken, it waits in Proposed.
+5. **Other sessions still need the accept.** Another session (another agent, or a new one the user tells to "fix #N") can't take a proposed item it didn't file until the user accepts it. That's ADR-0007's gate, where another agent's unread text would become this agent's instructions. Accepted items are taken by anyone, as before. Telling the filing session about a later acceptance, for example one made from the phone, is backlog #53.
+6. **`add --take` tracks a session's own work.** A session working without a backlog item (an ad-hoc one) still records its task with `valk todo add --take`, as ADR-0012 §1 allows.
 
 ## Consequences
 - A bare agent-filed card means "found, not in this task's scope, needs your yes", not "should have been fixed". It's work waiting on a choice, not debt.
-- The backlog fills only as fast as agents find things. What keeps it from turning into debt is the user accepting or dropping proposed cards, and #53 closing the loop back to the agent.
+- The common case closes in the terminal: the agent offers, the user says go, and the agent takes it. What keeps the backlog from turning into debt is the user accepting or dropping the cards left over.
 - Pull requests stay the size of their task.
-- Skill #17 is revised to match (step 4: file, don't fold in; take it after acceptance).
+- Skill #17 is revised to match (step 4: file, don't fold in; offer it at the end, and take it on the user's go-ahead).

@@ -24,8 +24,11 @@ fn how_to_propose(valk: &str) -> String {
          to deliver your task, as part of this change. Anything else you find broken, keep \
          out of this change and file it: `{valk} todo add -k <bug|feature|chore> \"<title>\" \
          --body \"<what, how to reproduce it, how much it matters>\"`, after checking `{valk} \
-         todo list --json`. That's the right call, not a fix skipped: the user accepts it, \
-         then you or another agent take it. If this session has no backlog item, track its \
+         todo list --json`. That's the right call, not a fix skipped. When your task is \
+         done, say what you filed and offer to fix it here or leave it to launch fresh from \
+         the backlog. If the user says to go ahead here, that's enough: take it with `{valk} \
+         todo take N --branch <branch>` and fix it on its own branch and pull request. If \
+         this session has no backlog item, track its \
          own work with `{valk} todo add --take -k <kind> \"<title>\" --branch <branch>` \
          (`{valk} todo take N --pr <url>` once the pull request is open, `{valk} todo note \
          -i N` for what's left), so the user can follow and ship it. Working on an \

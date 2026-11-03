@@ -38,7 +38,7 @@ export function takenOnly(item: Item, sessions: SessionInfo[], boot: number): bo
 
 /** Written down and taken by an agent for its own work, not accepted yet: it
  * follows its session like an open item, and shipping it accepts it. */
-export const agentFiled = (item: Item) => item.status === "proposed" && !!item.filed_by;
+export const agentFiled = (item: Item) => item.status === "proposed" && !!item.filed_by && !!item.taken?.length;
 
 export type CardAction = "accept" | "open" | "launch" | "folder";
 

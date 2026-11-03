@@ -55,7 +55,19 @@ impl Registry {
         let caller = self.caller(peer);
         let by = caller.agent.unwrap_or_else(|| "human".into());
         let item = match take {
-            None => self.backlog.lock().unwrap().add(new, &by, now_secs())?,
+            // An agent in a session records which, so it may take its own find
+            // once the user says to go ahead (ADR-0018).
+            None => {
+                let filed_by = caller
+                    .session
+                    .as_ref()
+                    .filter(|_| by != "human")
+                    .map(|s| (self.boot, s.info().id));
+                self.backlog
+                    .lock()
+                    .unwrap()
+                    .add_filed(new, &by, filed_by, now_secs())?
+            }
             Some((branch, pr)) => {
                 let Some(session) = caller.session else {
                     bail!("add --take from inside a valk session");

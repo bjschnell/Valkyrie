@@ -107,6 +107,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
              valk todo note -i 6 'fixed the overflow too' > {afn}.tmp 2>&1; mv {afn}.tmp {afn}\n\
              valk todo add 'For later' > {al}.tmp 2>&1; mv {al}.tmp {al}\n\
              valk todo take 7 > {alt}.tmp 2>&1; mv {alt}.tmp {alt}\n\
+             valk todo add 'Left for you' > {a8}.tmp 2>&1; mv {a8}.tmp {a8}\n\
              valk todo launch 1 > {al1}.tmp 2>&1; mv {al1}.tmp {al1}\n\
              valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
              valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
@@ -130,6 +131,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             afn = o("add-take-note"),
             al = o("add-later"),
             alt = o("take-later"),
+            a8 = o("add-left"),
             al1 = o("agent-relaunch1"),
             s5 = o("agent-steal5"),
             pr = PR,
@@ -302,12 +304,19 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         wait_for(&out.join("list-outside")).contains("is not in a git repository"),
         "a folder outside git names no repository"
     );
-    // Only its own: another proposed item still waits on the user.
+    // Its own find, filed plainly: it may take it once the user says go ahead
+    // in that session (ADR-0018), and then the card follows it.
     assert!(wait_for(&out.join("add-later")).starts_with("#7 For later"));
-    let refused = wait_for(&out.join("take-later"));
+    let took = wait_for(&out.join("take-later"));
+    assert!(took.contains("#7 For later taken"), "{took}");
+    let seven = list.lines().find(|l| l.starts_with("#7 ")).unwrap_or("");
+    assert!(seven.ends_with(" (agent-filed)"), "{list}");
+    // Filed and not taken, it waits on the user like any proposal.
+    assert!(wait_for(&out.join("add-left")).starts_with("#8 Left for you"));
+    let eight = list.lines().find(|l| l.starts_with("#8 ")).unwrap_or("");
     assert!(
-        refused.contains("#7 is proposed; accept it first"),
-        "{refused}"
+        eight.contains("proposed") && !eight.contains("agent-filed"),
+        "{list}"
     );
     // An agent's own session counts: it can't put a second one on its item.
     let refused = wait_for(&out.join("agent-relaunch1"));
@@ -396,6 +405,19 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{refused}"
     );
     assert!(wait_for(&out.join("steal5")).contains("#5 Held elsewhere taken"));
+    // Another session can't take an agent's find before the user accepts it.
+    in_session(
+        &format!(
+            "valk todo take 8 > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            o = o("take8-other")
+        ),
+        "take8-tab",
+    );
+    let refused = wait_for(&out.join("take8-other"));
+    assert!(
+        refused.contains("#8 is proposed; accept it first"),
+        "{refused}"
+    );
     human("valk todo list --json", "list-json");
     let items: serde_json::Value = serde_json::from_str(&wait_for(&out.join("list-json"))).unwrap();
     let five = items

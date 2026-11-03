@@ -1095,6 +1095,13 @@ mod tests {
             ..filed.clone()
         };
         assert_eq!(lane(&proposed, &working, 7), Lane::Proposed);
+        // Filed by an agent that hasn't taken it (yet): a proposal too.
+        let untaken = Item {
+            sessions: Vec::new(),
+            taken: Vec::new(),
+            ..filed.clone()
+        };
+        assert_eq!(lane(&untaken, &[], 7), Lane::Proposed);
         let t = crate::theme::DRACULA;
         let text: Vec<String> = detail_lines(&filed, Lane::Running, None, None, 0, &t)
             .iter()
