@@ -339,7 +339,7 @@ function SessionRow({
         <span className="row-n">{n}</span>
         <StateIcon state={state} />
         <span className="row-main">
-          <span className={`row-name state-text-${queued ? state : "plain"}`}>{s.name}</span>
+          <span className={`row-name state-text-${queued ? state : "plain"}${s.auto_name ? " auto-name" : ""}`}>{s.name}</span>
           <span className="row-sub">
             {program(s)} · {state === "exited" ? `exited ${s.exited ?? ""}` : STATE_LABEL[state]}
             {s.status.summary ? ` · ${s.status.summary}` : ""}

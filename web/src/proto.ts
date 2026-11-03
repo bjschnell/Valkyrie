@@ -32,6 +32,8 @@ export interface AgentStatus {
 export interface SessionInfo {
   id: SessionId;
   name: string;
+  /** `name` is what the agent says it works on, not one the user gave: shown set apart. */
+  auto_name?: boolean;
   command: string[];
   cwd: string;
   pid: number | null;
@@ -47,6 +49,7 @@ export interface SessionInfo {
 export interface QueueItem {
   session: SessionId;
   name: string;
+  auto_name?: boolean;
   cwd: string;
   status: AgentStatus;
 }

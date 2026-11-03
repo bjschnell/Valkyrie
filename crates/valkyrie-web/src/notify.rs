@@ -383,6 +383,7 @@ mod tests {
         QueueItem {
             session,
             name: format!("proj{session}"),
+            auto_name: false,
             cwd: "/".into(),
             status: AgentStatus {
                 agent: "claude".into(),

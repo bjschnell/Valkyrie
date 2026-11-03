@@ -108,7 +108,7 @@ export function SessionView({ id }: { id: number }) {
         </button>
         <div className="title">
           {naming === null ? (
-            <button className="title-name" title="Rename" onClick={startNaming}>
+            <button className={`title-name${info?.auto_name ? " auto-name" : ""}`} title="Rename" onClick={startNaming}>
               {info?.name ?? `#${id}`}
             </button>
           ) : (

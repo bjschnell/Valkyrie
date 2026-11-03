@@ -149,6 +149,8 @@ pub struct SavedSession {
     driven_by: Option<String>,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
+    topic: Option<String>,
 }
 
 /// What brings a session back after the daemon restarts (DESIGN §8.3).
@@ -159,6 +161,8 @@ pub struct RestoreEntry {
     pub cwd: PathBuf,
     #[serde(default)]
     pub conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
 }
 
 pub struct Session {
@@ -238,6 +242,9 @@ struct State {
     fg_checked_ms: u64,
     /// Where the foreground program is now (`cd` moves a shell); `None` until known.
     live_cwd: Option<PathBuf>,
+    /// What the agent says it is working on, from its terminal title: the name
+    /// lists show when the session has none of its own.
+    topic: Option<String>,
 }
 
 impl State {
@@ -359,6 +366,7 @@ impl Session {
             fg_group: None,
             fg_checked_ms: 0,
             live_cwd: None,
+            topic: None,
         };
         state.log(
             now_ms,
@@ -445,6 +453,7 @@ impl Session {
             fg_group: None,
             fg_checked_ms: 0,
             live_cwd: None,
+            topic: saved.topic,
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -633,6 +642,7 @@ impl Session {
             conversation: state.conversation.clone(),
             driven_by: state.driven_by.clone(),
             hidden: self.hidden,
+            topic: state.topic.clone(),
             chat: state.chat.clone(),
             input: self
                 .input
@@ -750,7 +760,8 @@ impl Session {
                     state.log(now, "bell", json!({}));
                     changed |= state.tracker.apply(&AgentEvent::Bell, now, self.watching());
                 }
-                Signal::Title(_) => {}
+                Signal::Title(Some(title)) => self.take_topic(&mut state, &title, now),
+                Signal::Title(None) => {}
                 Signal::Graphics(cmd) => {
                     let kept = state.graphics.record(cmd);
                     let _ = self.feed.send(Arc::new(ServerMsg::Graphics {
@@ -840,6 +851,10 @@ impl Session {
             && state.tracker.status().state != AgentState::Working
             && let Some(id) = adapter.conversation(&payload)
         {
+            // Another conversation in the same agent (`/clear`) is another task.
+            if state.conversation.as_ref().is_some_and(|was| *was != id) {
+                self.drop_topic(&mut state, now);
+            }
             state.conversation = Some(id);
         }
         // Its transcript too, by the same rule; a prompt names it as well, for an
@@ -944,19 +959,49 @@ impl Session {
         state.tracker = Tracker::resume(fresh, adapter.hook_gaps(), false, now);
         state.scan_due = true;
         state.log(now, "foreground", json!({"agent": agent}));
+        self.drop_topic(state, now);
         true
     }
 
-    /// What lists show: the session's own name, else its directory. The agent or
-    /// program running is shown beside it, from the status and the command.
+    /// What lists show: the session's own name, else what its agent is working on,
+    /// else its directory. The agent or program running is shown beside it, from
+    /// the status and the command.
     fn display_name(&self, state: &State) -> String {
         if let Some(name) = self.name.lock().unwrap().clone() {
             return name;
+        }
+        if let Some(topic) = &state.topic {
+            return topic.clone();
         }
         match self.live_cwd(state).file_name() {
             Some(dir) => dir.to_string_lossy().into_owned(),
             None => default_name(&self.command),
         }
+    }
+
+    /// The agent's first real title becomes the session's topic, and stays: a name
+    /// that followed every retitle would move tabs around under the user. Only
+    /// Claude's titles say what it works on; a shell's name its last command.
+    fn take_topic(&self, state: &mut State, title: &str, now: u64) {
+        if state.topic.is_some() || self.agent(state).name() != "claude" {
+            return;
+        }
+        let Some(topic) = topic(title) else { return };
+        state.log(now, "topic", json!({"topic": topic}));
+        state.topic = Some(topic);
+        self.changed.notify_one();
+    }
+
+    fn drop_topic(&self, state: &mut State, now: u64) {
+        if state.topic.take().is_some() {
+            state.log(now, "topic", json!({"topic": null}));
+            self.changed.notify_one();
+        }
+    }
+
+    /// A restored session keeps the topic it had, until its agent retitles it.
+    pub fn set_topic(&self, topic: Option<String>) {
+        self.state.lock().unwrap().topic = topic;
     }
 
     /// Where the session is now: the foreground program's directory, else where it
@@ -1286,6 +1331,7 @@ impl Session {
             // A shell comes back where it was, not where it started.
             cwd: self.live_cwd(&state),
             conversation: state.conversation.clone(),
+            topic: state.topic.clone(),
         })
     }
 
@@ -1303,6 +1349,7 @@ impl Session {
         SessionInfo {
             id: self.id,
             name: self.display_name(&state),
+            auto_name: self.name.lock().unwrap().is_none() && state.topic.is_some(),
             command: self.command.clone(),
             cwd: self.live_cwd(&state),
             pid: self.pid,
@@ -1575,6 +1622,19 @@ const FOREGROUND_RECHECK_MS: u64 = 2000;
 
 /// A name worth keeping: not blank, and not just the program's (what older images
 /// saved for an unnamed session).
+/// What a Claude Code title says it works on: `✳ Fix the login bug`, with a spinner
+/// glyph in front while it works. `Claude Code` alone is its title before the first
+/// prompt.
+fn topic(title: &str) -> Option<String> {
+    let title = title.trim();
+    let title = match title.split_once(' ') {
+        Some((mark, rest)) if !mark.chars().any(char::is_alphanumeric) => rest.trim(),
+        _ => title,
+    };
+    let real = title.chars().any(char::is_alphanumeric) && title != "Claude Code";
+    real.then(|| title.to_string())
+}
+
 fn own_name(name: Option<String>, command: &[String]) -> Option<String> {
     let name = name?.trim().to_string();
     (!name.is_empty() && name != default_name(command)).then_some(name)
@@ -1590,6 +1650,24 @@ fn default_name(command: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_claude_title_gives_its_topic() {
+        use super::topic;
+        assert_eq!(
+            topic("✳ Fix the login bug").as_deref(),
+            Some("Fix the login bug")
+        );
+        assert_eq!(
+            topic("◐ Mini terminal overlay").as_deref(),
+            Some("Mini terminal overlay")
+        );
+        assert_eq!(topic("Plain title").as_deref(), Some("Plain title"));
+        assert_eq!(topic("✳ Claude Code"), None);
+        assert_eq!(topic("Claude Code"), None);
+        assert_eq!(topic("✳ "), None);
+        assert_eq!(topic(""), None);
+    }
+
     #[test]
     fn a_burst_ending_on_a_glance_still_gets_a_quiet_scan() {
         // Output every 100 ms until 950 ms, then silence; ticks every 250 ms. The

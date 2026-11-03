@@ -185,6 +185,7 @@ mod tests {
         QueueItem {
             session,
             name: String::new(),
+            auto_name: false,
             cwd: "/".into(),
             status,
         }

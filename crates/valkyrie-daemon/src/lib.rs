@@ -276,6 +276,7 @@ impl Registry {
             .map(|info| QueueItem {
                 session: info.id,
                 name: info.name,
+                auto_name: info.auto_name,
                 cwd: info.cwd,
                 status: info.status,
             })
