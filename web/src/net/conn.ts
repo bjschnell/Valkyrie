@@ -5,8 +5,9 @@
 // network returns, and a keepalive whose missing reply means a dead socket.
 // (Shape borrowed from Alice's socket.ts.)
 
-import { PROTOCOL, type Notice, type Reply, type Request, type ServerMsg } from "../proto";
+import { type Notice, type Reply, type Request, type ServerMsg } from "../proto";
 import { pageBuild } from "../lib/build";
+import { mismatch, type Mismatch } from "../lib/protocol";
 
 /** `updated`: the server now has a newer build of this app (after an upgrade). */
 export type Status = "connecting" | "open" | "reconnecting" | "offline" | "unpaired" | "outdated" | "updated";
@@ -23,7 +24,8 @@ type Pending = { resolve: (r: Reply) => void; reject: (e: Error) => void; timer:
 export interface ConnOptions {
   token: string;
   onPush: (msg: ServerMsg) => void;
-  onStatus: (status: Status) => void;
+  /** `outdated` comes with both protocols. */
+  onStatus: (status: Status, mismatch?: Mismatch) => void;
   /** Called on every (re)connect once the daemon answered: resubscribe here. */
   /** `boot` names the daemon: a restarted one numbers its sessions afresh. */
   onReady: (boot: number) => void;
@@ -99,10 +101,10 @@ export class Conn {
     return true;
   }
 
-  private setStatus(status: Status): void {
+  private setStatus(status: Status, mismatch?: Mismatch): void {
     if (this.status === status) return;
     this.status = status;
-    this.opts.onStatus(status);
+    this.opts.onStatus(status, mismatch);
   }
 
   private connect(): void {
@@ -170,9 +172,10 @@ export class Conn {
         this.ws?.close(1000);
         return;
       }
-      if (hello.t !== "hello" || hello.protocol !== PROTOCOL) {
+      const differ = hello.t === "hello" ? mismatch(hello) : null;
+      if (hello.t !== "hello" || differ) {
         this.stopped = true;
-        this.setStatus("outdated");
+        this.setStatus("outdated", differ ?? undefined);
         this.ws?.close(1000);
         return;
       }

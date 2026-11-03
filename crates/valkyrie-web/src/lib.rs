@@ -639,6 +639,20 @@ impl Drop for Presence {
 /// except the app's own messages, which stay here: `{"t":"visible"}`, and
 /// `{"t":"chat","session":id|null}`, which follows (or stops following) one
 /// session's agent transcript (DESIGN §8.7).
+/// The daemon's hello, as the app gets it: with the build this server embeds, the
+/// protocol that build speaks (the app keeps no copy of its own, so the two can't
+/// drift), and without the daemon's binary, which is this machine's business.
+fn stamp_hello(frame: &mut serde_json::Value) {
+    if frame["t"] != "ok" || frame["reply"]["t"] != "hello" {
+        return;
+    }
+    frame["reply"]["web"] = BUILD.as_str().into();
+    frame["reply"]["app_protocol"] = valkyrie_proto::PROTOCOL.into();
+    if let Some(reply) = frame["reply"].as_object_mut() {
+        reply.remove("exe");
+    }
+}
+
 async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
     let socket = presence.app.socket.clone();
     let stream = valkyrie_proto::ipc::connect(&socket)
@@ -701,13 +715,7 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
             frame = read_frame::<_, serde_json::Value>(&mut from_daemon) => {
                 match frame? {
                     Some(mut frame) => {
-                        if frame["t"] == "ok" && frame["reply"]["t"] == "hello" {
-                            frame["reply"]["web"] = BUILD.as_str().into();
-                            // The daemon's binary is this machine's business.
-                            if let Some(reply) = frame["reply"].as_object_mut() {
-                                reply.remove("exe");
-                            }
-                        }
+                        stamp_hello(&mut frame);
                         ws.send(Message::Text(frame.to_string().into())).await?
                     }
                     None => {
@@ -794,21 +802,21 @@ fn content_type(path: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    /// The app closes as "outdated" on a protocol it doesn't know, and this
-    /// server embeds the app it ships with: the two must move together.
     #[test]
-    fn app_speaks_the_daemons_protocol() {
-        let src = include_str!("../../../web/src/proto.ts");
-        let app: u32 = src
-            .lines()
-            .find_map(|l| l.strip_prefix("export const PROTOCOL = "))
-            .and_then(|v| v.trim_end_matches(';').trim().parse().ok())
-            .expect("web/src/proto.ts exports PROTOCOL");
-        assert_eq!(
-            app,
-            valkyrie_proto::PROTOCOL,
-            "bump PROTOCOL in web/src/proto.ts and rebuild web/dist"
-        );
+    fn hello_tells_the_app_its_protocol_and_hides_the_exe() {
+        let mut hello = serde_json::json!({
+            "t": "ok", "req": 1,
+            "reply": { "t": "hello", "protocol": 7, "exe": "/home/me/valk" },
+        });
+        stamp_hello(&mut hello);
+        assert_eq!(hello["reply"]["app_protocol"], valkyrie_proto::PROTOCOL);
+        assert_eq!(hello["reply"]["web"], BUILD.as_str());
+        assert_eq!(hello["reply"]["protocol"], 7, "the daemon's own stays");
+        assert!(hello["reply"].get("exe").is_none());
+
+        let mut other = serde_json::json!({ "t": "ok", "req": 2, "reply": { "t": "sessions" } });
+        stamp_hello(&mut other);
+        assert!(other["reply"].get("app_protocol").is_none());
     }
 
     #[test]

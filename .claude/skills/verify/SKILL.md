@@ -5,6 +5,10 @@ description: Run an isolated valk daemon + web server with fake agent sessions t
 
 # Verifying valkyrie changes
 
+Before opening or pushing to a PR, run `scripts/check`: it runs CI's rust and web
+checks (fmt, clippy, tests, shellcheck, web/dist up to date). If it stops on a
+missing tool, ask the user to install it; don't push around it.
+
 ## Isolated daemon (never the user's)
 Agent shells run inside a valk session, so `VALK_SOCKET` points at the user's real
 daemon. Pass an explicit socket on every call, and unset the session env.

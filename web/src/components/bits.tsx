@@ -42,7 +42,7 @@ export function ConnectionPill() {
     );
   }
   return (
-    <span className={`pill conn-${status}`} title={status === "outdated" ? "This app and the daemon speak different protocols: restart valk web (valk setup web does it)" : undefined}>
+    <span className={`pill conn-${status}`} title={status === "outdated" ? "This app and the daemon speak different protocols" : undefined}>
       <span className="pill-dot" />
       {LABEL[status]}
     </span>

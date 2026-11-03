@@ -3,6 +3,7 @@
 
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
+import type { Mismatch } from "./lib/protocol";
 import type { Decision, Item, ItemChange, ItemFacts, Modes, NewItem, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
@@ -39,6 +40,8 @@ export interface Prompt {
 interface State {
   token: string | null;
   status: Status;
+  /** Set while `outdated`: the daemon's protocol and this app's. */
+  mismatch: Mismatch | null;
   sessions: SessionInfo[];
   queue: QueueItem[];
   /** Decisions agents proposed, waiting on the human (ADR-0007). */
@@ -67,6 +70,7 @@ interface State {
 export const useApp = create<State>(() => ({
   token: localStorage.getItem(TOKEN_KEY),
   status: "connecting",
+  mismatch: null,
   sessions: [],
   queue: [],
   proposals: [],
@@ -127,8 +131,8 @@ export function connect(): void {
   if (!token || conn) return;
   conn = new Conn({
     token,
-    onStatus: (status) => {
-      set({ status });
+    onStatus: (status, mismatch) => {
+      set({ status, mismatch: mismatch ?? null });
       if (status === "updated") reloadWhenSafe();
     },
     onPush,
