@@ -62,6 +62,7 @@ fn sh(script: &str, size: Size) -> SpawnSpec {
         size,
         env: Vec::new(),
         worktree: None,
+        hidden: false,
     }
 }
 
@@ -713,6 +714,7 @@ async fn a_fresh_daemon_restores_agents_and_shells() {
         size: SIZE,
         env: Vec::new(),
         worktree: None,
+        hidden: false,
     };
     let agent = client
         .spawn(spawn(
@@ -1002,6 +1004,7 @@ async fn splits_come_back_after_a_restart() {
         size: SIZE,
         env: Vec::new(),
         worktree: None,
+        hidden: false,
     };
     let a = client.spawn(shell("left")).await.unwrap().id;
     client.spawn(shell("alone")).await.unwrap();
@@ -1160,6 +1163,7 @@ async fn spawn_can_start_in_a_new_worktree() {
             cwd: Some(repo.clone()),
             name: Some("Fix login".into()),
             worktree: Some(String::new()),
+            hidden: false,
             ..sh(
                 "pwd; sleep 5",
                 Size {
@@ -1179,6 +1183,7 @@ async fn spawn_can_start_in_a_new_worktree() {
         .spawn(SpawnSpec {
             cwd: Some(dir.join("repos")),
             worktree: Some(String::new()),
+            hidden: false,
             ..sh("true", SIZE)
         })
         .await
@@ -1194,6 +1199,7 @@ async fn spawn_can_start_in_a_new_worktree() {
             cwd: Some(repo.clone()),
             name: Some("broken".into()),
             worktree: Some(String::new()),
+            hidden: false,
             ..sh("", SIZE)
         })
         .await
@@ -1360,4 +1366,57 @@ async fn clients_say_their_build_and_the_daemon_tells_who_is_behind() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("a closed connection is still listed");
+}
+
+#[tokio::test]
+async fn hidden_sessions_stay_off_the_lists_and_end_with_their_connection() {
+    use valkyrie_proto::codec::{read_frame, write_frame};
+    use valkyrie_proto::{ClientMsg, Reply};
+    let (client, mut pushes, dir) = start().await;
+    let shown = client.spawn(sh("sleep 30", SIZE)).await.unwrap().id;
+    // A bare connection, which closing is a plain drop (a `Client` keeps its
+    // socket open until the daemon hangs up).
+    let mut conn = valkyrie_proto::ipc::connect(&dir.join("run/o.sock"))
+        .await
+        .unwrap();
+    let mut spec = sh("printf mini-hi; sleep 30", SIZE);
+    spec.hidden = true;
+    write_frame(&mut conn, &ClientMsg::Spawn { req: 1, spec })
+        .await
+        .unwrap();
+    let hidden = loop {
+        match read_frame::<_, ServerMsg>(&mut conn).await.unwrap() {
+            Some(ServerMsg::Ok {
+                reply: Reply::Session { info },
+                ..
+            }) => break info.id,
+            Some(ServerMsg::Err { message, .. }) => panic!("{message}"),
+            _ => {}
+        }
+    };
+
+    // Nobody lists it, but whoever knows its id can watch it.
+    let ids: Vec<_> = client.list().await.unwrap().iter().map(|s| s.id).collect();
+    assert_eq!(ids, vec![shown]);
+    wait_dump(&client, hidden, |t| t.contains("mini-hi")).await;
+    client.attach_panes(vec![(hidden, SIZE)]).await.unwrap();
+    let ServerMsg::Screen { session, .. } = next_push(&mut pushes).await else {
+        panic!("expected screen")
+    };
+    assert_eq!(session, hidden);
+
+    // It goes with the connection that spawned it; the visible one stays.
+    drop(conn);
+    for _ in 0..100 {
+        if client.dump(hidden).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        client.dump(hidden).await.is_err(),
+        "hidden session survived"
+    );
+    assert!(client.dump(shown).await.is_ok());
+    client.kill(shown).await.unwrap();
 }

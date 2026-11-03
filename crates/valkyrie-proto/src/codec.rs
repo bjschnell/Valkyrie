@@ -69,6 +69,7 @@ mod tests {
                         ("DISPLAY".into(), None),
                     ],
                     worktree: Some("fix".into()),
+                    hidden: false,
                 },
             },
             ClientMsg::Input {

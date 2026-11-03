@@ -47,6 +47,7 @@ async fn latency(socket: &Path, n: usize) -> Result<()> {
         size,
         env: Vec::new(),
         worktree: None,
+        hidden: false,
     };
     let session = client.spawn(spec).await?.id;
     client.attach(session, size).await?;

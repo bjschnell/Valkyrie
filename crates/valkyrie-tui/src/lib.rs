@@ -9,6 +9,7 @@ mod clip;
 mod edit;
 mod keys;
 mod links;
+mod mini;
 mod mouse;
 mod panes;
 mod ping;
@@ -218,6 +219,8 @@ struct App {
     ship_busy: bool,
     /// The settings panel is open, its cursor on this field.
     settings_cursor: Option<usize>,
+    /// The mini terminal's shell, once started (`mini.rs`).
+    mini: Option<mini::Mini>,
     /// The keys page is open (`.` on the home screen).
     keys_page: Option<KeysPage>,
     /// The selected session's screen text, for the preview pane.
@@ -399,6 +402,7 @@ impl App {
             mouse_owner: None,
             captured: false,
             fixed_size: None,
+            mini: None,
         }
     }
 
@@ -457,6 +461,7 @@ impl App {
                     let ended = running.into_iter().find(|&id| {
                         self.view.iter().chain(&self.others).any(|v| v.id == id && v.exited.is_some())
                     });
+                    self.mini_reap().await;
                     if let Some(id) = ended {
                         self.on_ended(id).await;
                     } else if queue_changed {
@@ -672,6 +677,10 @@ impl App {
         self.hover_tab = None;
         self.menu = None;
         self.reviewing = None;
+        // Detaching ends its watch too; the next press attaches it again.
+        if let Some(m) = &mut self.mini {
+            m.open = false;
+        }
         let _ = reset_terminal_modes();
         self.paste_forced = false;
         let _ = self.client.detach().await;
@@ -698,6 +707,9 @@ impl App {
         }
         if self.settings_cursor.is_some() {
             return self.settings_keys(&bytes);
+        }
+        if self.mini_open() {
+            return self.mini_input(bytes).await;
         }
         if self.view.is_some() {
             // Every report is Valkyrie's first: it finds the pane under the pointer,
@@ -906,6 +918,7 @@ impl App {
                 }
             }
             Action::Pane => self.cycle_focus(1),
+            Action::Mini => self.toggle_mini().await,
             Action::Capture => {
                 self.open_backlog().await;
                 if let Some(page) = &mut self.backlog {
@@ -1183,6 +1196,7 @@ impl App {
             size,
             env: valkyrie_proto::login_env(),
             worktree: None,
+            hidden: false,
         };
         match self.client.spawn(spec).await {
             Ok(info) => {
@@ -2477,6 +2491,9 @@ impl App {
             .map(|main| self.pane_layout(main).0)
             .and_then(|panes| panes.into_iter().find(|p| p.0 == session))
             .map_or((0, 0), |(_, r)| (r.x, r.y));
+        let Some(msg) = self.mini_push(msg)? else {
+            return Ok(false);
+        };
         let focused = self.view.as_ref().is_some_and(|v| v.id == session);
         let forced = self.paste_forced;
         let Some(view) = self.pane_mut(session) else {
@@ -2560,6 +2577,7 @@ impl App {
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
                         && self.backlog.is_none()
+                        && !self.mini_open()
                         && !self.rail_open();
                     self.draw_panes(frame, main, cursor);
                     if let Some(tabs) = tabs {
@@ -2588,6 +2606,7 @@ impl App {
                 }
                 None => self.draw_home(frame, body, bar),
             }
+            self.draw_mini(frame);
             if let Some(cursor) = self.settings_cursor {
                 self.draw_settings(frame, cursor);
             }
@@ -4554,6 +4573,7 @@ fn session_hints(map: &Keymap) -> Vec<(String, &'static str, Option<Action>)> {
             (Action::Last, "last"),
             (Action::NewTab, "new"),
             (Action::Capture, "capture"),
+            (Action::Mini, "mini"),
         ]
         .into_iter()
         .filter_map(hint),
@@ -7356,5 +7376,145 @@ mod tests {
         render_rows(&rows, area, &mut plain, None);
         assert_eq!(plain[(0, 0)].fg, style::Color::Reset);
         assert_eq!(plain[(1, 0)].fg, style::Color::Indexed(1));
+    }
+
+    /// Alt-m opens the mini terminal over a session or home and Alt-m again puts it
+    /// away: while it is open the shell gets every other key, the daemon watches
+    /// it beside the tab's panes, and an exited shell closes the box.
+    #[tokio::test]
+    async fn mini_terminal_opens_takes_keys_and_hides() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, Reply};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-minibox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let seen: Arc<Mutex<Vec<ClientMsg>>> = Arc::default();
+        let kept = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                kept.lock().unwrap().push(msg.clone());
+                let answer = match msg {
+                    ClientMsg::Spawn { req, .. } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Session { info: info(7) },
+                    },
+                    ClientMsg::AttachPanes { req, .. } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Done,
+                    },
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.fixed_size = Some(Size {
+            cols: 100,
+            rows: 30,
+        });
+        app.sessions = vec![info(2)];
+        app.view = Some(Attached::new(2, "two".into(), None));
+        let sent = || seen.lock().unwrap().clone();
+        // The client sends from a task and the fake daemon reads from another.
+        let typed = || -> Vec<Vec<u8>> {
+            sent()
+                .into_iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Input { session: 7, data } => Some(data),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        app.on_keys(b"\x1bm".to_vec()).await;
+        assert!(app.mini_open());
+        // Hidden: spawned for the mini's size, in the session's directory.
+        let spawn = sent()
+            .into_iter()
+            .find_map(|m| match m {
+                ClientMsg::Spawn { spec, .. } => Some(spec),
+                _ => None,
+            })
+            .expect("spawned a shell");
+        assert!(spawn.hidden);
+        assert_eq!(spawn.cwd, Some(PathBuf::from("/")));
+        // Watched beside the attached pane.
+        let panes = sent().into_iter().rev().find_map(|m| match m {
+            ClientMsg::AttachPanes { panes, .. } => Some(panes),
+            _ => None,
+        });
+        let ids: Vec<_> = panes.unwrap().iter().map(|p| p.0).collect();
+        assert_eq!(ids, vec![2, 7]);
+
+        // Keys go to the shell, Alt-m included only as the way out; the rest of the
+        // read after it goes back to the session underneath.
+        app.on_input(b"ls\r".to_vec()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(typed(), vec![b"ls\r".to_vec()]);
+        app.on_input(b"\x1b[<0;5;5M".to_vec()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(typed().len(), 1, "the mouse isn't the shell's");
+        app.on_input(b"x\x1bm".to_vec()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!app.mini_open());
+        assert_eq!(typed().last(), Some(&b"x".to_vec()));
+        let panes = sent().into_iter().rev().find_map(|m| match m {
+            ClientMsg::AttachPanes { panes, .. } => Some(panes),
+            _ => None,
+        });
+        assert_eq!(
+            panes.unwrap().iter().map(|p| p.0).collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        // Back again: the same shell, no second spawn.
+        app.on_input(b"\x1bm".to_vec()).await;
+        assert!(app.mini_open());
+        let spawns = sent()
+            .iter()
+            .filter(|m| matches!(m, ClientMsg::Spawn { .. }))
+            .count();
+        assert_eq!(spawns, 1);
+
+        // It draws as a box over the screen, with the key to put it away.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 31)).unwrap();
+        terminal.draw(|frame| app.draw_mini(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..31)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol())
+            .collect();
+        assert!(text.contains("mini terminal"), "{text}");
+        assert!(text.contains("alt m puts it away"), "{text}");
+
+        // The shell exiting closes the box and drops the shell.
+        app.mini.as_mut().unwrap().pane.exited = Some(Some(0));
+        app.mini_reap().await;
+        assert!(!app.mini_open() && app.mini.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The box is centered, and never smaller than a usable shell when the
+    /// terminal has room.
+    #[test]
+    fn mini_box_is_centered_and_bounded() {
+        let r = mini::mini_rect(Rect::new(0, 0, 100, 30));
+        assert_eq!((r.width, r.height), (80, 18));
+        assert_eq!((r.x, r.y), (10, 6));
+        let small = mini::mini_rect(Rect::new(0, 0, 44, 12));
+        assert_eq!((small.width, small.height), (40, 10));
+        let tiny = mini::mini_rect(Rect::new(0, 0, 30, 6));
+        assert_eq!((tiny.width, tiny.height), (30, 6));
     }
 }

@@ -437,6 +437,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     size,
                     env: valkyrie_proto::login_env(),
                     worktree,
+                    hidden: false,
                 })
                 .await?;
             if attach {
@@ -620,6 +621,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     },
                     env: valkyrie_proto::login_env(),
                     worktree: None,
+                    hidden: false,
                 })
                 .await?;
             if attach {

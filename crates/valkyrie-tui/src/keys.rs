@@ -28,12 +28,15 @@ pub enum Action {
     Pane,
     /// The backlog page, straight into a new item, then back where you were.
     Capture,
+    /// A small shell over whatever is on screen: type a command, press the key
+    /// again to put it away. It keeps running while hidden.
+    Mini,
     /// The tab at this place, from 0.
     Tab(u8),
 }
 
 impl Action {
-    pub const ALL: [Action; 19] = [
+    pub const ALL: [Action; 20] = [
         Action::Tabs,
         Action::Home,
         Action::NewTab,
@@ -44,6 +47,7 @@ impl Action {
         Action::Close,
         Action::Pane,
         Action::Capture,
+        Action::Mini,
         Action::Tab(0),
         Action::Tab(1),
         Action::Tab(2),
@@ -72,6 +76,7 @@ impl Action {
             Action::Close => "close_tab".into(),
             Action::Pane => "next_pane".into(),
             Action::Capture => "capture".into(),
+            Action::Mini => "mini_terminal".into(),
             Action::Tab(i) => format!("tab_{}", i + 1),
         }
     }
@@ -89,6 +94,7 @@ impl Action {
             Action::Close => "Close tab".into(),
             Action::Pane => "Next pane".into(),
             Action::Capture => "Add to backlog".into(),
+            Action::Mini => "Mini terminal".into(),
             Action::Tab(i) => format!("Tab {}", i + 1),
         }
     }
@@ -105,6 +111,7 @@ impl Action {
             Action::Close => Key::Alt(b'w'),
             Action::Pane => Key::Alt(b'o'),
             Action::Capture => Key::Alt(b'a'),
+            Action::Mini => Key::Alt(b'm'),
             Action::Tab(i) => Key::Alt(b'1' + i),
         })
     }
