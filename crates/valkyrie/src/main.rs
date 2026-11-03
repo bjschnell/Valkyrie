@@ -1,6 +1,7 @@
 mod alias;
 mod bench;
 mod context;
+mod guard;
 mod hook;
 mod mcp;
 mod pings;

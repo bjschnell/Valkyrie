@@ -245,6 +245,8 @@ struct State {
     /// What the agent says it is working on, from its terminal title: the name
     /// lists show when the session has none of its own.
     topic: Option<String>,
+    /// The merge guard's confirms that may be on screen (ADR-0015 §1).
+    guard: crate::guard::Pending,
 }
 
 impl State {
@@ -367,6 +369,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             topic: None,
+            guard: Default::default(),
         };
         state.log(
             now_ms,
@@ -454,6 +457,8 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             topic: saved.topic,
+            // Not carried over: a confirm up across an upgrade is a narrow window.
+            guard: Default::default(),
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -843,6 +848,7 @@ impl Session {
         );
         if ours {
             state.activity.note(&payload, now);
+            state.guard.hook(&payload);
         }
         // Only a session start names the conversation, and not mid-turn: Codex hooks
         // are global, so a `codex exec` the agent runs reports its own one-shot id.
@@ -1276,6 +1282,22 @@ impl Session {
         if state.driven_by.is_none() {
             state.driven_by = Some(agent.to_owned());
         }
+    }
+
+    /// Whether the session shows a merge guard confirm (ADR-0015 §1), which only the
+    /// user may answer.
+    pub fn at_guard_confirm(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.guard.on_screen(state.tracker.status().state)
+    }
+
+    /// Notes typing an agent sent that was dropped, and why.
+    pub fn log_refused_input(&self, agent: &str) {
+        self.state.lock().unwrap().log(
+            now_ms(),
+            "input_refused",
+            json!({"agent": agent, "reason": "merge guard confirm"}),
+        );
     }
 
     /// Whether an agent started this session or typed into it.

@@ -59,6 +59,16 @@ pub enum Pr {
     Unknown,
 }
 
+/// The default branch of the repository `dir` is in (see `default_branch`).
+pub fn default_branch_at(dir: &Path) -> Option<String> {
+    default_branch(dir)
+}
+
+/// The branch checked out in `dir`; `None` on a detached head or outside git.
+pub fn current_branch(dir: &Path) -> Option<String> {
+    git_out(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
+}
+
 /// The work at a stop in `cwd`. `None` outside a git repository.
 pub fn at(cwd: &Path) -> Option<Value> {
     let (state, branch, pr) = state(cwd, &|dir, branch| gh_pr(dir, branch, GH_TIMEOUT))?;
