@@ -732,3 +732,116 @@ fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
     );
     drop(daemon);
 }
+
+/// An agent drops or rewords only the items it filed itself (ADR-0018): the user's
+/// accepted items and another agent's proposals are theirs, not its.
+#[test]
+fn agents_drop_and_reword_only_their_own_items() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-own-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let o = |name: &str| out.join(name).display().to_string();
+    let run =
+        |cmd: &str, name: &str| format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}\n", o = o(name));
+    // Two stand-in agents: `a` files #2 and #3 and manages its own; `b` goes after
+    // the user's #1 and a's #2. Both are `claude`, so each has a folder of its own.
+    let stand_in = |who: &str, script: String| {
+        let at = bin.join(who);
+        std::fs::create_dir_all(&at).unwrap();
+        let agent = at.join("claude");
+        std::fs::write(&agent, format!("#!/bin/sh\n{script}exec sleep 60\n")).unwrap();
+        std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        agent.display().to_string()
+    };
+    let a = stand_in(
+        "a",
+        [
+            run("valk todo add 'From a'", "a-add2"),
+            run("valk todo edit 2 -t 'From a, reworded'", "a-edit2"),
+            run("valk todo add 'Also from a'", "a-add3"),
+            run("valk todo drop 3", "a-drop3"),
+        ]
+        .concat(),
+    );
+    let b = stand_in(
+        "b",
+        [
+            run("valk todo drop 1", "b-drop1"),
+            run("valk todo edit 2 -t 'Hijacked'", "b-edit2"),
+            run("valk todo drop 2", "b-drop2"),
+        ]
+        .concat(),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let human = |cmd: &str, name: &str| {
+        let line = run(cmd, name);
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", line.trim_end(), "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .env_remove("VALK_ITEM")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{cmd}");
+    };
+    let new = |cmd: &str, name: &str| {
+        human(&format!("valk new --cwd {} -- {cmd}", repo.display()), name);
+        let id = wait_for(&out.join(name));
+        assert!(id.trim().parse::<u32>().is_ok(), "{id}");
+    };
+
+    human("valk todo add --no-folder 'The user’s'", "add1");
+    assert!(wait_for(&out.join("add1")).starts_with("#1 "));
+    new(&a, "agent-a");
+    assert!(wait_for(&out.join("a-add2")).starts_with("#2 From a"));
+    assert!(
+        wait_for(&out.join("a-edit2")).starts_with("#2 From a, reworded"),
+        "its own proposal is its to reword"
+    );
+    assert!(wait_for(&out.join("a-add3")).starts_with("#3 Also from a"));
+    let dropped = wait_for(&out.join("a-drop3"));
+    assert!(dropped.contains("#3 Also from a: dropped"), "{dropped}");
+
+    new(&b, "agent-b");
+    for name in ["b-drop1", "b-edit2", "b-drop2"] {
+        let said = wait_for(&out.join(name));
+        assert!(
+            said.contains("is for the user, not claude"),
+            "{name}: {said}"
+        );
+    }
+    human("valk todo show 1", "show1");
+    let show = wait_for(&out.join("show1"));
+    assert!(show.contains("· open ·"), "{show}");
+    human("valk todo show 2", "show2");
+    let show = wait_for(&out.join("show2"));
+    assert!(
+        show.starts_with("#2 From a, reworded") && show.contains("· proposed ·"),
+        "{show}"
+    );
+    // The user still may.
+    human("valk todo drop 1", "drop1");
+    assert!(wait_for(&out.join("drop1")).contains("#1 The user’s: dropped"));
+    drop(daemon);
+}
