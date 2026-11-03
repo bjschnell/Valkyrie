@@ -28,13 +28,14 @@ fn how_to_propose(valk: &str) -> String {
          done, say what you filed and offer to fix it here or leave it to launch fresh from \
          the backlog. If the user says to go ahead here, that's enough: take it with `{valk} \
          todo take N --branch <branch>` and fix it on its own branch and pull request. If \
-         this session has no backlog item, track its \
-         own work with `{valk} todo add --take -k <kind> \"<title>\" --branch <branch>` \
-         (`{valk} todo take N --pr <url>` once the pull request is open, `{valk} todo note \
-         -i N` for what's left), so the user can follow and ship it. Working on an \
-         accepted item outside a launch, `{valk} todo take N --branch \
-         <branch>` as you start; a take is refused while another session is on the item: \
-         leave that one to it. Never ship or accept an item: that's the user's."
+         this session isn't on a backlog item and the user asks for work, check `{valk} todo \
+         list --json` for an open item it matches; if one does, say which and take it with \
+         `{valk} todo take N --branch <branch>` as you start. A take is refused while another \
+         session is on the item: leave that one to it. If none matches, track the work with \
+         `{valk} todo add --take -k <kind> \"<title>\" --branch <branch>`. Either way, \
+         `{valk} todo take N --pr <url>` once the pull request is open and `{valk} todo note \
+         -i N` for what's left, so the user can follow and ship it. Never ship, accept or \
+         merge on your own: those are the user's."
     )
 }
 
