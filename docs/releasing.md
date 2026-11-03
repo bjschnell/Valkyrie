@@ -110,12 +110,30 @@ run. If the code needs a fix, abandon the version: delete the draft and its tag
 install it, then land the fix as a `fix:` commit and merge the next release PR.
 Never delete a tag that was published.
 
+### Edge: the rolling build of `main`
+
+To run what was just merged on another machine, use edge, not a release. After every
+push to `main` that passes the tests, `edge.yml` builds every platform and replaces
+the builds on a GitHub pre-release tagged `edge`. It moves the tag last, once all
+builds are up. Nothing is bumped, nothing goes in the changelog, and since it's a
+pre-release it is never `releases/latest`, so stable installs never see it.
+
+- Move a machine onto it with `valk upgrade --edge`. The binary remembers its channel
+  (`valk --version` says `0.4.0 (edge abc1234)`, the version being the last release's),
+  so later `valk upgrade`s follow edge until `valk upgrade --stable`.
+- New machine: `VALK_VERSION=edge` with any install line.
+- Running `edge` by hand from the Actions tab publishes the head of the branch you
+  pick, untested, even a feature branch. The next push to `main` replaces it.
+
+`edge` is the one tag that moves. `v*` tags never do.
+
 ### Cadence
 
 Semver says what a number means, not when one comes out. The release PR collects
-changes until it is merged, so the cadence is when you merge it: whenever a fix
-matters, or on a fixed day such as every other Friday. Nothing in the tooling needs
-to change for either.
+changes until it is merged, so the cadence is when you merge it. Edge covers
+trying a change on another machine, so merge it only when you want a version:
+whenever a fix matters, or on a fixed day such as every other Friday. Nothing in the
+tooling needs to change for either.
 
 ### By hand
 

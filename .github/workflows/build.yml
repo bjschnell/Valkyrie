@@ -1,0 +1,80 @@
+# Builds `valk` for every platform a release ships and uploads each build, with its
+# checksum, to an existing GitHub release. release.yml calls it for a versioned
+# release, edge.yml for the rolling `edge` one.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: "The GitHub release (its tag name) to upload to"
+        type: string
+        required: true
+      ref:
+        description: "What to build: a tag or a commit"
+        type: string
+        required: true
+      channel:
+        description: "Stamped into the binary as VALK_CHANNEL: empty for stable, `edge`"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Static (musl), so one file runs on any Linux and any WSL distro,
+          # whatever its glibc.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The ref, not the branch a manual run was started from.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - name: musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: rustup target add ${{ matrix.target }}
+      # The ref's commit, also for a manual run: `valk upgrade` compares it with
+      # what the release's tag points at (build.rs). The channel picks which
+      # release a plain `valk upgrade` follows.
+      - name: stamp
+        shell: bash
+        run: |
+          echo "VALK_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "VALK_CHANNEL=${{ inputs.channel }}" >> "$GITHUB_ENV"
+      - run: cargo build --locked --release -p valkyrie --target ${{ matrix.target }}
+      - name: publish
+        if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release }}
+          NAME: valk-${{ matrix.target }}.tar.gz
+        run: |
+          tar -czf "$NAME" -C target/${{ matrix.target }}/release valk
+          shasum -a 256 "$NAME" > "$NAME.sha256"
+          gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber
+      - name: publish Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release }}
+          NAME: valk-${{ matrix.target }}.zip
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/valk.exe -DestinationPath $env:NAME
+          $hash = (Get-FileHash $env:NAME -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:NAME" | Set-Content "$env:NAME.sha256" -Encoding ascii
+          gh release upload $env:TAG $env:NAME "$env:NAME.sha256" --clobber

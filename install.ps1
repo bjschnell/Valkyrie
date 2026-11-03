@@ -1,6 +1,6 @@
 # Installs native Valkyrie for Windows x64. No WSL or administrator access needed.
 #   irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
-# VALK_VERSION selects a release tag; VALK_BIN_DIR selects the install directory.
+# VALK_VERSION selects a release tag (`edge`: the rolling build of main); VALK_BIN_DIR selects the install directory.
 # Versioned binaries allow updates while the old daemon is still running.
 & {
     $ErrorActionPreference = 'Stop'
@@ -19,7 +19,7 @@
             $release = Invoke-RestMethod 'https://api.github.com/repos/bjschnell/Valkyrie/releases/latest'
             $version = $release.tag_name
         }
-        if ($version -notmatch '^v[0-9A-Za-z._-]+$') { throw 'VALK_VERSION must be a release tag such as v0.0.2.' }
+        if ($version -ne 'edge' -and $version -notmatch '^v[0-9A-Za-z._-]+$') { throw 'VALK_VERSION must be a release tag such as v0.0.2, or edge.' }
         $binDir = $env:VALK_BIN_DIR
         if (-not $binDir) { $binDir = Join-Path $env:LOCALAPPDATA 'Programs\Valkyrie' }
         $binDir = [IO.Path]::GetFullPath($binDir)

@@ -181,6 +181,11 @@ restart it. On Windows an open TUI reconnects, and only a newer protocol needs a
   source never asks.
 - `valk upgrade --check` only says whether a newer release is out.
 - `valk upgrade --tag v0.0.2` installs that release instead of the latest.
+- `valk upgrade --edge` moves this machine onto **edge**, a build of `main` that is
+  replaced after every push that passes the tests ([Edge](releasing.md#edge-the-rolling-build-of-main)).
+  From then on a plain `valk upgrade`, and the home screen's notice, follow edge;
+  `valk upgrade --stable` goes back to versioned releases. To install edge on a new
+  machine, set `VALK_VERSION=edge` for the install line.
 - `valk upgrade --local` downloads nothing and hands the daemon to this binary.
 - Releases are told apart by the commit they were built from, not only the tag.
 
