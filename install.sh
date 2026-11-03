@@ -41,7 +41,10 @@ say "building valk (release) with $(cargo --version)"
 # would take the daemon over, and every agent it starts would run that copy's hooks.
 here="$(pwd -P)/target/release/valk"
 on_path="$(command -v valk 2>/dev/null || true)"
-resolved="$( [ -n "$on_path" ] && readlink -f "$on_path" 2>/dev/null || true)"
+resolved=""
+if [ -n "$on_path" ]; then
+    resolved="$(readlink -f "$on_path" 2>/dev/null || true)"
+fi
 if [ -n "$resolved" ] && [ "$resolved" = "$here" ]; then
     cargo build --locked --release --bin valk
     bin="$on_path"
