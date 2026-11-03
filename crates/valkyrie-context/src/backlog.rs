@@ -516,7 +516,7 @@ pub fn brief(item: &Item) -> String {
 /// What an agent on item `id` is asked to keep track of: the end of its brief.
 fn footer(id: u32) -> String {
     format!(
-        "(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`, then `valk todo take N --pr <url>` and `valk todo note -i N \"…\"` with the N it printed (without -i N, both mean this item); `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "(This is item #{} in my Valkyrie backlog. Fixing what you find broken along the way is the default, not a detour: fix it here or in a pull request of its own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`, then `valk todo take N --pr <url>` and `valk todo note -i N \"…\"` with the N it printed (without -i N, both mean this item). Nothing needs a card before you fix it. `valk todo add` without --take is for what's too big for now, risky, needs my call, or sits in files another agent is editing; say which in its body. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         id
     )
 }
