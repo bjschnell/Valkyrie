@@ -39,6 +39,14 @@ pub(crate) struct Caller {
 }
 
 impl Caller {
+    /// Refuses `what` unless the caller is a human.
+    pub(crate) fn vouch(&self, what: &str) -> Result<()> {
+        if let Some(agent) = &self.agent {
+            bail!("{what} is for the user, not {agent}: run it from your own terminal");
+        }
+        Ok(())
+    }
+
     fn agent(name: &str) -> Caller {
         Caller {
             agent: Some(name.into()),
@@ -76,12 +84,23 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests stand in for a caller here, and may act while the daemon works it out.
+    pub(crate) static AS_CALLER: std::cell::RefCell<Option<Box<dyn Fn() -> Caller>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl Registry {
     /// Works out who `peer` is (ADR-0007 §4), failing closed: anything it can't
     /// show is a human's counts as an agent's. A human is a process outside every
     /// agent, either in a session no agent runs, started or typed into, or on a
     /// terminal of its own, or the `valk web` bridge (whose devices a human paired).
     pub(crate) fn caller(&self, peer: Option<Peer>) -> Caller {
+        #[cfg(test)]
+        if let Some(caller) = AS_CALLER.with(|c| c.borrow().as_ref().map(|f| f())) {
+            return caller;
+        }
         let Some(peer) = peer.filter(|p| p.pid > 0) else {
             return Caller::agent("unknown");
         };
@@ -190,10 +209,7 @@ impl Registry {
     /// Only a human may act on decisions; through the `valk web` bridge, that is
     /// one of the devices they paired.
     pub(crate) fn vouch(&self, peer: Option<Peer>, what: &str) -> Result<()> {
-        if let Some(agent) = self.caller(peer).agent {
-            bail!("{what} is for the user, not {agent}: run it from your own terminal");
-        }
-        Ok(())
+        self.caller(peer).vouch(what)
     }
 
     /// A human at this process's own terminal, as `Vouch` asks before a pairing code

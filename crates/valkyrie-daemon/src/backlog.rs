@@ -102,63 +102,50 @@ impl Registry {
     }
 
     /// An agent may drop an item it filed itself (not once shipped, which is the
-    /// user's), and reword one it filed that's
-    /// still proposed, which the user reads before accepting; the rest (accepting,
-    /// shipping, rewording one the user will launch, touching the user's or another
-    /// agent's card) is the user's (ADR-0018).
+    /// user's), and reword one it filed that's still proposed, which the user
+    /// reads before accepting; the rest (accepting, shipping, rewording one the
+    /// user will launch, touching the user's or another agent's card) is the
+    /// user's (ADR-0018). The caller is worked out first, and the change judged
+    /// on the item under the same lock that writes it: an accept or ship landing
+    /// meanwhile can't let through what it would refuse (backlog #61).
     pub(crate) async fn change_item(
         self: &Arc<Self>,
         id: u32,
         change: ItemChange,
         peer: Option<Peer>,
     ) -> Result<Reply> {
-        let current = self.backlog.lock().unwrap().get(id)?;
-        let own = || {
-            let caller = self.caller(peer);
-            let session = caller.session.as_ref().map(|s| (self.boot, s.info().id));
-            caller.agent.is_some() && session.is_some() && current.filed_by == session
-        };
-        match &change {
-            ItemChange::Status {
-                status: ItemStatus::Dropped,
-            } if current.status != ItemStatus::Shipped && own() => {}
-            ItemChange::Status {
-                status: ItemStatus::Dropped,
-            } => self.vouch(
-                peer,
-                "dropping a backlog item another filed, or a shipped one",
-            )?,
-            ItemChange::Edit { .. } if current.status == ItemStatus::Proposed && own() => {}
-            ItemChange::Edit { .. } if current.status == ItemStatus::Proposed => {
-                self.vouch(peer, "rewording a proposal another filed")?
-            }
-            ItemChange::Edit { .. } => self.vouch(peer, "rewording an accepted backlog item")?,
-            ItemChange::Status { status } => {
-                let what = match (current.status, status) {
+        let caller = self.caller(peer);
+        let session = caller.session.as_ref().map(|s| (self.boot, s.info().id));
+        let item = {
+            let backlog = self.backlog.lock().unwrap();
+            let current = backlog.get(id)?;
+            let own = caller.agent.is_some() && session.is_some() && current.filed_by == session;
+            match &change {
+                ItemChange::Status {
+                    status: ItemStatus::Dropped,
+                } if own && current.status != ItemStatus::Shipped => {}
+                ItemChange::Status {
+                    status: ItemStatus::Dropped,
+                } => caller.vouch("dropping a backlog item another filed, or a shipped one")?,
+                ItemChange::Edit { .. } if own && current.status == ItemStatus::Proposed => {}
+                ItemChange::Edit { .. } if current.status == ItemStatus::Proposed => {
+                    caller.vouch("rewording a proposal another filed")?
+                }
+                ItemChange::Edit { .. } => caller.vouch("rewording an accepted backlog item")?,
+                ItemChange::Status { status } => caller.vouch(match (current.status, status) {
                     (ItemStatus::Proposed, ItemStatus::Open) => "accepting a backlog item",
                     (_, ItemStatus::Shipped) => "shipping a backlog item",
                     _ => "reopening a backlog item",
-                };
-                self.vouch(peer, what)?;
+                })?,
             }
-        }
-        let (item, note) = self.apply(id, &change).await?;
+            backlog.change(id, &change, now_secs())?
+        };
+        let (item, note) = self.after_change(item).await?;
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
             note,
         })
-    }
-
-    /// Makes a change the caller may make, taking a shipped item's worktree away;
-    /// also returns what happened to that.
-    async fn apply(&self, id: u32, change: &ItemChange) -> Result<(Item, Option<String>)> {
-        let item = self
-            .backlog
-            .lock()
-            .unwrap()
-            .change(id, change, now_secs())?;
-        self.after_change(item).await
     }
 
     /// Takes the worktree of an item just shipped away, if it has one; returns the
@@ -1024,6 +1011,102 @@ mod tests {
         });
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The user accepts an agent's proposal while the daemon works out that the
+    /// agent rewording or dropping it filed it (backlog #61): the change is judged
+    /// against the item as it is when written, not as it was a moment before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_change_is_judged_on_the_item_as_written() {
+        use crate::context::{AS_CALLER, Caller};
+        let dir = std::env::temp_dir().join(format!("valkyrie-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let spec = SpawnSpec {
+            command: vec!["sleep".into(), "30".into()],
+            cwd: Some(dir.clone()),
+            name: None,
+            size: Size { cols: 40, rows: 10 },
+            env: Vec::new(),
+            worktree: None,
+            hidden: false,
+        };
+        let Reply::Session { info } = crate::spawn(&registry, spec).unwrap() else {
+            panic!("no session");
+        };
+        let session = registry.get(info.id).unwrap();
+        let new = |title: &str| NewItem {
+            title: title.into(),
+            body: String::new(),
+            kind: Default::default(),
+            cwd: None,
+            attachments: Vec::new(),
+        };
+        let filed = |title: &str| {
+            registry
+                .backlog
+                .lock()
+                .unwrap()
+                .add_filed(&new(title), "claude", Some((registry.boot, info.id)), 1)
+                .unwrap()
+                .id
+        };
+        let (reworded, dropped) = (filed("reworded"), filed("dropped"));
+        let open = ItemChange::Status {
+            status: ItemStatus::Open,
+        };
+        let ship = ItemChange::Status {
+            status: ItemStatus::Shipped,
+        };
+        // The agent that filed both; as it's worked out, the user accepts #1 and
+        // ships #2.
+        let (r2, s2) = (Arc::clone(&registry), Arc::clone(&session));
+        AS_CALLER.with(|c| {
+            *c.borrow_mut() = Some(Box::new(move || {
+                let b = r2.backlog.lock().unwrap();
+                for (id, change) in [(reworded, &open), (dropped, &ship)] {
+                    if b.get(id).unwrap().status == ItemStatus::Proposed {
+                        b.change(id, change, 2).unwrap();
+                    }
+                }
+                Caller {
+                    agent: Some("claude".into()),
+                    session: Some(Arc::clone(&s2)),
+                    bridge: false,
+                }
+            }))
+        });
+        let edit = ItemChange::Edit {
+            title: Some("Hijacked".into()),
+            body: None,
+            kind: None,
+            cwd: None,
+        };
+        let refused = registry.change_item(reworded, edit, None).await;
+        assert!(refused.is_err(), "reworded an accepted item: {refused:?}");
+        let drop = ItemChange::Status {
+            status: ItemStatus::Dropped,
+        };
+        let refused = registry.change_item(dropped, drop, None).await;
+        assert!(refused.is_err(), "dropped a shipped item: {refused:?}");
+        AS_CALLER.with(|c| *c.borrow_mut() = None);
+        let get = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        assert_eq!(get(reworded).title, "reworded");
+        assert_eq!(get(reworded).status, ItemStatus::Open);
+        assert_eq!(get(dropped).status, ItemStatus::Shipped);
+        session.kill();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
