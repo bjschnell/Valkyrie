@@ -489,6 +489,7 @@ async fn serve_forever(
         tokio::spawn(extract::run(registry.clone(), turns));
     }
     tokio::spawn(watch_stale(registry.clone()));
+    tokio::spawn(watch_prs(registry.clone()));
     tokio::spawn(tick(registry.clone()));
     tokio::spawn(restore::keep(
         registry.clone(),
@@ -847,6 +848,21 @@ async fn watch_stale(registry: Arc<Registry>) {
     loop {
         interval.tick().await;
         registry.check_stale(None, Duration::ZERO).await;
+    }
+}
+
+/// How often backlog items' pull requests are read for a merge (ADR-0015 §2).
+const PRS_EVERY: Duration = Duration::from_secs(300);
+
+/// Ships items whose PRs merged. Only items with a PR are asked about, so with
+/// none open this costs nothing.
+async fn watch_prs(registry: Arc<Registry>) {
+    let lookup: work::PrLookup = Arc::new(|dir, url| work::gh_pr(dir, url, work::GH_TIMEOUT));
+    let mut interval = tokio::time::interval(PRS_EVERY);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        registry.ship_merged_prs(lookup.clone()).await;
     }
 }
 
