@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Backlog, ItemEditor } from "./components/Backlog";
 import { Inbox } from "./components/Inbox";
 import { Launcher } from "./components/Launcher";
+import { Outdated } from "./components/Outdated";
 import { Pair } from "./components/Pair";
 import { ReviewView } from "./components/Review";
 import { SessionView } from "./components/SessionView";
@@ -57,6 +58,7 @@ export function App() {
   }, [openId]);
 
   if (!token || status === "unpaired") return <Pair />;
+  if (status === "outdated") return <Outdated />;
   return (
     <>
       {at.page === "inbox" && <Inbox />}

@@ -1,8 +1,6 @@
 // The daemon's wire protocol (crates/valkyrie-proto), as the web app sees it: the
 // `valk web` server passes these JSON messages through unchanged.
 
-export const PROTOCOL = 19;
-
 export type SessionId = number;
 export type Size = { cols: number; rows: number };
 
@@ -280,8 +278,9 @@ export type Notice =
 
 export type Reply =
   | { t: "done" }
-  /** `web`: the build of the app `valk web` serves (see lib/build.ts). */
-  | { t: "hello"; protocol: number; generation: number; boot: number; web?: string }
+  /** `web`: the build of the app `valk web` serves (see lib/build.ts); `app_protocol`:
+   * the protocol that build speaks (see lib/protocol.ts). Both added by `valk web`. */
+  | { t: "hello"; protocol: number; generation: number; boot: number; web?: string; app_protocol?: number }
   | { t: "session"; info: SessionInfo }
   | { t: "sessions"; sessions: SessionInfo[] }
   | { t: "text"; text: string }

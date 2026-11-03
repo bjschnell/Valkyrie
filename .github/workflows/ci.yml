@@ -61,7 +61,7 @@ jobs:
       - run: cargo test --workspace --locked --no-fail-fast
       - name: Validate shell installers
         if: runner.os == 'Linux'
-        run: shellcheck install.sh install-release.sh .githooks/commit-msg
+        run: shellcheck install.sh install-release.sh .githooks/commit-msg scripts/check
       - name: Validate PowerShell installers
         if: runner.os == 'Windows'
         shell: pwsh
