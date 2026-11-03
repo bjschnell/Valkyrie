@@ -215,6 +215,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 | | `Alt-n` | each session that needs you, then back where you started |
 | | `Alt-t` · `Alt-w` · `Alt-o` | new shell tab · close tab · next pane |
 | | `Alt-a` | add a bug or idea into the backlog (`↩` adds, `Esc` cancels), then back where you were |
+| | `Alt-m` | mini terminal: a small shell in a box over the screen, for a side command; `Alt-m` again puts it away, and it keeps running until you `exit` it |
 | Attached | `^\` | actions (below) |
 | | `^]` | back home |
 | Actions | `s` / `v` · `p` | split below / beside · the pane's menu |

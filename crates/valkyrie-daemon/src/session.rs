@@ -147,6 +147,8 @@ pub struct SavedSession {
     rank: Option<u64>,
     #[serde(default)]
     driven_by: Option<String>,
+    #[serde(default)]
+    hidden: bool,
 }
 
 /// What brings a session back after the daemon restarts (DESIGN §8.3).
@@ -170,6 +172,8 @@ pub struct Session {
     pid: Option<u32>,
     created_unix: u64,
     pub clients: AtomicU32,
+    /// Left out of lists and the restore file (`SpawnSpec::hidden`).
+    hidden: bool,
     /// When a client last typed into it (ms since the epoch; 0: never).
     last_input_ms: AtomicU64,
     adapter: &'static dyn Adapter,
@@ -198,6 +202,7 @@ struct Meta {
     created_unix: u64,
     transcript: PathBuf,
     events: PathBuf,
+    hidden: bool,
 }
 
 /// Everything shared threads mutate. Diffs and `Exited` are broadcast while this lock
@@ -374,6 +379,7 @@ impl Session {
                 created_unix: now.as_secs(),
                 transcript: transcript_path,
                 events: events_path,
+                hidden: spec.hidden,
             },
             adapter,
             state,
@@ -456,6 +462,7 @@ impl Session {
                 created_unix: saved.created_unix,
                 transcript: saved.transcript,
                 events: saved.events,
+                hidden: saved.hidden,
             },
             adapter,
             state,
@@ -486,6 +493,7 @@ impl Session {
             pid: meta.pid,
             created_unix: meta.created_unix,
             clients: AtomicU32::new(0),
+            hidden: meta.hidden,
             last_input_ms: AtomicU64::new(0),
             adapter,
             state: Mutex::new(state),
@@ -624,6 +632,7 @@ impl Session {
             exited: state.exited,
             conversation: state.conversation.clone(),
             driven_by: state.driven_by.clone(),
+            hidden: self.hidden,
             chat: state.chat.clone(),
             input: self
                 .input
@@ -988,6 +997,10 @@ impl Session {
         self.gone() && exited_ms.is_some_and(|at| now.saturating_sub(at) >= grace_ms)
     }
 
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
     pub fn rename(&self, name: Option<String>) {
         let name = own_name(name, &self.command);
         let now = now_ms();
@@ -1257,6 +1270,9 @@ impl Session {
     /// `grace_ms` after it exits. A reboot ends every program at once, and the daemon
     /// may reap some before it dies itself; an exit seen that late must not drop them.
     pub fn restore_entry(&self, now: u64, grace_ms: u64) -> Option<RestoreEntry> {
+        if self.hidden {
+            return None;
+        }
         let state = self.state.lock().unwrap();
         if state
             .exited_ms

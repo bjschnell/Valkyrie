@@ -112,7 +112,7 @@ impl App {
     }
 
     /// Each pane's size, for the daemon.
-    fn pane_sizes(&self) -> Vec<(SessionId, Size)> {
+    pub(crate) fn pane_sizes(&self) -> Vec<(SessionId, Size)> {
         let Some(main) = self.main_area() else {
             return Vec::new();
         };
@@ -200,7 +200,7 @@ impl App {
                 p.size = size;
             }
         }
-        if let Err(e) = self.client.attach_panes(sizes).await {
+        if let Err(e) = self.attach_set(sizes).await {
             self.view = None;
             self.others.clear();
             self.layout = None;
@@ -292,13 +292,14 @@ impl App {
                 p.size = size;
             }
         }
-        if let Err(e) = self.client.attach_panes(sizes).await {
+        if let Err(e) = self.attach_set(sizes).await {
             self.say(format!("panes not attached: {e:#}"));
         }
     }
 
     /// Tells each pane whose area changed its new size.
     pub(crate) fn resize_panes(&mut self) {
+        self.resize_mini();
         for (id, size) in self.pane_sizes() {
             if let Some(p) = self.pane_mut(id)
                 && p.size != size
@@ -374,6 +375,7 @@ impl App {
             size,
             env: valkyrie_proto::login_env(),
             worktree: None,
+            hidden: false,
         };
         match self.client.split(at, side, spec).await {
             Ok(info) => {

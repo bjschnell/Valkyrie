@@ -64,6 +64,11 @@ pub struct SpawnSpec {
     /// §4.3); empty names the branch after the session. The daemon makes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// A session only its spawner knows: left out of lists, the queue and the
+    /// restore file, and killed when the connection that spawned it closes. The
+    /// TUI's mini terminal is one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// Variables tied to one login rather than the user: the daemon outlives the login

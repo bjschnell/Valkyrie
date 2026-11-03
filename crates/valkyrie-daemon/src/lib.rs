@@ -182,9 +182,13 @@ impl Registry {
         all
     }
 
-    /// The sessions lists show: not the ones that exited with nothing to show.
+    /// The sessions lists show: not the ones that exited with nothing to show, nor
+    /// the hidden ones.
     fn listed(&self) -> Vec<Arc<Session>> {
-        self.all().into_iter().filter(|s| !s.gone()).collect()
+        self.all()
+            .into_iter()
+            .filter(|s| !s.gone() && !s.hidden())
+            .collect()
     }
 
     /// The split layouts as clients see them: without panes whose session left the
@@ -893,6 +897,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // Every pane of the attached tab; one session for a tab that isn't split.
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut queue_watch: Option<JoinHandle<()>> = None;
+    // Hidden sessions this connection spawned: nobody else can find them, so they
+    // go with it.
+    let mut owned_hidden: Vec<SessionId> = Vec::new();
     // Cleanup below must run however the connection ends: a client that dies with
     // unread frames shows up as a read error (ECONNRESET), not EOF.
     let ended = loop {
@@ -1059,7 +1066,11 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 }),
             ),
             ClientMsg::Spawn { req, spec } => {
+                let hidden = spec.hidden;
                 let result = in_worktree(spec, |spec| spawn(&registry, spec)).await;
+                if hidden && let Ok(Reply::Session { info }) = &result {
+                    owned_hidden.push(info.id);
+                }
                 mark_driven(&registry, &result, &mut driver, peer);
                 (req, result)
             }
@@ -1232,6 +1243,11 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     };
     for a in attachments {
         a.end().await;
+    }
+    for id in owned_hidden {
+        if let Some(s) = registry.sessions.lock().unwrap().remove(&id) {
+            s.kill();
+        }
     }
     if let Some(task) = queue_watch {
         task.abort();

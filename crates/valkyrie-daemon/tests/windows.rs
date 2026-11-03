@@ -60,6 +60,7 @@ fn cmd(args: &[&str]) -> SpawnSpec {
         size: Size { cols: 80, rows: 20 },
         env: Vec::new(),
         worktree: None,
+        hidden: false,
     }
 }
 

@@ -601,6 +601,7 @@ impl Registry {
             size,
             env,
             worktree: new_worktree.clone(),
+            hidden: false,
         };
         let registry = Arc::clone(self);
         let reply = crate::in_worktree(spec, move |spec| crate::spawn(&registry, spec)).await?;
