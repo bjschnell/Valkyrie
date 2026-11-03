@@ -1,0 +1,93 @@
+# The rolling `edge` pre-release: every push to main that passes the tests is built
+# for every platform and replaces the builds on one GitHub pre-release tagged `edge`,
+# so a second machine can run what was just merged without a version bump
+# (docs/releasing.md). `valk upgrade --edge` moves a machine onto it; an edge build
+# then follows edge with a plain `valk upgrade`. Being a pre-release, it is never
+# `releases/latest`, so stable installs never see it.
+#
+# `edge` is the one tag that moves. Versioned `v*` tags never do.
+name: edge
+
+on:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
+    branches: [main]
+  # By hand: publishes the head of the branch it runs on, untested, and even when
+  # that isn't ahead of edge (a feature branch to try before merging it).
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A newer push supersedes a build still running; the newer one uploads everything.
+concurrency:
+  group: edge
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          current=$(gh api -H 'Accept: application/vnd.github.sha' \
+            "repos/$GITHUB_REPOSITORY/commits/edge" 2>/dev/null || true)
+          # Test runs can finish out of order: never put edge back to an older main.
+          if [ "$EVENT" = workflow_run ] && [ -n "$current" ] && [ "$current" != "$SHA" ]; then
+            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$SHA" -q .status)
+            if [ "$status" != ahead ]; then
+              echo "edge is at $current; $SHA is $status of it, so leaving edge alone"
+              echo "go=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+          gh release view edge -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create edge -R "$GITHUB_REPOSITORY" --target "$SHA" \
+                 --prerelease --latest=false --title edge --notes "Rolling build of main."
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.go == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      release: edge
+      ref: ${{ needs.prepare.outputs.sha }}
+      channel: edge
+
+  # Last, once every build is up: `valk upgrade` reads the commit off the tag, so
+  # a machine only sees the new edge when all its builds are there.
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          gh release upload edge install-release.sh install.ps1 install-wsl.ps1 --clobber
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/edge" \
+            -f sha="$SHA" -F force=true >/dev/null
+          gh release edit edge --prerelease --latest=false --notes "$(cat <<EOF
+          Rolling build of \`main\` at $SHA, replaced on every push that passes the tests. Not a versioned release.
+
+          - Move a machine onto it: \`valk upgrade --edge\`. After that, a plain \`valk upgrade\` follows edge; \`valk upgrade --stable\` goes back.
+          - Fresh install: \`curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | VALK_VERSION=edge bash\`
+          EOF
+          )"

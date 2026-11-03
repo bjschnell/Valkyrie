@@ -5,7 +5,7 @@
 # offers Claude Code, and adds a "Valkyrie" Windows Terminal profile. Rerun it
 # to update; a running daemon is handed to the new binary.
 # VALK_WSL_DISTRO picks the distro (default: your default one, or Ubuntu),
-# VALK_VERSION a release tag (default: the latest).
+# VALK_VERSION a release tag (default: the latest; `edge`: the rolling build of main).
 #
 # Keep this file ASCII, so no code page can garble it on the way into iex.
 # And no `exit`: under iex it would close the window.

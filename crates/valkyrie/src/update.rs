@@ -14,6 +14,39 @@ const REPO: &str = "bjschnell/Valkyrie";
 const COMMIT: Option<&str> = option_env!("VALK_COMMIT");
 const TARGET: &str = env!("VALK_TARGET");
 pub const VERSION: &str = env!("VALK_LONG_VERSION");
+/// `edge` on a build of the rolling pre-release (edge.yml); unset on a versioned one.
+const CHANNEL: Option<&str> = option_env!("VALK_CHANNEL");
+/// The tag edge.yml moves to each new build of main.
+const EDGE: &str = "edge";
+
+/// Which releases a plain `valk upgrade` follows: the one this binary came from, so a
+/// machine moved onto edge stays there until `--stable` moves it back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    /// Versioned releases: GitHub's latest.
+    Stable,
+    /// The rolling `edge` pre-release, rebuilt from every push to main.
+    Edge,
+}
+
+impl Channel {
+    fn ours() -> Channel {
+        match CHANNEL {
+            Some(EDGE) => Channel::Edge,
+            _ => Channel::Stable,
+        }
+    }
+}
+
+/// The tag to look up (`None`: the latest versioned release) and the channel the
+/// build installed from it follows.
+fn wanted(tag: Option<&str>, channel: Option<Channel>, ours: Channel) -> (Option<&str>, Channel) {
+    match (tag, channel.unwrap_or(ours)) {
+        (Some(EDGE), _) | (None, Channel::Edge) => (Some(EDGE), Channel::Edge),
+        (Some(tag), _) => (Some(tag), Channel::Stable),
+        (None, Channel::Stable) => (None, Channel::Stable),
+    }
+}
 
 struct Release {
     tag: String,
@@ -33,27 +66,41 @@ pub enum Next {
     Stop,
 }
 
-/// Brings this binary up to the release `tag` (default: the latest). With `check`,
-/// only reports.
-pub fn update(check: bool, tag: Option<&str>) -> Result<Next> {
+/// Brings this binary up to the release `tag`, or else the newest on `channel`
+/// (default: the one this build follows). With `check`, only reports.
+pub fn update(check: bool, tag: Option<&str>, channel: Option<Channel>) -> Result<Next> {
     let Some(ours) = COMMIT else {
         let note = "this valk was built from source, so it updates with its checkout \
                     (git pull, then ./install.sh)";
-        if check || tag.is_some() {
+        if check || tag.is_some() || channel.is_some() {
             bail!("{note}");
         }
         println!("{note}; switching the daemon to it as it is");
         return Ok(Next::Handoff(None));
     };
+    // What installs it, for `check`: the flags that picked it.
+    let how = match (tag, channel) {
+        (Some(tag), _) => format!("valk upgrade --tag {tag}"),
+        (None, Some(Channel::Edge)) if Channel::ours() != Channel::Edge => {
+            "valk upgrade --edge".to_owned()
+        }
+        (None, Some(Channel::Stable)) if Channel::ours() != Channel::Stable => {
+            "valk upgrade --stable".to_owned()
+        }
+        _ => "valk upgrade".to_owned(),
+    };
+    let (tag, channel) = wanted(tag, channel, Channel::ours());
     let release = find(tag)?;
     let short = &release.commit[..7];
-    if release.commit == ours {
+    // A versioned release and edge can be built from the same commit; switching
+    // channels still swaps the binary, since that's what remembers the channel.
+    if release.commit == ours && channel == Channel::ours() {
         println!("valk {VERSION} is the {} release", release.tag);
         return Ok(Next::Current);
     }
     if check {
         println!(
-            "{} ({short}) is out; this is valk {VERSION}. `valk upgrade` installs it",
+            "{} ({short}) is out; this is valk {VERSION}. `{how}` installs it",
             release.tag
         );
         return Ok(Next::Stop);
@@ -62,14 +109,18 @@ pub fn update(check: bool, tag: Option<&str>) -> Result<Next> {
     install(&release)
 }
 
-/// The latest release when it isn't this build, as `v0.0.2 (abc1234)`: the TUI's
-/// notice. GitHub is asked at most once a day, the answer kept in
-/// `<state>/update-check`. Quiet: a failure is no notice, and a build from source
-/// never asks.
+/// The newest release on this build's channel when it isn't this build, as
+/// `v0.0.2 (abc1234)` or `edge (abc1234)`: the TUI's notice. GitHub is asked at most
+/// once a day, the answer kept in `<state>/update-check` (`update-check-edge` for
+/// edge). Quiet: a failure is no notice, and a build from source never asks.
 pub fn newer_release() -> Option<String> {
     const DAY: u64 = 24 * 60 * 60;
     let ours = COMMIT?;
-    let file = valkyrie_proto::state_dir().join("update-check");
+    let (tag, _) = wanted(None, None, Channel::ours());
+    let file = valkyrie_proto::state_dir().join(match tag {
+        Some(EDGE) => "update-check-edge",
+        _ => "update-check",
+    });
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -83,7 +134,7 @@ pub fn newer_release() -> Option<String> {
     let latest = match kept {
         Some(latest) => latest,
         None => {
-            let latest = find(None).ok()?;
+            let latest = find(tag).ok()?;
             let _ = std::fs::write(&file, format!("{now} {} {}\n", latest.commit, latest.tag));
             latest
         }
@@ -107,17 +158,23 @@ fn find(tag: Option<&str>) -> Result<Release> {
         }
     };
     ensure!(
-        tag.starts_with('v')
-            && tag[1..]
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b)),
-        "{tag:?} isn't a release tag such as v0.0.2"
+        tag == EDGE
+            || tag.starts_with('v')
+                && tag[1..]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b)),
+        "{tag:?} isn't a release tag such as v0.0.2 or edge"
     );
     let commit = curl(&[
         "-H",
         "Accept: application/vnd.github.sha",
         &format!("https://api.github.com/repos/{REPO}/commits/{tag}"),
-    ])?;
+    ])
+    .with_context(|| match tag.as_str() {
+        EDGE => "there is no edge release yet: edge.yml makes one after the next push to main"
+            .to_owned(),
+        _ => format!("there is no release {tag}"),
+    })?;
     let commit = String::from_utf8_lossy(&commit).trim().to_owned();
     ensure!(
         commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -289,4 +346,42 @@ fn curl(args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_upgrade_follows_the_builds_channel() {
+        assert_eq!(wanted(None, None, Channel::Stable), (None, Channel::Stable));
+        assert_eq!(
+            wanted(None, None, Channel::Edge),
+            (Some(EDGE), Channel::Edge)
+        );
+    }
+
+    #[test]
+    fn edge_and_stable_switch_channels() {
+        assert_eq!(
+            wanted(None, Some(Channel::Edge), Channel::Stable),
+            (Some(EDGE), Channel::Edge)
+        );
+        assert_eq!(
+            wanted(None, Some(Channel::Stable), Channel::Edge),
+            (None, Channel::Stable)
+        );
+    }
+
+    #[test]
+    fn a_tag_picks_its_own_channel() {
+        assert_eq!(
+            wanted(Some("v0.4.0"), None, Channel::Edge),
+            (Some("v0.4.0"), Channel::Stable)
+        );
+        assert_eq!(
+            wanted(Some("edge"), None, Channel::Stable),
+            (Some(EDGE), Channel::Edge)
+        );
+    }
 }

@@ -3,7 +3,8 @@
 # Windows, macOS. On a new machine:
 #   curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 # Rerun it to update; a running daemon is handed to the new binary.
-# VALK_VERSION picks a tag (default: the latest), VALK_BIN_DIR the directory.
+# VALK_VERSION picks a tag (default: the latest; `edge`: the rolling build of
+# main), VALK_BIN_DIR the directory.
 set -euo pipefail
 
 repo=bjschnell/Valkyrie

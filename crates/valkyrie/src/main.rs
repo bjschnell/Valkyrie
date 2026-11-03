@@ -52,6 +52,7 @@ enum Cmd {
     },
     /// Update valk to the latest release, then switch the running daemon to it,
     /// keeping every session (ADR-0006). A build from source skips the download.
+    /// An edge build follows edge, the rolling build of main, instead.
     Upgrade {
         /// Switch the daemon to this valk binary instead; nothing is downloaded.
         #[arg(long)]
@@ -65,6 +66,12 @@ enum Cmd {
         /// Install this release tag instead of the latest.
         #[arg(long, value_name = "TAG", conflicts_with_all = ["exe", "local"])]
         tag: Option<String>,
+        /// Move onto edge, the rolling build of main: later upgrades follow it.
+        #[arg(long, conflicts_with_all = ["exe", "local", "tag", "stable"])]
+        edge: bool,
+        /// Move back onto versioned releases.
+        #[arg(long, conflicts_with_all = ["exe", "local", "tag"])]
+        stable: bool,
     },
     /// Spawn a session: `valk new -- claude`.
     New {
@@ -361,11 +368,18 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             local,
             check,
             tag,
+            edge,
+            stable,
         }) => {
+            let channel = match (edge, stable) {
+                (true, _) => Some(update::Channel::Edge),
+                (_, true) => Some(update::Channel::Stable),
+                _ => None,
+            };
             let next = match exe {
                 Some(exe) => update::Next::Handoff(Some(exe)),
                 None if local => update::Next::Handoff(None),
-                None => update::update(check, tag.as_deref())?,
+                None => update::update(check, tag.as_deref(), channel)?,
             };
             match next {
                 update::Next::Stop => Ok(()),
