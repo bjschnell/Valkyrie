@@ -8,7 +8,10 @@ There are two ways in:
 - **From a checkout**: `./install.sh` builds `valk` from this checkout and installs it
   to `~/.cargo/bin`. It installs Rust with rustup first if you don't have it (it asks).
   Rerun it to update: if a daemon is running, the script hands it to the new binary
-  with `valk upgrade`, and every session keeps running.
+  with `valk upgrade`, and every session keeps running. If the `valk` on your PATH
+  is already this checkout's `target/release/valk` (a symlink, say), the script
+  rebuilds that in place instead, so there's only one `valk` for the daemon and the
+  agents' hooks to run.
 
 Windows x64 runs natively using ConPTY and a local named pipe. The PowerShell
 installer needs no administrator access. WSL2 is also available, using the separate

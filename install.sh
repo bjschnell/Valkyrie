@@ -35,10 +35,24 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 say "building valk (release) with $(cargo --version)"
-cargo install --locked --path crates/valkyrie
 
-bin="$HOME/.cargo/bin/valk"
-[ -x "$bin" ] || bin="$(command -v valk)"
+# The valk on PATH may already be this checkout's own build (a symlink to
+# target/release/valk). Rebuild that one in place: a second copy in ~/.cargo/bin
+# would take the daemon over, and every agent it starts would run that copy's hooks.
+here="$(pwd -P)/target/release/valk"
+on_path="$(command -v valk 2>/dev/null || true)"
+resolved="$( [ -n "$on_path" ] && readlink -f "$on_path" 2>/dev/null || true)"
+if [ -n "$resolved" ] && [ "$resolved" = "$here" ]; then
+    cargo build --locked --release --bin valk
+    bin="$on_path"
+else
+    cargo install --locked --path crates/valkyrie
+    bin="$HOME/.cargo/bin/valk"
+    [ -x "$bin" ] || bin="$(command -v valk)"
+    if [ -n "$resolved" ] && [ "$resolved" != "$(readlink -f "$bin" 2>/dev/null || echo "$bin")" ]; then
+        say "warning: $on_path comes first on PATH, so 'valk' still runs that one, not $bin"
+    fi
+fi
 say "installed $("$bin" --version 2>/dev/null || echo valk) at $bin"
 
 # A daemon from an older build keeps running its sessions; switch it over in place.
