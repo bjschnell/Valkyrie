@@ -70,7 +70,7 @@ describe("lane", () => {
   });
 
   it("follows the session of an agent's own filed work, until it's accepted", () => {
-    const filed = item({ status: "proposed", by: "claude", sessions: [4], filed_by: [7, 4] });
+    const filed = item({ status: "proposed", by: "claude", sessions: [4], taken: [4], filed_by: [7, 4] });
     expect(agentFiled(filed)).toBe(true);
     expect(lane(filed, [session(4, "working")], 7)).toBe("running");
     expect(lane(filed, [session(4, "needs_input")], 7)).toBe("needs");
@@ -78,6 +78,9 @@ describe("lane", () => {
     expect(lane(filed, [], 7)).toBe("review");
     // Proposed without taking it, it waits on you; accepted, it's no longer agent-filed.
     expect(lane({ ...filed, filed_by: undefined }, [session(4, "working")], 7)).toBe("proposed");
+    // Filed by the agent but not taken yet: a proposal like any other.
+    expect(agentFiled({ ...filed, sessions: [], taken: [] })).toBe(false);
+    expect(lane({ ...filed, sessions: [], taken: [] }, [], 7)).toBe("proposed");
     expect(agentFiled({ ...filed, status: "open" })).toBe(false);
     expect(lane({ ...filed, status: "shipped" }, [], 7)).toBe("done");
   });

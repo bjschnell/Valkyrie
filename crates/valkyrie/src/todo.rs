@@ -596,9 +596,16 @@ mod tests {
         let filed = Item {
             status: ItemStatus::Proposed,
             filed_by: Some((7, 4)),
+            taken: vec![4],
             ..plain.clone()
         };
         assert_eq!(lane(&filed, &[session(AgentState::Working)], 7), "working");
+        // Filed by the agent but not taken yet: a proposal like any other.
+        let untaken = Item {
+            taken: Vec::new(),
+            ..filed.clone()
+        };
+        assert_eq!(lane(&untaken, &[], 7), "proposed");
         let proposed = Item {
             filed_by: None,
             ..filed.clone()

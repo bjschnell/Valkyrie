@@ -105,9 +105,10 @@ pub struct Item {
     /// The pull request, an `https://` URL, as `valk todo take --pr` recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
-    /// The daemon `boot` and session that wrote it down and took it in one step
-    /// (`valk todo add --take`): an agent's own work, tracked. That session may
-    /// take it while it's still proposed.
+    /// The daemon `boot` and session of the agent that wrote it down (`valk todo
+    /// add`, with or without `--take`). That session may take it while it's still
+    /// proposed: its own find, which the user said to go ahead with in that
+    /// session (ADR-0018), or its own work tracked (ADR-0012).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filed_by: Option<(u64, SessionId)>,
     /// Shipped or dropped while still proposed: the user never accepted it, so
@@ -126,8 +127,9 @@ pub struct Item {
 impl Item {
     /// Written down and taken by an agent for its own work, and not accepted yet:
     /// it follows its session like an open item, and shipping it accepts it.
+    /// Filed but not taken, it waits in Proposed like any other proposal.
     pub fn agent_filed(&self) -> bool {
-        self.status == ItemStatus::Proposed && self.filed_by.is_some()
+        self.status == ItemStatus::Proposed && self.filed_by.is_some() && !self.taken.is_empty()
     }
 }
 
