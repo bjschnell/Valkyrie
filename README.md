@@ -396,6 +396,7 @@ valk todo edit 1 -k chore  # reword it (-t, -b), change its kind or repository
 valk todo ship 1           # done: the worktree goes if it's clean, the branch if merged
 valk todo take 4 -b fix/x  # an agent says it's on #4 (and --pr URL once it's open)
 valk todo take 4 --steal   # one session per item: hand #4 to your session anyway
+valk todo adopt 12         # a claude session you started by hand becomes an item (or A at home)
 valk todo add --take -k bug "Off-by-one in resize" --branch fix/resize  # an agent tracks a fix nobody planned
 valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
 valk todo note -i 4 "left: X"   # a handoff, kept for the item's next launch

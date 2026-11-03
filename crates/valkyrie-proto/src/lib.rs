@@ -29,7 +29,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 18;
+pub const PROTOCOL: u32 = 19;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -412,6 +412,26 @@ pub enum ClientMsg {
         pr: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         steal: bool,
+    },
+    /// Writes an item down for a live agent session started outside the backlog
+    /// and links that session to it, as a launch would, so its lane follows the
+    /// session (protocol 19). The user only (ADR-0007): an agent can't adopt
+    /// itself or another. The title defaults to the session's own name, else what
+    /// it was last asked; the repository is the one its folder is in, the branch
+    /// the one checked out there unless that's the default. The checkout stays as
+    /// it is and isn't recorded, so shipping never takes it away. Replies `Item`.
+    AdoptSession {
+        req: ReqId,
+        session: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default)]
+        kind: ItemKind,
+    },
+    /// The item the caller's session is on, by launch, take or adoption: the
+    /// newest, when several (protocol 19). Replies `Item`.
+    MyItem {
+        req: ReqId,
     },
     /// Ships every open item whose branch is merged into the default branch, as
     /// last fetched (the daemon doesn't fetch): the user only. With `dry_run`,

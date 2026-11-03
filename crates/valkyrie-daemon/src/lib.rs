@@ -1090,6 +1090,16 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 req,
                 registry.take_item(id, branch.as_deref(), pr.as_deref(), steal, peer),
             ),
+            ClientMsg::AdoptSession {
+                req,
+                session,
+                title,
+                kind,
+            } => (
+                req,
+                registry.adopt_session(session, title, kind, peer).await,
+            ),
+            ClientMsg::MyItem { req } => (req, registry.my_item(peer)),
             ClientMsg::ShipMerged { req, dry_run, only } => {
                 (req, registry.ship_merged(dry_run, only, peer).await)
             }

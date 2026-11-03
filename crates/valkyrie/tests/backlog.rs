@@ -540,3 +540,170 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     assert!(!branches.contains("fix/1"), "{branches}");
     drop(daemon);
 }
+
+/// A claude session started outside the backlog, adopted by the user: an item
+/// titled by its prompt, on its branch, with its card following it; its agent is
+/// told once on its next prompt, and notes it with no `VALK_ITEM`. An agent can't
+/// adopt, a shell has no lane to follow, and a session goes on one item only.
+#[test]
+fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-adopt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "-b", "main"]).status.success());
+    std::fs::write(repo.join("README"), "hi\n").unwrap();
+    git(&["add", "."]);
+    assert!(git(&["commit", "-qm", "one"]).status.success());
+    assert!(git(&["checkout", "-qb", "fix/login-loop"]).status.success());
+
+    let o = |name: &str| out.join(name).display().to_string();
+    let repo_s = repo.display().to_string();
+    let hook = |payload: serde_json::Value| format!("echo '{payload}' | valk hook claude\n");
+    let ask = |name: &str| {
+        let payload =
+            serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"go on","cwd":repo_s});
+        format!(
+            "echo '{payload}' | valk context-hook claude > {o}.tmp; mv {o}.tmp {o}\n",
+            o = o(name)
+        )
+    };
+    // The stand-in: asked something, it tries to adopt itself, then waits for the
+    // user to adopt it, hears about it, and notes and shows its item by no id.
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n{start}{prompt}\
+             valk todo adopt $VALK_SESSION > {sa}.tmp 2>&1; mv {sa}.tmp {sa}\n\
+             while [ ! -e {adopted} ]; do sleep 0.1; done\n\
+             {told}{again}\
+             valk todo note 'adopted and noted' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
+             valk todo show > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
+             exec sleep 60\n",
+            start = hook(
+                serde_json::json!({"hook_event_name":"SessionStart","source":"startup","cwd":repo_s})
+            ),
+            prompt = hook(
+                serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"fix the login redirect loop\nand more","cwd":repo_s})
+            ),
+            sa = o("self-adopt"),
+            adopted = o("adopted"),
+            told = ask("told"),
+            again = ask("told-again"),
+            n = o("note"),
+            s = o("show"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let human = |cmd: &str, name: &str| {
+        let line = format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}", o = o(name));
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .env_remove("VALK_ITEM")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{cmd}");
+    };
+    let new = |cmd: &str, name: &str| {
+        human(&format!("valk new --cwd {repo_s} -- {cmd}"), name);
+        let id = wait_for(&out.join(name));
+        assert!(id.trim().parse::<u32>().is_ok(), "{id}");
+        id.trim().to_owned()
+    };
+
+    let shell = new("sh -c 'exec sleep 60'", "shell");
+    human(&format!("valk todo adopt {shell}"), "adopt-shell");
+    assert!(
+        wait_for(&out.join("adopt-shell")).contains("isn't running claude or codex"),
+        "a shell has no lane to follow"
+    );
+    let session = new(&agent.display().to_string(), "agent");
+    assert!(
+        wait_for(&out.join("self-adopt")).contains("is for the user, not claude"),
+        "an agent can't adopt"
+    );
+    // Its prompt reaches the daemon by a hook: adopt once that's in and the
+    // tracker knows it's claude.
+    let start = Instant::now();
+    let adopted = loop {
+        let _ = std::fs::remove_file(out.join("adopt"));
+        human(&format!("valk todo adopt {session} -k bug"), "adopt");
+        let said = wait_for(&out.join("adopt"));
+        if said.starts_with('#') || start.elapsed() > Duration::from_secs(10) {
+            break said;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(
+        adopted,
+        format!(
+            "#1 fix the login redirect loop (repo, branch fix/login-loop): session {session} is on it\n"
+        )
+    );
+    human(&format!("valk todo adopt {session}"), "adopt-again");
+    assert!(
+        wait_for(&out.join("adopt-again")).contains("is already on #1"),
+        "one item per session"
+    );
+    std::fs::write(out.join("adopted"), "").unwrap();
+
+    let told = wait_for(&out.join("told"));
+    assert!(told.contains("as item #1"), "{told}");
+    assert!(told.contains("valk todo note"), "{told}");
+    let again = std::fs::read_to_string(out.join("told-again")).unwrap_or_default();
+    assert!(!again.contains("as item #1"), "told once: {again}");
+    assert_eq!(
+        wait_for(&out.join("note")),
+        "noted on #1 fix the login redirect loop\n"
+    );
+    let show = wait_for(&out.join("show"));
+    assert!(
+        show.starts_with("#1 fix the login redirect loop [bug · open · by human]"),
+        "{show}"
+    );
+    assert!(show.contains("branch: fix/login-loop\n"), "{show}");
+    assert!(show.contains("adopted and noted"), "{show}");
+
+    human("valk todo list", "list");
+    let list = wait_for(&out.join("list"));
+    assert!(
+        list.contains("#1") && !list.contains("backlog"),
+        "the card follows the session: {list}"
+    );
+    drop(daemon);
+}

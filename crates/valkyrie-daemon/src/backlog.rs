@@ -299,6 +299,97 @@ impl Registry {
         })
     }
 
+    /// Writes an item down for a live agent session started outside the backlog
+    /// and links it there, the user only (`ClientMsg::AdoptSession`). Its agent is
+    /// told on its next prompt, having no `VALK_ITEM`.
+    pub(crate) async fn adopt_session(
+        &self,
+        id: SessionId,
+        title: Option<String>,
+        kind: valkyrie_proto::ItemKind,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        self.vouch(peer, "adopting a session into the backlog")?;
+        let session = self.get(id)?;
+        let info = session.info();
+        if session.exited() {
+            bail!("session {id} has exited");
+        }
+        if !matches!(info.status.agent.as_str(), "claude" | "codex") {
+            bail!("session {id} isn't running claude or codex; only an agent's lane can follow it");
+        }
+        if let Some(on) = self.item_of(id) {
+            bail!("session {id} is already on #{}", on.id);
+        }
+        let title = title
+            .or_else(|| session.own_name())
+            .or_else(|| session.activity().prompt().map(short_title))
+            .filter(|t| !t.trim().is_empty());
+        let Some(title) = title else {
+            bail!("session {id} has no name or prompt to title it by; give it a title");
+        };
+        let cwd = info.cwd.clone();
+        let branch = tokio::task::spawn_blocking(move || adopted_branch(&cwd)).await?;
+        let new = NewItem {
+            title,
+            body: String::new(),
+            kind,
+            cwd: Some(info.cwd.clone()),
+            attachments: Vec::new(),
+        };
+        let item = {
+            let backlog = self.backlog.lock().unwrap();
+            // Checked again under the lock that records it, as a take is.
+            if let Some(on) = self.item_of_in(&backlog.load(), id) {
+                bail!("session {id} is already on #{}", on.id);
+            }
+            let now = now_secs();
+            let added = backlog.add(&new, "human", now)?;
+            backlog.adopted(added.id, id, self.boot, branch.as_deref(), now)?
+        };
+        session.adopt_into_item(item.id);
+        tracing::info!(
+            id = item.id,
+            session = id,
+            "adopted a session into the backlog"
+        );
+        self.refresh_items();
+        Ok(Reply::Item {
+            item: Box::new(item),
+            note: None,
+        })
+    }
+
+    /// The item the caller's session is on (`ClientMsg::MyItem`).
+    pub(crate) fn my_item(&self, peer: Option<Peer>) -> Result<Reply> {
+        let Some(session) = self.caller(peer).session else {
+            bail!("not in a valk session; say which item");
+        };
+        let id = session.info().id;
+        let Some(item) = self.item_of(id) else {
+            bail!("this session isn't on a backlog item; say which");
+        };
+        Ok(Reply::Item {
+            item: Box::new(item),
+            note: None,
+        })
+    }
+
+    /// The item live session `id` is on, the newest when several.
+    fn item_of(&self, id: SessionId) -> Option<Item> {
+        let items = self.backlog.lock().unwrap().load();
+        self.item_of_in(&items, id)
+    }
+
+    fn item_of_in(&self, items: &[Item], id: SessionId) -> Option<Item> {
+        items
+            .iter()
+            .filter(|i| i.boot == self.boot && i.sessions.contains(&id))
+            .filter(|i| matches!(i.status, ItemStatus::Open | ItemStatus::Proposed))
+            .max_by_key(|i| i.updated)
+            .cloned()
+    }
+
     /// Ships every open item whose branch is merged into the default branch as
     /// last fetched, the user only: shipping is theirs, this is just many at once.
     /// Anyone may ask what would ship (`dry_run`); `only` ships just those items,
@@ -620,6 +711,29 @@ impl Registry {
         self.refresh_items();
         Ok(reply)
     }
+}
+
+/// An item's title from what its session was last asked: one line, kept short.
+fn short_title(prompt: &str) -> String {
+    const MAX: usize = 80;
+    let prompt = backlog::one_line(prompt);
+    let prompt = prompt.trim();
+    if prompt.chars().count() <= MAX {
+        return prompt.to_owned();
+    }
+    let cut: String = prompt.chars().take(MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// The branch an adopted session's checkout is on, unless it's the repository's
+/// default (work there has no branch of its own to ship by) or detached.
+fn adopted_branch(cwd: &std::path::Path) -> Option<String> {
+    if !valkyrie_context::project::in_git(cwd) {
+        return None;
+    }
+    let branch = worktree::git_out(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+    let default = worktree::default_branch(&valkyrie_context::project::root(cwd));
+    (!branch.is_empty() && default.as_deref() != Some(branch.as_str())).then_some(branch)
 }
 
 /// The session a refused claim names: the launch's own, else the newest holder.

@@ -546,6 +546,36 @@ impl Client {
         }
     }
 
+    /// Writes an item down for a live agent session and links it there (see
+    /// `ClientMsg::AdoptSession`); the user only.
+    pub async fn adopt_session(
+        &self,
+        session: SessionId,
+        title: Option<String>,
+        kind: crate::ItemKind,
+    ) -> Result<crate::Item> {
+        match self
+            .request(|req| ClientMsg::AdoptSession {
+                req,
+                session,
+                title,
+                kind,
+            })
+            .await?
+        {
+            Reply::Item { item, .. } => Ok(*item),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The item the session this process runs in is on.
+    pub async fn my_item(&self) -> Result<crate::Item> {
+        match self.request(|req| ClientMsg::MyItem { req }).await? {
+            Reply::Item { item, .. } => Ok(*item),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Ships every open item whose branch is merged (see `ClientMsg::ShipMerged`);
     /// returns those shipped, or that would be, and those kept, with why.
     pub async fn ship_merged(

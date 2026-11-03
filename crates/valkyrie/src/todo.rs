@@ -80,14 +80,14 @@ pub enum TodoCmd {
         /// What happened; `-` reads it from stdin.
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
-        /// The item (default: the one this session was launched for).
+        /// The item (default: the one this session is on).
         #[arg(short, long = "item", env = "VALK_ITEM", value_name = "ID")]
-        id: u32,
+        id: Option<u32>,
     },
-    /// One item in full (default: the one this session was launched for).
+    /// One item in full (default: the one this session is on).
     Show {
         #[arg(env = "VALK_ITEM")]
-        id: u32,
+        id: Option<u32>,
     },
     /// Start an agent on an item, in a worktree of its own on a branch named after
     /// it. Prints the session's id.
@@ -102,12 +102,12 @@ pub enum TodoCmd {
         #[arg(short, long)]
         attach: bool,
     },
-    /// Say you're working on an accepted item (default: the one this session was
-    /// launched for), from inside a valk session: its card follows the session,
-    /// and `--merged` can ship it once its branch is merged.
+    /// Say you're working on an accepted item (default: the one this session is
+    /// on), from inside a valk session: its card follows the session, and
+    /// `--merged` can ship it once its branch is merged.
     Take {
         #[arg(env = "VALK_ITEM")]
-        id: u32,
+        id: Option<u32>,
         /// The branch the work is on.
         #[arg(short, long)]
         branch: Option<String>,
@@ -117,6 +117,18 @@ pub enum TodoCmd {
         /// Take it from the session already on it (yours to do, not an agent's).
         #[arg(long)]
         steal: bool,
+    },
+    /// Turn a live claude or codex session started outside the backlog into an
+    /// item: its card follows the session, which stays in its checkout, and its
+    /// agent is told on its next prompt. Yours to do, not an agent's.
+    Adopt {
+        /// The session's id (`valk ls`).
+        session: u32,
+        /// The title (default: the session's name, else what it was last asked).
+        #[arg(short, long)]
+        title: Option<String>,
+        #[arg(short, long, default_value = "feature", value_parser = parse_kind)]
+        kind: ItemKind,
     },
     /// Mark it done. Takes away the worktree its launch made, unless it has changes,
     /// and the branch, if it's merged.
@@ -141,6 +153,15 @@ pub enum TodoCmd {
     /// Takes away its worktree as `ship` does, and refuses if that has changes.
     #[command(alias = "delete")]
     Rm { id: u32 },
+}
+
+/// `id`, else the item the session this runs in is on: an adopted session has no
+/// `VALK_ITEM`.
+async fn or_mine(client: &Client, id: Option<u32>) -> Result<u32> {
+    match id {
+        Some(id) => Ok(id),
+        None => Ok(client.my_item().await?.id),
+    }
 }
 
 pub fn parse_kind(s: &str) -> Result<ItemKind, String> {
@@ -262,6 +283,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             Ok(None)
         }
         TodoCmd::Show { id } => {
+            let id = or_mine(client, id).await?;
             let Some(i) = client.items().await?.into_iter().find(|i| i.id == id) else {
                 bail!("no item #{id}");
             };
@@ -343,6 +365,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 text.clear();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
             }
+            let id = or_mine(client, id).await?;
             let item = client.note_item(id, text).await?;
             println!("noted on #{} {}", item.id, item.title);
             Ok(None)
@@ -370,6 +393,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             pr,
             steal,
         } => {
+            let id = or_mine(client, id).await?;
             let item = client.take_item(id, branch, pr, steal).await?;
             let mut has = Vec::new();
             if let Some(b) = &item.branch {
@@ -383,6 +407,25 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 false => format!(" ({})", has.join(", ")),
             };
             println!("#{} {} taken{has}", item.id, short(&item.title, 40));
+            Ok(None)
+        }
+        TodoCmd::Adopt {
+            session,
+            title,
+            kind,
+        } => {
+            let item = client.adopt_session(session, title, kind).await?;
+            let branch = item
+                .branch
+                .as_ref()
+                .map(|b| format!(", branch {b}"))
+                .unwrap_or_default();
+            println!(
+                "#{} {} ({}{branch}): session {session} is on it",
+                item.id,
+                item.title,
+                folder(&item)
+            );
             Ok(None)
         }
         TodoCmd::Ship {

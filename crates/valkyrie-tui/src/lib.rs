@@ -2239,7 +2239,45 @@ impl App {
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
             HomeKey::Backlog => self.open_backlog().await,
+            HomeKey::Adopt => self.adopt(selected).await,
         }
+    }
+
+    /// Whether `A` can adopt the selected session into the backlog: a live claude
+    /// or codex session not on an item already.
+    fn adoptable(&self) -> Option<SessionId> {
+        let id = self.selection().0?;
+        let session = self.sessions.iter().find(|s| s.id == id)?;
+        let agent = matches!(session.status.agent.as_str(), "claude" | "codex");
+        let on_item = self.items.iter().any(|i| {
+            i.boot == self.boot()
+                && i.sessions.contains(&id)
+                && matches!(
+                    i.status,
+                    valkyrie_proto::ItemStatus::Open | valkyrie_proto::ItemStatus::Proposed
+                )
+        });
+        (session.exited.is_none() && agent && !on_item).then_some(id)
+    }
+
+    /// `A` at home: writes the selected agent session down as a backlog item, its
+    /// card following that session (`valk todo adopt`).
+    async fn adopt(&mut self, selected: Option<SessionId>) {
+        if selected.is_none() {
+            return;
+        }
+        let Some(id) = self.adoptable() else {
+            self.status = "only a live claude or codex session not on an item yet".into();
+            return;
+        };
+        self.status = match self
+            .client
+            .adopt_session(id, None, valkyrie_proto::ItemKind::Feature)
+            .await
+        {
+            Ok(item) => format!("adopted as #{} {}", item.id, item.title),
+            Err(e) => format!("adopt failed: {e:#}"),
+        };
     }
 
     /// The daemon's boot, to tell this daemon's sessions from a restarted one's.
@@ -2935,6 +2973,7 @@ impl App {
                 &self.status,
                 in_proposals,
                 self.proposal().is_some_and(|d| d.fresh.review.is_some()),
+                self.adoptable().is_some(),
                 t,
             ),
         };
@@ -4424,7 +4463,13 @@ fn rename_line(id: SessionId, typed: &edit::LineEdit, t: &Theme) -> Line<'static
 
 /// The status message, then key hints as chips: a proposal's own keys while the
 /// cursor is on one.
-fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'static> {
+fn footer_line(
+    status: &str,
+    proposal: bool,
+    flagged: bool,
+    adoptable: bool,
+    t: &Theme,
+) -> Line<'static> {
     let mut spans = Vec::new();
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
@@ -4434,6 +4479,13 @@ fn footer_line(status: &str, proposal: bool, flagged: bool, t: &Theme) -> Line<'
         &[("a", "still holds"), ("d", "retire"), ("↩", "why")]
     } else if proposal {
         &[("a", "accept"), ("d", "reject"), ("↩", "read")]
+    } else if adoptable {
+        &[
+            ("↩", "open"),
+            ("x", "kill"),
+            ("r", "rename"),
+            ("A", "adopt"),
+        ]
     } else {
         &[("↩", "open"), ("x", "kill"), ("r", "rename")]
     };
@@ -4979,6 +5031,8 @@ enum HomeKey {
     AddDevice,
     /// Open the backlog page.
     Backlog,
+    /// Write the selected agent session down as a backlog item.
+    Adopt,
     Quit,
 }
 
@@ -5037,6 +5091,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'd' => Some(HomeKey::Reject),
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
+            b'A' => Some(HomeKey::Adopt),
             b'q' | 0x03 => Some(HomeKey::Quit),
             _ => None,
         };
@@ -5146,6 +5201,8 @@ mod tests {
         );
         assert_eq!(home_keys_default(b"ad"), [HomeKey::Accept, HomeKey::Reject]);
         assert_eq!(home_keys_default(b"p"), [HomeKey::AddDevice]);
+        // Shifted: `a` accepts a proposal, `A` adopts a session.
+        assert_eq!(home_keys_default(b"aA"), [HomeKey::Accept, HomeKey::Adopt]);
     }
 
     /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)
