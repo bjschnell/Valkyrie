@@ -10,6 +10,10 @@
 //! daemon the turn goes on. It's this hook rather than the context hook so the one
 //! process that reports the stop also decides it: the queue never shows a turn
 //! end the agent didn't take.
+//!
+//! The other: the merge guard (ADR-0015 §1). On `PreToolUse`, a shell command that
+//! merges a pull request or pushes to the default branch gets Claude's "ask", a
+//! confirm the user answers at their own terminal, or Codex's refusal.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -68,7 +72,10 @@ fn forward(agent: &str, socket: &Path) -> Result<()> {
     if raw.len() as u64 > MAX_PAYLOAD {
         anyhow::bail!("payload over {MAX_PAYLOAD} bytes, dropped");
     }
-    let mut payload = slim(serde_json::from_slice(&raw)?);
+    let mut payload: Value = serde_json::from_slice(&raw)?;
+    // Before `slim`, which cuts long commands short.
+    let guard = merge_guard(agent, &mut payload, &crate::guard::Git);
+    let mut payload = slim(payload);
     let block = (agent == "claude")
         .then(|| ship_block(&mut payload))
         .flatten();
@@ -80,7 +87,53 @@ fn forward(agent: &str, socket: &Path) -> Result<()> {
             serde_json::json!({"decision": "block", "reason": reason})
         );
     }
+    if let Some(decision) = guard {
+        println!("{decision}");
+    }
     sent
+}
+
+/// On a shell `PreToolUse`, the merge guard's answer (ADR-0015 §1): Claude's "ask",
+/// so the user approves at their own terminal, or Codex's "deny", which has no
+/// confirm of its own. The payload is marked so the daemon knows the confirm on
+/// screen is the guard's and keeps other agents from answering it.
+fn merge_guard(agent: &str, payload: &mut Value, repo: &dyn crate::guard::Repo) -> Option<Value> {
+    if payload["hook_event_name"] != "PreToolUse"
+        || !matches!(
+            payload["tool_name"].as_str(),
+            Some("Bash" | "PowerShell" | "shell")
+        )
+    {
+        return None;
+    }
+    let command = payload["tool_input"]["command"].as_str()?;
+    let cwd = PathBuf::from(payload["cwd"].as_str()?);
+    let hit = crate::guard::check(command, &cwd, repo)?;
+    let (decision, reason) = match agent {
+        "claude" => (
+            "ask",
+            format!(
+                "Valkyrie merge guard: {} Merging is yours (ADR-0015): approve only if you asked for it.",
+                hit.what()
+            ),
+        ),
+        _ => (
+            "deny",
+            format!(
+                "{} Merging is the user's (ADR-0015): don't merge or push to the default branch \
+                 yourself. Tell the user the pull request is ready instead.",
+                hit.what()
+            ),
+        ),
+    };
+    payload["valk_merge_guard"] = serde_json::json!({"kind": hit.kind(), "decision": decision});
+    Some(serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    }))
 }
 
 fn send(
@@ -403,6 +456,72 @@ mod tests {
             p["last_assistant_message"].as_str().unwrap().len(),
             long.len()
         );
+    }
+
+    struct OnMain;
+
+    impl crate::guard::Repo for OnMain {
+        fn default_branch(&self, _: &Path) -> Option<String> {
+            Some("main".into())
+        }
+        fn current_branch(&self, _: &Path) -> Option<String> {
+            Some("feat/x".into())
+        }
+    }
+
+    fn pre_tool(command: &str) -> Value {
+        json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": "/repo",
+               "tool_input": {"command": command}})
+    }
+
+    #[test]
+    fn the_merge_guard_asks_claude_and_marks_the_payload() {
+        let mut payload = pre_tool("gh pr merge 81 --squash");
+        let out = merge_guard("claude", &mut payload, &OnMain).unwrap();
+        let answer = &out["hookSpecificOutput"];
+        assert_eq!(answer["hookEventName"], "PreToolUse");
+        assert_eq!(answer["permissionDecision"], "ask");
+        assert!(
+            answer["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("merges a pull request")
+        );
+        assert_eq!(
+            payload["valk_merge_guard"],
+            json!({"kind": "merge", "decision": "ask"})
+        );
+    }
+
+    #[test]
+    fn the_merge_guard_refuses_codex() {
+        let mut payload = pre_tool("git push origin HEAD:main");
+        let out = merge_guard("codex", &mut payload, &OnMain).unwrap();
+        let answer = &out["hookSpecificOutput"];
+        assert_eq!(answer["permissionDecision"], "deny");
+        let reason = answer["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("default branch (main)") && reason.contains("is ready"));
+    }
+
+    #[test]
+    fn the_merge_guard_leaves_everything_else_alone() {
+        for mut payload in [
+            pre_tool("git push -u origin feat/x"),
+            json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": "/repo",
+                   "tool_input": {"command": "gh pr merge 81"}}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": "/repo",
+                   "tool_input": {"command": "gh pr merge 81"}}),
+        ] {
+            assert!(merge_guard("claude", &mut payload, &OnMain).is_none());
+            assert!(payload.get("valk_merge_guard").is_none());
+        }
+    }
+
+    #[test]
+    fn the_merge_guard_reads_the_whole_command_before_slim_cuts_it() {
+        let long = format!("echo {} && gh pr merge 81", "x".repeat(MAX_STRING));
+        let mut payload = pre_tool(&long);
+        assert!(merge_guard("claude", &mut payload, &OnMain).is_some());
     }
 
     #[test]

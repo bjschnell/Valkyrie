@@ -7,6 +7,7 @@ mod chat;
 mod context;
 mod extract;
 mod foreground;
+mod guard;
 mod pty;
 mod restore;
 mod session;
@@ -932,6 +933,16 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Input { session, data } => {
                 if let Ok(s) = registry.get(session) {
                     if let Some(agent) = driver.get_or_insert_with(|| registry.caller(peer).agent) {
+                        // The merge guard's confirm is the user's to answer (ADR-0015 §1).
+                        if s.at_guard_confirm() {
+                            tracing::warn!(
+                                session,
+                                agent,
+                                "agent input dropped at a merge guard confirm"
+                            );
+                            s.log_refused_input(agent);
+                            continue;
+                        }
                         s.driven_by(agent);
                     }
                     s.typed(data);
