@@ -101,9 +101,10 @@ impl Registry {
         })
     }
 
-    /// An agent may reword an item still proposed, which the user reads before
-    /// accepting, and drop one; the rest (accepting, shipping, rewording one the user
-    /// will launch) is the user's.
+    /// An agent may drop an item it filed itself, and reword one it filed that's
+    /// still proposed, which the user reads before accepting; the rest (accepting,
+    /// shipping, rewording one the user will launch, touching the user's or another
+    /// agent's card) is the user's (ADR-0018).
     pub(crate) async fn change_item(
         self: &Arc<Self>,
         id: u32,
@@ -111,11 +112,22 @@ impl Registry {
         peer: Option<Peer>,
     ) -> Result<Reply> {
         let current = self.backlog.lock().unwrap().get(id)?;
+        let own = || {
+            let caller = self.caller(peer);
+            let session = caller.session.as_ref().map(|s| (self.boot, s.info().id));
+            caller.agent.is_some() && session.is_some() && current.filed_by == session
+        };
         match &change {
             ItemChange::Status {
                 status: ItemStatus::Dropped,
-            } => {}
-            ItemChange::Edit { .. } if current.status == ItemStatus::Proposed => {}
+            } if own() => {}
+            ItemChange::Status {
+                status: ItemStatus::Dropped,
+            } => self.vouch(peer, "dropping a backlog item another filed")?,
+            ItemChange::Edit { .. } if current.status == ItemStatus::Proposed && own() => {}
+            ItemChange::Edit { .. } if current.status == ItemStatus::Proposed => {
+                self.vouch(peer, "rewording a proposal another filed")?
+            }
             ItemChange::Edit { .. } => self.vouch(peer, "rewording an accepted backlog item")?,
             ItemChange::Status { status } => {
                 let what = match (current.status, status) {
