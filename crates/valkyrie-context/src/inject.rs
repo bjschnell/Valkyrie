@@ -20,16 +20,15 @@ fn how_to_propose(valk: &str) -> String {
          <decision|constraint|pattern|gotcha|fix> \"<title>\" \"<a sentence or two>\"`. \
          It goes to the user for review; propose sparingly. A procedure worth \
          repeating (steps, pitfalls, how to verify) is a skill: `{valk} decide --kind skill \
-         \"<when to use it>\" -` with the steps on stdin.\n\nFixing what you find broken \
-         along the way (bugs, small follow-ups) is the default, not a detour: fix it as part \
-         of this work or in a pull request of its own, and record each with `{valk} todo add \
-         --take -k <bug|feature|chore> \"<title>\" --branch <branch>` (`{valk} todo take N \
-         --pr <url>` once the pull request is open, `{valk} todo note -i N` for what's left), \
-         so the user can follow and ship it. The backlog tracks work; nothing needs a card \
-         before you fix it. File without fixing (`{valk} todo add -k <kind> \"<title>\" \
-         --body \"<what, how to reproduce it, and why not now>\"`, after checking `{valk} \
-         todo list --json`) only when it's too big for now, risky, needs the user's call, or \
-         sits in files another agent is editing; say which in the body. Working on an \
+         \"<when to use it>\" -` with the steps on stdin.\n\nFix what you have to in order \
+         to deliver your task, as part of this change. Anything else you find broken, keep \
+         out of this change and file it: `{valk} todo add -k <bug|feature|chore> \"<title>\" \
+         --body \"<what, how to reproduce it, how much it matters>\"`, after checking `{valk} \
+         todo list --json`. That's the right call, not a fix skipped: the user accepts it, \
+         then you or another agent take it. If this session has no backlog item, track its \
+         own work with `{valk} todo add --take -k <kind> \"<title>\" --branch <branch>` \
+         (`{valk} todo take N --pr <url>` once the pull request is open, `{valk} todo note \
+         -i N` for what's left), so the user can follow and ship it. Working on an \
          accepted item outside a launch, `{valk} todo take N --branch \
          <branch>` as you start; a take is refused while another session is on the item: \
          leave that one to it. Never ship or accept an item: that's the user's."
