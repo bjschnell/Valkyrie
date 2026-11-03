@@ -578,12 +578,15 @@ fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
 
     let o = |name: &str| out.join(name).display().to_string();
     let repo_s = repo.display().to_string();
-    let hook = |payload: serde_json::Value| format!("echo '{payload}' | valk hook claude\n");
+    // printf, not echo: dash's echo (Ubuntu's /bin/sh) turns the payload's escaped
+    // `\n` into a real line break, and the JSON no longer parses.
+    let hook =
+        |payload: serde_json::Value| format!("printf '%s\\n' '{payload}' | valk hook claude\n");
     let ask = |name: &str| {
         let payload =
             serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"go on","cwd":repo_s});
         format!(
-            "echo '{payload}' | valk context-hook claude > {o}.tmp; mv {o}.tmp {o}\n",
+            "printf '%s\\n' '{payload}' | valk context-hook claude > {o}.tmp; mv {o}.tmp {o}\n",
             o = o(name)
         )
     };
