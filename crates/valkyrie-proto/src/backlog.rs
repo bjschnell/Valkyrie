@@ -105,6 +105,11 @@ pub struct Item {
     /// The pull request, an `https://` URL, as `valk todo take --pr` recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
+    /// The daemon last read `pr` as closed without merging: it waits for the user
+    /// to drop or relaunch the item. Cleared when the PR reads open again, or a
+    /// take records another.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pr_closed: bool,
     /// The daemon `boot` and session of the agent that wrote it down (`valk todo
     /// add`, with or without `--take`). That session may take it while it's still
     /// proposed: its own find, which the user said to go ahead with in that

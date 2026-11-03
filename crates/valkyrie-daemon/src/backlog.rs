@@ -538,12 +538,14 @@ impl Registry {
     /// Ships every open or proposed item whose pull request GitHub reports merged,
     /// with a note on its card naming the PR (ADR-0015 §2): the user's merge is
     /// the review, and the merge guard (#40) keeps merging theirs. A PR closed
-    /// without merging, or one `lookup` can't read (no `gh`, another host,
-    /// offline), ships nothing; `ship --merged` still covers those. `lookup` asks
+    /// without merging ships nothing and is marked `pr_closed` for the board (open
+    /// again, the mark goes); one `lookup` can't read (no `gh`, another host,
+    /// offline) changes nothing, and `ship --merged` still covers those. `lookup` asks
     /// about a PR's URL from a directory, and may block. Returns how many shipped.
     pub(crate) async fn ship_merged_prs(&self, lookup: PrLookup) -> usize {
         let items = self.backlog.lock().unwrap().load();
         let mut shipped = 0;
+        let mut changed = false;
         for item in items {
             if !matches!(item.status, ItemStatus::Open | ItemStatus::Proposed) {
                 continue;
@@ -563,10 +565,21 @@ impl Registry {
             let pr = tokio::task::spawn_blocking(move || ask(&dir, &asked))
                 .await
                 .unwrap_or(Pr::Unknown);
-            if !matches!(pr, Pr::Merged { .. }) {
+            let id = item.id;
+            let closed = match pr {
+                Pr::Merged { .. } => None,
+                Pr::Closed { .. } => Some(true),
+                Pr::Open { .. } => Some(false),
+                Pr::None | Pr::Unknown => continue,
+            };
+            if let Some(closed) = closed {
+                match self.backlog.lock().unwrap().pr_closed(id, &url, closed) {
+                    Ok(Some(_)) => changed = true,
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(id, "couldn't record its PR's state: {e:#}"),
+                }
                 continue;
             }
-            let id = item.id;
             let note = match self.ship_judged(&item).await {
                 None => continue,
                 Some(Err(e)) => {
@@ -590,7 +603,7 @@ impl Registry {
             tracing::info!(id, pr = url, "shipped a backlog item: its PR merged");
             shipped += 1;
         }
-        if shipped > 0 {
+        if shipped > 0 || changed {
             self.refresh_items();
         }
         shipped
@@ -981,10 +994,20 @@ mod tests {
             assert!(get(id).notes.is_empty());
         }
         assert_eq!(get(none).status, ItemStatus::Open);
+        // Closed is marked for the board; unreadable says nothing either way.
+        assert!(get(closed).pr_closed);
+        assert!(!get(unknown).pr_closed);
         // Only items with a PR are asked about; shipped ones aren't asked again.
         assert_eq!(asked.lock().unwrap().len(), 4);
         assert_eq!(registry.ship_merged_prs(lookup).await, 0);
         assert_eq!(*asked.lock().unwrap(), [1, 2, 3, 4, 2, 3].map(url).to_vec());
+        // Reopened on GitHub, the mark goes.
+        let reopened: PrLookup = Arc::new(|_, pr| Pr::Open {
+            url: pr.to_owned(),
+            red: false,
+        });
+        assert_eq!(registry.ship_merged_prs(reopened).await, 0);
+        assert!(!get(closed).pr_closed);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

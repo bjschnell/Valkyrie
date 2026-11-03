@@ -543,6 +543,7 @@ fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
         |s: &SessionInfo| matches!(s.status.state, AgentState::NeedsInput | AgentState::Blocked);
     match live {
         Some(s) if needs(s) => s.status.state.label().into(),
+        _ if item.pr_closed => "PR closed".into(),
         _ if item.pr.is_some() => "PR open".into(),
         Some(s) => s.status.state.label().into(),
         None if item.checkout.is_some() || !item.sessions.is_empty() => "to review".into(),
