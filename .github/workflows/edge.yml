@@ -43,8 +43,10 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          # No edge yet on the first run: gh prints the 422's JSON to stdout, so
+          # keep its output only when it succeeds.
           current=$(gh api -H 'Accept: application/vnd.github.sha' \
-            "repos/$GITHUB_REPOSITORY/commits/edge" 2>/dev/null || true)
+            "repos/$GITHUB_REPOSITORY/commits/edge" 2>/dev/null) || current=
           # Test runs can finish out of order: never put edge back to an older main.
           if [ "$EVENT" = workflow_run ] && [ -n "$current" ] && [ "$current" != "$SHA" ]; then
             status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$SHA" -q .status)
