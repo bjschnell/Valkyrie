@@ -11,7 +11,7 @@ use valkyrie_proto::NoWindow;
 
 /// Longest a `gh` lookup may take; the answer is only for the record, so a slow
 /// network loses it rather than holding anything up.
-const GH_TIMEOUT: Duration = Duration::from_secs(10);
+pub const GH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How far a stop's work got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,13 +51,19 @@ pub enum Pr {
         url: String,
         red: bool,
     },
-    /// Merged or closed.
-    Done {
+    Merged {
+        url: String,
+    },
+    /// Closed without merging.
+    Closed {
         url: String,
     },
     /// No `gh`, not signed in, not a GitHub remote, offline, too slow.
     Unknown,
 }
+
+/// Looks a pull request up from a directory (see `gh_pr`); may block.
+pub type PrLookup = std::sync::Arc<dyn Fn(&Path, &str) -> Pr + Send + Sync>;
 
 /// The default branch of the repository `dir` is in (see `default_branch`).
 pub fn default_branch_at(dir: &Path) -> Option<String> {
@@ -128,23 +134,20 @@ pub fn state(
     let (state, url) = match pr(cwd, &branch) {
         Pr::None => (State::NoPr, None),
         Pr::Open { url, red: true } => (State::PrRed, Some(url)),
-        Pr::Open { url, red: false } | Pr::Done { url } => (State::Clean, Some(url)),
+        Pr::Open { url, red: false } | Pr::Merged { url } | Pr::Closed { url } => {
+            (State::Clean, Some(url))
+        }
         Pr::Unknown => (State::Clean, None),
     };
     Some((state, Some(branch), url))
 }
 
-/// Asks `gh` about `branch`'s pull request, giving up after `timeout`.
-pub fn gh_pr(cwd: &Path, branch: &str, timeout: Duration) -> Pr {
+/// Asks `gh` about a pull request, giving up after `timeout`: `which` is a
+/// branch of the repository `cwd` is in, or the pull request's URL.
+pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
     let child = Command::new("gh")
         .no_window()
-        .args([
-            "pr",
-            "view",
-            branch,
-            "--json",
-            "state,url,statusCheckRollup",
-        ])
+        .args(["pr", "view", which, "--json", "state,url,statusCheckRollup"])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -184,8 +187,11 @@ pub fn gh_pr(cwd: &Path, branch: &str, timeout: Duration) -> Pr {
 /// `gh pr view --json state,url,statusCheckRollup`, read.
 fn parse_pr(v: &Value) -> Pr {
     let url = v["url"].as_str().unwrap_or("").to_owned();
-    if v["state"] != "OPEN" {
-        return Pr::Done { url };
+    match v["state"].as_str() {
+        Some("OPEN") => {}
+        Some("MERGED") => return Pr::Merged { url },
+        Some("CLOSED") => return Pr::Closed { url },
+        _ => return Pr::Unknown,
     }
     // A check run has a conclusion once it's done; a commit status, a state.
     const FAILED: &[&str] = &[
@@ -299,7 +305,8 @@ mod tests {
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
-        assert_eq!(of(&app, Pr::Done { url: url.clone() }), State::Clean);
+        assert_eq!(of(&app, Pr::Merged { url: url.clone() }), State::Clean);
+        assert_eq!(of(&app, Pr::Closed { url: url.clone() }), State::Clean);
         // Without `gh` nothing is known past the push.
         assert_eq!(of(&app, Pr::Unknown), State::Clean);
         // More commits after the push are unpushed again.
@@ -339,7 +346,9 @@ mod tests {
         assert!(!red(pr("OPEN", json!([]))));
         assert_eq!(
             pr("MERGED", json!([{"conclusion": "FAILURE"}])),
-            Pr::Done { url: "u".into() }
+            Pr::Merged { url: "u".into() }
         );
+        assert_eq!(pr("CLOSED", json!([])), Pr::Closed { url: "u".into() });
+        assert_eq!(pr("", json!([])), Pr::Unknown);
     }
 }

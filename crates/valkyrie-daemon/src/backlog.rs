@@ -2,6 +2,7 @@
 //! an agent on itself in a worktree of its own.
 
 use crate::context::Peer;
+use crate::work::{Pr, PrLookup};
 use crate::{Registry, worktree};
 use anyhow::{Result, bail};
 use std::path::PathBuf;
@@ -464,32 +465,10 @@ impl Registry {
                 });
                 continue;
             }
-            // Shipped only as it was judged: not if it was shipped, dropped, or
-            // moved to another branch or checkout meanwhile.
-            let changed = {
-                let backlog = self.backlog.lock().unwrap();
-                match backlog.get(id) {
-                    Ok(now)
-                        if now.status == item.status
-                            && now.branch == item.branch
-                            && now.checkout == item.checkout =>
-                    {
-                        let ship = ItemChange::Status {
-                            status: ItemStatus::Shipped,
-                        };
-                        Some(backlog.change(id, &ship, now_secs()))
-                    }
-                    _ => None,
-                }
-            };
-            let done = match changed {
-                Some(Ok(item)) => self.after_change(item).await,
-                Some(Err(e)) => Err(e),
-                None => {
-                    let why = "changed since it was checked".to_owned();
-                    kept.push(KeptItem { id, title, why });
-                    continue;
-                }
+            let Some(done) = self.ship_judged(&item).await else {
+                let why = "changed since it was checked".to_owned();
+                kept.push(KeptItem { id, title, why });
+                continue;
             };
             match done {
                 Ok((_, note)) => shipped.push(ShippedItem {
@@ -524,6 +503,97 @@ impl Registry {
             self.refresh_items();
         }
         Ok(Reply::Shipped { shipped, kept })
+    }
+
+    /// Ships `judged` as `ship` does (its worktree and merged branch go by the same
+    /// rules), but only as it was judged: `None` if it was shipped, dropped, or
+    /// moved to another branch, checkout or pull request meanwhile. Shipped while
+    /// proposed, it's marked unaccepted (ADR-0012 §3). Who may is the caller's to
+    /// check: the user's `ship --merged`, or the daemon on a merged PR.
+    async fn ship_judged(&self, judged: &Item) -> Option<Result<(Item, Option<String>)>> {
+        let id = judged.id;
+        let changed = {
+            let backlog = self.backlog.lock().unwrap();
+            match backlog.get(id) {
+                Ok(now)
+                    if now.status == judged.status
+                        && now.branch == judged.branch
+                        && now.checkout == judged.checkout
+                        && now.pr == judged.pr =>
+                {
+                    let ship = ItemChange::Status {
+                        status: ItemStatus::Shipped,
+                    };
+                    backlog.change(id, &ship, now_secs())
+                }
+                _ => return None,
+            }
+        };
+        Some(match changed {
+            Ok(item) => self.after_change(item).await,
+            Err(e) => Err(e),
+        })
+    }
+
+    /// Ships every open or proposed item whose pull request GitHub reports merged,
+    /// with a note on its card naming the PR (ADR-0015 §2): the user's merge is
+    /// the review, and the merge guard (#40) keeps merging theirs. A PR closed
+    /// without merging, or one `lookup` can't read (no `gh`, another host,
+    /// offline), ships nothing; `ship --merged` still covers those. `lookup` asks
+    /// about a PR's URL from a directory, and may block. Returns how many shipped.
+    pub(crate) async fn ship_merged_prs(&self, lookup: PrLookup) -> usize {
+        let items = self.backlog.lock().unwrap().load();
+        let mut shipped = 0;
+        for item in items {
+            if !matches!(item.status, ItemStatus::Open | ItemStatus::Proposed) {
+                continue;
+            }
+            let Some(url) = item.pr.clone() else {
+                continue;
+            };
+            // `gh pr view <url>` needs no repository, but its own is the likeliest
+            // to have the host's credentials configured.
+            let dir = item
+                .project
+                .clone()
+                .filter(|p| p.is_dir())
+                .unwrap_or_else(std::env::temp_dir);
+            let ask = Arc::clone(&lookup);
+            let asked = url.clone();
+            let pr = tokio::task::spawn_blocking(move || ask(&dir, &asked))
+                .await
+                .unwrap_or(Pr::Unknown);
+            if !matches!(pr, Pr::Merged { .. }) {
+                continue;
+            }
+            let id = item.id;
+            let note = match self.ship_judged(&item).await {
+                None => continue,
+                Some(Err(e)) => {
+                    tracing::warn!(id, "couldn't ship on a merged PR: {e:#}");
+                    continue;
+                }
+                Some(Ok((_, note))) => note.filter(|n| !n.is_empty()),
+            };
+            let mut text = format!("Shipped: PR {url} merged.");
+            if let Some(note) = note {
+                text = format!("{text}\n{note}");
+            }
+            if let Err(e) =
+                self.backlog
+                    .lock()
+                    .unwrap()
+                    .note(id, "valkyrie", &text, false, now_secs())
+            {
+                tracing::warn!(id, "couldn't note the ship on its card: {e:#}");
+            }
+            tracing::info!(id, pr = url, "shipped a backlog item: its PR merged");
+            shipped += 1;
+        }
+        if shipped > 0 {
+            self.refresh_items();
+        }
+        shipped
     }
 
     /// Deletes item `id`, for the user only, since it can't be undone (drop is the
@@ -785,6 +855,7 @@ fn checkout_of(info: &SessionInfo) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn nothing_claims_an_item_while_a_launch_is_starting_on_it() {
@@ -828,6 +899,92 @@ mod tests {
         }
         // Its guard dropped, whatever became of the launch: free again.
         assert!(take(false).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_merged_pr_ships_its_item_and_nothing_else_does() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-prship-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let new = |title: &str| NewItem {
+            title: title.into(),
+            body: String::new(),
+            kind: Default::default(),
+            cwd: None,
+            attachments: Vec::new(),
+        };
+        let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
+        let (merged, closed, unknown, proposed, none) = {
+            let b = registry.backlog.lock().unwrap();
+            let with_pr = |title: &str, n: u32, filed_by: Option<(u64, SessionId)>| {
+                let by = if filed_by.is_some() {
+                    "claude"
+                } else {
+                    "human"
+                };
+                let item = b.add_filed(&new(title), by, filed_by, 1).unwrap();
+                if filed_by.is_none() {
+                    let open = ItemChange::Status {
+                        status: ItemStatus::Open,
+                    };
+                    b.change(item.id, &open, 1).unwrap();
+                }
+                let pr = url(n);
+                b.taken(item.id, 3, 7, &[], None, Some(&pr), None, 1)
+                    .unwrap()
+                    .id
+            };
+            let ids = (
+                with_pr("merged", 1, None),
+                with_pr("closed", 2, None),
+                with_pr("unknown", 3, None),
+                with_pr("an agent's own", 4, Some((7, 3))),
+            );
+            let none = b.add(&new("no pr"), "human", 1).unwrap().id;
+            (ids.0, ids.1, ids.2, ids.3, none)
+        };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        let lookup: PrLookup = Arc::new(move |_, pr| {
+            seen.lock().unwrap().push(pr.to_owned());
+            let url = pr.to_owned();
+            match pr.rsplit('/').next() {
+                Some("1" | "4") => Pr::Merged { url },
+                Some("2") => Pr::Closed { url },
+                _ => Pr::Unknown,
+            }
+        });
+        assert_eq!(registry.ship_merged_prs(lookup.clone()).await, 2);
+        let get = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        let item = get(merged);
+        assert_eq!(item.status, ItemStatus::Shipped);
+        assert!(!item.unaccepted);
+        let note = item.notes.last().unwrap();
+        assert_eq!(note.by, "valkyrie");
+        assert!(note.text.contains(&url(1)), "{}", note.text);
+        // Merged accepts the work, not the proposal: reopened, it's proposed again.
+        let item = get(proposed);
+        assert_eq!((item.status, item.unaccepted), (ItemStatus::Shipped, true));
+        for id in [closed, unknown] {
+            assert_eq!(get(id).status, ItemStatus::Open);
+            assert!(get(id).notes.is_empty());
+        }
+        assert_eq!(get(none).status, ItemStatus::Open);
+        // Only items with a PR are asked about; shipped ones aren't asked again.
+        assert_eq!(asked.lock().unwrap().len(), 4);
+        assert_eq!(registry.ship_merged_prs(lookup).await, 0);
+        assert_eq!(*asked.lock().unwrap(), [1, 2, 3, 4, 2, 3].map(url).to_vec());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
