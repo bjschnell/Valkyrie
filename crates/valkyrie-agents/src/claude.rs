@@ -190,6 +190,8 @@ fn normalize(p: &Value) -> Option<AgentEvent> {
                 _ => return None,
             }
         }
+        // A policy blocked this stop (ADR-0013 §5): the turn goes on.
+        "Stop" if !p["valk_continued"].is_null() => return None,
         "Stop" => E::TurnEnded {
             summary: p["last_assistant_message"]
                 .as_str()
@@ -481,6 +483,11 @@ mod tests {
         assert_eq!(
             n(json!({"hook_event_name": "Stop", "agent_id": null})),
             Some(E::TurnEnded { summary: None })
+        );
+        // A stop a policy kept going isn't a turn end.
+        assert_eq!(
+            n(json!({"hook_event_name": "Stop", "valk_continued": {"policy": 3}})),
+            None
         );
     }
 

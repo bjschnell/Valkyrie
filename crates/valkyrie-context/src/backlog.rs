@@ -245,6 +245,12 @@ impl Backlog {
                         item.unaccepted = false;
                         item.status = ItemStatus::Proposed;
                     }
+                    // Proposed is what the user hasn't accepted: nothing left to
+                    // remember, or the next accept would stay Proposed once.
+                    (_, ItemStatus::Proposed) => {
+                        item.unaccepted = false;
+                        item.status = *status;
+                    }
                     _ => item.status = *status,
                 }
             }
@@ -831,6 +837,11 @@ mod tests {
             (item.status, item.unaccepted),
             (ItemStatus::Proposed, false)
         );
+        // A direct Proposed clears the flag, so the next accept opens it.
+        b.change(1, &status(ItemStatus::Shipped), 3).unwrap();
+        b.change(1, &status(ItemStatus::Proposed), 3).unwrap();
+        let item = b.change(1, &status(ItemStatus::Open), 3).unwrap();
+        assert_eq!(item.status, ItemStatus::Open);
         // Accepted, it reopens open as before.
         b.change(1, &status(ItemStatus::Open), 4).unwrap();
         b.change(1, &status(ItemStatus::Dropped), 5).unwrap();

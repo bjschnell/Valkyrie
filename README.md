@@ -339,7 +339,26 @@ How it works:
    retired at 90. `valk decisions export` writes active skills to `.claude/skills/`
    where Claude Code loads them. In the TUI, PgUp/PgDn scrolls a long proposal;
    a skill is accepted once you've read it to the end.
-7. **Agents know about each other.** With each prompt, an agent also hears what the
+7. **Policies finish routine work without asking you.** A policy is a decision of
+   kind `policy` that picks a template Valkyrie's hooks enforce (ADR-0013). The
+   first is `ship`: when a Claude agent is about to end its turn with work short of
+   where you ship it, the hook keeps it going instead, with fixed text that has it
+   run your checks and then commit, push, or open a pull request. It never merges
+   and never pushes the default branch. How far is yours to set, once:
+
+   ```sh
+   printf '%s\n' 'template: ship' 'until: pr' \
+     'checks: cargo fmt --check && cargo clippy && cargo test' |
+     valk decide -k policy "Ship finished work as a pull request" -
+   ```
+
+   (The body comes on stdin with `-`, which works the same in bash, zsh and fish.)
+
+   `until` is `commit`, `push` or `pr`; `checks` is optional. The agent gets the
+   template, never your body as prose, and only once a turn. The queue doesn't
+   show *finished* for a turn a policy kept going, and `valk pings` counts those
+   stops apart. Retire the policy, or turn Context off, to stop it.
+8. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently
    editing the same file.

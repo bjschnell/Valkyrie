@@ -277,6 +277,31 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         six.contains("PR open") && six.ends_with(" (PR) (agent-filed)"),
         "{list}"
     );
+    // One repository's items, named by any of its worktrees; or those with no folder.
+    human(
+        &format!("valk todo list -C {}", worktree.display()),
+        "list-repo",
+    );
+    let ids = |list: &str| -> Vec<String> {
+        list.lines()
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect()
+    };
+    let in_repo = ids(&wait_for(&out.join("list-repo")));
+    assert!(
+        in_repo.contains(&"#1".into()) && !in_repo.contains(&"#2".into()),
+        "{in_repo:?}"
+    );
+    human("valk todo list --no-folder", "list-none");
+    assert_eq!(ids(&wait_for(&out.join("list-none"))), ["#2"]);
+    human(
+        &format!("valk todo list -C {}", dir.display()),
+        "list-outside",
+    );
+    assert!(
+        wait_for(&out.join("list-outside")).contains("is not in a git repository"),
+        "a folder outside git names no repository"
+    );
     // Only its own: another proposed item still waits on the user.
     assert!(wait_for(&out.join("add-later")).starts_with("#7 For later"));
     let refused = wait_for(&out.join("take-later"));
@@ -290,7 +315,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         refused.contains(&format!(
             "#1 is already being worked on in session {}",
             launched.trim()
-        )) && refused.contains("leave it to that session"),
+        )) && refused.contains("you're already on it"),
         "{refused}"
     );
     human("valk todo launch 6", "launch6");

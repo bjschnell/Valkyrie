@@ -5,7 +5,7 @@
 
 use crate::links;
 use crate::mouse::{self, Mouse, MouseKind};
-use crate::{App, Attached, MENU_WIDTH, Menu, MenuKind, reset_terminal_modes, write_modes};
+use crate::{App, Attached, MENU_WIDTH, Menu, MenuKind, write_modes};
 use ratatui::layout::{Position, Rect};
 use ratatui::style;
 use valkyrie_proto::layout::{Area, Divider};
@@ -165,7 +165,7 @@ impl App {
             self.previous = Some(view.id);
         }
         if self.view.is_some() {
-            let _ = reset_terminal_modes();
+            self.reset_outer_modes();
         }
         // Set the panes before the request so the snapshots pushed right after the
         // reply land in them.
@@ -204,7 +204,7 @@ impl App {
             self.view = None;
             self.others.clear();
             self.layout = None;
-            let _ = reset_terminal_modes();
+            self.reset_outer_modes();
             self.status = format!("attach {id} failed: {e:#}");
         }
     }
@@ -274,7 +274,7 @@ impl App {
         let i = panes.iter().position(|p| p.id == focus).unwrap_or(0);
         let view = panes.remove(i);
         if view.id != focused {
-            let _ = write_modes(view.modes, Some(view.shape));
+            let _ = write_modes(self.outer_modes(view.modes), Some(view.shape));
         }
         self.view = Some(view);
         self.others = panes;
@@ -328,7 +328,7 @@ impl App {
             if view.modes.focus_events {
                 let _ = self.client.input(view.id, FOCUS_IN.to_vec());
             }
-            let _ = write_modes(view.modes, Some(view.shape));
+            let _ = write_modes(self.outer_modes(view.modes), Some(view.shape));
         }
     }
 

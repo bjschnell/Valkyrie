@@ -37,7 +37,7 @@ use ratatui::widgets::{
 use settings::{Field, Settings, TabSide, TabStyle};
 pub use settings::{context_enabled, on_context_change};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use theme::{Theme, state_icon};
 use tokio::sync::mpsc;
@@ -546,8 +546,7 @@ impl App {
                 self.view = None;
                 self.others.clear();
                 self.layout = None;
-                let _ = reset_terminal_modes();
-                self.paste_forced = false;
+                self.reset_outer_modes();
                 "the daemon restarted; restorable sessions came back with new ids".into()
             };
             if let Err(e) = self.client.watch_queue().await {
@@ -681,8 +680,7 @@ impl App {
         if let Some(m) = &mut self.mini {
             m.open = false;
         }
-        let _ = reset_terminal_modes();
-        self.paste_forced = false;
+        self.reset_outer_modes();
         let _ = self.client.detach().await;
         self.refresh().await;
         // The preview showed a peeked tab, or nothing, while attached.
@@ -1132,14 +1130,27 @@ impl App {
     /// multi-line paste reaches it as one, at home too; after, the program's mode.
     fn sync_paste(&mut self) {
         let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some());
-        if want == self.paste_forced {
-            return;
-        }
-        self.paste_forced = want;
         let program = self.view.as_ref().is_some_and(|v| v.modes.bracketed_paste);
+        let Some(final_byte) = paste_change(want, self.paste_forced, program) else {
+            return;
+        };
+        self.paste_forced = want;
         let mut out = std::io::stdout();
-        let _ = write!(out, "\x1b[?2004{}", if want || program { 'h' } else { 'l' });
+        let _ = write!(out, "\x1b[?2004{final_byte}");
         let _ = out.flush();
+    }
+
+    /// The program's modes as the outer terminal should have them: a backlog prompt
+    /// keeps bracketed paste on (`sync_paste`).
+    fn outer_modes(&self, m: Modes) -> Modes {
+        forced_modes(m, self.paste_forced)
+    }
+
+    /// Back to a plain shell's modes; `sync_paste` turns paste back on if a prompt
+    /// is still open.
+    fn reset_outer_modes(&mut self) {
+        let _ = reset_terminal_modes();
+        self.paste_forced = false;
     }
 
     /// A Mac's Option typed a character where an Alt key was meant (the terminal
@@ -1628,6 +1639,17 @@ impl App {
             Err(e) => return self.say(e),
         };
         let open = self.backlog.is_some();
+        // Asking, a filtered page offers only its own repository's items.
+        let (shipped, kept) = match self.backlog.as_ref().map(|p| &p.repo) {
+            Some(repo) if done.asking => {
+                let shown = |id: u32| self.items.iter().any(|i| i.id == id && repo.holds(i));
+                (
+                    shipped.into_iter().filter(|s| shown(s.id)).collect(),
+                    kept.into_iter().filter(|k| shown(k.id)).collect(),
+                )
+            }
+            _ => (shipped, kept),
+        };
         let (arm, said) = backlog::answer(done.asking, open, &shipped, &kept, done.unfetched);
         if let (Some(ids), Some(page)) = (arm, &mut self.backlog) {
             page.ship_armed = Some(ids);
@@ -2239,8 +2261,16 @@ impl App {
         self.daemon.as_ref().map_or(0, |d| d.boot)
     }
 
+    /// The open page's rows: the items of the repository it shows.
     fn backlog_rows(&self) -> Vec<(backlog::Lane, Item)> {
-        backlog::rows(&self.items, &self.sessions, self.boot())
+        let repo = self.backlog.as_ref().map(|p| &p.repo);
+        let items: Vec<Item> = self
+            .items
+            .iter()
+            .filter(|i| repo.is_none_or(|r| r.holds(i)))
+            .cloned()
+            .collect();
+        backlog::rows(&items, &self.sessions, self.boot())
     }
 
     async fn open_backlog(&mut self) {
@@ -2374,9 +2404,15 @@ impl App {
                 // with the user's credentials, so fetch here first. Off the event
                 // loop: a fetch can take a while, and the answer comes back on
                 // `shipping`.
+                let repo = self
+                    .backlog
+                    .as_ref()
+                    .map(|p| p.repo.clone())
+                    .unwrap_or_default();
                 let mut projects: Vec<PathBuf> = self
                     .items
                     .iter()
+                    .filter(|i| repo.holds(i))
                     .filter(|i| i.status == valkyrie_proto::ItemStatus::Open && i.branch.is_some())
                     .filter_map(|i| i.project.clone())
                     .collect();
@@ -2416,10 +2452,23 @@ impl App {
                     });
                 });
             }
+            Do::NextRepo => {
+                if let Some(page) = &mut self.backlog {
+                    page.repo = page.repo.next(&self.items);
+                    page.cursor = 0;
+                    page.armed = None;
+                }
+            }
             Do::Add { kind, text } => {
-                // For the repository the TUI is in, or the attached tab is.
+                // For the repository the page shows, else the one the TUI is in, or
+                // the attached tab is.
+                let repo = self.backlog.as_ref().map(|p| p.repo.clone());
                 let here = self.attached_cwd().or_else(|| std::env::current_dir().ok());
-                let cwd = here.filter(|d| d.ancestors().any(|a| a.join(".git").exists()));
+                let cwd = match repo.unwrap_or_default() {
+                    backlog::Repo::In(root) => Some(root),
+                    backlog::Repo::NoFolder => None,
+                    backlog::Repo::All => here.filter(|d| in_repository(d)),
+                };
                 let item = self
                     .client
                     .add_item(NewItem {
@@ -2505,10 +2554,7 @@ impl App {
                 let before = (view.modes, view.shape);
                 view.apply(update);
                 if focused && before != (view.modes, view.shape) {
-                    // A backlog prompt keeps bracketed paste on (`sync_paste`).
-                    let mut modes = view.modes;
-                    modes.bracketed_paste |= forced;
-                    write_modes(modes, Some(view.shape))?;
+                    write_modes(forced_modes(view.modes, forced), Some(view.shape))?;
                 }
                 mouse_changed = mouse::modes(before.0) != mouse::modes(view.modes);
             }
@@ -2763,11 +2809,11 @@ impl App {
         };
         // Backlog items waiting on the user (to review, stuck, proposed), only while
         // there are some; `b` opens the whole backlog.
-        let waiting: Vec<(backlog::Lane, Item)> = self
-            .backlog_rows()
-            .into_iter()
-            .filter(|(lane, _)| lane.waits())
-            .collect();
+        let waiting: Vec<(backlog::Lane, Item)> =
+            backlog::rows(&self.items, &self.sessions, self.boot())
+                .into_iter()
+                .filter(|(lane, _)| lane.waits())
+                .collect();
         let backlog_height = match waiting.len() {
             0 => 0,
             n => (n.min(BACKLOG_ROWS) as u16 + 2)
@@ -4755,6 +4801,18 @@ pub fn session_size() -> Result<Size> {
     })
 }
 
+/// What `sync_paste` writes for bracketed paste (`h` or `l`), if anything: it only
+/// acts when a prompt opens or closes, and leaves paste on when the program wants it.
+fn paste_change(want: bool, forced: bool, program: bool) -> Option<char> {
+    (want != forced).then_some(if want || program { 'h' } else { 'l' })
+}
+
+/// `m` with bracketed paste on when a backlog prompt forces it.
+fn forced_modes(mut m: Modes, forced: bool) -> Modes {
+    m.bracketed_paste |= forced;
+    m
+}
+
 /// Mirrors the program's input modes.
 fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     let flag = |on: bool| if on { 'h' } else { 'l' };
@@ -4802,10 +4860,12 @@ fn reset_terminal_modes() -> Result<()> {
 fn next_key(bytes: &[u8]) -> &[u8] {
     match bytes {
         [0x1b, b'[', rest @ ..] => {
+            // A final byte ends it, an embedded Esc cuts it short (that Esc is the
+            // next key), and nothing else does: a stray `ESC [` can't swallow what follows.
             let end = rest
                 .iter()
-                .position(|b| (0x40..=0x7e).contains(b))
-                .map_or(bytes.len(), |i| i + 3);
+                .position(|b| (0x40..=0x7e).contains(b) || *b == 0x1b)
+                .map_or(bytes.len(), |i| if rest[i] == 0x1b { i + 2 } else { i + 3 });
             &bytes[..end]
         }
         [0x1b, b'O', _, ..] => &bytes[..3],
@@ -5008,10 +5068,39 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
     keys
 }
 
+/// Whether `dir` is in a git repository (as the CLI and daemon see it).
+fn in_repository(dir: &Path) -> bool {
+    valkyrie_context::project::in_git(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use valkyrie_proto::{Cursor, Span};
+
+    /// A stray empty `.git` above the cwd isn't a repository, so `n` mustn't file
+    /// the item under it (backlog #13).
+    #[test]
+    fn a_stray_empty_git_dir_is_not_a_repository() {
+        let base = std::env::temp_dir().join(format!("valk-tui-stray-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join("y")).unwrap();
+        let real = base.join("repo");
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        std::fs::write(real.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        let strays_above = base.ancestors().skip(1).any(in_repository);
+        let (stray, filed) = (
+            in_repository(&base.join("y")),
+            in_repository(&real.join("src")),
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+        assert!(filed, "a real repository still counts");
+        if !strays_above {
+            assert!(!stray, "an empty .git is not a repository");
+        }
+    }
 
     /// The default map's keys go past the program; Esc before `[` or `O` is a
     /// sequence, and an Alt key no one here claims is the program's.
@@ -6221,6 +6310,60 @@ mod tests {
         ] {
             assert!(shown.contains(want), "{want}: {shown}");
         }
+
+        // `r` shows one repository's items, named in the title; a check then offers
+        // only those to ship.
+        app.on_push(ServerMsg::Items {
+            items: vec![
+                item(1, "Tab rename eats a letter", Open),
+                item(2, "Flaky exit test", Proposed),
+                Item {
+                    project: Some("/r/lib".into()),
+                    ..item(3, "Lib leaks a socket", Open)
+                },
+            ],
+        })
+        .unwrap();
+        assert_eq!(app.backlog_rows().len(), 3);
+        app.on_input(b"r".to_vec()).await;
+        let page = app.backlog.clone().unwrap();
+        assert_eq!(page.repo, backlog::Repo::In("/r/app".into()));
+        let rows: Vec<u32> = app.backlog_rows().iter().map(|(_, i)| i.id).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows.contains(&3));
+        terminal
+            .draw(|f| {
+                page.draw(
+                    f,
+                    &app.backlog_rows(),
+                    &app.sessions,
+                    0,
+                    0,
+                    app.settings.theme,
+                )
+            })
+            .unwrap();
+        assert!(
+            text(&terminal).contains(" Backlog app 2 open"),
+            "{}",
+            text(&terminal)
+        );
+        let merged = |id: u32| valkyrie_proto::ShippedItem {
+            id,
+            title: String::new(),
+            branch: format!("fix/{id}"),
+            branch_taken: false,
+            filed: false,
+            against: "origin/main".into(),
+            note: None,
+        };
+        app.on_shipping(Shipping {
+            asking: true,
+            unfetched: 0,
+            result: Ok((vec![merged(1), merged(3)], Vec::new())),
+        });
+        assert_eq!(app.backlog.as_ref().unwrap().ship_armed, Some(vec![1]));
+
         app.on_input(b"q".to_vec()).await;
         assert!(app.backlog.is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -7516,5 +7659,37 @@ mod tests {
         assert_eq!((small.width, small.height), (40, 10));
         let tiny = mini::mini_rect(Rect::new(0, 0, 30, 6));
         assert_eq!((tiny.width, tiny.height), (30, 6));
+    }
+
+    #[test]
+    fn a_csi_ends_at_an_embedded_esc() {
+        assert_eq!(next_key(b"\x1b[\x1b"), b"\x1b[");
+        assert_eq!(next_key(b"\x1b[1;\x1bx"), b"\x1b[1;");
+        assert_eq!(next_key(b"\x1b[Ax"), b"\x1b[A");
+        assert_eq!(next_key(b"\x1b[1;"), b"\x1b[1;");
+    }
+
+    #[test]
+    fn paste_changes_only_when_the_prompt_opens_or_closes() {
+        assert_eq!(paste_change(true, false, false), Some('h'));
+        assert_eq!(paste_change(false, true, false), Some('l'));
+        assert_eq!(
+            paste_change(false, true, true),
+            Some('h'),
+            "the program wants it"
+        );
+        assert_eq!(paste_change(true, true, false), None);
+        assert_eq!(paste_change(false, false, true), None);
+    }
+
+    #[test]
+    fn forced_modes_turn_paste_on_and_leave_the_rest() {
+        let m = Modes {
+            app_cursor: true,
+            ..Modes::default()
+        };
+        let f = forced_modes(m, true);
+        assert!(f.bracketed_paste && f.app_cursor);
+        assert_eq!(forced_modes(m, false), m);
     }
 }

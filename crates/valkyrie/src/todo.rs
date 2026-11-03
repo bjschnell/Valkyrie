@@ -41,10 +41,17 @@ pub enum TodoCmd {
         #[arg(long, value_name = "URL", requires = "take")]
         pr: Option<String>,
     },
-    /// The open and proposed items (with --all, shipped and dropped ones too).
+    /// The open and proposed items (with --all, shipped and dropped ones too), of
+    /// every repository unless you pick one.
     List {
         #[arg(long)]
         all: bool,
+        /// Only the items for the repository holding DIR (`-C .` for the one you're in).
+        #[arg(short = 'C', long, value_name = "DIR", conflicts_with = "no_folder")]
+        dir: Option<PathBuf>,
+        /// Only the items not for any repository yet.
+        #[arg(long)]
+        no_folder: bool,
         /// As JSON, every field, for a script or an agent to read.
         #[arg(long)]
         json: bool,
@@ -144,6 +151,8 @@ pub fn parse_kind(s: &str) -> Result<ItemKind, String> {
 pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<SessionInfo>> {
     match cmd.unwrap_or(TodoCmd::List {
         all: false,
+        dir: None,
+        no_folder: false,
         json: false,
     }) {
         TodoCmd::Add {
@@ -197,11 +206,30 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             println!("#{} {} ({}){taken}", item.id, item.title, folder(&item));
             Ok(None)
         }
-        TodoCmd::List { all, json } => {
+        TodoCmd::List {
+            all,
+            dir,
+            no_folder,
+            json,
+        } => {
+            // Items keep their repository's main root (every worktree shares it), so
+            // DIR is matched the same way.
+            let repo = match (dir, no_folder) {
+                (_, true) => Some(None),
+                (Some(dir), _) => {
+                    let dir = std::path::absolute(dir)?;
+                    if !valkyrie_context::project::in_git(&dir) {
+                        bail!("{} is not in a git repository", dir.display());
+                    }
+                    Some(Some(valkyrie_context::project::root(&dir)))
+                }
+                (None, _) => None,
+            };
             let items = client.items().await?;
             let items: Vec<Item> = items
                 .into_iter()
                 .filter(|i| all || matches!(i.status, ItemStatus::Open | ItemStatus::Proposed))
+                .filter(|i| repo.as_ref().is_none_or(|r| i.project == *r))
                 .collect();
             if json {
                 println!("{}", serde_json::to_string_pretty(&items)?);
@@ -209,11 +237,13 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             let sessions = client.list().await?;
             let boot = client.hello_info().await?.boot;
-            let shown = &items;
-            if shown.is_empty() {
-                println!("nothing written down; `valk todo add \"…\"` adds one");
+            if items.is_empty() {
+                match repo {
+                    Some(_) => println!("nothing written down for it"),
+                    None => println!("nothing written down; `valk todo add \"…\"` adds one"),
+                }
             }
-            for i in shown {
+            for i in &items {
                 println!(
                     "#{:<4} {:<8} {:<12} {:<14} {}{}{}",
                     i.id,

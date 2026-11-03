@@ -449,11 +449,11 @@ fn tips(repo: &Path, remote: bool) -> (Vec<String>, Vec<String>) {
     (against, tips)
 }
 
-/// `tips`, each commit with its name, e.g. (`origin/main`, its commit).
-fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
+/// The repository's default branch: what `origin/HEAD` names, even offline; else
+/// whichever of main and master exists.
+pub(crate) fn default_branch(repo: &Path) -> Option<String> {
     let tip = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
-    // `origin/HEAD` names it even offline; else whichever of main and master exists.
-    let default = git_out(
+    git_out(
         repo,
         &[
             "symbolic-ref",
@@ -469,7 +469,13 @@ fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
             tip(&format!("refs/heads/{b}")).is_ok()
                 || tip(&format!("refs/remotes/origin/{b}")).is_ok()
         })
-    });
+    })
+}
+
+/// `tips`, each commit with its name, e.g. (`origin/main`, its commit).
+fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
+    let tip = |reference: &str| git_out(repo, &["rev-parse", "--verify", "--quiet", reference]);
+    let default = default_branch(repo);
     let mut named = Vec::new();
     if let Some(default) = &default {
         if remote && let Ok(at) = tip(&format!("refs/remotes/origin/{default}")) {
@@ -494,7 +500,8 @@ fn named_tips(repo: &Path, remote: bool) -> Vec<(String, String)> {
 /// it would ship an item nobody worked on. A local branch has work when its reflog
 /// shows a commit, cherry-pick or merge made on it (a fast-forward, pull, rebase,
 /// reset or rename isn't: each can leave it on a commit of the default branch).
-/// One only on `origin`, without a reflog, or made here as a copy of `origin`'s,
+/// One only on `origin`, without a reflog, made here as a copy of `origin`'s, or
+/// pushed as it is (its head is `origin`'s),
 /// has work when its head is off the tips' first-parent history: a pull request
 /// merged with a merge commit, or squashed, but not a branch pushed from an older
 /// main with nothing on it.
@@ -546,8 +553,12 @@ pub fn branch_merged(repo: &Path, branch: &str) -> std::result::Result<String, S
             .any(|from| created == format!("branch: Created from {from}"))
         })
     };
+    // Pushed as it is: `origin` holds the same head, so it's judged as `origin`'s
+    // copy is. A rebase leaves no `commit` in the reflog, so this is what sees
+    // its work; an empty branch pushed stays on main's history and isn't any.
+    let pushed = is_local && rev(&remote).is_ok_and(|theirs| theirs == head);
     let work = match history {
-        Some(log) => log.lines().any(made_here) || (copied(&log) && off_main()),
+        Some(log) => log.lines().any(made_here) || ((pushed || copied(&log)) && off_main()),
         None => off_main(),
     };
     if !work {
@@ -700,7 +711,7 @@ fn git_raw(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Runs `git` in `dir`, returning what it printed, trimmed.
-fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(git_raw(dir, args)?.trim().to_owned())
 }
 
@@ -1084,6 +1095,68 @@ mod tests {
         // Pushed from an older main with nothing on it: on main's own history.
         assert_eq!(
             branch_merged(&clone, "fix/old"),
+            Err("no commits of its own".into())
+        );
+    }
+
+    #[test]
+    fn a_pushed_branch_whose_commits_came_by_rebase_is_work() {
+        let repo = Repo::new("branch-rebased");
+        let main = repo.main();
+        let me = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        let commit = |dir: &Path, file: &str| {
+            std::fs::write(dir.join(file), file).unwrap();
+            git(dir, &["add", file]).unwrap();
+            git(dir, &[&me[..], &["commit", "--quiet", "-m", file]].concat()).unwrap();
+        };
+        // The work is made on a branch elsewhere, then merged with a merge commit.
+        git(&main, &["checkout", "--quiet", "-b", "fix/src"]).unwrap();
+        commit(&main, "a.txt");
+        commit(&main, "b.txt");
+        git(&main, &["checkout", "--quiet", "main"]).unwrap();
+        let no_ff = ["merge", "--quiet", "--no-ff", "-m", "merge", "fix/src"];
+        git(&main, &[&me[..], &no_ff[..]].concat()).unwrap();
+        let clone = repo.0.join("clone");
+        let from = main.to_string_lossy().into_owned();
+        let to = clone.to_string_lossy().into_owned();
+        git(&repo.0, &["clone", "--quiet", &from, &to]).unwrap();
+        // Made with `checkout -b`, its commits arrived by rebase: the reflog has
+        // no `commit`, only `rebase (finish)`.
+        git(
+            &clone,
+            &["checkout", "--quiet", "-b", "fix/rebased", "main~1"],
+        )
+        .unwrap();
+        let rebase = ["rebase", "--quiet", "origin/fix/src"];
+        git(&clone, &[&me[..], &rebase[..]].concat()).unwrap();
+        // Not pushed: nothing says the work isn't just main's own history.
+        assert_eq!(
+            branch_merged(&clone, "fix/rebased"),
+            Err("no commits of its own".into())
+        );
+        // Pushed as it is: judged as origin's copy would be.
+        git(
+            &clone,
+            &[
+                "update-ref",
+                "refs/remotes/origin/fix/rebased",
+                "fix/rebased",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            branch_merged(&clone, "fix/rebased"),
+            Ok("origin/main".into())
+        );
+        // A pushed empty branch, its head a tip's ancestor, is still nobody's work.
+        git(&clone, &["branch", "fix/empty", "main~1"]).unwrap();
+        git(
+            &clone,
+            &["update-ref", "refs/remotes/origin/fix/empty", "fix/empty"],
+        )
+        .unwrap();
+        assert_eq!(
+            branch_merged(&clone, "fix/empty"),
             Err("no commits of its own".into())
         );
     }

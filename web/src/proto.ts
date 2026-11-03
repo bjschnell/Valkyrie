@@ -52,8 +52,8 @@ export interface QueueItem {
 }
 
 /** A project decision (ADR-0007). */
-export type DecisionKind = "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill";
-export const DECISION_KINDS: DecisionKind[] = ["decision", "constraint", "pattern", "gotcha", "fix", "skill"];
+export type DecisionKind = "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
+export const DECISION_KINDS: DecisionKind[] = ["decision", "constraint", "pattern", "gotcha", "fix", "skill", "policy"];
 export type DecisionStatus = "proposed" | "active" | "rejected" | "superseded" | "retired";
 
 export interface Decision {

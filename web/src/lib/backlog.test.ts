@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, byColumn, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, takenOnly, wouldShip } from "./backlog";
+import { agentFiled, byColumn, inRepo, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, takenOnly, wouldShip } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -41,6 +41,13 @@ describe("lane", () => {
     expect(lane(i, [session(4, "review_ready")], 7)).toBe("review");
     // The newest one exited: the older one still running counts.
     expect(liveSession(i, [session(3, "working"), session(4, "working", 0)], 7)?.id).toBe(3);
+  });
+
+  it("keeps an interrupted session running: nothing in it is complete", () => {
+    const i = item({ sessions: [4] });
+    expect(lane(i, [session(4, "interrupted")], 7)).toBe("running");
+    expect(lane(i, [session(4, "review_ready")], 7)).toBe("review");
+    expect(lane({ ...i, pr: "https://github.com/o/r/pull/7" }, [session(4, "interrupted")], 7)).toBe("review");
   });
 
   it("waits on review once its sessions are gone, or belong to another daemon", () => {
@@ -239,5 +246,30 @@ describe("wouldShip", () => {
     expect(wouldShip(shipped, [])).toBe(
       "Tap again to ship #6 fix/6 (agent-filed, not yet accepted), merged into origin/main (as of the last fetch)",
     );
+  });
+});
+
+describe("repo filter", () => {
+  const a = item({ id: 1, project: "/home/u/valkyrie" });
+  const b = item({ id: 2, project: "/home/u/notes" });
+  const none = item({ id: 3 });
+
+  it("shows every item unfiltered, one repository's, or those with no folder", () => {
+    expect([a, b, none].filter((i) => inRepo(i, null)).map((i) => i.id)).toEqual([1, 2, 3]);
+    expect([a, b, none].filter((i) => inRepo(i, "/home/u/notes")).map((i) => i.id)).toEqual([2]);
+    expect([a, b, none].filter((i) => inRepo(i, "")).map((i) => i.id)).toEqual([3]);
+  });
+
+  it("offers each repository once by name, then no folder", () => {
+    expect(repoChoices([a, b, none, item({ id: 4, project: "/home/u/notes" })])).toEqual([
+      { repo: "/home/u/notes", label: "notes" },
+      { repo: "/home/u/valkyrie", label: "valkyrie" },
+      { repo: "", label: "No folder" },
+    ]);
+  });
+
+  it("names repositories that share a name by their path", () => {
+    const other = item({ id: 5, project: "/work/valkyrie" });
+    expect(repoChoices([a, other]).map((c) => c.label)).toEqual(["/home/u/valkyrie", "/work/valkyrie"]);
   });
 });

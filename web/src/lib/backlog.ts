@@ -70,8 +70,11 @@ export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
       case "working":
       case "stale":
         return item.pr ? "review" : "running";
+      case "interrupted":
+        // An Esc-interrupted turn finished nothing: it isn't up for review.
+        return item.pr ? "review" : "running";
       default:
-        // Done with its turn, idle or interrupted: its work is waiting on you.
+        // Done with its turn or idle: its work is waiting on you.
         return "review";
     }
   }
@@ -100,6 +103,24 @@ export function byColumn(
 
 /** The last part of a path: a repository's name. */
 export const base = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+
+/** Which items the board shows: every repository's (`null`), one repository's (its
+ * path), or those with no folder yet (`""`). */
+export type RepoFilter = string | null;
+
+export const inRepo = (item: Item, repo: RepoFilter) => repo === null || (item.project ?? "") === repo;
+
+/** The repositories items are for, to pick from: each with its name, the full path
+ * where two share one; then "No folder" if any item has none. Sorted by name. */
+export function repoChoices(items: Item[]): { repo: string; label: string }[] {
+  const paths = [...new Set(items.flatMap((i) => (i.project ? [i.project] : [])))];
+  const named = paths.map((repo) => ({ repo, label: base(repo) }));
+  const clash = (label: string) => named.filter((n) => n.label === label).length > 1;
+  const out = named.map((n) => (clash(n.label) ? { ...n, label: n.repo } : n));
+  out.sort((a, b) => a.label.localeCompare(b.label) || a.repo.localeCompare(b.repo));
+  if (items.some((i) => !i.project)) out.push({ repo: "", label: "No folder" });
+  return out;
+}
 
 /** `2 commits · 3 files changed, 40 insertions(+) · 1 not committed`. */
 export function factsLine(f: ItemFacts): string {

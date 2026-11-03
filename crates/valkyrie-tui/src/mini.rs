@@ -9,7 +9,7 @@
 
 use crate::keys::Action;
 use crate::mouse::{self, Input};
-use crate::{App, Attached, reset_terminal_modes, write_modes};
+use crate::{App, Attached, write_modes};
 use anyhow::Result;
 use ratatui::layout::Rect;
 use ratatui::style;
@@ -117,13 +117,11 @@ impl App {
             self.say(format!("panes not attached: {e:#}"));
         }
         // The program underneath gets its terminal modes back.
-        match &self.view {
-            Some(v) => {
-                let _ = write_modes(v.modes, Some(v.shape));
+        match self.view.as_ref().map(|v| (v.modes, v.shape)) {
+            Some((modes, shape)) => {
+                let _ = write_modes(self.outer_modes(modes), Some(shape));
             }
-            None => {
-                let _ = reset_terminal_modes();
-            }
+            None => self.reset_outer_modes(),
         }
     }
 
