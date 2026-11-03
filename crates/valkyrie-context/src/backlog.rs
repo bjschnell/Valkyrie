@@ -117,12 +117,26 @@ impl Backlog {
             pr: None,
             filed_by,
             unaccepted: false,
+            pr_closed: false,
             notes: Vec::new(),
             created: now,
             updated: now,
         };
         self.write(&item)?;
         Ok(item)
+    }
+
+    /// Records whether item `id`'s pull request `pr` was last read closed without
+    /// merging. Ignored if the item has since moved to another PR, and written
+    /// only when it changes, since the daemon reads PRs every few minutes.
+    pub fn pr_closed(&self, id: u32, pr: &str, closed: bool) -> Result<Option<Item>> {
+        let mut item = self.get(id)?;
+        if item.pr.as_deref() != Some(pr) || item.pr_closed == closed {
+            return Ok(None);
+        }
+        item.pr_closed = closed;
+        self.write(&item)?;
+        Ok(Some(item))
     }
 
     /// Leaves a handoff note on item `id`; `taken`, from an agent that only took
@@ -358,6 +372,7 @@ impl Backlog {
             item.branch_taken = true;
         }
         if let Some(pr) = pr {
+            item.pr_closed &= item.pr.as_deref() == Some(pr);
             item.pr = Some(pr.to_owned());
         }
         if item.project.is_none() {
@@ -860,6 +875,22 @@ mod tests {
             );
         }
         assert_eq!(b.get(1).unwrap().pr.as_deref(), Some(pr));
+        // A closed mark holds for its own PR only: another one recorded starts over.
+        assert!(
+            b.pr_closed(1, "https://github.com/o/r/pull/8", true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(b.pr_closed(1, pr, true).unwrap().unwrap().pr_closed);
+        assert!(
+            b.pr_closed(1, pr, true).unwrap().is_none(),
+            "unchanged, not written"
+        );
+        let same = b.taken(1, 5, 77, &[], None, Some(pr), None, 6).unwrap();
+        assert!(same.pr_closed, "the same PR again keeps it");
+        let other = "https://github.com/o/r/pull/8";
+        let item = b.taken(1, 5, 77, &[], None, Some(other), None, 7).unwrap();
+        assert!(!item.pr_closed);
     }
 
     #[test]
@@ -969,6 +1000,7 @@ mod tests {
             pr: None,
             filed_by: None,
             unaccepted: false,
+            pr_closed: false,
             notes: Vec::new(),
             created: 0,
             updated: 0,

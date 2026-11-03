@@ -868,9 +868,10 @@ fn detail_lines(
         ]),
         Line::from(vec![
             format!(" {} ", lane.title()).fg(lane.color(t)).bold(),
-            match lane == Lane::Review && item.pr.is_some() {
-                true => "· PR open ".fg(t.muted),
-                false => "".into(),
+            match (lane == Lane::Review && item.pr.is_some(), item.pr_closed) {
+                (true, true) => "· PR closed ".fg(t.accent2),
+                (true, false) => "· PR open ".fg(t.muted),
+                (false, _) => "".into(),
             },
             match live {
                 Some(s) => format!("· tab {} {} ", s.id, s.status.state.label()).fg(t.muted),
@@ -964,6 +965,7 @@ mod tests {
             pr: None,
             filed_by: None,
             unaccepted: false,
+            pr_closed: false,
             notes: Vec::new(),
             created: 0,
             updated,
@@ -1092,6 +1094,7 @@ mod tests {
         let proposed = Item {
             filed_by: None,
             unaccepted: false,
+            pr_closed: false,
             ..filed.clone()
         };
         assert_eq!(lane(&proposed, &working, 7), Lane::Proposed);

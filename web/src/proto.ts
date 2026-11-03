@@ -183,6 +183,7 @@ export interface Item {
   filed_by?: [number, number];
   /** Shipped or dropped while still proposed: reopening makes it proposed again. */
   unaccepted?: boolean;
+  pr_closed?: boolean;
   /** Handoffs left on it, oldest first. */
   notes?: ItemNote[];
   /** Seconds since the epoch. */
