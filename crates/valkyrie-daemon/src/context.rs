@@ -288,9 +288,21 @@ impl Registry {
             })
             .collect();
         let now = crate::session::now_ms();
-        let text = tell(&root, &my_checkout, &me.activity(), &siblings, now)
+        let mut text = tell(&root, &my_checkout, &me.activity(), &siblings, now)
             .filter(|text| me.tell(text))
             .unwrap_or_default();
+        // Adopted into the backlog since its last prompt: said once, first.
+        let adopted = me
+            .take_adopted()
+            .and_then(|item| self.backlog.lock().unwrap().get(item).ok());
+        if let Some(item) = adopted {
+            let said = valkyrie_context::backlog::adopted(&item);
+            text = if text.is_empty() {
+                said
+            } else {
+                format!("{said}\n{text}")
+            };
+        }
         Ok(Reply::Text { text })
     }
 

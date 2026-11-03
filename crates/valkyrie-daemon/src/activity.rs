@@ -31,6 +31,9 @@ pub struct Activity {
     told: Option<u64>,
     /// Tool calls that failed since the last retro (ADR-0011).
     failures: u32,
+    /// The backlog item the user just adopted this session into, until its agent
+    /// is told on its next prompt: it has no `VALK_ITEM` to find it by.
+    adopted: Option<u32>,
 }
 
 impl Activity {
@@ -93,6 +96,21 @@ impl Activity {
     /// after yet may be answered then.
     pub fn arm(&mut self) {
         self.failures = self.failures.max(1);
+    }
+
+    /// What you last asked: the first line, without tags.
+    pub fn prompt(&self) -> Option<&str> {
+        self.prompt.as_ref().map(|(p, _)| p.as_str())
+    }
+
+    /// Remembers to tell the agent it's on item `id` now.
+    pub fn adopt(&mut self, id: u32) {
+        self.adopted = Some(id);
+    }
+
+    /// The item to tell the agent it was adopted into, once.
+    pub fn take_adopted(&mut self) -> Option<u32> {
+        self.adopted.take()
     }
 
     /// Whether `text` is news to this agent; remembers it either way.

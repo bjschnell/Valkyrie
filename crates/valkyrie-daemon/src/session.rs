@@ -1250,6 +1250,21 @@ impl Session {
         self.state.lock().unwrap().activity.arm()
     }
 
+    /// See `Activity::adopt`.
+    pub fn adopt_into_item(&self, item: u32) {
+        self.state.lock().unwrap().activity.adopt(item)
+    }
+
+    /// See `Activity::take_adopted`.
+    pub fn take_adopted(&self) -> Option<u32> {
+        self.state.lock().unwrap().activity.take_adopted()
+    }
+
+    /// The name the user gave it, if they did.
+    pub fn own_name(&self) -> Option<String> {
+        self.name.lock().unwrap().clone()
+    }
+
     /// Whether `text` is news to this session's agent (see `Activity::tell`).
     pub fn tell(&self, text: &str) -> bool {
         self.state.lock().unwrap().activity.tell(text)

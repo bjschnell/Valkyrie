@@ -289,6 +289,28 @@ impl Backlog {
         Ok(item)
     }
 
+    /// Records the user adopting `session` into item `id`, just written down for
+    /// it: linked as a launch links one (its notes reach a later launch's brief,
+    /// since the user chose it), with no checkout, since it stays where it was,
+    /// which shipping must never take away. `branch`, the one it's on, is
+    /// recorded as a take's is: the user may replace it.
+    pub fn adopted(
+        &self,
+        id: u32,
+        session: SessionId,
+        boot: u64,
+        branch: Option<&str>,
+        now: u64,
+    ) -> Result<Item> {
+        let mut item = self.launched(id, session, boot, &[], None, now)?;
+        if let Some(branch) = branch {
+            item.branch = Some(branch.to_owned());
+            item.branch_taken = true;
+            self.write(&item)?;
+        }
+        Ok(item)
+    }
+
     /// Records `session` taking item `id`, as `launched` does but with no checkout
     /// of its own: it may be working in the main one, which shipping must never
     /// take away. A session already on it isn't listed twice. Sets the branch and
@@ -486,11 +508,28 @@ pub fn brief(item: &Item) -> String {
             text.push_str(&format!("- {by}: {}\n", n.text.replace('\n', "\n  ")));
         }
     }
-    text.push_str(&format!(
-        "\n(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`, then `valk todo take N --pr <url>` and `valk todo note -i N \"…\"` with the N it printed (without -i N, both mean this item); `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
-        item.id
-    ));
+    text.push('\n');
+    text.push_str(&footer(item.id));
     text
+}
+
+/// What an agent on item `id` is asked to keep track of: the end of its brief.
+fn footer(id: u32) -> String {
+    format!(
+        "(This is item #{} in my Valkyrie backlog. Fix small related things you find along the way, here or in a pull request of their own, and record each with `valk todo add --take -k <bug|feature|chore> \"<title>\" --branch <branch>`, then `valk todo take N --pr <url>` and `valk todo note -i N \"…\"` with the N it printed (without -i N, both mean this item); `valk todo add` without --take is for what you won't do now. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        id
+    )
+}
+
+/// What the agent in a session the user just adopted into `item` is told on its
+/// next prompt, having no `VALK_ITEM` (`valk todo adopt`).
+pub fn adopted(item: &Item) -> String {
+    format!(
+        "The user just added this session to their Valkyrie backlog as item #{} “{}”: its card follows this session now. `valk todo show` prints it.\n{}",
+        item.id,
+        one_line(&item.title),
+        footer(item.id)
+    )
 }
 
 #[cfg(test)]
