@@ -94,6 +94,9 @@ impl AgentStatus {
 pub struct QueueItem {
     pub session: SessionId,
     pub name: String,
+    /// The name is the agent's topic, not one the user gave (`SessionInfo::auto_name`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_name: bool,
     pub cwd: PathBuf,
     pub status: AgentStatus,
 }

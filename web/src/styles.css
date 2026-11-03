@@ -567,6 +567,11 @@ code {
   color: var(--accent);
 }
 
+/* A name the agent's topic gave, not the user. */
+.auto-name {
+  font-style: italic;
+}
+
 .row[aria-checked="true"] .row-name {
   color: var(--accent);
 }

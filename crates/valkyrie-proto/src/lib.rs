@@ -170,6 +170,10 @@ pub fn binary_id() -> Option<(u64, u64)> {
 pub struct SessionInfo {
     pub id: SessionId,
     pub name: String,
+    /// `name` is what the agent says it works on, not one the user gave it: clients
+    /// show it set apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_name: bool,
     pub command: Vec<String>,
     pub cwd: PathBuf,
     pub pid: Option<u32>,

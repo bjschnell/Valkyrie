@@ -568,6 +568,58 @@ async fn claude_sessions_get_hook_settings_and_screen_heuristics() {
 }
 
 #[tokio::test]
+async fn claude_titles_name_a_session_until_the_user_does() {
+    let (client, _pushes, dir) = start().await;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("claude");
+    // Claude Code's titles: its placeholder, then the topic behind a spinner, then a
+    // later retitle that must not move the name.
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '\\033]0;\\342\\234\\263 Claude Code\\007'\nsleep 0.2\n\
+         printf '\\033]0;\\342\\227\\220 Fix the login bug\\007'\nsleep 0.2\n\
+         printf '\\033]0;\\342\\234\\263 Something else\\007ready'\nsleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut spec = sh("", SIZE);
+    spec.command = vec![fake.to_string_lossy().into_owned()];
+    let id = client.spawn(spec).await.unwrap().id;
+    // A shell's title is its last command, never a name.
+    let shell = client
+        .spawn(sh("printf '\\033]0;make test\\007ok'; sleep 30", SIZE))
+        .await
+        .unwrap()
+        .id;
+    wait_dump(&client, id, |t| t.contains("ready")).await;
+    wait_dump(&client, shell, |t| t.contains("ok")).await;
+    let info = |id| {
+        let client = client.clone();
+        async move {
+            let list = client.list().await.unwrap();
+            list.into_iter().find(|s| s.id == id).unwrap()
+        }
+    };
+    let s = info(id).await;
+    assert_eq!(s.name, "Fix the login bug");
+    assert!(s.auto_name);
+    let sh_info = info(shell).await;
+    assert_ne!(sh_info.name, "make test");
+    assert!(!sh_info.auto_name);
+
+    // The user's name wins; clearing it gives the topic back.
+    client.rename(id, Some("auth".into())).await.unwrap();
+    let s = info(id).await;
+    assert_eq!((s.name.as_str(), s.auto_name), ("auth", false));
+    client.rename(id, None).await.unwrap();
+    let s = info(id).await;
+    assert_eq!((s.name.as_str(), s.auto_name), ("Fix the login bug", true));
+    client.kill(id).await.unwrap();
+    client.kill(shell).await.unwrap();
+}
+
+#[tokio::test]
 async fn every_session_writes_a_replayable_event_log() {
     let (client, _pushes, dir) = start().await;
     let id = client

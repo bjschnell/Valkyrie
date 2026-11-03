@@ -277,6 +277,8 @@ struct App {
 struct Attached {
     id: SessionId,
     name: String,
+    /// `name` is the agent's topic, not the user's (`SessionInfo::auto_name`).
+    auto_name: bool,
     rows: Vec<Row>,
     cursor: Option<(u16, u16)>,
     shape: CursorShape,
@@ -320,6 +322,7 @@ impl Attached {
         Self {
             id,
             name,
+            auto_name: false,
             rows: Vec::new(),
             cursor: None,
             shape: CursorShape::Block,
@@ -624,11 +627,12 @@ impl App {
                         .sessions
                         .iter()
                         .find(|s| s.id == id)
-                        .map(|s| s.name.clone());
+                        .map(|s| (s.name.clone(), s.auto_name));
                     if let Some(pane) = self.pane_mut(id) {
                         pane.status = status;
-                        if let Some(name) = name {
+                        if let Some((name, auto)) = name {
                             pane.name = name;
+                            pane.auto_name = auto;
                         }
                     }
                 }
@@ -3014,9 +3018,15 @@ impl App {
         focused: bool,
     ) {
         let t = self.settings.theme;
+        let name = session.name.clone().fg(t.fg).bold();
+        let name = if session.auto_name {
+            name.italic()
+        } else {
+            name
+        };
         let title = Line::from(vec![
             " ▸ ".fg(t.accent).bold(),
-            session.name.clone().fg(t.fg).bold(),
+            name,
             format!(" #{} ", session.id).fg(t.muted),
         ]);
         let block = panel(title, t, focused);
@@ -3626,6 +3636,9 @@ impl App {
                     if here || queued {
                         name = name.bold();
                     }
+                    if s.auto_name {
+                        name = name.italic();
+                    }
                     Line::from(vec![
                         mark.fg(t.accent).bold(),
                         number.fg(t.muted),
@@ -3846,6 +3859,7 @@ impl App {
                         (true, false) => name.fg(t.fg).bold(),
                         (false, false) => name.fg(t.muted),
                     };
+                    let name = if s.auto_name { name.italic() } else { name };
                     let number = if here {
                         number.fg(t.accent)
                     } else {
@@ -4276,11 +4290,11 @@ fn badge(state: AgentState, label: String, spin: usize, t: &Theme) -> Cell<'stat
     ]))
 }
 
-fn name_cell(id: SessionId, name: &str, t: &Theme) -> Cell<'static> {
-    Cell::from(Line::from(vec![
-        name.to_string().fg(t.fg).bold(),
-        format!(" #{id}").fg(t.muted),
-    ]))
+/// The name, italic when it's the agent's topic rather than one the user gave.
+fn name_cell(id: SessionId, name: &str, auto: bool, t: &Theme) -> Cell<'static> {
+    let name = name.to_string().fg(t.fg).bold();
+    let name = if auto { name.italic() } else { name };
+    Cell::from(Line::from(vec![name, format!(" #{id}").fg(t.muted)]))
 }
 
 /// `#id  kind  title`, then who proposed it and in which project, muted.
@@ -4350,7 +4364,7 @@ fn queue_row(q: &QueueItem, now: u64, spin: usize, t: &Theme) -> TableRow<'stati
     let s = &q.status;
     TableRow::new([
         badge(s.state, s.state.label().into(), spin, t),
-        name_cell(q.session, &q.name, t),
+        name_cell(q.session, &q.name, q.auto_name, t),
         Cell::from(age(s.since_ms, now).fg(t.muted)),
         Cell::from(s.summary.clone().unwrap_or_default().fg(t.fg)),
         Cell::from(short_path(&q.cwd).fg(t.muted)),
@@ -4377,7 +4391,7 @@ fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'s
     }
     TableRow::new([
         badge(state, label, spin, t),
-        name_cell(s.id, &s.name, t),
+        name_cell(s.id, &s.name, s.auto_name, t),
         Cell::from(age(s.status.since_ms, now).fg(t.muted)),
         Cell::from(Line::from(detail)),
         Cell::from(short_path(&s.cwd).fg(t.muted)),
@@ -4507,8 +4521,9 @@ fn attached_bar(
 ) -> Bar {
     let width = |spans: &[Span]| spans.iter().map(|s| s.width() as u16).sum::<u16>();
     let mut clicks = Vec::new();
+    let name = format!(" {} ", view.name).fg(t.fg).bold();
     let mut spans = vec![
-        format!(" {} ", view.name).fg(t.fg).bold(),
+        if view.auto_name { name.italic() } else { name },
         format!("#{} ", view.id).fg(t.muted),
     ];
     match (view.exited, &view.status) {
@@ -5232,6 +5247,7 @@ mod tests {
         SessionInfo {
             id,
             name: String::new(),
+            auto_name: false,
             command: vec![],
             cwd: "/".into(),
             pid: None,
@@ -5249,6 +5265,7 @@ mod tests {
         QueueItem {
             session: id,
             name: String::new(),
+            auto_name: false,
             cwd: "/".into(),
             status: AgentStatus::default(),
         }
@@ -5528,6 +5545,7 @@ mod tests {
                 QueueItem {
                     session: s.id,
                     name: s.name.clone(),
+                    auto_name: false,
                     cwd: s.cwd.clone(),
                     status: s.status.clone(),
                 }
@@ -5616,6 +5634,7 @@ mod tests {
                     QueueItem {
                         session: s.id,
                         name: s.name.clone(),
+                        auto_name: false,
                         cwd: s.cwd.clone(),
                         status: s.status.clone(),
                     }

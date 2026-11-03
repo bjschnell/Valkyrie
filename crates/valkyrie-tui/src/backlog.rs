@@ -974,6 +974,7 @@ mod tests {
         SessionInfo {
             id,
             name: String::new(),
+            auto_name: false,
             command: vec![],
             cwd: "/".into(),
             pid: None,

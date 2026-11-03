@@ -130,13 +130,11 @@ impl App {
     }
 
     pub(crate) fn new_pane(&self, id: SessionId) -> Attached {
-        let name = self
-            .sessions
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| id.to_string());
-        Attached::new(id, name, self.sessions_status(id))
+        let info = self.sessions.iter().find(|s| s.id == id);
+        let name = info.map_or_else(|| id.to_string(), |s| s.name.clone());
+        let mut pane = Attached::new(id, name, self.sessions_status(id));
+        pane.auto_name = info.is_some_and(|s| s.auto_name);
+        pane
     }
 
     /// Attaches to the tab holding `id`, every pane of it, with `id` focused.

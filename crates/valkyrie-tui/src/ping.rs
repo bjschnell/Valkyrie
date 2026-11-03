@@ -521,6 +521,7 @@ mod tests {
         QueueItem {
             session: id,
             name: format!("s{id}"),
+            auto_name: false,
             cwd: "/".into(),
             status,
         }

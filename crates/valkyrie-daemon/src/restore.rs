@@ -189,6 +189,9 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
         match spawn_with(registry, spec, entry.conversation.clone()) {
             Ok(Reply::Session { info }) => {
                 tracing::info!(session = info.id, ?command, "restored");
+                if let Some(session) = registry.sessions.lock().unwrap().get(&info.id) {
+                    session.set_topic(entry.topic.clone());
+                }
                 ids.insert(place as SessionId, info.id);
                 restored += 1;
             }
