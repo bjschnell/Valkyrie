@@ -101,7 +101,8 @@ impl Registry {
         })
     }
 
-    /// An agent may drop an item it filed itself, and reword one it filed that's
+    /// An agent may drop an item it filed itself (not once shipped, which is the
+    /// user's), and reword one it filed that's
     /// still proposed, which the user reads before accepting; the rest (accepting,
     /// shipping, rewording one the user will launch, touching the user's or another
     /// agent's card) is the user's (ADR-0018).
@@ -120,10 +121,13 @@ impl Registry {
         match &change {
             ItemChange::Status {
                 status: ItemStatus::Dropped,
-            } if own() => {}
+            } if current.status != ItemStatus::Shipped && own() => {}
             ItemChange::Status {
                 status: ItemStatus::Dropped,
-            } => self.vouch(peer, "dropping a backlog item another filed")?,
+            } => self.vouch(
+                peer,
+                "dropping a backlog item another filed, or a shipped one",
+            )?,
             ItemChange::Edit { .. } if current.status == ItemStatus::Proposed && own() => {}
             ItemChange::Edit { .. } if current.status == ItemStatus::Proposed => {
                 self.vouch(peer, "rewording a proposal another filed")?
