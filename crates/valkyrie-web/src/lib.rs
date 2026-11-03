@@ -794,6 +794,23 @@ fn content_type(path: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// The app closes as "outdated" on a protocol it doesn't know, and this
+    /// server embeds the app it ships with: the two must move together.
+    #[test]
+    fn app_speaks_the_daemons_protocol() {
+        let src = include_str!("../../../web/src/proto.ts");
+        let app: u32 = src
+            .lines()
+            .find_map(|l| l.strip_prefix("export const PROTOCOL = "))
+            .and_then(|v| v.trim_end_matches(';').trim().parse().ok())
+            .expect("web/src/proto.ts exports PROTOCOL");
+        assert_eq!(
+            app,
+            valkyrie_proto::PROTOCOL,
+            "bump PROTOCOL in web/src/proto.ts and rebuild web/dist"
+        );
+    }
+
     #[test]
     fn origin_must_be_this_server() {
         let mut h = HeaderMap::new();
