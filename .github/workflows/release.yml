@@ -1,4 +1,4 @@
-# Builds `valk` and attaches it to a GitHub release, so a machine can install
+# Builds `valk` (build.yml) and attaches it to a GitHub release, so a machine can install
 # the binary without the source (docs/install.md). release-please.yml calls it when
 # a release pull request is merged (docs/releasing.md); a pushed `v*` tag or a
 # manual run does the same by hand. The release stays a draft until every build
@@ -52,57 +52,10 @@ jobs:
 
   build:
     needs: release
-    strategy:
-      matrix:
-        include:
-          # Static (musl), so one file runs on any Linux and any WSL distro,
-          # whatever its glibc.
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      # The tag, not the branch a manual run was started from.
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-      - name: musl toolchain
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: rustup target add ${{ matrix.target }}
-      # The tag's commit, also for a manual run: `valk upgrade` compares it with
-      # what the tag points at (build.rs).
-      - name: stamp
-        shell: bash
-        run: echo "VALK_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-      - run: cargo build --locked --release -p valkyrie --target ${{ matrix.target }}
-      - name: publish
-        if: runner.os != 'Windows'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.release.outputs.tag }}
-          NAME: valk-${{ matrix.target }}.tar.gz
-        run: |
-          tar -czf "$NAME" -C target/${{ matrix.target }}/release valk
-          shasum -a 256 "$NAME" > "$NAME.sha256"
-          gh release upload "$TAG" "$NAME" "$NAME.sha256" --clobber
-      - name: publish Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.release.outputs.tag }}
-          NAME: valk-${{ matrix.target }}.zip
-        run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/valk.exe -DestinationPath $env:NAME
-          $hash = (Get-FileHash $env:NAME -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $env:NAME" | Set-Content "$env:NAME.sha256" -Encoding ascii
-          gh release upload $env:TAG $env:NAME "$env:NAME.sha256" --clobber
+    uses: ./.github/workflows/build.yml
+    with:
+      release: ${{ needs.release.outputs.tag }}
+      ref: ${{ needs.release.outputs.tag }}
 
   installers:
     needs: [release, build]
@@ -115,13 +68,14 @@ jobs:
         run: |
           gh release upload "$TAG" install-release.sh install.ps1 install-wsl.ps1 --clobber
       # Publish once. `valk upgrade` installs whatever is latest, so a backport or a
-      # re-run for an older tag must not become it.
+      # re-run for an older tag must not become it. The rolling `edge` pre-release
+      # (edge.yml) never counts.
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}
         run: |
           [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" = true ] || exit 0
-          newest=$( { gh release list --exclude-drafts --json tagName -q '.[].tagName'; echo "$TAG"; } \
+          newest=$( { gh release list --exclude-drafts --exclude-pre-releases --json tagName -q '.[].tagName'; echo "$TAG"; } \
             | sort -V | tail -n 1)
           latest=false
           [ "$newest" = "$TAG" ] && latest=true
