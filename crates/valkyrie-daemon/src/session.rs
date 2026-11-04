@@ -253,6 +253,8 @@ struct State {
     /// The prompt that answered it, with that state, until the next stop shows
     /// how far the work got.
     answer: Option<(String, String)>,
+    /// What the agent ran, for the repository's facts (ADR-0016 §3).
+    watch: crate::facts::Watch,
 }
 
 /// A reply to a stop short of shipping, and how far the work got by the next
@@ -389,6 +391,7 @@ impl Session {
             topic: None,
             guard: Default::default(),
             unshipped: None,
+            watch: Default::default(),
             answer: None,
         };
         state.log(
@@ -480,6 +483,7 @@ impl Session {
             // Not carried over: a confirm up across an upgrade is a narrow window.
             guard: Default::default(),
             unshipped: None,
+            watch: Default::default(),
             answer: None,
         };
         state.log(now, "resume", json!({"generation": generation}));
@@ -848,6 +852,16 @@ impl Session {
 
     /// Records where the agent left its work when a turn ended (ADR-0013 §1), for
     /// `valk pings`. Written after the turn end's own line, once git has been read.
+    /// A key for this session that no other has, now or after a restart: its
+    /// transcript's name (`<created ns>-<id>`), as `valk pings` names sessions.
+    /// Names aren't: two sessions in one repository share it.
+    pub fn key(&self) -> String {
+        self.transcript
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.id.to_string())
+    }
+
     /// Records where a stop left the work. Returns the reply it completes, when
     /// the stop before was short of shipping and the user answered it.
     pub fn log_work(&self, work: Value) -> Option<Answered> {
@@ -861,6 +875,7 @@ impl Session {
             after: after.clone(),
             pr,
         });
+        state.watch.stopped(&after, pr);
         state.unshipped =
             matches!(after.as_str(), "uncommitted" | "unpushed" | "no-pr").then_some(after);
         answered
@@ -869,7 +884,13 @@ impl Session {
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
     /// inherits `VALK_SESSION`, so only the session's own agent may drive it (a
     /// `codex exec` run by Claude must not); a plain shell session takes any agent.
-    pub fn hook(self: &Arc<Self>, agent: &str, sent_us: u64, payload: Value) {
+    /// Returns what it saw run, for the repository's facts.
+    pub fn hook(
+        self: &Arc<Self>,
+        agent: &str,
+        sent_us: u64,
+        payload: Value,
+    ) -> Option<(PathBuf, valkyrie_context::facts::Seen)> {
         let adapter = valkyrie_agents::by_name(agent);
         let ours = adapter.name() != "generic"
             && (self.adapter.name() == "generic" || self.adapter.name() == adapter.name());
@@ -882,6 +903,11 @@ impl Session {
             json!({"agent": agent, "sent_us": sent_us, "payload": payload, "events": events,
                    "ignored": !ours}),
         );
+        let seen = if ours {
+            state.watch.hook(&payload)
+        } else {
+            None
+        };
         if ours {
             state.activity.note(&payload, now);
             state.guard.hook(&payload);
@@ -921,6 +947,7 @@ impl Session {
         if ours && state.tracker.hook(&events, sent_us, now, self.watching()) {
             self.after_change(&mut state, now);
         }
+        seen
     }
 
     /// Periodic: screen heuristics once output is quiet (glances in between), then
