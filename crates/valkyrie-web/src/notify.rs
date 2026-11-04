@@ -411,6 +411,7 @@ mod tests {
             updated: 1,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: Default::default(),
             fresh: Default::default(),
         }

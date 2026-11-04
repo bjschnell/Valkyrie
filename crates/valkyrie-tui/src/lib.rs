@@ -5375,6 +5375,7 @@ mod tests {
             updated: 0,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: valkyrie_proto::Provenance {
                 by: "claude".into(),
                 ..Default::default()

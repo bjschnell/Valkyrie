@@ -244,6 +244,7 @@ impl Store {
             updated: now,
             supersedes: new.supersedes,
             superseded_by: None,
+            pinned: false,
             fresh,
             provenance,
         };
@@ -297,6 +298,18 @@ impl Store {
             (ReviewAction::Reject, Proposed) => d.status = Rejected,
             (ReviewAction::Retire, Active) => d.status = Retired,
             (ReviewAction::Confirm, Active) => confirming = true,
+            (ReviewAction::Pin | ReviewAction::Unpin, Active) => {
+                // A skill is an index line read when needed, and a policy's body
+                // is settings for its hook: neither has a body to put in the block.
+                if matches!(d.kind, DecisionKind::Skill | DecisionKind::Policy) {
+                    bail!("#{id} is a {}: it isn't pinned", d.kind.as_str());
+                }
+                // Habits are listed by title in every project, never in full.
+                if project::is_user(root) {
+                    bail!("#{id} is a habit: habits aren't pinned");
+                }
+                d.pinned = matches!(action, ReviewAction::Pin);
+            }
             (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
                 (d.title, d.body) = clean(title, body, *kind, root)?;
                 d.kind = *kind;
@@ -315,6 +328,8 @@ impl Store {
                     ReviewAction::Reject => "reject",
                     ReviewAction::Retire => "retire",
                     ReviewAction::Confirm => "confirm",
+                    ReviewAction::Pin => "pin",
+                    ReviewAction::Unpin => "unpin",
                     ReviewAction::Edit { .. } => "edit",
                     ReviewAction::Revise { .. } => "revise",
                 },
@@ -1041,6 +1056,30 @@ mod tests {
             f.store.failures(&f.repo, (FAILURE_DAYS + 3) * day),
             Failures::default()
         );
+    }
+
+    #[test]
+    fn active_decisions_pin_and_unpin_but_skills_and_proposals_dont() {
+        let f = Fixture::new("pin");
+        let a = f
+            .store
+            .decide(&f.new_decision("A"), by("human"), 1)
+            .unwrap();
+        let pin =
+            |id, action: &ReviewAction, at| f.store.review(&f.repo, id, action, None, None, at);
+        assert!(pin(a.id, &ReviewAction::Pin, 2).unwrap().pinned);
+        // Kept in the file, read back.
+        assert!(f.store.load(&f.repo)[0].pinned);
+        assert!(!pin(a.id, &ReviewAction::Unpin, 3).unwrap().pinned);
+        assert!(!f.store.load(&f.repo)[0].pinned);
+        let mut skill = f.new_decision("Release the thing");
+        skill.kind = DecisionKind::Skill;
+        let skill = f.store.decide(&skill, by("human"), 4).unwrap();
+        assert!(pin(skill.id, &ReviewAction::Pin, 5).is_err());
+        let mut asked = f.new_decision("B");
+        asked.propose = true;
+        let asked = f.store.decide(&asked, by("human"), 6).unwrap();
+        assert!(pin(asked.id, &ReviewAction::Pin, 7).is_err());
     }
 
     #[test]

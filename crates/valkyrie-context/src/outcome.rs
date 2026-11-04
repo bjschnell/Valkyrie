@@ -304,6 +304,7 @@ mod tests {
             updated: 1,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             fresh: Default::default(),
             provenance: Default::default(),
         };

@@ -70,6 +70,8 @@ export interface Decision {
   updated: number;
   supersedes?: number;
   superseded_by?: number;
+  /** Its body goes in every session's block (ADR-0014 §1); only you set it. */
+  pinned?: boolean;
   provenance: {
     /** `human`, or the agent that proposed it. */
     by: string;
@@ -93,6 +95,9 @@ export type ReviewAction =
   | { a: "retire" }
   /** An active decision flagged for review still holds. */
   | { a: "confirm" }
+  /** Put an active decision's body in every session's block, or take it back to a title. */
+  | { a: "pin" }
+  | { a: "unpin" }
   | { a: "edit"; title: string; body: string; kind: DecisionKind }
   /** Reword a proposal and accept it; refused once it isn't a proposal any more. */
   | { a: "revise"; title: string; body: string; kind: DecisionKind };

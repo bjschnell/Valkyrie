@@ -2678,3 +2678,27 @@ button.title-name {
   flex: 1;
   min-width: 0;
 }
+
+/* Every active decision, to pin (ADR-0014 §1) --------------------------------- */
+
+.decisions-about {
+  margin: 4px 0 12px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.decision-card.in-full {
+  --state: var(--blocked);
+}
+
+button.as-text {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}

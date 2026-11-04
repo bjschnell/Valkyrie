@@ -528,6 +528,7 @@ mod tests {
             updated: 77,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: Provenance::default(),
             fresh: Default::default(),
         }
