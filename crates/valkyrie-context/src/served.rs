@@ -139,6 +139,26 @@ pub fn unserved(decisions: &[Decision], serves: &[Serve], now: u64) -> Vec<(u32,
         .collect()
 }
 
+/// The decisions `session` already got whole, so a hook doesn't serve them
+/// again. The read commands log under Valkyrie's session (`valk`), which spans
+/// the agent's `/clear`s, so theirs count from the agent session's first serve.
+pub fn had(serves: &[Serve], session: &str, valk: Option<&str>) -> BTreeSet<u32> {
+    let start = serves
+        .iter()
+        .filter(|s| s.session == session)
+        .map(|s| s.at)
+        .min();
+    serves
+        .iter()
+        .filter(|s| s.layer.whole())
+        .filter(|s| {
+            s.session == session
+                || (valk == Some(s.session.as_str()) && start.is_some_and(|t| s.at >= t))
+        })
+        .map(|s| s.id)
+        .collect()
+}
+
 /// Why a decision no session got for `days` needs you.
 pub fn says(days: u64) -> String {
     format!(
@@ -244,6 +264,29 @@ mod tests {
         let mut confirmed = d(2, DecisionKind::Decision);
         confirmed.fresh.confirmed = 30 * DAY;
         assert!(unserved(&[confirmed], &sessions(12, 0, 10 * DAY), 60 * DAY).is_empty());
+    }
+
+    #[test]
+    fn a_session_had_what_it_got_whole_and_what_valk_read_it_since_it_began() {
+        let valk = |id, at| Serve {
+            session: "valk:7".into(),
+            id,
+            layer: Layer::Show,
+            at,
+        };
+        let log = [
+            valk(9, 1),
+            serve(1, 1, Layer::Block, 5),
+            serve(1, 2, Layer::Title, 5),
+            serve(1, 3, Layer::Prompt, 6),
+            serve(2, 4, Layer::Block, 6),
+            valk(5, 7),
+        ];
+        let had = |valk_id| had(&log, "s1", valk_id).into_iter().collect::<Vec<_>>();
+        assert_eq!(had(None), [1, 3]);
+        // #9 was read before this agent session began (a `/clear` ago).
+        assert_eq!(had(Some("valk:7")), [1, 3, 5]);
+        assert!(super::had(&log, "s9", Some("valk:7")).is_empty());
     }
 
     #[test]

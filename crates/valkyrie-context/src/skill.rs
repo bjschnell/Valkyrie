@@ -290,16 +290,7 @@ pub fn finished(jsonl: &str) -> Option<(usize, String, String)> {
 /// The active skills a prompt is about: most of a title's words in it, leaving
 /// out words every sentence has, and a plural's `s`.
 pub fn about<'a>(prompt: &str, known: &'a [Decision]) -> Vec<&'a Decision> {
-    let words = |text: &str| -> std::collections::BTreeSet<String> {
-        extract::words(text)
-            .into_iter()
-            .filter(|w| !crate::mine::STOPWORDS.contains(&w.as_str()))
-            .map(|w| match w.strip_suffix('s') {
-                Some(one) if one.len() > 2 && !one.ends_with('s') => one.to_owned(),
-                _ => w,
-            })
-            .collect()
-    };
+    let words = crate::find::words;
     let said = words(prompt);
     known
         .iter()

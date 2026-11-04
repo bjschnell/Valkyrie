@@ -6,6 +6,7 @@ pub mod backlog;
 pub mod extract;
 pub mod facts;
 mod file;
+pub mod find;
 pub mod handoff;
 pub mod inject;
 pub mod mine;

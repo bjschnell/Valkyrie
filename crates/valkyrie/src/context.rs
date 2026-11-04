@@ -27,6 +27,11 @@ pub enum DecisionsCmd {
     Health,
     /// Show one decision in full, with where it came from.
     Show { id: u32 },
+    /// Find decisions by their words, best first (with --all, ended ones too).
+    Search {
+        #[arg(required = true)]
+        words: Vec<String>,
+    },
     /// Print the block agents get at session start.
     Preview,
     /// Copy the active decisions into <repo>/.valkyrie/decisions/ for git.
@@ -195,6 +200,34 @@ pub async fn decisions(
             }
             if d.kind == DecisionKind::Policy {
                 print_policy(client, &here).await?;
+            }
+            Ok(())
+        }
+        Some(DecisionsCmd::Search { words }) => {
+            let list = client.decisions(Some(cwd)).await?;
+            let found = valkyrie_context::find::search(&list, &words.join(" "), all);
+            if found.is_empty() {
+                println!(
+                    "no decision has those words; `{} decisions` lists them all",
+                    valk_command()
+                );
+                return Ok(());
+            }
+            for d in &found {
+                println!("{}", valkyrie_context::find::line(d));
+            }
+            if let Some(session) = reader() {
+                let store = valkyrie_context::Store::new(store_base());
+                record_served(
+                    &store,
+                    &root,
+                    &session,
+                    found
+                        .iter()
+                        .filter(|d| d.status == DecisionStatus::Active)
+                        .take(valkyrie_context::served::MAX_SEARCH_SERVED)
+                        .map(|d| (d.id, valkyrie_context::served::Layer::Search)),
+                );
             }
             Ok(())
         }
@@ -736,20 +769,42 @@ pub fn hook(agent: &str, ambient: bool) {
         "UserPromptSubmit" => {
             let prompt = payload["prompt"].as_str().unwrap_or("");
             let root = valkyrie_context::project::root(&cwd);
-            let known = valkyrie_context::Store::new(store_base()).load(&root);
+            let store = valkyrie_context::Store::new(store_base());
+            let known = store.load(&root);
             let skills = valkyrie_context::skill::about(prompt, &known);
+            let valk = valk_command();
             let mut text = siblings().unwrap_or_default();
             for d in skills {
                 if !text.is_empty() {
                     text.push('\n');
                 }
                 text.push_str(&format!(
-                    "Skill #{} “{}” looks like what this asks for: read it first with `{} decisions show {}`.",
-                    d.id,
-                    d.title,
-                    valk_command(),
-                    d.id
+                    "Skill #{} “{}” looks like what this asks for: read it first with `{valk} decisions show {}`.",
+                    d.id, d.title, d.id
                 ));
+            }
+            // Decisions the prompt bears on (ADR-0014 §3), each once a session:
+            // without the agent's session id there's no telling what it had.
+            if let Some(session) = payload["session_id"].as_str().filter(|s| !s.is_empty()) {
+                use valkyrie_context::served::{self, Layer};
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let had = served::had(&store.served(&root, now), session, reader().as_deref());
+                let found = valkyrie_context::find::for_prompt(prompt, &known, &had);
+                if !found.is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&valkyrie_context::find::prompt_section(&found, &valk));
+                    record_served(
+                        &store,
+                        &root,
+                        session,
+                        found.iter().map(|d| (d.id, Layer::Prompt)),
+                    );
+                }
             }
             if text.is_empty() {
                 return;
