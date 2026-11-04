@@ -6,8 +6,8 @@
 //!
 //! One exception, by the user's own accepted policy (ADR-0013 §5): on Claude's
 //! `Stop`, when an active `ship` policy finds the work short of where the user
-//! ships it, the hook prints Claude's block with the policy's text, and tells the
-//! daemon the turn goes on. It's this hook rather than the context hook so the one
+//! ships it, or `ci-fix` finds its pull request's checks failed, the hook prints
+//! Claude's block with the policy's text, and tells the daemon the turn goes on. It's this hook rather than the context hook so the one
 //! process that reports the stop also decides it: the queue never shows a turn
 //! end the agent didn't take.
 //!
@@ -27,7 +27,7 @@ const MAX_STRING: usize = 4096;
 /// Payloads larger than this are dropped rather than forwarded.
 const MAX_PAYLOAD: u64 = 8 * 1024 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_millis(300);
-/// Longest the `ship` policy waits on `gh` for a pull request: Claude gives the
+/// Longest a policy waits on `gh` for a pull request: Claude gives the
 /// hook 5 s, and an unanswered lookup lets the stop through.
 const GH_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -77,7 +77,7 @@ fn forward(agent: &str, socket: &Path) -> Result<()> {
     let guard = merge_guard(agent, &mut payload, &crate::guard::Git);
     let mut payload = slim(payload);
     let block = (agent == "claude")
-        .then(|| ship_block(&mut payload))
+        .then(|| policy_block(&mut payload))
         .flatten();
     let sent = send(socket, session, agent, sent_us, payload);
     // Blocked whether or not the daemon heard: the policy is the user's either way.
@@ -158,12 +158,14 @@ fn send(
     Ok(())
 }
 
-/// On a main-thread `Stop`, the `ship` policy (ADR-0013), the user's habit with the
-/// project's settings over it (ADR-0016): the text to
-/// keep the turn going when the work is short of where the user ships it, with
-/// the payload marked so the daemon doesn't count a turn end. Once per turn:
-/// Claude says `stop_hook_active` when the stop follows a block.
-fn ship_block(payload: &mut Value) -> Option<String> {
+/// On a main-thread `Stop`, the user's accepted policies (ADR-0013): the text to
+/// keep the turn going, with the payload marked so the daemon doesn't count a turn
+/// end. `ship` (the user's habit with the project's settings over it, ADR-0016)
+/// answers work short of where the user ships it; `ci-fix`, on where the
+/// repository's `ci: gh` is accepted, answers a pull request whose checks failed,
+/// at most [`policy::CI_FIX_LIMIT`] times per pull request. Once per turn: Claude
+/// says `stop_hook_active` when the stop follows a block.
+fn policy_block(payload: &mut Value) -> Option<String> {
     use valkyrie_context::policy;
     use valkyrie_daemon::work;
     if payload["hook_event_name"] != "Stop"
@@ -176,33 +178,68 @@ fn ship_block(payload: &mut Value) -> Option<String> {
     let cwd = PathBuf::from(payload["cwd"].as_str()?);
     let root = valkyrie_context::project::root(&cwd);
     let store = valkyrie_context::Store::new(crate::context::store_base());
-    let ship = policy::ship(
-        &store.load(&root),
-        &store.load(&valkyrie_context::project::user()),
-    )?;
-    let pr = |dir: &Path, branch: &str| {
-        if ship.until.0 == policy::Until::Pr {
-            work::gh_pr(dir, branch, GH_TIMEOUT)
-        } else {
-            // Nothing past a push matters to this policy.
-            work::Pr::Unknown
-        }
-    };
-    let (state, branch, _) = work::state(&cwd, &pr)?;
-    let state = state.as_str();
-    if !policy::short(&ship, state) {
+    let (project, user) = (
+        store.load(&root),
+        store.load(&valkyrie_context::project::user()),
+    );
+    let ship = policy::ship(&project, &user);
+    let ci = policy::ci(&project, &user).filter(|(ci, _)| *ci == policy::Ci::Gh);
+    if ship.is_none() && ci.is_none() {
         return None;
     }
-    let (policy, scope) = match ship.until.1 {
+    // Nothing past a push matters unless a policy looks at the pull request.
+    let ask = ci.is_some()
+        || ship
+            .as_ref()
+            .is_some_and(|s| s.until.0 == policy::Until::Pr);
+    let seen = std::cell::RefCell::new(None);
+    let pr = |dir: &Path, branch: &str| {
+        if !ask {
+            return work::Pr::Unknown;
+        }
+        let pr = work::gh_pr(dir, branch, GH_TIMEOUT);
+        *seen.borrow_mut() = Some(pr.clone());
+        pr
+    };
+    let (state, branch, url) = work::state(&cwd, &pr)?;
+    let branch = branch.unwrap_or_default();
+    let named = |source: policy::Source| match source {
         policy::Source::User(id) => (id, "user"),
         policy::Source::Project(id) => (id, "project"),
     };
-    payload["valk_continued"] = serde_json::json!({"policy": policy, "scope": scope,
-        "state": state, "until": ship.until.0.as_str()});
-    Some(policy::reason(
-        &ship,
-        state,
-        branch.as_deref().unwrap_or(""),
+    if let Some(ship) = ship
+        && policy::short(&ship, state.as_str())
+    {
+        let (policy, scope) = named(ship.until.1);
+        payload["valk_continued"] = serde_json::json!({"template": "ship", "policy": policy,
+            "scope": scope, "state": state.as_str(), "until": ship.until.0.as_str()});
+        return Some(policy::reason(&ship, state.as_str(), &branch));
+    }
+    let (_, source) = ci?;
+    if state != work::State::PrRed {
+        return None;
+    }
+    let url = url?;
+    let Some(work::Pr::Open { failed, .. }) = seen.take() else {
+        return None;
+    };
+    // Past the limit the stop goes through: what's left is the user's.
+    if store.ci_fix_blocks(&root, &url) >= policy::CI_FIX_LIMIT {
+        return None;
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    // Uncounted, it could go on forever: no block.
+    let block = store.record_ci_fix(&root, &url, now).ok()?;
+    let (policy, scope) = named(source);
+    payload["valk_continued"] = serde_json::json!({"template": "ci-fix", "policy": policy,
+        "scope": scope, "state": state.as_str(), "pr": url, "block": block});
+    Some(policy::ci_fix(
+        source,
+        policy::checks(&project, &user).as_ref(),
+        &url,
+        &branch,
+        &failed,
+        block,
     ))
 }
 

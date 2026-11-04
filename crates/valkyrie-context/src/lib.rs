@@ -525,6 +525,40 @@ impl Store {
         write_atomic(&path, &format!("{}\n", used.to_json()))
     }
 
+    /// How many times the `ci-fix` policy has kept an agent going on the pull
+    /// request at `pr` (ADR-0013 §3); 0 when it never has.
+    pub fn ci_fix_blocks(&self, root: &Path, pr: &str) -> u32 {
+        self.ci_fixes(root)[pr]["blocks"].as_u64().unwrap_or(0) as u32
+    }
+
+    /// Counts one more `ci-fix` block on `pr`, and returns the new count. Pull
+    /// requests not blocked for [`FAILURE_DAYS`] are forgotten.
+    pub fn record_ci_fix(&self, root: &Path, pr: &str, now: u64) -> Result<u32> {
+        let mut all = self.ci_fixes(root);
+        let map = all.as_object_mut().context("ci-fix.json isn't an object")?;
+        map.retain(|_, v| {
+            now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+        });
+        let blocks = map.get(pr).and_then(|v| v["blocks"].as_u64()).unwrap_or(0) as u32 + 1;
+        map.insert(
+            pr.to_owned(),
+            serde_json::json!({"blocks": blocks, "at": now}),
+        );
+        self.mark_project(root)?;
+        let path = self.base.join(project::key(root)).join("ci-fix.json");
+        write_atomic(&path, &format!("{all}\n"))?;
+        Ok(blocks)
+    }
+
+    fn ci_fixes(&self, root: &Path) -> serde_json::Value {
+        let path = self.base.join(project::key(root)).join("ci-fix.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
     fn failures_file(&self, root: &Path) -> PathBuf {
         self.base.join(project::key(root)).join("failures.jsonl")
     }
@@ -1154,6 +1188,25 @@ mod tests {
         let got = f.store.skill_use(&f.repo);
         assert_eq!(got.since, 10 * day);
         assert!(!got.sessions.contains_key("old"));
+    }
+
+    #[test]
+    fn ci_fix_blocks_count_per_pull_request_and_are_forgotten() {
+        let f = Fixture::new("ci-fix");
+        let (a, b) = (
+            "https://github.com/o/r/pull/1",
+            "https://github.com/o/r/pull/2",
+        );
+        assert_eq!(f.store.ci_fix_blocks(&f.repo, a), 0);
+        assert_eq!(f.store.record_ci_fix(&f.repo, a, 1).unwrap(), 1);
+        assert_eq!(f.store.record_ci_fix(&f.repo, a, 2).unwrap(), 2);
+        let day = 86_400;
+        assert_eq!(f.store.record_ci_fix(&f.repo, b, 10 * day).unwrap(), 1);
+        assert_eq!(f.store.ci_fix_blocks(&f.repo, a), 2);
+        // A pull request quiet for long starts over; a recent one keeps its count.
+        let later = (FAILURE_DAYS + 5) * day;
+        assert_eq!(f.store.record_ci_fix(&f.repo, b, later).unwrap(), 2);
+        assert_eq!(f.store.ci_fix_blocks(&f.repo, a), 0);
     }
 
     #[test]

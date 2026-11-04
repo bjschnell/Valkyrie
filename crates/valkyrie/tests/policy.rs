@@ -34,6 +34,16 @@ fn git(dir: &Path, args: &[&str]) {
 /// What `valk hook claude` prints for a Stop in `repo`, with the store at `store`.
 /// No daemon is running: the block can't wait on one.
 fn stop(dir: &Path, repo: &Path, active: bool) -> String {
+    stop_with(dir, repo, active, None)
+}
+
+/// `stop`, with `gh` taken from `bin` first when given.
+fn stop_with(dir: &Path, repo: &Path, active: bool, bin: Option<&Path>) -> String {
+    let mut path = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(bin) = bin {
+        let dirs = std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path));
+        path = std::env::join_paths(dirs.collect::<Vec<_>>()).unwrap();
+    }
     let mut child = Command::new(BIN)
         .args(["hook", "claude"])
         .env("VALK_SESSION", "1")
@@ -41,6 +51,7 @@ fn stop(dir: &Path, repo: &Path, active: bool) -> String {
         .env("VALK_CONTEXT", dir.join("context"))
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_STATE_HOME", dir.join("state"))
+        .env("PATH", path)
         .env_remove("VALK_SESSION_HOOKS")
         .env_remove("VALK_HOOK_LOG")
         .stdin(Stdio::piped())
@@ -215,4 +226,106 @@ fn the_users_habit_ships_in_a_repository_with_no_policy_of_its_own() {
     // Committed: as far as this user ships.
     git(&repo, &["commit", "--quiet", "-am", "fix"]);
     assert_eq!(stop(&dir.0, &repo, false), "");
+}
+
+#[test]
+fn ci_fix_keeps_the_agent_on_a_red_pull_request_twice_then_lets_it_stop() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Dir(std::env::temp_dir().join(format!("valkyrie-ci-fix-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    let repo = dir.0.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(
+        &dir.0,
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    git(&repo, &["remote", "add", "origin", "../origin.git"]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+    git(&repo, &["checkout", "--quiet", "-b", "fix"]);
+    std::fs::write(repo.join("a.txt"), "fixed").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "fix"]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "fix"]);
+
+    // A `gh` that answers with whatever the test last wrote.
+    let bin = dir.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let answer = dir.0.join("gh.json");
+    let gh = bin.join("gh");
+    std::fs::write(&gh, format!("#!/bin/sh\ncat '{}'\n", answer.display())).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pr = "https://github.com/o/r/pull/93";
+    let red = serde_json::json!({"state": "OPEN", "url": pr, "statusCheckRollup": [
+        {"name": "test", "workflowName": "CI", "conclusion": "FAILURE",
+         "detailsUrl": "https://github.com/o/r/actions/runs/555/job/1"},
+        {"context": "bamboo/PLAN", "state": "FAILURE",
+         "targetUrl": "https://bamboo.example.com/browse/PLAN-7"}]});
+    std::fs::write(&answer, red.to_string()).unwrap();
+    let stop = |active| stop_with(&dir.0, &repo, active, Some(&bin));
+
+    // No `ci` accepted: a red PR is the user's, as before.
+    assert_eq!(stop(false), "");
+
+    let store = valkyrie_context::Store::new(dir.0.join("context"));
+    let human = Provenance {
+        by: "human".into(),
+        ..Default::default()
+    };
+    // The repository's facts alone, with no habit saying how far to ship.
+    let facts = store
+        .decide(
+            &NewDecision {
+                cwd: repo.clone(),
+                title: "Checks to run before shipping".into(),
+                body: "template: ship\nchecks: make check\nci: gh".into(),
+                kind: DecisionKind::Policy,
+                propose: false,
+                supersedes: None,
+                review_every: None,
+                session: None,
+            },
+            human,
+            1,
+        )
+        .unwrap()
+        .id;
+    let block = |out: String| -> String {
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["decision"], "block", "{out}");
+        v["reason"].as_str().unwrap().to_owned()
+    };
+    let reason = block(stop(false));
+    assert!(
+        reason.starts_with(&format!("Valkyrie policy #{facts}, accepted")),
+        "{reason}"
+    );
+    assert!(reason.contains("PR #93 (branch `fix`)"), "{reason}");
+    assert!(
+        reason.contains("`CI / test`: `gh run view 555 --log-failed`"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("`bamboo/PLAN`: https://bamboo.example.com/browse/PLAN-7"),
+        "{reason}"
+    );
+    assert!(reason.contains("run `make check`, push"), "{reason}");
+    assert!(reason.contains("block 1 of 2"), "{reason}");
+    // Once per turn.
+    assert_eq!(stop(true), "");
+    // Green, or still running: nothing to fix.
+    let green = serde_json::json!({"state": "OPEN", "url": pr, "statusCheckRollup": [
+        {"name": "test", "conclusion": "SUCCESS"}, {"name": "lint", "status": "IN_PROGRESS"}]});
+    std::fs::write(&answer, green.to_string()).unwrap();
+    assert_eq!(stop(false), "");
+    // Red again: the second and last block, then the user's.
+    std::fs::write(&answer, red.to_string()).unwrap();
+    assert!(block(stop(false)).contains("block 2 of 2"));
+    assert_eq!(stop(false), "");
+    // Another pull request starts its own count.
+    let other = red.to_string().replace("/pull/93", "/pull/94");
+    std::fs::write(&answer, other).unwrap();
+    assert!(block(stop(false)).contains("PR #94"));
 }

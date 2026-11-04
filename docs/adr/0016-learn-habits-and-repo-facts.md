@@ -43,7 +43,7 @@ A first draft of this ADR added onboarding: a question on first run about how fa
 1. The user scope and how the scopes combine. Split #21 into a habit (`until: pr`) and this repository's facts (`checks`, `ci: gh`).
 2. Reply pairs and the habit proposal, across repositories (ADR-0013 phase 3, #37).
 3. Learning `checks` and `ci: agent` from what runs in a repository, as proposals.
-4. `ci-fix` with `ci: gh` (#38, with PR #73's links), then with `ci: agent` (#48).
+4. `ci-fix` with `ci: gh` (#38, with PR #73's links; built 2026-11-03, see ADR-0013 §3), then with `ci: agent` (#48).
 
 ## Consequences
 - No setup. A new user's first couple of routine shipping stops still reach them. After that, the habit holds in every repository.

@@ -196,6 +196,10 @@ impl Ship {
             None => out.push_str("checks: none recorded (the agent runs what the project uses)\n"),
         }
         match &self.ci {
+            Some((Ci::Gh, from)) => out.push_str(&format!(
+                "ci: gh  ({from}); ci-fix keeps an agent on a red pull request, {CI_FIX_LIMIT} \
+                 times at most\n"
+            )),
             Some((c, from)) => out.push_str(&format!("ci: {}  ({from})\n", c.as_str())),
             None => out.push_str("ci: none recorded\n"),
         }
@@ -254,6 +258,18 @@ pub fn short(ship: &Ship, state: &str) -> bool {
     reached(state).is_some_and(|got| got < Some(ship.until.0))
 }
 
+/// How a policy's decisions are named to the agent: `#N`, or `your habit #N`.
+fn names(sources: &[Source]) -> String {
+    let names: Vec<String> = sources
+        .iter()
+        .map(|s| match s {
+            Source::Project(id) => format!("#{id}"),
+            user => user.to_string(),
+        })
+        .collect();
+    names.join(" with ")
+}
+
 /// What the agent is told when `ship` keeps its turn going.
 pub fn reason(ship: &Ship, state: &str, branch: &str) -> String {
     let left = match state {
@@ -265,22 +281,107 @@ pub fn reason(ship: &Ship, state: &str, branch: &str) -> String {
         None => "Run the project's checks (format, lint, tests: what its CI runs).".to_owned(),
         Some((checks, _)) => format!("Run `{checks}`."),
     };
-    let names: Vec<String> = ship
-        .sources()
-        .iter()
-        .map(|s| match s {
-            Source::Project(id) => format!("#{id}"),
-            user => user.to_string(),
-        })
-        .collect();
     format!(
         "Valkyrie policy {names}, accepted by the user: work isn't done until it's \
          shipped to `{until}`. Branch `{branch}` {left}. {checks} If they pass, {steps}. \
          If they fail and you can't fix them, stop and say why. Never merge, and never \
          push to the default branch.",
-        names = names.join(" with "),
+        names = names(&ship.sources()),
         until = ship.until.0.as_str(),
         steps = ship.until.0.steps(),
+    )
+}
+
+/// The `ci-fix` template (ADR-0013 §3): how many times it keeps an agent going on
+/// one pull request before its stops go through to the user.
+pub const CI_FIX_LIMIT: u32 = 2;
+
+/// Where CI runs in a project, whatever says how far to ship: the newest `ci`
+/// setting, the project's over the user's. `None`: nothing recorded, so `ci-fix`
+/// is off (the user accepts it with the repository's `ci` fact, ADR-0016 §3).
+pub fn ci(project: &[Decision], user: &[Decision]) -> Option<(Ci, Source)> {
+    let (project, user) = (settings(project), settings(user));
+    let scopes: [Scope; 2] = [(&project, Source::Project), (&user, Source::User)];
+    pick(&scopes, |s| s.ci)
+}
+
+/// The project's `checks`, the same way: for `ci-fix` where no `until` is set.
+pub fn checks(project: &[Decision], user: &[Decision]) -> Option<(String, Source)> {
+    let (project, user) = (settings(project), settings(user));
+    let scopes: [Scope; 2] = [(&project, Source::Project), (&user, Source::User)];
+    pick(&scopes, |s| s.checks.clone())
+}
+
+/// A failed check on a pull request, named the way GitHub shows it, with the link
+/// to its logs (ADR-0013 §3): a check run's `detailsUrl`, or a commit status's
+/// `targetUrl` for CI that runs outside GitHub Actions (Jenkins, Bamboo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub name: String,
+    /// Empty when the CI gave none.
+    pub url: String,
+    /// The GitHub Actions run, when the check is one: `gh run view` reads it.
+    pub run: Option<u64>,
+}
+
+/// Longest list of failed checks an agent is given; the rest are counted.
+const MAX_CHECKS: usize = 10;
+
+/// What a pull request whose checks failed tells the agent (`ci: gh`): each
+/// failed check with where its logs are, then fix, push and wait, or stop and say
+/// why. `block` counts from 1 to [`CI_FIX_LIMIT`].
+pub fn ci_fix(
+    ci: Source,
+    checks: Option<&(String, Source)>,
+    pr: &str,
+    branch: &str,
+    failed: &[Check],
+    block: u32,
+) -> String {
+    let mut sources = vec![ci];
+    if let Some((_, from)) = checks
+        && *from != ci
+    {
+        sources.push(*from);
+    }
+    let number = pr
+        .rsplit_once("/pull/")
+        .map(|(_, n)| format!("#{}", n.trim_end_matches('/')))
+        .unwrap_or_else(|| pr.to_owned());
+    let mut list = String::new();
+    for c in failed.iter().take(MAX_CHECKS) {
+        let name = if c.name.is_empty() {
+            "a check"
+        } else {
+            &c.name
+        };
+        let how = match (c.run, c.url.is_empty()) {
+            (Some(run), _) => format!("`gh run view {run} --log-failed`"),
+            (None, false) => format!("{} (not GitHub Actions: open the link)", c.url),
+            (None, true) => "no link: run the same check locally".to_owned(),
+        };
+        list.push_str(&format!("\n- `{name}`: {how}"));
+    }
+    if failed.len() > MAX_CHECKS {
+        list.push_str(&format!("\n- and {} more", failed.len() - MAX_CHECKS));
+    }
+    let run = match checks {
+        Some((checks, _)) => format!("run `{checks}`"),
+        None => "run the project's checks".to_owned(),
+    };
+    format!(
+        "Valkyrie policy {names}, accepted by the user: a pull request isn't done while \
+         its CI is red. PR {number} (branch `{branch}`) has failed checks:{list}\n\
+         Read the failing logs, fix the cause, {run}, push, and wait for the checks \
+         (`gh pr checks --watch`). For a check outside GitHub Actions, reach its logs \
+         through the link (or its CI's API), or run the same check locally if you \
+         can't. If the failure is in code you didn't change (a flaky test, a broken \
+         runner), look for it in `valk todo list` and file it with `valk todo add -k \
+         bug` if it's new, then rerun the failed jobs once (`gh run rerun <run> \
+         --failed`) and wait. If you can't make it pass, stop and say why. Never merge, \
+         and never push to the default branch. This is block {block} of {CI_FIX_LIMIT} \
+         for this PR; after that your stops go to the user.",
+        names = names(&sources),
     )
 }
 
@@ -425,5 +526,74 @@ mod tests {
         )
         .unwrap();
         assert!(reason(&habit, "no-pr", "b").starts_with("Valkyrie policy your habit #2 with #7,"));
+    }
+
+    #[test]
+    fn ci_is_read_without_anything_saying_how_far_to_ship() {
+        let facts = [policy(39, 9, "template: ship\nchecks: make\nci: gh")];
+        assert_eq!(ci(&facts, &[]), Some((Ci::Gh, Source::Project(39))));
+        assert_eq!(
+            checks(&facts, &[]),
+            Some(("make".into(), Source::Project(39)))
+        );
+        assert_eq!(ci(&[], &[policy(1, 1, "template: ship\nuntil: pr")]), None);
+        let off = [policy(40, 10, "template: ship\nci: none")];
+        assert_eq!(
+            ci(&[facts[0].clone(), off[0].clone()], &[]).unwrap().0,
+            Ci::None
+        );
+    }
+
+    #[test]
+    fn ci_fix_names_each_failed_check_and_where_its_logs_are() {
+        let failed = [
+            Check {
+                name: "CI / test".into(),
+                url: "https://github.com/o/r/actions/runs/7/job/8".into(),
+                run: Some(7),
+            },
+            Check {
+                name: "bamboo/PLAN".into(),
+                url: "https://bamboo.example.com/browse/PLAN-1".into(),
+                run: None,
+            },
+            Check {
+                name: String::new(),
+                url: String::new(),
+                run: None,
+            },
+        ];
+        let checks = ("make check".to_owned(), Source::Project(39));
+        let text = ci_fix(
+            Source::Project(39),
+            Some(&checks),
+            "https://github.com/o/r/pull/93",
+            "fix/x",
+            &failed,
+            1,
+        );
+        assert!(
+            text.starts_with("Valkyrie policy #39, accepted by the user"),
+            "{text}"
+        );
+        assert!(text.contains("PR #93 (branch `fix/x`)"), "{text}");
+        assert!(
+            text.contains("- `CI / test`: `gh run view 7 --log-failed`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- `bamboo/PLAN`: https://bamboo.example.com/browse/PLAN-1 (not GitHub"),
+            "{text}"
+        );
+        assert!(text.contains("- `a check`: no link"), "{text}");
+        assert!(text.contains("run `make check`, push"), "{text}");
+        assert!(text.contains("gh run rerun <run> --failed"), "{text}");
+        assert!(text.contains("Never merge"), "{text}");
+        assert!(text.contains("block 1 of 2"), "{text}");
+        // Many failures: the first few, and a count.
+        let many = vec![failed[0].clone(); MAX_CHECKS + 3];
+        let text = ci_fix(Source::User(1), None, "u", "b", &many, 2);
+        assert!(text.contains("and 3 more"), "{text}");
+        assert!(text.contains("run the project's checks"), "{text}");
     }
 }
