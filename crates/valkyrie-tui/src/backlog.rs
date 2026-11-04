@@ -153,8 +153,12 @@ pub(crate) fn rows_of(
             _ => order(a, b),
         })
     });
-    for (_, item) in &mut out {
-        item.blocked_by = item.waiting_on(all);
+    // A done item waits on nothing worth showing, as the web card has it.
+    for (lane, item) in &mut out {
+        item.blocked_by = match lane {
+            Lane::Done => Vec::new(),
+            _ => item.waiting_on(all),
+        };
     }
     // Sorted newest first: the newest few done ones stay.
     let mut done = 0;

@@ -82,7 +82,7 @@ impl Backlog {
         valkyrie_proto::ensure_private_dir(&self.base)?;
         let items = self.load();
         // Nothing can wait on an item not yet written, so no cycle is possible here.
-        let blocked_by = blockers(0, &new.blocked_by, &items)?;
+        let blocked_by = blockers(0, &new.blocked_by, &[], &items)?;
         let id = items
             .iter()
             .map(|i| i.id)
@@ -243,7 +243,7 @@ impl Backlog {
                     item.priority = *priority;
                 }
                 if let Some(ids) = blocked_by {
-                    item.blocked_by = blockers(id, ids, &self.load())?;
+                    item.blocked_by = blockers(id, ids, &item.blocked_by, &self.load())?;
                 }
                 // A blank title is taken from the body when adding; here it would
                 // quietly move the body's first line.
@@ -416,26 +416,28 @@ impl Backlog {
     }
 }
 
-/// Refuses a pull request that isn't one plain `https://` URL: it's shown as a
-/// link in the web app.
 /// Most items one can wait on.
 const MAX_BLOCKERS: usize = 20;
 
 /// `ids` as item `id` (0 for one being added) may wait on, sorted with repeats
 /// dropped: items that exist, not itself, and none that waits on it in turn.
-fn blockers(id: u32, ids: &[u32], items: &[Item]) -> Result<Vec<u32>> {
+/// One deleted since it was put on the list (`had`, the list it has now) is
+/// dropped rather than refused: clients send the whole list back, so it would
+/// otherwise block every later change to it.
+fn blockers(id: u32, ids: &[u32], had: &[u32], items: &[Item]) -> Result<Vec<u32>> {
     let mut ids = ids.to_vec();
+    ids.retain(|b| !had.contains(b) || items.iter().any(|i| i.id == *b));
     ids.sort_unstable();
     ids.dedup();
     if ids.len() > MAX_BLOCKERS {
         bail!("at most {MAX_BLOCKERS} items to wait on");
     }
     for &b in &ids {
-        if b == id {
-            bail!("#{id} can't wait on itself");
-        }
         if !items.iter().any(|i| i.id == b) {
             bail!("no item #{b}");
+        }
+        if b == id {
+            bail!("#{id} can't wait on itself");
         }
         // Follow what b waits on: reaching `id` would make a loop.
         let mut seen = vec![b];
@@ -458,6 +460,8 @@ fn blockers(id: u32, ids: &[u32], items: &[Item]) -> Result<Vec<u32>> {
     Ok(ids)
 }
 
+/// Refuses a pull request that isn't one plain `https://` URL: it's shown as a
+/// link in the web app.
 pub fn pr_url(pr: &str) -> Result<()> {
     // ASCII only: bidi and look-alike characters could make a link read as another.
     let ok = pr.is_ascii()
@@ -1163,6 +1167,30 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            b.add(
+                &NewItem {
+                    blocked_by: vec![0],
+                    ..new("x", "", ItemKind::Bug)
+                },
+                "human",
+                5
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no item #0")
+        );
+        // A blocker deleted since doesn't stand in the way of the next change.
+        let four = b
+            .add(&new("four", "", ItemKind::Feature), "human", 5)
+            .unwrap();
+        b.change(three.id, &after(vec![two.id, four.id]), 5)
+            .unwrap();
+        b.delete(four.id).unwrap();
+        let kept = b
+            .change(three.id, &after(vec![two.id, four.id, one.id]), 5)
+            .unwrap();
+        assert_eq!(kept.blocked_by, [1, 2]);
         // Clearing works, and a priority alone is a change.
         assert!(
             b.change(three.id, &after(Vec::new()), 6)
