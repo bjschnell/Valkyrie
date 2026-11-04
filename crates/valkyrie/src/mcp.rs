@@ -6,6 +6,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use valkyrie_context::served::Layer;
 use valkyrie_proto::client::Client;
 use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, NewDecision};
 
@@ -113,6 +114,16 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
             let list = all().await?;
             let found = search(&list, query, inactive);
             if !found.is_empty() {
+                // The fallback below lists everything for the agent to judge, so
+                // only a hit counts as served.
+                served(
+                    cwd,
+                    found
+                        .iter()
+                        .filter(|d| d.status == DecisionStatus::Active)
+                        .take(valkyrie_context::served::MAX_SEARCH_SERVED)
+                        .map(|d| (d.id, Layer::Search)),
+                );
                 return Ok(found.iter().map(|d| line(d)).collect::<Vec<_>>().join("\n"));
             }
             // Words miss synonyms ("package manager" vs "pnpm"); a project has tens
@@ -155,6 +166,9 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
             // Unreviewed text (an agent's, or the extractor's) never reaches an agent.
             if d.status == DecisionStatus::Proposed {
                 anyhow::bail!("#{id} is a proposal the user hasn't reviewed yet");
+            }
+            if d.status == DecisionStatus::Active {
+                served(cwd, [(d.id, Layer::Show)]);
             }
             let mut text = valkyrie_context::render(d);
             if let Some(why) = &d.fresh.review {
@@ -224,10 +238,27 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
             for line in crate::context::overridden(&store, &root, &list, &habits, now) {
                 text.push_str(&format!("\n{line}"));
             }
+            for (id, days) in store.unserved(&root, &list, now) {
+                text.push_str(&format!(
+                    "\n#{id}: {}",
+                    valkyrie_context::served::says(days)
+                ));
+            }
             Ok(text)
         }
         other => anyhow::bail!("no tool {other}"),
     }
+}
+
+/// Logs what this agent was served (ADR-0014 §5), when it runs in a Valkyrie
+/// session.
+fn served(cwd: &std::path::Path, serves: impl IntoIterator<Item = (u32, Layer)>) {
+    let Some(session) = crate::context::reader() else {
+        return;
+    };
+    let root = valkyrie_context::project::root(cwd);
+    let store = valkyrie_context::Store::new(crate::context::store_base());
+    crate::context::record_served(&store, &root, &session, serves);
 }
 
 fn line(d: &Decision) -> String {
