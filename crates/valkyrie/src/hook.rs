@@ -158,7 +158,8 @@ fn send(
     Ok(())
 }
 
-/// On a main-thread `Stop`, the project's `ship` policy (ADR-0013): the text to
+/// On a main-thread `Stop`, the `ship` policy (ADR-0013), the user's habit with the
+/// project's settings over it (ADR-0016): the text to
 /// keep the turn going when the work is short of where the user ships it, with
 /// the payload marked so the daemon doesn't count a turn end. Once per turn:
 /// Claude says `stop_hook_active` when the stop follows a block.
@@ -174,10 +175,13 @@ fn ship_block(payload: &mut Value) -> Option<String> {
     }
     let cwd = PathBuf::from(payload["cwd"].as_str()?);
     let root = valkyrie_context::project::root(&cwd);
-    let decisions = valkyrie_context::Store::new(crate::context::store_base()).load(&root);
-    let (id, ship) = policy::ship(&decisions)?;
+    let store = valkyrie_context::Store::new(crate::context::store_base());
+    let ship = policy::ship(
+        &store.load(&root),
+        &store.load(&valkyrie_context::project::user()),
+    )?;
     let pr = |dir: &Path, branch: &str| {
-        if ship.until == policy::Until::Pr {
+        if ship.until.0 == policy::Until::Pr {
             work::gh_pr(dir, branch, GH_TIMEOUT)
         } else {
             // Nothing past a push matters to this policy.
@@ -189,10 +193,13 @@ fn ship_block(payload: &mut Value) -> Option<String> {
     if !policy::short(&ship, state) {
         return None;
     }
-    payload["valk_continued"] =
-        serde_json::json!({"policy": id, "state": state, "until": ship.until.as_str()});
+    let (policy, scope) = match ship.until.1 {
+        policy::Source::User(id) => (id, "user"),
+        policy::Source::Project(id) => (id, "project"),
+    };
+    payload["valk_continued"] = serde_json::json!({"policy": policy, "scope": scope,
+        "state": state, "until": ship.until.0.as_str()});
     Some(policy::reason(
-        id,
         &ship,
         state,
         branch.as_deref().unwrap_or(""),

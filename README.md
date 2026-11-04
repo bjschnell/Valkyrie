@@ -344,20 +344,28 @@ How it works:
    first is `ship`: when a Claude agent is about to end its turn with work short of
    where you ship it, the hook keeps it going instead, with fixed text that has it
    run your checks and then commit, push, or open a pull request. It never merges
-   and never pushes the default branch. How far is yours to set, once:
+   and never pushes the default branch. Its settings live in two places
+   (ADR-0016). How far you ship is your habit, recorded once for every project
+   with `--user`. Each repository's checks are its own:
 
    ```sh
-   printf '%s\n' 'template: ship' 'until: pr' \
+   printf '%s\n' 'template: ship' 'until: pr' |
+     valk decide --user -k policy "Ship finished work as a pull request" -
+   printf '%s\n' 'template: ship' 'ci: gh' \
      'checks: cargo fmt --check && cargo clippy && cargo test' |
-     valk decide -k policy "Ship finished work as a pull request" -
+     valk decide -k policy "Checks to run before shipping" -
    ```
 
    (The body comes on stdin with `-`, which works the same in bash, zsh and fish.)
 
-   `until` is `commit`, `push` or `pr`; `checks` is optional. The agent gets the
-   template, never your body as prose, and only once a turn. The queue doesn't
-   show *finished* for a turn a policy kept going, and `valk pings` counts those
-   stops apart. Retire the policy, or turn Context off, to stop it.
+   `until` is `commit`, `push` or `pr`; `checks` and `ci` (`gh`, `agent` or
+   `none`) are optional. A repository's settings lie over your habit, and one that
+   sets `until` itself wins there. `valk decisions show <id>` on a policy prints
+   what's in effect in the project and where each setting came from; `valk
+   decisions --user` lists your habits. The agent gets the template, never your
+   body as prose, and only once a turn. The queue doesn't show *finished* for a
+   turn a policy kept going, and `valk pings` counts those stops apart. Retire the
+   policy, or turn Context off, to stop it.
 8. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently

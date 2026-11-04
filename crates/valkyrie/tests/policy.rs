@@ -141,3 +141,78 @@ fn a_ship_policy_keeps_the_turn_going_until_work_is_where_the_user_ships_it() {
     };
     assert!(store.decide(&bad, human, 2).is_err());
 }
+
+#[test]
+fn the_users_habit_ships_in_a_repository_with_no_policy_of_its_own() {
+    let dir = Dir(std::env::temp_dir().join(format!("valkyrie-habit-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    let repo = dir.0.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    git(&repo, &["checkout", "--quiet", "-b", "fix"]);
+    std::fs::write(repo.join("a.txt"), "fixed").unwrap();
+
+    let store = valkyrie_context::Store::new(dir.0.join("context"));
+    let human = Provenance {
+        by: "human".into(),
+        ..Default::default()
+    };
+    let policy = |cwd: PathBuf, body: &str| NewDecision {
+        cwd,
+        title: "Ship".into(),
+        body: body.into(),
+        kind: DecisionKind::Policy,
+        propose: false,
+        supersedes: None,
+        review_every: None,
+        session: None,
+    };
+    // The habit, recorded once for every project.
+    let user = valkyrie_context::project::user();
+    let habit = store
+        .decide(
+            &policy(user, "template: ship\nuntil: commit"),
+            human.clone(),
+            1,
+        )
+        .unwrap()
+        .id;
+    let block = |out: String| -> String {
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["decision"], "block", "{out}");
+        v["reason"].as_str().unwrap().to_owned()
+    };
+    // A repository with nothing of its own: the habit alone, with whatever checks
+    // the project uses.
+    let reason = block(stop(&dir.0, &repo, false));
+    assert!(
+        reason.starts_with(&format!("Valkyrie policy your habit #{habit}, accepted")),
+        "{reason}"
+    );
+    assert!(reason.contains("Run the project's checks"), "{reason}");
+
+    // The repository's facts lie over it.
+    let facts = store
+        .decide(
+            &policy(repo.clone(), "template: ship\nchecks: true\nci: gh"),
+            human,
+            2,
+        )
+        .unwrap()
+        .id;
+    let reason = block(stop(&dir.0, &repo, false));
+    assert!(
+        reason.starts_with(&format!(
+            "Valkyrie policy your habit #{habit} with #{facts}, accepted"
+        )),
+        "{reason}"
+    );
+    assert!(reason.contains("Run `true`."), "{reason}");
+
+    // Committed: as far as this user ships.
+    git(&repo, &["commit", "--quiet", "-am", "fix"]);
+    assert_eq!(stop(&dir.0, &repo, false), "");
+}

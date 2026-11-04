@@ -191,8 +191,8 @@ impl Store {
     /// `proposed`. `provenance.by` must already be set by the caller (the daemon,
     /// which knows whether the session runs an agent).
     pub fn decide(&self, new: &NewDecision, provenance: Provenance, now: u64) -> Result<Decision> {
-        let (title, body) = clean(&new.title, &new.body, new.kind)?;
         let root = project::root(&new.cwd);
+        let (title, body) = clean(&new.title, &new.body, new.kind, &root)?;
         let files = self.files(&root);
         let by_human = provenance.by == "human";
         if let Some(old) = new.supersedes {
@@ -294,12 +294,12 @@ impl Store {
             (ReviewAction::Retire, Active) => d.status = Retired,
             (ReviewAction::Confirm, Active) => confirming = true,
             (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
-                (d.title, d.body) = clean(title, body, *kind)?;
+                (d.title, d.body) = clean(title, body, *kind, root)?;
                 d.kind = *kind;
                 reworded = true;
             }
             (ReviewAction::Revise { title, body, kind }, Proposed) => {
-                (d.title, d.body) = clean(title, body, *kind)?;
+                (d.title, d.body) = clean(title, body, *kind, root)?;
                 d.kind = *kind;
                 accepting = true;
                 reworded = true;
@@ -672,7 +672,8 @@ fn export_skills(all: &[Decision], checkout: &Path) -> Result<Vec<PathBuf>> {
 /// A title on one line and a trimmed body, both without control characters (but
 /// the body's line breaks) or bidi overrides: text a reviewer reads in a terminal
 /// must be the text agents get.
-fn clean(title: &str, body: &str, kind: DecisionKind) -> Result<(String, String)> {
+/// A policy is read for the scope `root` is: the user's, or a project's.
+fn clean(title: &str, body: &str, kind: DecisionKind, root: &Path) -> Result<(String, String)> {
     let title = file::one_line(&shown(title, false));
     if title.is_empty() {
         bail!("a decision needs a title");
@@ -682,7 +683,7 @@ fn clean(title: &str, body: &str, kind: DecisionKind) -> Result<(String, String)
     }
     let body = shown(body, true).trim().to_owned();
     if kind == DecisionKind::Policy
-        && let Err(e) = policy::parse(&body)
+        && let Err(e) = policy::check(&body, project::is_user(root))
     {
         bail!("{e}");
     }
@@ -823,6 +824,56 @@ mod tests {
         assert_eq!(f.store.projects(), vec![f.repo.clone()]);
         let proposed: Vec<u32> = f.store.proposals().iter().map(|d| d.id).collect();
         assert_eq!(proposed, vec![2, 3]);
+    }
+
+    #[test]
+    fn the_users_habits_are_a_scope_beside_the_projects() {
+        let f = Fixture::new("user");
+        let habit = NewDecision {
+            cwd: project::user(),
+            title: "Ship finished work as a pull request".into(),
+            body: "template: ship\nuntil: pr".into(),
+            kind: DecisionKind::Policy,
+            ..f.new_decision("")
+        };
+        // An agent proposes a habit; it's the user's to accept, as in a project.
+        let d = f.store.decide(&habit, by("claude"), 1).unwrap();
+        assert_eq!((d.id, d.status), (1, DecisionStatus::Proposed));
+        assert_eq!(d.project, project::user());
+        assert!(f.base.join("state/context/user/decisions").is_dir());
+        assert_eq!(f.store.projects(), vec![project::user()]);
+        assert_eq!(f.store.proposals()[0].project, project::user());
+        f.store
+            .review(&project::user(), 1, &ReviewAction::Accept, None, None, 2)
+            .unwrap();
+        assert_eq!(
+            f.store.load(&project::user())[0].status,
+            DecisionStatus::Active
+        );
+        // A project's ids are its own.
+        let p = f
+            .store
+            .decide(&f.new_decision("A"), by("human"), 3)
+            .unwrap();
+        assert_eq!(p.id, 1);
+        // A repository's facts don't belong in the habits, nor a habit without until.
+        for body in [
+            "template: ship\nuntil: pr\nchecks: make",
+            "template: ship\nci: gh",
+        ] {
+            let wrong = NewDecision {
+                body: body.into(),
+                ..habit.clone()
+            };
+            assert!(f.store.decide(&wrong, by("human"), 4).is_err(), "{body}");
+        }
+        // In a project, facts alone are fine.
+        let facts = NewDecision {
+            cwd: f.repo.clone(),
+            body: "template: ship\nchecks: make".into(),
+            ..habit
+        };
+        assert!(f.store.decide(&facts, by("human"), 5).is_ok());
     }
 
     #[test]
