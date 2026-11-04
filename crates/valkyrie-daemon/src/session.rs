@@ -926,7 +926,7 @@ impl Session {
         if ours {
             state.activity.note(&payload, now);
             state.guard.hook(&payload);
-            state.blocks.hook(&payload, &self.cwd);
+            state.blocks.hook(agent, &payload, &self.cwd);
             // The user's first prompt after a stop short of shipping answers it.
             if payload["hook_event_name"] == "UserPromptSubmit" {
                 let unshipped = state.unshipped.take();

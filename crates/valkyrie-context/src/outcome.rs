@@ -51,25 +51,29 @@ impl Block {
     }
 }
 
-/// Whether the agent's last message says it stopped because something failed,
+/// Whether the agent's last message says it stopped because it couldn't go on,
 /// as the template allows ("if they fail and you can't fix them, stop and say
-/// why"). Only measured with: a miss just counts one less override.
+/// why"). Only words that say it couldn't, not that something failed: "fixed the
+/// failing test" and "0 failed" are success. Only measured with: a miss just
+/// counts one less override.
 pub fn gave_up(message: &str) -> bool {
-    let text = message.to_lowercase();
-    [
-        "fail", "error", "can't", "cannot", "couldn't", "unable", "broken", "red",
-    ]
-    .iter()
-    .any(|w| {
-        text.match_indices(w).any(|(i, _)| {
-            // Whole words for the short ones ("red" isn't "required").
-            w.len() > 3 || {
-                let before = text[..i].chars().next_back();
-                let after = text[i + w.len()..].chars().next();
-                !before.is_some_and(char::is_alphanumeric)
-                    && !after.is_some_and(char::is_alphanumeric)
-            }
-        })
+    let text = message
+        .to_lowercase()
+        .replace(['\u{2019}', '\u{2018}'], "'");
+    let words: Vec<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| {
+        matches!(
+            *w,
+            "can't" | "cannot" | "couldn't" | "unable" | "wasn't" | "won't" | "blocked"
+        )
+    }) || words.windows(2).any(|p| {
+        p == ["still", "fail"]
+            || p == ["still", "fails"]
+            || p == ["still", "failing"]
+            || p == ["still", "red"]
     })
 }
 
@@ -78,6 +82,9 @@ pub fn gave_up(message: &str) -> bool {
 pub struct Kept {
     pub block: Block,
     pub cwd: PathBuf,
+    /// The agent whose stop it was: another agent's hooks in the session (a
+    /// `codex exec` it ran) aren't its outcome.
+    pub agent: String,
 }
 
 /// How a block turned out.
@@ -105,7 +112,13 @@ pub struct Follow {
 impl Follow {
     /// One of the session's own hooks. `cwd` is the session's, for a payload
     /// without one.
-    pub fn hook(&mut self, payload: &serde_json::Value, cwd: &Path) {
+    pub fn hook(&mut self, agent: &str, payload: &serde_json::Value, cwd: &Path) {
+        let theirs = |k: &Kept| k.agent == agent;
+        if self.block.as_ref().is_some_and(|(k, _)| !theirs(k))
+            || self.reply_to.as_ref().is_some_and(|(k, _)| !theirs(k))
+        {
+            return;
+        }
         match payload["hook_event_name"].as_str() {
             // A subagent's stop isn't the turn's.
             Some("Stop") if payload["agent_id"].is_null() => {
@@ -113,8 +126,11 @@ impl Follow {
                     let cwd = payload["cwd"]
                         .as_str()
                         .map_or_else(|| cwd.into(), PathBuf::from);
-                    self.block = Some((Kept { block, cwd }, None));
-                    self.reply_to = None;
+                    let agent = agent.to_owned();
+                    self.block = Some((Kept { block, cwd, agent }, None));
+                    // A reply that left the work short is blocked again: it's still
+                    // the reply to judge, at the stop after this block's turn.
+                    self.reply_to.take_if(|(_, answered)| !*answered);
                 } else if let Some((_, ended @ None)) = &mut self.block {
                     *ended = Some(
                         payload["last_assistant_message"]
@@ -334,7 +350,7 @@ mod tests {
     }
 
     fn hook(f: &mut Follow, v: serde_json::Value) {
-        f.hook(&v, Path::new("/r"));
+        f.hook("claude", &v, Path::new("/r"));
     }
 
     fn block(f: &mut Follow) {
@@ -408,6 +424,30 @@ mod tests {
         assert_eq!(replied.block.policy, 4);
         assert!(f.take().is_empty());
 
+        // Your reply left it short and the policy blocked again: the reply still
+        // decides, once that turn ends.
+        block(&mut f);
+        stop(&mut f, "Done.");
+        f.stopped("uncommitted", false);
+        prompt(&mut f);
+        block(&mut f);
+        stop(&mut f, "Explained.");
+        let replied = f.stopped("uncommitted", false).expect("still the reply's");
+        assert_eq!(replied.block.policy, 4);
+        f.stopped("uncommitted", false);
+
+        // Another agent in the session (a `codex exec`) isn't the block's.
+        block(&mut f);
+        f.hook(
+            "codex",
+            &serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+            Path::new("/r"),
+        );
+        assert!(f.take().is_empty());
+        stop(&mut f, "Opened PR.");
+        f.stopped("clean", true);
+        assert_eq!(hows(&mut f), [(false, "stop")]);
+
         // A stop short with no reply before the next stop is left alone.
         block(&mut f);
         stop(&mut f, "Done.");
@@ -426,9 +466,13 @@ mod tests {
 
     #[test]
     fn hears_an_agent_say_it_gave_up() {
-        assert!(gave_up("cargo test failed in two places; I stopped."));
-        assert!(gave_up("CI is red and I can't reach the logs"));
-        assert!(gave_up("Clippy errors I couldn't fix"));
+        assert!(gave_up(
+            "cargo test fails in two places and I couldn't fix it."
+        ));
+        assert!(gave_up("CI is red and I can\u{2019}t reach the logs"));
+        assert!(gave_up("Clippy still fails on parse.rs"));
+        assert!(!gave_up("Committed; tests pass, 0 failed. Opened the PR."));
+        assert!(!gave_up("Fixed the failing test and added error handling."));
         assert!(!gave_up(
             "Committed, pushed and opened PR #12. Required checks pass."
         ));
