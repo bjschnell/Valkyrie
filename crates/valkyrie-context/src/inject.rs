@@ -160,7 +160,11 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
 
 /// Whether a decision's body goes in every block: a constraint, or pinned.
 fn everywhere(d: &Decision) -> bool {
-    d.kind == DecisionKind::Constraint || d.pinned
+    match d.kind {
+        DecisionKind::Constraint => true,
+        DecisionKind::Skill | DecisionKind::Policy => false,
+        _ => d.pinned,
+    }
 }
 
 /// Most of the user's habits listed; they're few, and each is a title.

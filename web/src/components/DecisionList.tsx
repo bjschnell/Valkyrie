@@ -98,10 +98,16 @@ export function DecisionList() {
 function DecisionRow({ d, onChange }: { d: Decision; onChange: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Read again either way: a refusal ("changed since you read it") is fixed by
+  // what's there now.
   const toggle = async () => {
     setBusy(true);
-    if (await review(d, { a: d.pinned ? "unpin" : "pin" })) await onChange();
-    setBusy(false);
+    try {
+      await review(d, { a: d.pinned ? "unpin" : "pin" });
+      await onChange();
+    } finally {
+      setBusy(false);
+    }
   };
   const how = d.kind === "constraint" ? "always in full" : d.pinned ? "pinned" : null;
   return (
