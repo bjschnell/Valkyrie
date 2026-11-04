@@ -71,6 +71,11 @@ export const List = () => (
     <path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01" />
   </svg>
 );
+export const Pin = () => (
+  <svg {...base}>
+    <path d="M9 4h6l-1 6 4 4H6l4-4-1-6zM12 14v7" />
+  </svg>
+);
 export const Plus = () => (
   <svg {...base}>
     <path d="M12 5v14M5 12h14" />

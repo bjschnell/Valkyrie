@@ -165,6 +165,7 @@ mod tests {
             updated: 0,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: Default::default(),
             fresh: Default::default(),
         }

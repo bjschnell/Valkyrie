@@ -229,7 +229,7 @@ impl Store {
                 .or_else(|| stale::volatile(&text).then_some(stale::VOLATILE_DAYS)),
             ..Default::default()
         };
-        let decision = Decision {
+        let mut decision = Decision {
             id: self.next_id(&root),
             project: root.clone(),
             title,
@@ -244,6 +244,7 @@ impl Store {
             updated: now,
             supersedes: new.supersedes,
             superseded_by: None,
+            pinned: false,
             fresh,
             provenance,
         };
@@ -254,7 +255,7 @@ impl Store {
         if decision.status == DecisionStatus::Active
             && let Some(old) = decision.supersedes
         {
-            self.supersede(&root, old, decision.id, now)?;
+            decision.pinned |= self.supersede(&root, old, decision.id, now)?;
         }
         Ok(decision)
     }
@@ -292,14 +293,33 @@ impl Store {
         let mut accepting = false;
         let mut confirming = false;
         let mut reworded = false;
+        // A pin changes where it's shown, not what it says: it isn't a
+        // confirmation, so `updated` (which stands in for one) stays.
+        let pinning = matches!(action, ReviewAction::Pin | ReviewAction::Unpin);
         match (action, d.status) {
             (ReviewAction::Accept, Proposed) => accepting = true,
             (ReviewAction::Reject, Proposed) => d.status = Rejected,
             (ReviewAction::Retire, Active) => d.status = Retired,
             (ReviewAction::Confirm, Active) => confirming = true,
+            (ReviewAction::Pin | ReviewAction::Unpin, Active) => {
+                // A skill is an index line read when needed, and a policy's body
+                // is settings for its hook: neither has a body to put in the block.
+                if matches!(d.kind, DecisionKind::Skill | DecisionKind::Policy) {
+                    bail!("#{id} is a {}: it isn't pinned", d.kind.as_str());
+                }
+                // Habits are listed by title in every project, never in full.
+                if project::is_user(root) {
+                    bail!("#{id} is a habit: habits aren't pinned");
+                }
+                d.pinned = matches!(action, ReviewAction::Pin);
+            }
             (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
                 (d.title, d.body) = clean(title, body, *kind, root)?;
                 d.kind = *kind;
+                // Neither has a body for the block (see Pin below).
+                if matches!(d.kind, DecisionKind::Skill | DecisionKind::Policy) {
+                    d.pinned = false;
+                }
                 reworded = true;
             }
             (ReviewAction::Revise { title, body, kind }, Proposed) => {
@@ -315,6 +335,8 @@ impl Store {
                     ReviewAction::Reject => "reject",
                     ReviewAction::Retire => "retire",
                     ReviewAction::Confirm => "confirm",
+                    ReviewAction::Pin => "pin",
+                    ReviewAction::Unpin => "unpin",
                     ReviewAction::Edit { .. } => "edit",
                     ReviewAction::Revise { .. } => "revise",
                 },
@@ -341,7 +363,9 @@ impl Store {
             }
             d.fresh.anchors.retain(|a| root.join(a).exists());
         }
-        d.updated = now;
+        if !pinning {
+            d.updated = now;
+        }
         self.write(root, &d, Some(path))?;
         // The one it replaces may have been retired meanwhile; then there's
         // nothing left to supersede.
@@ -349,21 +373,34 @@ impl Store {
             && let Some(old) = d.supersedes
             && files.get(&old).is_some_and(|(_, o)| o.status == Active)
         {
-            self.supersede(root, old, id, now)?;
+            d.pinned |= self.supersede(root, old, id, now)?;
         }
         Ok(d)
     }
 
-    fn supersede(&self, root: &Path, old: u32, by: u32, now: u64) -> Result<()> {
+    /// Marks `old` replaced by `by`; whether `by` took over its pin.
+    fn supersede(&self, root: &Path, old: u32, by: u32, now: u64) -> Result<bool> {
         let files = self.files(root);
         let Some((path, d)) = files.get(&old) else {
-            return Ok(());
+            return Ok(false);
         };
         let mut d = d.clone();
         d.status = DecisionStatus::Superseded;
         d.superseded_by = Some(by);
         d.updated = now;
-        self.write(root, &d, Some(path))
+        self.write(root, &d, Some(path))?;
+        // What replaces a pinned decision keeps the pin: you pinned the rule,
+        // not its wording.
+        if d.pinned
+            && let Some((path, new)) = files.get(&by)
+            && !matches!(new.kind, DecisionKind::Skill | DecisionKind::Policy)
+        {
+            let mut new = new.clone();
+            new.pinned = true;
+            self.write(root, &new, Some(path))?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// One past the highest number on any decision file, parsed or not, so a file
@@ -1041,6 +1078,62 @@ mod tests {
             f.store.failures(&f.repo, (FAILURE_DAYS + 3) * day),
             Failures::default()
         );
+    }
+
+    #[test]
+    fn active_decisions_pin_and_unpin_but_skills_and_proposals_dont() {
+        let f = Fixture::new("pin");
+        let a = f
+            .store
+            .decide(&f.new_decision("A"), by("human"), 1)
+            .unwrap();
+        let pin =
+            |id, action: &ReviewAction, at| f.store.review(&f.repo, id, action, None, None, at);
+        assert!(pin(a.id, &ReviewAction::Pin, 2).unwrap().pinned);
+        // Kept in the file, read back.
+        assert!(f.store.load(&f.repo)[0].pinned);
+        assert!(!pin(a.id, &ReviewAction::Unpin, 3).unwrap().pinned);
+        assert!(!f.store.load(&f.repo)[0].pinned);
+        let mut skill = f.new_decision("Release the thing");
+        skill.kind = DecisionKind::Skill;
+        let skill = f.store.decide(&skill, by("human"), 4).unwrap();
+        assert!(pin(skill.id, &ReviewAction::Pin, 5).is_err());
+        let mut asked = f.new_decision("B");
+        asked.propose = true;
+        let asked = f.store.decide(&asked, by("human"), 6).unwrap();
+        assert!(pin(asked.id, &ReviewAction::Pin, 7).is_err());
+    }
+
+    #[test]
+    fn a_pin_isnt_a_confirmation_and_follows_the_rule_not_its_wording() {
+        let f = Fixture::new("pin-keeps");
+        let day = 86_400;
+        let mut volatile = f.new_decision("Use node 24");
+        volatile.review_every = Some(30);
+        let a = f.store.decide(&volatile, by("human"), day).unwrap();
+        let review =
+            |id, action: &ReviewAction, at| f.store.review(&f.repo, id, action, None, None, at);
+        // Pinned on day 40, it's still due: 30 days from when it was made.
+        let pinned = review(a.id, &ReviewAction::Pin, 40 * day).unwrap();
+        assert_eq!(pinned.updated, day);
+        assert!(stale::due(&pinned, 40 * day).is_some());
+        // Its replacement keeps the pin; an edit into a policy loses it.
+        let mut next = f.new_decision("Use node 26");
+        next.supersedes = Some(a.id);
+        let b = f.store.decide(&next, by("human"), 41 * day).unwrap();
+        assert!(b.pinned);
+        assert!(
+            f.store
+                .load(&f.repo)
+                .iter()
+                .any(|d| d.id == b.id && d.pinned)
+        );
+        let edit = ReviewAction::Edit {
+            title: "Checks to run".into(),
+            body: "template: ship\nuntil: pr".into(),
+            kind: DecisionKind::Policy,
+        };
+        assert!(!review(b.id, &edit, 42 * day).unwrap().pinned);
     }
 
     #[test]

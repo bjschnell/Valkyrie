@@ -19,6 +19,9 @@ pub fn render(d: &Decision) -> String {
     field("updated", &d.updated.to_string());
     field("supersedes", &opt(d.supersedes));
     field("superseded_by", &opt(d.superseded_by));
+    if d.pinned {
+        field("pinned", "true");
+    }
     field("by", &d.provenance.by);
     field("session", d.provenance.session.as_deref().unwrap_or(""));
     field(
@@ -60,6 +63,7 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
         updated: 0,
         supersedes: None,
         superseded_by: None,
+        pinned: false,
         provenance: Provenance::default(),
         fresh: Default::default(),
     };
@@ -77,6 +81,7 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
             "updated" => d.updated = v.parse().unwrap_or(0),
             "supersedes" => d.supersedes = v.parse().ok(),
             "superseded_by" => d.superseded_by = v.parse().ok(),
+            "pinned" => d.pinned = v == "true",
             "by" => d.provenance.by = v.to_owned(),
             "session" => d.provenance.session = text(),
             "conversation" => d.provenance.conversation = text(),
@@ -150,6 +155,7 @@ mod tests {
             updated: 200,
             supersedes: Some(3),
             superseded_by: None,
+            pinned: false,
             provenance: Provenance {
                 by: "claude".into(),
                 session: Some("valkyrie".into()),

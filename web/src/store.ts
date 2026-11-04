@@ -409,6 +409,8 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   reject: "Rejected",
   retire: "Retired",
   confirm: "Confirmed",
+  pin: "Pinned",
+  unpin: "Unpinned",
   edit: "Saved",
   revise: "Accepted",
 };
@@ -424,6 +426,18 @@ export async function review(d: Decision, action: ReviewAction): Promise<boolean
   } catch (e) {
     toast(`Couldn't: ${(e as Error).message}`);
     return false;
+  }
+}
+
+/** Every project's decisions and your habits, as the daemon has them now; null
+ * when it can't be asked. Not pushed: a page asks again after it changes one. */
+export async function allDecisions(): Promise<Decision[] | null> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const reply = await conn.request({ t: "decisions", cwd: null });
+    return reply.t === "decisions" ? reply.decisions : null;
+  } catch {
+    return null;
   }
 }
 

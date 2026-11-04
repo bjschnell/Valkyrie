@@ -81,9 +81,11 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
         .iter()
         .filter(|d| d.status == DecisionStatus::Active)
         .partition(|d| d.kind == DecisionKind::Skill);
+    // What holds everywhere comes first: constraints, and what the user pinned.
     active.sort_by(|a, b| {
-        rank(a.kind)
-            .cmp(&rank(b.kind))
+        everywhere(b)
+            .cmp(&everywhere(a))
+            .then(rank(a.kind).cmp(&rank(b.kind)))
             .then(b.updated.cmp(&a.updated))
             .then(b.id.cmp(&a.id))
     });
@@ -102,13 +104,15 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
         out.push_str(&format!(
             "Project decisions for {name}, recorded with Valkyrie and confirmed by the user. \
              Follow them. If one looks wrong or out of date, say so instead of quietly \
-             working around it.\n\n"
+             working around it. Constraints and the ones the user pinned are in full; the \
+             rest are titles. Before you start, read the ones that bear on your task with \
+             `{valk} decisions show <id>` (MCP `get_decision`), or search them all with MCP \
+             `search_decisions`.\n\n"
         ));
         let footer_room = propose.len() + 120;
-        // Every decision gets at least its title, so a low-ranked kind (patterns
-        // come after constraints, gotchas and decisions) isn't cut whole once a
-        // project has a dozen long ones. Bodies fill what the titles leave, in
-        // rank order; once one has to go, the rest go too.
+        // An index (ADR-0014 §1): every decision gets its title, and only what
+        // holds everywhere its body, in rank order, from what the titles leave;
+        // once one has to go, the rest go too.
         let titles: Vec<String> = active.iter().map(|d| entry(d, now, false)).collect();
         let mut rest: usize = titles.iter().map(String::len).sum();
         let mut bodies = true;
@@ -116,13 +120,14 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
         for (d, title) in active.iter().zip(&titles) {
             rest -= title.len();
             let full = entry(d, now, true);
-            let whole = bodies && out.len() + full.len() + rest + footer_room <= budget;
-            let line = if whole {
-                full
-            } else {
+            let fits = out.len() + full.len() + rest + footer_room <= budget;
+            let body = everywhere(d) && bodies && fits;
+            if everywhere(d) && !body {
                 bodies = false;
-                title.clone()
-            };
+            }
+            // A title is all of a decision without a body.
+            let whole = body || full == *title;
+            let line = if body { full } else { title.clone() };
             if out.len() + line.len() + footer_room > budget {
                 break;
             }
@@ -141,7 +146,7 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
         }
         if shown < active.len() {
             out.push_str(&format!(
-                "({} more not shown; `valk decisions` lists them all.)\n",
+                "({} more not shown; `{valk} decisions` lists them all.)\n",
                 active.len() - shown
             ));
         }
@@ -151,6 +156,15 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
     out.push_str(&propose);
     out.push('\n');
     (out, seen)
+}
+
+/// Whether a decision's body goes in every block: a constraint, or pinned.
+fn everywhere(d: &Decision) -> bool {
+    match d.kind {
+        DecisionKind::Constraint => true,
+        DecisionKind::Skill | DecisionKind::Policy => false,
+        _ => d.pinned,
+    }
 }
 
 /// Most of the user's habits listed; they're few, and each is a title.
@@ -277,6 +291,7 @@ mod tests {
             updated,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: Provenance::default(),
             fresh: Default::default(),
         }
@@ -317,39 +332,57 @@ mod tests {
     }
 
     #[test]
-    fn long_bodies_never_cut_a_low_ranked_decision_whole() {
+    fn only_constraints_and_pins_get_bodies_and_every_decision_its_title() {
         use DecisionKind as K;
-        // A dozen constraints, gotchas and decisions with near-maximal bodies
-        // used to fill the budget before any pattern was reached.
         let kinds = [K::Constraint, K::Gotcha, K::Decision];
         let mut all: Vec<Decision> = (1..=12)
             .map(|i| d(i, kinds[i as usize % 3], DecisionStatus::Active, 0))
             .collect();
         all.push(d(13, K::Pattern, DecisionStatus::Active, 0));
+        all[12].pinned = true;
         for x in &mut all {
             x.body = "y".repeat(490);
         }
-        let text = block(Path::new("/r/app"), &all, BUDGET, "valk");
+        let (text, shown) = laid_out(Path::new("/r/app"), &all, BUDGET, "valk");
         assert!(text.len() <= BUDGET, "{}", text.len());
         for i in 1..=13 {
             assert!(text.contains(&format!("- #{i} [")), "#{i} missing:\n{text}");
         }
-        assert!(text.contains("- #13 [pattern] Title 13\n"), "{text}");
-        assert!(text.contains("Bodies left out"));
-        assert!(!text.contains("more not shown"));
-        // The highest-ranked (constraints, newest id first) keep their bodies.
-        assert!(text.contains("Title 12: yyy"), "{text}");
-        // What the serving log is told matches what the text shows.
-        let (same, shown) = laid_out(Path::new("/r/app"), &all, BUDGET, "valk");
-        assert_eq!(same, text);
-        assert_eq!(shown.whole.len() + shown.titles.len(), 13);
-        assert!(shown.whole.contains(&12) && shown.titles.contains(&13));
-        for id in &shown.whole {
-            assert!(text.contains(&format!("Title {id}: ")), "#{id}");
-        }
+        // Constraints (3, 6, 9, 12) and the pinned pattern in full, first.
+        let mut whole = shown.whole.clone();
+        whole.sort();
+        assert_eq!(whole, [3, 6, 9, 12, 13]);
+        assert!(text.find("Title 13: yyy").unwrap() < text.find("Title 1\n").unwrap());
+        assert!(text.contains("- #1 [gotcha] Title 1\n"), "{text}");
+        assert!(!text.contains("Bodies left out") && !text.contains("more not shown"));
+        assert!(text.contains("valk decisions show <id>"));
         for id in &shown.titles {
             assert!(text.contains(&format!("Title {id}\n")), "#{id}");
         }
+    }
+
+    #[test]
+    fn too_many_pins_lose_their_bodies_in_rank_order_and_say_so() {
+        let mut all: Vec<Decision> = (1..=20)
+            .map(|i| d(i, DecisionKind::Decision, DecisionStatus::Active, 0))
+            .collect();
+        for x in &mut all {
+            x.pinned = true;
+            x.body = "z".repeat(490);
+        }
+        let (text, shown) = laid_out(Path::new("/r/app"), &all, BUDGET, "valk");
+        assert!(text.len() <= BUDGET, "{}", text.len());
+        assert!(!shown.whole.is_empty() && !shown.titles.is_empty());
+        assert_eq!(shown.whole.len() + shown.titles.len(), 20);
+        assert!(text.contains("Bodies left out"));
+    }
+
+    #[test]
+    fn a_decision_without_a_body_is_whole_as_a_title() {
+        let mut x = d(1, DecisionKind::Gotcha, DecisionStatus::Active, 0);
+        x.body.clear();
+        let (_, shown) = laid_out(Path::new("/r/app"), &[x], BUDGET, "valk");
+        assert_eq!(shown.whole, [1]);
     }
 
     #[test]

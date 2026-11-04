@@ -213,6 +213,7 @@ mod tests {
             updated: 0,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: Provenance::default(),
             fresh: Default::default(),
         }];

@@ -162,6 +162,7 @@ mod tests {
             updated: 1000,
             supersedes: None,
             superseded_by: None,
+            pinned: false,
             provenance: Provenance {
                 commit: commit.map(str::to_owned),
                 ..Provenance::default()

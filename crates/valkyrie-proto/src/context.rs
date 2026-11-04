@@ -125,6 +125,10 @@ pub struct Decision {
     pub supersedes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<u32>,
+    /// The user wants its body in every session's block (ADR-0014 §1). Only a
+    /// human sets it, as only a human accepts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     #[serde(default)]
     pub provenance: Provenance,
     #[serde(default)]
@@ -225,6 +229,10 @@ pub enum ReviewAction {
     Retire,
     /// It still holds: an active decision flagged for review is confirmed as of now.
     Confirm,
+    /// Put an active decision's body in every session's block (ADR-0014 §1).
+    Pin,
+    /// Back to a title in the block, its body read when needed.
+    Unpin,
     /// Change the wording (and kind) without changing the status.
     Edit {
         title: String,

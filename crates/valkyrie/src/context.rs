@@ -17,6 +17,11 @@ pub enum DecisionsCmd {
     Retire { id: u32 },
     /// Say an active decision still holds (one flagged as maybe out of date).
     Confirm { id: u32 },
+    /// Put an active decision's body in every session's block, not only its
+    /// title. Constraints always have theirs; `preview` shows what it costs.
+    Pin { id: u32 },
+    /// Back to a title in the block, its body read when an agent needs it.
+    Unpin { id: u32 },
     /// How this project's decisions are doing: what waits on you, what may be
     /// out of date.
     Health,
@@ -133,6 +138,8 @@ pub async fn decisions(
             cmd,
             Some(
                 DecisionsCmd::Preview
+                    | DecisionsCmd::Pin { .. }
+                    | DecisionsCmd::Unpin { .. }
                     | DecisionsCmd::Export
                     | DecisionsCmd::Mine { .. }
                     | DecisionsCmd::Learn { .. }
@@ -152,6 +159,8 @@ pub async fn decisions(
         Some(DecisionsCmd::Reject { id }) => review(id, ReviewAction::Reject).await,
         Some(DecisionsCmd::Retire { id }) => review(id, ReviewAction::Retire).await,
         Some(DecisionsCmd::Confirm { id }) => review(id, ReviewAction::Confirm).await,
+        Some(DecisionsCmd::Pin { id }) => review(id, ReviewAction::Pin).await,
+        Some(DecisionsCmd::Unpin { id }) => review(id, ReviewAction::Unpin).await,
         Some(DecisionsCmd::Health) => {
             let list = client.decisions(Some(cwd)).await?;
             // Your habits act in every project, so a project's health has them too.
@@ -195,15 +204,16 @@ pub async fn decisions(
             let user = client
                 .decisions(Some(valkyrie_context::project::user()))
                 .await?;
-            print!(
-                "{}{}",
-                valkyrie_context::inject::habits(&user, &valk),
-                valkyrie_context::inject::block(
-                    &root,
-                    &list,
-                    valkyrie_context::inject::BUDGET,
-                    &valk
-                )
+            let budget = valkyrie_context::inject::BUDGET;
+            let (block, shown) = valkyrie_context::inject::laid_out(&root, &list, budget, &valk);
+            print!("{}{block}", valkyrie_context::inject::habits(&user, &valk));
+            // On stderr, so the block itself can still be piped.
+            eprintln!(
+                "({} of {budget} characters: {} in full, {} as titles. \
+                 `valk decisions pin <id>` puts one in full.)",
+                block.len(),
+                shown.whole.len(),
+                shown.titles.len()
             );
             Ok(())
         }
@@ -511,11 +521,14 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
         return;
     }
     for d in shown {
-        let status = match (&d.fresh.review, d.status) {
+        let mut status = match (&d.fresh.review, d.status) {
             (Some(why), _) => format!(" (may be out of date: {why})"),
             (None, DecisionStatus::Active) => String::new(),
             (None, other) => format!(" ({})", other.as_str()),
         };
+        if d.pinned && d.status == DecisionStatus::Active {
+            status.push_str(" (pinned)");
+        }
         println!(
             "{:>4}  {:<10} {}{status}",
             format!("#{}", d.id),
