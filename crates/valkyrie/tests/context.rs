@@ -1331,10 +1331,13 @@ fn routine_replies_in_two_sessions_propose_a_ship_habit() {
         let claude = bin.join("claude");
         let _ = std::fs::remove_file(&claude);
         std::os::unix::fs::symlink(&agent, &claude).unwrap();
+        // One name for both: sessions are told apart by more than their names.
         valk(
             &repo,
             &[
                 "new",
+                "--name",
+                "fix",
                 "--cwd",
                 repo.to_str().unwrap(),
                 "--",

@@ -71,13 +71,15 @@ pub(crate) async fn run(
                 }
             }
         };
-        learn(&registry, &info, &answered, class);
+        learn(&registry, &session.key(), &info, &answered, class);
     }
 }
 
-/// Records one classified reply, and proposes the habit it completes.
+/// Records one classified reply under `key`, the session's own (names repeat),
+/// and proposes the habit it completes.
 fn learn(
     registry: &Registry,
+    key: &str,
     info: &valkyrie_proto::SessionInfo,
     answered: &Answered,
     class: reply::Class,
@@ -90,7 +92,7 @@ fn learn(
     );
     let record = reply::Record {
         at: now,
-        session: info.name.clone(),
+        session: key.to_owned(),
         project: project::root(&info.cwd).display().to_string(),
         state: answered.before.clone(),
         step,
