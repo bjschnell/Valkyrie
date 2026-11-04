@@ -254,6 +254,15 @@ struct State {
     watch: crate::facts::Watch,
 }
 
+/// What a hook told the daemon to do next.
+pub struct Heard {
+    /// What it saw run, for the repository's facts.
+    pub seen: Option<(PathBuf, valkyrie_context::facts::Seen)>,
+    /// A turn end of the session's own agent: the work state to read (the read's
+    /// number and where), off the hook path.
+    pub read: Option<(u64, PathBuf)>,
+}
+
 /// A reply to a stop short of shipping, and how far the work got by the next
 /// stop (ADR-0013 §2): for `habit` to classify.
 #[derive(Debug, Clone)]
@@ -860,17 +869,15 @@ impl Session {
             .unwrap_or_else(|| self.id.to_string())
     }
 
-    /// A turn end whose work state is about to be read: the read's number, for
-    /// [`Self::log_work`]. Replies typed until it lands wait for it.
-    pub fn reading(&self) -> u64 {
-        self.state.lock().unwrap().pairing.reading()
-    }
-
     /// Records where read `n` found a stop left the work (`None` outside git).
     /// Returns the reply it completes, when the stop before was short of
     /// shipping and the user answered it.
     pub fn log_work(&self, n: u64, work: Option<Value>) -> Option<Answered> {
         let mut state = self.state.lock().unwrap();
+        // Overtaken by a later turn end, which says where the work is now.
+        if !state.pairing.latest(n) {
+            return None;
+        }
         let found = work.as_ref().map(|w| {
             (
                 w["state"].as_str().unwrap_or_default().to_owned(),
@@ -906,19 +913,14 @@ impl Session {
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
     /// inherits `VALK_SESSION`, so only the session's own agent may drive it (a
     /// `codex exec` run by Claude must not); a plain shell session takes any agent.
-    /// Returns what it saw run, for the repository's facts.
-    pub fn hook(
-        self: &Arc<Self>,
-        agent: &str,
-        sent_us: u64,
-        payload: Value,
-    ) -> Option<(PathBuf, valkyrie_context::facts::Seen)> {
+    pub fn hook(self: &Arc<Self>, agent: &str, sent_us: u64, payload: Value) -> Heard {
         let adapter = valkyrie_agents::by_name(agent);
         let ours = adapter.name() != "generic"
             && (self.adapter.name() == "generic" || self.adapter.name() == adapter.name());
         let events = adapter.normalize(&payload);
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
+        let mut read = None;
         state.log(
             now,
             "hook",
@@ -933,7 +935,7 @@ impl Session {
         if ours {
             state.activity.note(&payload, now);
             state.guard.hook(&payload);
-            state.pairing.hook(agent, &payload, &self.cwd);
+            read = state.pairing.hook(agent, &payload, &self.cwd);
         }
         // Only a session start names the conversation, and not mid-turn: Codex hooks
         // are global, so a `codex exec` the agent runs reports its own one-shot id.
@@ -963,7 +965,7 @@ impl Session {
         if ours && state.tracker.hook(&events, sent_us, now, self.watching()) {
             self.after_change(&mut state, now);
         }
-        seen
+        Heard { seen, read }
     }
 
     /// Periodic: screen heuristics once output is quiet (glances in between), then

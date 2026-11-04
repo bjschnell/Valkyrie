@@ -7,7 +7,7 @@
 //! late is just logged.
 
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use valkyrie_context::outcome::{Follow, Kept, Outcome};
 
 #[derive(Debug, Default)]
@@ -38,25 +38,35 @@ pub struct Paired {
 }
 
 impl Pairing {
-    /// One of the session's own hooks. `cwd` is the session's.
-    pub fn hook(&mut self, agent: &str, payload: &Value, cwd: &Path) {
-        match payload["hook_event_name"].as_str() {
-            Some("UserPromptSubmit") if self.started > self.landed => {
-                self.waiting.push((agent.to_owned(), payload.clone()));
-                return;
-            }
-            // The prompts waiting came before this stop, whether or not their
-            // read ever lands: they go first.
-            Some("Stop") => self.release(cwd),
-            _ => {}
+    /// One of the session's own hooks. `cwd` is the session's. A turn end (the
+    /// main thread's stop, not one a policy kept going, with its `cwd`) starts a
+    /// read of the work state: its number and where, for [`Self::read`].
+    pub fn hook(&mut self, agent: &str, payload: &Value, cwd: &Path) -> Option<(u64, PathBuf)> {
+        let turn_end = payload["hook_event_name"] == "Stop"
+            && payload["agent_id"].is_null()
+            && payload["valk_continued"].is_null();
+        if payload["hook_event_name"] == "UserPromptSubmit" && self.started > self.landed {
+            self.waiting.push((agent.to_owned(), payload.clone()));
+            return None;
+        }
+        let dir = payload["cwd"]
+            .as_str()
+            .filter(|_| turn_end)
+            .map(PathBuf::from);
+        if dir.is_some() {
+            // The prompts waiting came before this turn end, whose read overtakes
+            // theirs: they go first.
+            self.release(cwd);
         }
         self.apply(agent, payload, cwd);
+        let dir = dir?;
+        self.started += 1;
+        Some((self.started, dir))
     }
 
-    /// A turn end whose work state is being read: its number, for [`Self::read`].
-    pub fn reading(&mut self) -> u64 {
-        self.started += 1;
-        self.started
+    /// Whether read `n` is the latest, so what it found is where the work is.
+    pub fn latest(&self, n: u64) -> bool {
+        n == self.started
     }
 
     /// The work state read `n` found (`None` when it found none, outside git),
@@ -130,10 +140,11 @@ mod tests {
     fn stop(p: &mut Pairing) -> u64 {
         p.hook(
             "claude",
-            &json!({"hook_event_name": "Stop"}),
+            &json!({"hook_event_name": "Stop", "cwd": CWD}),
             Path::new(CWD),
-        );
-        p.reading()
+        )
+        .expect("a turn end starts a read")
+        .0
     }
 
     fn read(p: &mut Pairing, n: u64, after: &str) -> Option<(String, String, String)> {
@@ -184,6 +195,23 @@ mod tests {
             read(&mut p, n, "unpushed"),
             s("uncommitted", "commit it", "unpushed")
         );
+    }
+
+    #[test]
+    fn a_stop_that_isnt_a_turn_end_keeps_the_reply_waiting() {
+        let mut p = Pairing::default();
+        let n = stop(&mut p);
+        prompt(&mut p, "ship it");
+        // The turn the reply started: a subagent's stop, then a policy's block.
+        let sub = json!({"hook_event_name": "Stop", "agent_id": "a", "cwd": CWD});
+        assert_eq!(p.hook("claude", &sub, Path::new(CWD)), None);
+        let kept = json!({"hook_event_name": "Stop", "cwd": CWD, "valk_continued":
+            {"policy": 1, "state": "unpushed", "until": "pr"}});
+        assert_eq!(p.hook("claude", &kept, Path::new(CWD)), None);
+        assert_eq!(p.waiting.len(), 1);
+        assert_eq!(read(&mut p, n, "unpushed"), None);
+        let n = stop(&mut p);
+        assert_eq!(read(&mut p, n, "no-pr"), s("unpushed", "ship it", "no-pr"));
     }
 
     #[test]

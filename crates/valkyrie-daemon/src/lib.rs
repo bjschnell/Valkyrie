@@ -1019,20 +1019,16 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 // agent is still at it, and nothing should say it finished.
                 let turn_ended =
                     payload["hook_event_name"] == "Stop" && payload["valk_continued"].is_null();
-                // The main thread's turn, not a subagent's, and where it ran.
-                let work_in = (turn_ended && payload["agent_id"].is_null())
-                    .then(|| payload["cwd"].as_str().map(std::path::PathBuf::from))
-                    .flatten();
                 match registry.get(session) {
                     Ok(s) => {
-                        if let Some((cwd, seen)) = s.hook(&agent, sent_us, payload) {
+                        let heard = s.hook(&agent, sent_us, payload);
+                        if let Some((cwd, seen)) = heard.seen {
                             let _ = registry.seen.send((session, cwd, seen));
                         }
                         habit::record_outcomes(&registry, &s);
                         // Git and `gh` take a while; the record can wait, the hook can't.
-                        // The read is numbered now, so a reply typed meanwhile waits for it.
-                        if let Some(cwd) = work_in {
-                            let n = s.reading();
+                        // Numbered by the hook, so a reply typed meanwhile waits for it.
+                        if let Some((n, cwd)) = heard.read {
                             let answers = registry.answers.clone();
                             let registry = registry.clone();
                             tokio::task::spawn_blocking(move || {
