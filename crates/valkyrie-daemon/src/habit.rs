@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use valkyrie_context::{project, reply};
+use valkyrie_context::{outcome, project, reply};
 use valkyrie_proto::{AutoMode, DecisionKind, NewDecision, Provenance, SessionId};
 
 /// Most model calls per hour for replies. A routine answer is a few a day.
@@ -99,6 +99,11 @@ fn learn(
         hash: format!("{:016x}", crate::extract::fnv(&answered.prompt)),
         quote: matches!(class, reply::Class::Routine(_)).then(|| reply::quote(&answered.prompt)),
     };
+    // A reply to work a policy left short says whether the user overrode it.
+    if let Some(kept) = &answered.block {
+        let overridden = class == reply::Class::Other;
+        record_outcome(registry, key, kept, overridden, "reply", now);
+    }
     let store = registry.context.lock().unwrap();
     if let Err(e) = store.record_reply(&record, now) {
         tracing::warn!("couldn't record a reply: {e:#}");
@@ -144,4 +149,46 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Records how the session's blocks turned out (ADR-0013 §6), in each policy's
+/// own scope: the user's for a habit, the repository's for its own policy.
+pub(crate) fn record_outcomes(registry: &Registry, session: &crate::session::Session) {
+    let outcomes = session.take_outcomes();
+    if outcomes.is_empty() {
+        return;
+    }
+    let key = session.key();
+    let now = now_secs();
+    for o in &outcomes {
+        record_outcome(registry, &key, &o.kept, o.overridden, o.how, now);
+    }
+}
+
+fn record_outcome(
+    registry: &Registry,
+    key: &str,
+    kept: &outcome::Kept,
+    overridden: bool,
+    how: &str,
+    now: u64,
+) {
+    let repo = project::root(&kept.cwd);
+    let scope = match kept.block.scope.as_str() {
+        "user" => project::user(),
+        _ => repo.clone(),
+    };
+    let record = outcome::Record {
+        at: now,
+        session: key.to_owned(),
+        policy: kept.block.policy,
+        scope: kept.block.scope.clone(),
+        project: repo.display().to_string(),
+        overridden,
+        how: how.to_owned(),
+    };
+    let store = registry.context.lock().unwrap();
+    if let Err(e) = store.record_outcome(&scope, &record, now) {
+        tracing::warn!("couldn't record a policy's outcome: {e:#}");
+    }
 }
