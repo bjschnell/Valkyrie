@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use valkyrie_context::backlog;
 use valkyrie_proto::{
-    Item, ItemChange, ItemStatus, KeptItem, NewItem, Reply, SessionId, SessionInfo, ShippedItem,
-    Size, SpawnSpec,
+    Item, ItemChange, ItemLaunch, ItemStatus, KeptItem, NewItem, Reply, SessionId, SessionInfo,
+    ShippedItem, Size, SpawnSpec,
 };
 
 /// Every item, pushed to queue watchers with the queue.
@@ -726,11 +726,14 @@ impl Registry {
 
     /// Starts `agent` on item `id`: in the checkout an earlier launch made if it's
     /// still there, else in a new worktree on the item's branch (or the repository
-    /// itself without `worktree`). Returns the spawn's reply.
+    /// itself without `worktree`). `model` as `ClientMsg::LaunchItem` has it.
+    /// Returns the spawn's reply.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn launch_item(
         self: &Arc<Self>,
         id: u32,
         agent: &str,
+        model: Option<String>,
         worktree: bool,
         size: Size,
         env: Vec<(String, Option<String>)>,
@@ -740,6 +743,16 @@ impl Registry {
             bail!("an item starts claude or codex, not {agent}");
         }
         let item = self.backlog.lock().unwrap().get(id)?;
+        let model = match model {
+            Some(model) => model.trim().to_owned(),
+            None => item
+                .launch
+                .as_ref()
+                .filter(|l| l.agent == agent)
+                .map(|l| l.model.clone())
+                .unwrap_or_default(),
+        };
+        check_model(&model)?;
         match item.status {
             ItemStatus::Open => {}
             ItemStatus::Proposed => bail!("#{id} is proposed; accept it first"),
@@ -784,7 +797,7 @@ impl Registry {
         // The item it's on, for `valk todo show` in the session.
         env.push(("VALK_ITEM".into(), Some(id.to_string())));
         let spec = SpawnSpec {
-            command: vec![agent.to_owned(), backlog::brief(&item)],
+            command: agent_command(agent, &model, backlog::brief(&item)),
             cwd: Some(cwd),
             name: Some(name),
             size,
@@ -806,6 +819,11 @@ impl Registry {
             checkout,
             now_secs(),
         )?;
+        let launch = ItemLaunch {
+            agent: agent.to_owned(),
+            model,
+        };
+        self.backlog.lock().unwrap().launched_with(id, launch)?;
         tracing::info!(id, session = info.id, "launched a backlog item");
         self.refresh_items();
         Ok(reply)
@@ -833,6 +851,28 @@ fn adopted_branch(cwd: &std::path::Path) -> Option<String> {
     let branch = worktree::git_out(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
     let default = worktree::default_branch(&valkyrie_context::project::root(cwd));
     (!branch.is_empty() && default.as_deref() != Some(branch.as_str())).then_some(branch)
+}
+
+/// The command that starts `agent` on `brief`, on `model` unless it's empty.
+fn agent_command(agent: &str, model: &str, brief: String) -> Vec<String> {
+    let mut command = vec![agent.to_owned()];
+    if !model.is_empty() {
+        let flag = if agent == "codex" { "-m" } else { "--model" };
+        command.extend([flag.to_owned(), model.to_owned()]);
+    }
+    command.push(brief);
+    command
+}
+
+/// Refuses a model name that isn't one: it goes on the agent's command line, so
+/// it mustn't read as a flag or carry spaces.
+fn check_model(model: &str) -> Result<()> {
+    const MAX: usize = 100;
+    let fits = |c: char| c.is_ascii_alphanumeric() || "._-:/[]@".contains(c);
+    if model.len() > MAX || model.starts_with('-') || !model.chars().all(fits) {
+        bail!("{model:?} isn't a model name");
+    }
+    Ok(())
 }
 
 /// The session a refused claim names: the launch's own, else the newest holder.
@@ -872,6 +912,34 @@ fn checkout_of(info: &SessionInfo) -> PathBuf {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn a_model_goes_on_the_command_line_as_each_agent_takes_it() {
+        let brief = || "the brief".to_owned();
+        assert_eq!(
+            agent_command("claude", "", brief()),
+            ["claude", "the brief"]
+        );
+        assert_eq!(
+            agent_command("claude", "opus", brief()),
+            ["claude", "--model", "opus", "the brief"]
+        );
+        assert_eq!(
+            agent_command("codex", "gpt-5-codex", brief()),
+            ["codex", "-m", "gpt-5-codex", "the brief"]
+        );
+    }
+
+    #[test]
+    fn only_a_model_name_reaches_the_command_line() {
+        for ok in ["", "opus", "claude-opus-5-5", "claude-sonnet-4-5[1m]", "o3"] {
+            assert!(check_model(ok).is_ok(), "{ok}");
+        }
+        for bad in ["--dangerously-skip-permissions", "opus haiku", "a;b", "x\n"] {
+            assert!(check_model(bad).is_err(), "{bad}");
+        }
+        assert!(check_model(&"a".repeat(101)).is_err());
+    }
 
     #[test]
     fn nothing_claims_an_item_while_a_launch_is_starting_on_it() {
