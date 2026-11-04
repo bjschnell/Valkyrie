@@ -1223,3 +1223,170 @@ fn mcp_serves_and_proposes_decisions() {
     assert_eq!(replies[5]["error"]["code"], -32601);
     drop(daemon);
 }
+
+/// ADR-0013 §2/§4 and ADR-0016 §2: a stop that leaves work uncommitted, answered
+/// by a routine reply that the next stop shows was carried out, counts toward the
+/// user's habit. Two such replies in two sessions, in two repositories, propose
+/// it in the user scope, for the user to accept.
+#[test]
+fn routine_replies_in_two_sessions_propose_a_ship_habit() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-habit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, out) = (dir.join("bin"), dir.join("out"));
+    for d in [&bin, &out, &dir.join("run")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let git = |repo: &Path, args: &[&str]| {
+        let ok = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+
+    // The model: records each prompt, says the reply asked for a commit.
+    let model = bin.join("model");
+    std::fs::write(
+        &model,
+        format!(
+            "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\necho commit\n",
+            calls = out.join("calls").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&model, exec.clone()).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let valk = |cwd: &Path, args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .current_dir(cwd)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env("VALK_EXTRACTOR", model.to_str().unwrap())
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let user = valkyrie_context::project::user();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+
+    for (n, name) in ["api", "web"].iter().enumerate() {
+        let repo = dir.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "init"]);
+        git(&repo, &["checkout", "--quiet", "-b", "fix"]);
+        std::fs::write(repo.join("a.txt"), "fixed").unwrap();
+        // The agent stops with the fix uncommitted; you say "commit it"; it
+        // commits and stops again.
+        let hook = |event: &str, extra: &str| {
+            format!(
+                "echo '{{\"hook_event_name\":\"{event}\",\"session_id\":\"c{n}\",\"cwd\":\"{}\"{extra}}}' | valk hook claude\n",
+                repo.display()
+            )
+        };
+        let agent = bin.join(format!("claude-{name}"));
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\n{}{}sleep 1.5\n{}sleep 0.3\ngit -c user.name=t -c user.email=t@t commit --quiet -am fix\n{}sleep 30\n",
+                hook("SessionStart", ",\"source\":\"startup\""),
+                hook("Stop", ""),
+                hook("UserPromptSubmit", ",\"prompt\":\"looks good, commit it\""),
+                hook("Stop", ""),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, exec.clone()).unwrap();
+        // Named `claude` so the session is taken for Claude's.
+        let claude = bin.join("claude");
+        let _ = std::fs::remove_file(&claude);
+        std::os::unix::fs::symlink(&agent, &claude).unwrap();
+        valk(
+            &repo,
+            &[
+                "new",
+                "--cwd",
+                repo.to_str().unwrap(),
+                "--",
+                claude.to_str().unwrap(),
+            ],
+        );
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) && store.replies(now()).len() < n + 1 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let replies = store.replies(now());
+        assert_eq!(replies.len(), n + 1, "{replies:?}");
+        let r = &replies[n];
+        assert_eq!(
+            (r.state.as_str(), r.step, r.quote.as_deref()),
+            (
+                "uncommitted",
+                Some(valkyrie_context::policy::Until::Commit),
+                Some("looks good, commit it")
+            ),
+        );
+        // One session's word isn't a habit yet.
+        if n == 0 {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(store.load(&user).is_empty());
+        }
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && store.load(&user).is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let habits = store.load(&user);
+    assert_eq!(habits.len(), 1, "{habits:?}");
+    let h = &habits[0];
+    assert_eq!(h.status, valkyrie_proto::DecisionStatus::Proposed);
+    assert_eq!(h.title, "Commit finished work");
+    assert!(
+        h.body.starts_with("template: ship\nuntil: commit\n"),
+        "{}",
+        h.body
+    );
+    assert!(
+        h.body
+            .contains("> “looks good, commit it” (web, uncommitted → commit)"),
+        "{}",
+        h.body
+    );
+    let calls = std::fs::read_to_string(out.join("calls")).unwrap();
+    assert_eq!(calls.matches("---").count(), 2, "{calls}");
+    assert!(
+        calls.contains("<reply>\nlooks good, commit it\n</reply>"),
+        "{calls}"
+    );
+    drop(daemon);
+}

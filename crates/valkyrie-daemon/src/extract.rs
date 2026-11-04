@@ -551,7 +551,7 @@ fn read_tail(path: &Path) -> String {
     String::from_utf8_lossy(&raw).into_owned()
 }
 
-fn fnv(text: &str) -> u64 {
+pub(crate) fn fnv(text: &str) -> u64 {
     text.bytes().fold(0xcbf29ce484222325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
     })

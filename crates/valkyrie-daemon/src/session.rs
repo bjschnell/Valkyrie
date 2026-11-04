@@ -247,6 +247,24 @@ struct State {
     topic: Option<String>,
     /// The merge guard's confirms that may be on screen (ADR-0015 §1).
     guard: crate::guard::Pending,
+    /// The last stop's work state, while it was short of shipping and no prompt
+    /// has answered it yet (ADR-0013 §2).
+    unshipped: Option<String>,
+    /// The prompt that answered it, with that state, until the next stop shows
+    /// how far the work got.
+    answer: Option<(String, String)>,
+}
+
+/// A reply to a stop short of shipping, and how far the work got by the next
+/// stop (ADR-0013 §2): for `habit` to classify.
+#[derive(Debug, Clone)]
+pub struct Answered {
+    /// The state the work stopped in.
+    pub before: String,
+    pub prompt: String,
+    /// The next stop's state, and whether it had a pull request.
+    pub after: String,
+    pub pr: bool,
 }
 
 impl State {
@@ -370,6 +388,8 @@ impl Session {
             live_cwd: None,
             topic: None,
             guard: Default::default(),
+            unshipped: None,
+            answer: None,
         };
         state.log(
             now_ms,
@@ -459,6 +479,8 @@ impl Session {
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
             guard: Default::default(),
+            unshipped: None,
+            answer: None,
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -826,8 +848,22 @@ impl Session {
 
     /// Records where the agent left its work when a turn ended (ADR-0013 §1), for
     /// `valk pings`. Written after the turn end's own line, once git has been read.
-    pub fn log_work(&self, work: Value) {
-        self.state.lock().unwrap().log(now_ms(), "work", work);
+    /// Records where a stop left the work. Returns the reply it completes, when
+    /// the stop before was short of shipping and the user answered it.
+    pub fn log_work(&self, work: Value) -> Option<Answered> {
+        let mut state = self.state.lock().unwrap();
+        let after = work["state"].as_str().unwrap_or_default().to_owned();
+        let pr = work["pr"].is_string();
+        state.log(now_ms(), "work", work);
+        let answered = state.answer.take().map(|(before, prompt)| Answered {
+            before,
+            prompt,
+            after: after.clone(),
+            pr,
+        });
+        state.unshipped =
+            matches!(after.as_str(), "uncommitted" | "unpushed" | "no-pr").then_some(after);
+        answered
     }
 
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
@@ -849,6 +885,13 @@ impl Session {
         if ours {
             state.activity.note(&payload, now);
             state.guard.hook(&payload);
+            // The user's first prompt after a stop short of shipping answers it.
+            if payload["hook_event_name"] == "UserPromptSubmit" {
+                let unshipped = state.unshipped.take();
+                if let (Some(before), Some(prompt)) = (unshipped, payload["prompt"].as_str()) {
+                    state.answer = Some((before, prompt.to_owned()));
+                }
+            }
         }
         // Only a session start names the conversation, and not mid-turn: Codex hooks
         // are global, so a `codex exec` the agent runs reports its own one-shot id.

@@ -11,6 +11,7 @@ pub mod mine;
 pub mod model;
 pub mod policy;
 pub mod project;
+pub mod reply;
 pub mod retro;
 pub mod skill;
 pub mod stale;
@@ -523,6 +524,48 @@ impl Store {
         self.mark_project(root)?;
         let path = self.base.join(project::key(root)).join("skill-use.json");
         write_atomic(&path, &format!("{}\n", used.to_json()))
+    }
+
+    /// Records a reply to a stop short of shipping (ADR-0013 §2). Kept in the
+    /// user scope: habits are learned across repositories (ADR-0016 §2). Past
+    /// [`FAILURES_COMPACT`] bytes, what no longer counts is dropped first.
+    pub fn record_reply(&self, record: &reply::Record, now: u64) -> Result<()> {
+        use std::io::Write;
+        let user = project::user();
+        self.mark_project(&user)?;
+        let path = self.replies_file();
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .replies(now)
+                .iter()
+                .map(|r| format!("{}\n", r.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", record.to_json())?;
+        Ok(())
+    }
+
+    /// The replies recorded over the last [`reply::REPLY_DAYS`] days, oldest first.
+    pub fn replies(&self, now: u64) -> Vec<reply::Record> {
+        std::fs::read_to_string(self.replies_file())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| reply::Record::from_json(&v))
+            .filter(|r| now.saturating_sub(r.at) <= reply::REPLY_DAYS * 86_400)
+            .collect()
+    }
+
+    fn replies_file(&self) -> PathBuf {
+        self.base
+            .join(project::key(&project::user()))
+            .join("replies.jsonl")
     }
 
     fn failures_file(&self, root: &Path) -> PathBuf {
