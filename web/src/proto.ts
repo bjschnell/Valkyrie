@@ -154,6 +154,9 @@ export interface SpawnSpec {
 export type ItemKind = "bug" | "feature" | "chore";
 export const ITEM_KINDS: ItemKind[] = ["bug", "feature", "chore"];
 export type ItemStatus = "open" | "shipped" | "dropped" | "proposed";
+/** How soon: p0 first. An item from an older daemon has none, which is p2. */
+export type Priority = "p0" | "p1" | "p2" | "p3";
+export const PRIORITIES: Priority[] = ["p0", "p1", "p2", "p3"];
 
 export interface Item {
   id: number;
@@ -161,6 +164,9 @@ export interface Item {
   body: string;
   kind: ItemKind;
   status: ItemStatus;
+  priority?: Priority;
+  /** Items to finish first: advisory, it sorts below the ready ones while one is open. */
+  blocked_by?: number[];
   /** The repository it's for; absent until one is picked. */
   project?: string;
   attachments?: string[];
@@ -235,10 +241,21 @@ export interface NewItem {
   kind: ItemKind;
   cwd: string | null;
   attachments: string[];
+  priority?: Priority;
+  blocked_by?: number[];
 }
 
 export type ItemChange =
-  | { do: "edit"; title?: string; body?: string; kind?: ItemKind; cwd?: string | null }
+  | {
+      do: "edit";
+      title?: string;
+      body?: string;
+      kind?: ItemKind;
+      cwd?: string | null;
+      priority?: Priority;
+      /** The whole list, replacing the item's; empty clears it. */
+      blocked_by?: number[];
+    }
   | { do: "status"; status: ItemStatus };
 
 /** Requests, without the `req` id the client adds. */

@@ -351,7 +351,7 @@ impl Registry {
             body: String::new(),
             kind,
             cwd: Some(info.cwd.clone()),
-            attachments: Vec::new(),
+            ..NewItem::default()
         };
         let item = {
             let backlog = self.backlog.lock().unwrap();
@@ -783,8 +783,9 @@ impl Registry {
         let mut env = env;
         // The item it's on, for `valk todo show` in the session.
         env.push(("VALK_ITEM".into(), Some(id.to_string())));
+        let items = self.backlog.lock().unwrap().load();
         let spec = SpawnSpec {
-            command: vec![agent.to_owned(), backlog::brief(&item)],
+            command: vec![agent.to_owned(), backlog::brief(&item, &items)],
             cwd: Some(cwd),
             name: Some(name),
             size,
@@ -894,6 +895,7 @@ mod tests {
             kind: Default::default(),
             cwd: None,
             attachments: Vec::new(),
+            ..Default::default()
         };
         let item = registry
             .backlog
@@ -939,6 +941,7 @@ mod tests {
             kind: Default::default(),
             cwd: None,
             attachments: Vec::new(),
+            ..Default::default()
         };
         let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
         let (merged, closed, unknown, proposed, none) = {
@@ -1053,6 +1056,7 @@ mod tests {
             kind: Default::default(),
             cwd: None,
             attachments: Vec::new(),
+            ..Default::default()
         };
         let filed = |title: &str| {
             registry
@@ -1089,6 +1093,8 @@ mod tests {
             }))
         });
         let edit = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
             title: Some("Hijacked".into()),
             body: None,
             kind: None,

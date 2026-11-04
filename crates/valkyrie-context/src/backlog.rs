@@ -80,8 +80,10 @@ impl Backlog {
             bail!("at most {MAX_ATTACHMENTS} attachments");
         }
         valkyrie_proto::ensure_private_dir(&self.base)?;
-        let id = self
-            .load()
+        let items = self.load();
+        // Nothing can wait on an item not yet written, so no cycle is possible here.
+        let blocked_by = blockers(0, &new.blocked_by, &items)?;
+        let id = items
             .iter()
             .map(|i| i.id)
             .max()
@@ -95,6 +97,8 @@ impl Backlog {
             title,
             body,
             kind: new.kind,
+            priority: new.priority,
+            blocked_by,
             status: if by == "human" {
                 ItemStatus::Open
             } else {
@@ -223,9 +227,23 @@ impl Backlog {
                 body,
                 kind,
                 cwd,
+                priority,
+                blocked_by,
             } => {
-                if title.is_none() && body.is_none() && kind.is_none() && cwd.is_none() {
+                if title.is_none()
+                    && body.is_none()
+                    && kind.is_none()
+                    && cwd.is_none()
+                    && priority.is_none()
+                    && blocked_by.is_none()
+                {
                     bail!("nothing to change");
+                }
+                if let Some(priority) = priority {
+                    item.priority = *priority;
+                }
+                if let Some(ids) = blocked_by {
+                    item.blocked_by = blockers(id, ids, &self.load())?;
                 }
                 // A blank title is taken from the body when adding; here it would
                 // quietly move the body's first line.
@@ -400,6 +418,46 @@ impl Backlog {
 
 /// Refuses a pull request that isn't one plain `https://` URL: it's shown as a
 /// link in the web app.
+/// Most items one can wait on.
+const MAX_BLOCKERS: usize = 20;
+
+/// `ids` as item `id` (0 for one being added) may wait on, sorted with repeats
+/// dropped: items that exist, not itself, and none that waits on it in turn.
+fn blockers(id: u32, ids: &[u32], items: &[Item]) -> Result<Vec<u32>> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() > MAX_BLOCKERS {
+        bail!("at most {MAX_BLOCKERS} items to wait on");
+    }
+    for &b in &ids {
+        if b == id {
+            bail!("#{id} can't wait on itself");
+        }
+        if !items.iter().any(|i| i.id == b) {
+            bail!("no item #{b}");
+        }
+        // Follow what b waits on: reaching `id` would make a loop.
+        let mut seen = vec![b];
+        let mut next = vec![b];
+        while let Some(at) = next.pop() {
+            let Some(i) = items.iter().find(|i| i.id == at) else {
+                continue;
+            };
+            for &up in &i.blocked_by {
+                if up == id {
+                    bail!("#{b} already waits on #{id}, so #{id} can't wait on it");
+                }
+                if !seen.contains(&up) {
+                    seen.push(up);
+                    next.push(up);
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
 pub fn pr_url(pr: &str) -> Result<()> {
     // ASCII only: bidi and look-alike characters could make a link read as another.
     let ok = pr.is_ascii()
@@ -493,8 +551,9 @@ pub fn branch(item: &Item) -> String {
 
 /// What the agent is told first: a brief for the kind of work, then the item.
 /// Ideas written on a phone are rough, so a feature asks for a plan and questions
-/// before code; a bug asks for a reproduction before a fix.
-pub fn brief(item: &Item) -> String {
+/// before code; a bug asks for a reproduction before a fix. `items` are the rest
+/// of the backlog, for what this one still waits on.
+pub fn brief(item: &Item, items: &[Item]) -> String {
     let how = match item.kind {
         ItemKind::Bug => {
             "Fix this bug from my backlog. Reproduce it first, as a failing test where you can, then fix it and show the test passing. If you can't reproduce it, stop and tell me what you tried."
@@ -514,6 +573,20 @@ pub fn brief(item: &Item) -> String {
         text.push_str("\nAttached (screenshots and files; read them):\n");
         for a in &item.attachments {
             text.push_str(&format!("- {}\n", a.display()));
+        }
+    }
+    let waits = item.waiting_on(items);
+    if !waits.is_empty() {
+        // Advisory: the user launched it anyway, so say what it leans on and let
+        // the agent check before building over a gap.
+        text.push_str("\nThis is meant to come after these, which aren't finished yet; check whether this needs them before building on them, and tell me if it does:\n");
+        for i in items.iter().filter(|i| waits.contains(&i.id)) {
+            text.push_str(&format!(
+                "- #{} {} ({})\n",
+                i.id,
+                i.title,
+                i.status.as_str()
+            ));
         }
     }
     if item.notes.iter().any(|n| !n.taken) {
@@ -552,6 +625,7 @@ pub fn adopted(item: &Item) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+    use valkyrie_proto::Priority;
 
     /// A scratch folder, taken away when the test ends, pass or fail.
     struct Temp(PathBuf);
@@ -685,6 +759,8 @@ mod tests {
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Feature), "human", 1).unwrap();
         let edit = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
             title: Some("y".into()),
             body: Some("more".into()),
             kind: Some(ItemKind::Bug),
@@ -693,6 +769,8 @@ mod tests {
         b.change(1, &edit, 2).unwrap();
         // Only what an edit gives changes: a body edited elsewhere in between stays.
         let retitle = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
             title: Some("z".into()),
             body: None,
             kind: None,
@@ -704,6 +782,8 @@ mod tests {
             ("z", "more", ItemKind::Bug)
         );
         let blank = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
             title: Some(" ".into()),
             body: None,
             kind: None,
@@ -714,6 +794,8 @@ mod tests {
             "a blank title isn't taken from the body"
         );
         let nothing = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
             title: None,
             body: None,
             kind: None,
@@ -748,7 +830,7 @@ mod tests {
             (mine.status, theirs.status),
             (ItemStatus::Open, ItemStatus::Proposed)
         );
-        assert!(brief(&theirs).contains("item #2 in my Valkyrie backlog"));
+        assert!(brief(&theirs, &[]).contains("item #2 in my Valkyrie backlog"));
     }
 
     #[test]
@@ -774,7 +856,7 @@ mod tests {
             .unwrap();
         assert_eq!(item.notes.len(), 2);
         assert_eq!((item.notes[0].by.as_str(), item.updated), ("claude", 3));
-        let text = brief(&item);
+        let text = brief(&item, &[]);
         assert!(
             text.contains(
                 "- claude: fixed the parser\n  still flaky on Windows\n- me: check the Windows CI\n"
@@ -970,19 +1052,21 @@ mod tests {
             .unwrap();
         assert_eq!(item.notes.len(), 2, "both shown on the item");
         assert!(item.notes[1].taken && !item.notes[0].taken);
-        let text = brief(&item);
+        let text = brief(&item, &[]);
         assert!(text.contains("- claude: from the launch\n"), "{text}");
         assert!(!text.contains("rm -rf"), "{text}");
         let only_taken = Item {
             notes: item.notes[1..].to_vec(),
             ..item
         };
-        assert!(!brief(&only_taken).contains("Notes from earlier work"));
+        assert!(!brief(&only_taken, &[]).contains("Notes from earlier work"));
     }
 
     #[test]
     fn branches_follow_the_kind_and_title() {
         let mk = |id, title: &str, kind| Item {
+            priority: Default::default(),
+            blocked_by: Vec::new(),
             id,
             title: title.into(),
             body: String::new(),
@@ -1014,14 +1098,117 @@ mod tests {
             "feat/3-backlog-kanban-ish-view"
         );
         assert_eq!(branch(&mk(4, "日本語", ItemKind::Chore)), "chore/4");
-        let b = brief(&Item {
-            body: "steps".into(),
-            attachments: vec![PathBuf::from("/s/1-shot.png")],
-            ..mk(5, "crash", ItemKind::Bug)
-        });
+        let b = brief(
+            &Item {
+                body: "steps".into(),
+                attachments: vec![PathBuf::from("/s/1-shot.png")],
+                ..mk(5, "crash", ItemKind::Bug)
+            },
+            &[],
+        );
         assert!(b.starts_with("Fix this bug"));
         assert!(b.contains("# crash\n\nsteps\n"));
         assert!(b.contains("- /s/1-shot.png\n"));
         assert!(b.ends_with("anything I should check>\"`.)\n"));
+    }
+
+    #[test]
+    fn what_an_item_waits_on_must_exist_and_never_loop() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let one = b
+            .add(&new("one", "", ItemKind::Feature), "human", 1)
+            .unwrap();
+        let two = b
+            .add(
+                &NewItem {
+                    blocked_by: vec![one.id, one.id],
+                    priority: Priority::P0,
+                    ..new("two", "", ItemKind::Feature)
+                },
+                "human",
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            (two.blocked_by.as_slice(), two.priority),
+            (&[1][..], Priority::P0)
+        );
+        let three = b
+            .add(&new("three", "", ItemKind::Feature), "human", 3)
+            .unwrap();
+        let after = |ids: Vec<u32>| ItemChange::Edit {
+            title: None,
+            body: None,
+            kind: None,
+            cwd: None,
+            priority: None,
+            blocked_by: Some(ids),
+        };
+        let refused = |id, ids| b.change(id, &after(ids), 4).unwrap_err().to_string();
+        assert!(refused(three.id, vec![9]).contains("no item #9"));
+        assert!(refused(three.id, vec![3]).contains("itself"));
+        // 1 ← 2 ← 3, then 1 after 3 would loop, directly or not.
+        b.change(three.id, &after(vec![two.id]), 4).unwrap();
+        assert!(refused(one.id, vec![3]).contains("already waits on #1"));
+        assert!(refused(two.id, vec![3]).contains("already waits on #2"));
+        assert!(
+            b.add(
+                &NewItem {
+                    blocked_by: vec![7],
+                    ..new("x", "", ItemKind::Bug)
+                },
+                "human",
+                5
+            )
+            .is_err()
+        );
+        // Clearing works, and a priority alone is a change.
+        assert!(
+            b.change(three.id, &after(Vec::new()), 6)
+                .unwrap()
+                .blocked_by
+                .is_empty()
+        );
+        let prio = ItemChange::Edit {
+            title: None,
+            body: None,
+            kind: None,
+            cwd: None,
+            priority: Some(Priority::P3),
+            blocked_by: None,
+        };
+        assert_eq!(b.change(one.id, &prio, 7).unwrap().priority, Priority::P3);
+    }
+
+    #[test]
+    fn a_brief_names_what_its_item_still_waits_on() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let first = b
+            .add(&new("schema first", "", ItemKind::Feature), "human", 1)
+            .unwrap();
+        let done = b
+            .add(&new("already done", "", ItemKind::Feature), "human", 1)
+            .unwrap();
+        let ship = ItemChange::Status {
+            status: ItemStatus::Shipped,
+        };
+        b.change(done.id, &ship, 2).unwrap();
+        let item = b
+            .add(
+                &NewItem {
+                    blocked_by: vec![first.id, done.id],
+                    ..new("then this", "", ItemKind::Feature)
+                },
+                "human",
+                3,
+            )
+            .unwrap();
+        let text = brief(&item, &b.load());
+        assert!(text.contains("- #1 schema first (open)\n"), "{text}");
+        assert!(!text.contains("already done"));
+        b.change(first.id, &ship, 4).unwrap();
+        assert!(!brief(&item, &b.load()).contains("meant to come after"));
     }
 }

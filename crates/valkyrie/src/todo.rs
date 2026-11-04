@@ -5,7 +5,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use valkyrie_proto::client::Client;
 use valkyrie_proto::{
-    AgentState, Item, ItemChange, ItemKind, ItemStatus, NewItem, SessionInfo, Size,
+    AgentState, Item, ItemChange, ItemKind, ItemStatus, NewItem, Priority, SessionInfo, Size,
 };
 
 #[derive(Subcommand)]
@@ -30,6 +30,12 @@ pub enum TodoCmd {
         /// The detail, the text then being only the title.
         #[arg(short, long)]
         body: Option<String>,
+        /// p0 (first) to p3 (whenever); p2 if not given.
+        #[arg(short, long, default_value = "p2", value_parser = parse_priority)]
+        priority: Priority,
+        /// An item to finish before this one; repeat for more.
+        #[arg(long, value_name = "ID")]
+        after: Vec<u32>,
         /// Also take it for this session: work you're doing that nobody planned,
         /// tracked like a taken item (from inside a valk session).
         #[arg(long)]
@@ -56,6 +62,13 @@ pub enum TodoCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The item to start next: the first open one nobody's on and that waits on
+    /// nothing unfinished, by priority, then the oldest.
+    Next {
+        /// Only the items for the repository holding DIR (`-C .` for the one you're in).
+        #[arg(short = 'C', long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Accept an item an agent proposed, so it can be started.
     Accept { id: u32 },
     /// Reword it, change its kind, or move it to another repository. What you
@@ -73,6 +86,15 @@ pub enum TodoCmd {
         /// The repository it's for.
         #[arg(short = 'C', long, value_name = "DIR")]
         dir: Option<PathBuf>,
+        /// p0 (first) to p3 (whenever).
+        #[arg(short, long, value_parser = parse_priority)]
+        priority: Option<Priority>,
+        /// An item to finish before this one; repeat for more.
+        #[arg(long, value_name = "ID")]
+        after: Vec<u32>,
+        /// No longer wait on this item; repeat for more.
+        #[arg(long, value_name = "ID")]
+        not_after: Vec<u32>,
     },
     /// Leave a handoff: what changed, what's left, what to check. It shows on the
     /// item and goes into the brief of its next launch.
@@ -164,6 +186,36 @@ async fn or_mine(client: &Client, id: Option<u32>) -> Result<u32> {
     }
 }
 
+pub fn parse_priority(s: &str) -> Result<Priority, String> {
+    Priority::parse(s).ok_or_else(|| "p0, p1, p2 or p3".into())
+}
+
+/// The repository `-C DIR` names, as items keep it (its main root, which every
+/// worktree shares); `Some(None)` for `--no-folder`; `None` for every one.
+fn repo_of(dir: Option<PathBuf>, no_folder: bool) -> Result<Option<Option<PathBuf>>> {
+    Ok(match (dir, no_folder) {
+        (_, true) => Some(None),
+        (Some(dir), _) => {
+            let dir = std::path::absolute(dir)?;
+            if !valkyrie_context::project::in_git(&dir) {
+                bail!("{} is not in a git repository", dir.display());
+            }
+            Some(Some(valkyrie_context::project::root(&dir)))
+        }
+        (None, _) => None,
+    })
+}
+
+/// `p1`, then ` after #3, #4` for those it still waits on.
+fn rank(item: &Item, items: &[Item]) -> String {
+    let waits = item.waiting_on(items);
+    if waits.is_empty() {
+        return item.priority.as_str().into();
+    }
+    let ids: Vec<String> = waits.iter().map(|id| format!("#{id}")).collect();
+    format!("{} after {}", item.priority.as_str(), ids.join(", "))
+}
+
 pub fn parse_kind(s: &str) -> Result<ItemKind, String> {
     ItemKind::parse(s).ok_or_else(|| "bug, feature or chore".into())
 }
@@ -183,6 +235,8 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             no_folder,
             files,
             body,
+            priority,
+            after,
             take,
             branch,
             pr,
@@ -214,6 +268,8 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 kind,
                 cwd,
                 attachments,
+                priority,
+                blocked_by: after,
             };
             let item = match take {
                 true => client.add_and_take(new, branch, pr).await?,
@@ -233,25 +289,16 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             no_folder,
             json,
         } => {
-            // Items keep their repository's main root (every worktree shares it), so
-            // DIR is matched the same way.
-            let repo = match (dir, no_folder) {
-                (_, true) => Some(None),
-                (Some(dir), _) => {
-                    let dir = std::path::absolute(dir)?;
-                    if !valkyrie_context::project::in_git(&dir) {
-                        bail!("{} is not in a git repository", dir.display());
-                    }
-                    Some(Some(valkyrie_context::project::root(&dir)))
-                }
-                (None, _) => None,
-            };
-            let items = client.items().await?;
-            let items: Vec<Item> = items
-                .into_iter()
+            let repo = repo_of(dir, no_folder)?;
+            let every = client.items().await?;
+            let mut items: Vec<Item> = every
+                .iter()
                 .filter(|i| all || matches!(i.status, ItemStatus::Open | ItemStatus::Proposed))
                 .filter(|i| repo.as_ref().is_none_or(|r| i.project == *r))
+                .cloned()
                 .collect();
+            // In the order to work them, which is the order a script should too.
+            items.sort_by(valkyrie_proto::order(&every));
             if json {
                 println!("{}", serde_json::to_string_pretty(&items)?);
                 return Ok(None);
@@ -266,12 +313,23 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             for i in &items {
                 println!(
-                    "#{:<4} {:<8} {:<12} {:<14} {}{}{}",
+                    "#{:<4} {:<3} {:<8} {:<12} {:<14} {}{}{}{}",
                     i.id,
+                    i.priority.as_str(),
                     i.kind.as_str(),
                     lane(i, &sessions, boot),
                     short(&folder(i), 14),
                     i.title,
+                    match i.waiting_on(&every).as_slice() {
+                        [] => String::new(),
+                        ids => format!(
+                            " (after {})",
+                            ids.iter()
+                                .map(|id| format!("#{id}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
                     if i.pr.is_some() { " (PR)" } else { "" },
                     if i.agent_filed() {
                         " (agent-filed)"
@@ -282,20 +340,58 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             Ok(None)
         }
+        TodoCmd::Next { dir } => {
+            let repo = repo_of(dir, false)?;
+            let every = client.items().await?;
+            let sessions = client.list().await?;
+            let boot = client.hello_info().await?.boot;
+            let mut free: Vec<&Item> = every
+                .iter()
+                .filter(|i| i.status == ItemStatus::Open && lane(i, &sessions, boot) == "backlog")
+                .filter(|i| repo.as_ref().is_none_or(|r| i.project == *r))
+                .collect();
+            free.sort_by(|a, b| valkyrie_proto::order(&every)(a, b));
+            match free.first() {
+                Some(i) if i.waiting_on(&every).is_empty() => println!(
+                    "#{} {} [{} · {}] ({})",
+                    i.id,
+                    i.title,
+                    i.priority.as_str(),
+                    i.kind.as_str(),
+                    folder(i)
+                ),
+                // All of them wait: say on what, since that's where to start.
+                Some(_) => bail!(
+                    "every open item waits on another: {}",
+                    free.iter()
+                        .take(5)
+                        .map(|i| format!("#{} ({})", i.id, rank(i, &every)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => bail!("nothing open that nobody's on"),
+            }
+            Ok(None)
+        }
         TodoCmd::Show { id } => {
             let id = or_mine(client, id).await?;
             let Some(i) = client.items().await?.into_iter().find(|i| i.id == id) else {
                 bail!("no item #{id}");
             };
+            let every = client.items().await?;
             println!(
-                "#{} {} [{} · {} · by {}]",
+                "#{} {} [{} · {} · {} · by {}]",
                 i.id,
                 i.title,
+                rank(&i, &every),
                 i.kind.as_str(),
                 i.status.as_str(),
                 i.by
             );
             println!("folder: {}", folder(&i));
+            for w in every.iter().filter(|w| i.blocked_by.contains(&w.id)) {
+                println!("after: #{} {} ({})", w.id, w.title, w.status.as_str());
+            }
             if let Some(b) = &i.branch {
                 let at = i.checkout.as_ref().map(|c| format!(" in {}", c.display()));
                 println!("branch: {b}{}", at.unwrap_or_default());
@@ -328,9 +424,21 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             body,
             kind,
             dir,
+            priority,
+            after,
+            not_after,
         } => {
-            if title.is_none() && body.is_none() && kind.is_none() && dir.is_none() {
-                bail!("nothing to change: give --title, --body, --kind or --dir");
+            if title.is_none()
+                && body.is_none()
+                && kind.is_none()
+                && dir.is_none()
+                && priority.is_none()
+                && after.is_empty()
+                && not_after.is_empty()
+            {
+                bail!(
+                    "nothing to change: give --title, --body, --kind, --dir, --priority, --after or --not-after"
+                );
             }
             if title.as_deref().is_some_and(|t| t.trim().is_empty()) {
                 bail!("the title can't be empty");
@@ -348,12 +456,16 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 body,
                 kind,
                 cwd: dir.map(std::path::absolute).transpose()?,
+                priority,
+                blocked_by: blocked_by(client, id, &after, &not_after).await?,
             };
             let (item, _) = client.change_item(id, change).await?;
+            let every = client.items().await?;
             println!(
-                "#{} {} [{}] ({})",
+                "#{} {} [{} · {}] ({})",
                 item.id,
                 item.title,
+                rank(&item, &every),
                 item.kind.as_str(),
                 folder(&item)
             );
@@ -495,6 +607,26 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             Ok(None)
         }
     }
+}
+
+/// Item `id`'s list with `after` added and `not_after` taken out, or `None` to
+/// leave it alone.
+async fn blocked_by(
+    client: &Client,
+    id: u32,
+    after: &[u32],
+    not_after: &[u32],
+) -> Result<Option<Vec<u32>>> {
+    if after.is_empty() && not_after.is_empty() {
+        return Ok(None);
+    }
+    let Some(item) = client.items().await?.into_iter().find(|i| i.id == id) else {
+        bail!("no item #{id}");
+    };
+    let mut ids = item.blocked_by;
+    ids.extend(after);
+    ids.retain(|b| !not_after.contains(b));
+    Ok(Some(ids))
 }
 
 async fn status(client: &Client, id: u32, status: ItemStatus) -> Result<Option<SessionInfo>> {

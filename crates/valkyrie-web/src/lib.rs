@@ -908,7 +908,7 @@ mod tests {
                 body: String::new(),
                 kind: Default::default(),
                 cwd: None,
-                attachments: Vec::new(),
+                ..Default::default()
             },
             take,
             branch: None,
