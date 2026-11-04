@@ -247,16 +247,20 @@ struct State {
     topic: Option<String>,
     /// The merge guard's confirms that may be on screen (ADR-0015 §1).
     guard: crate::guard::Pending,
-    /// The last stop's work state, while it was short of shipping and no prompt
-    /// has answered it yet (ADR-0013 §2).
-    unshipped: Option<String>,
-    /// The prompt that answered it, with that state, until the next stop shows
-    /// how far the work got.
-    answer: Option<(String, String)>,
+    /// Stops short of shipping, the replies to them and the blocks policies made
+    /// (ADR-0013 §2, §6).
+    pairing: crate::pairing::Pairing,
     /// What the agent ran, for the repository's facts (ADR-0016 §3).
     watch: crate::facts::Watch,
-    /// Where the stops policies kept going led (ADR-0013 §6).
-    blocks: valkyrie_context::outcome::Follow,
+}
+
+/// What a hook told the daemon to do next.
+pub struct Heard {
+    /// What it saw run, for the repository's facts.
+    pub seen: Option<(PathBuf, valkyrie_context::facts::Seen)>,
+    /// A turn end of the session's own agent: the work state to read (the read's
+    /// number and where), off the hook path.
+    pub read: Option<(u64, PathBuf)>,
 }
 
 /// A reply to a stop short of shipping, and how far the work got by the next
@@ -395,10 +399,8 @@ impl Session {
             live_cwd: None,
             topic: None,
             guard: Default::default(),
-            unshipped: None,
             watch: Default::default(),
-            answer: None,
-            blocks: Default::default(),
+            pairing: Default::default(),
         };
         state.log(
             now_ms,
@@ -488,10 +490,8 @@ impl Session {
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
             guard: Default::default(),
-            unshipped: None,
             watch: Default::default(),
-            answer: None,
-            blocks: Default::default(),
+            pairing: Default::default(),
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -869,49 +869,58 @@ impl Session {
             .unwrap_or_else(|| self.id.to_string())
     }
 
-    /// Records where a stop left the work. Returns the reply it completes, when
-    /// the stop before was short of shipping and the user answered it.
-    pub fn log_work(&self, work: Value) -> Option<Answered> {
+    /// Records where read `n` found a stop left the work (`None` outside git).
+    /// Returns the reply it completes, when the stop before was short of
+    /// shipping and the user answered it.
+    pub fn log_work(&self, n: u64, work: Option<Value>) -> Option<Answered> {
         let mut state = self.state.lock().unwrap();
-        let after = work["state"].as_str().unwrap_or_default().to_owned();
-        let pr = work["pr"].is_string();
-        state.log(now_ms(), "work", work);
-        let block = state.blocks.stopped(&after, pr);
-        let answered = state.answer.take().map(|(before, prompt)| Answered {
-            block,
-            before,
-            prompt,
-            after: after.clone(),
-            pr,
+        // Overtaken by a later turn end, which says where the work is now.
+        if !state.pairing.latest(n) {
+            return None;
+        }
+        let found = work.as_ref().map(|w| {
+            (
+                w["state"].as_str().unwrap_or_default().to_owned(),
+                w["pr"].is_string(),
+            )
         });
-        state.watch.stopped(&after, pr);
-        state.unshipped =
-            matches!(after.as_str(), "uncommitted" | "unpushed" | "no-pr").then_some(after);
-        answered
+        if let Some(work) = work {
+            state.log(now_ms(), "work", work);
+        }
+        if let Some((after, pr)) = &found {
+            state.watch.stopped(after, *pr);
+        }
+        let paired = state.pairing.read(
+            n,
+            found.as_ref().map(|(a, pr)| (a.as_str(), *pr)),
+            &self.cwd,
+        )?;
+        Some(Answered {
+            block: paired.block,
+            before: paired.before,
+            prompt: paired.prompt,
+            after: paired.after,
+            pr: paired.pr,
+        })
     }
 
     /// How blocks turned out since the last call, for the daemon to record:
     /// each with whether the user overrode it, and how that was seen.
     pub fn take_outcomes(&self) -> Vec<valkyrie_context::outcome::Outcome> {
-        self.state.lock().unwrap().blocks.take()
+        self.state.lock().unwrap().pairing.outcomes()
     }
 
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
     /// inherits `VALK_SESSION`, so only the session's own agent may drive it (a
     /// `codex exec` run by Claude must not); a plain shell session takes any agent.
-    /// Returns what it saw run, for the repository's facts.
-    pub fn hook(
-        self: &Arc<Self>,
-        agent: &str,
-        sent_us: u64,
-        payload: Value,
-    ) -> Option<(PathBuf, valkyrie_context::facts::Seen)> {
+    pub fn hook(self: &Arc<Self>, agent: &str, sent_us: u64, payload: Value) -> Heard {
         let adapter = valkyrie_agents::by_name(agent);
         let ours = adapter.name() != "generic"
             && (self.adapter.name() == "generic" || self.adapter.name() == adapter.name());
         let events = adapter.normalize(&payload);
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
+        let mut read = None;
         state.log(
             now,
             "hook",
@@ -926,14 +935,7 @@ impl Session {
         if ours {
             state.activity.note(&payload, now);
             state.guard.hook(&payload);
-            state.blocks.hook(agent, &payload, &self.cwd);
-            // The user's first prompt after a stop short of shipping answers it.
-            if payload["hook_event_name"] == "UserPromptSubmit" {
-                let unshipped = state.unshipped.take();
-                if let (Some(before), Some(prompt)) = (unshipped, payload["prompt"].as_str()) {
-                    state.answer = Some((before, prompt.to_owned()));
-                }
-            }
+            read = state.pairing.hook(agent, &payload, &self.cwd);
         }
         // Only a session start names the conversation, and not mid-turn: Codex hooks
         // are global, so a `codex exec` the agent runs reports its own one-shot id.
@@ -963,7 +965,7 @@ impl Session {
         if ours && state.tracker.hook(&events, sent_us, now, self.watching()) {
             self.after_change(&mut state, now);
         }
-        seen
+        Heard { seen, read }
     }
 
     /// Periodic: screen heuristics once output is quiet (glances in between), then
