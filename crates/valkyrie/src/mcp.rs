@@ -213,6 +213,17 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                     crate::context::not_working(times)
                 ));
             }
+            let habits = client
+                .decisions(Some(valkyrie_context::project::user()))
+                .await
+                .unwrap_or_default();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            for line in crate::context::overridden(&store, &root, &list, &habits, now) {
+                text.push_str(&format!("\n{line}"));
+            }
             Ok(text)
         }
         other => anyhow::bail!("no tool {other}"),

@@ -59,9 +59,9 @@ The user's line for what an agent may decide: anything code, scripts or infrastr
    - **Codex:** policies reach Codex only as a title in the decisions block until its `Stop` hook is shown to support blocking.
 6. **Every action is logged and measured.**
    - **Log:** each blocked stop is in the session's event log, marked `valk_continued`, and `valk pings` counts them as *kept going by a policy*. (Phase 2 dropped the separate `policy.jsonl`: the event log already has the session, policy, state and time.)
-   - **Handled:** the session's next stop was `clean`, or a PR opened, with no prompt from the user in between.
-   - **Overridden:** the user interrupted, or answered the block's outcome with something that isn't routine.
-   - **Health:** `valk decisions health` reports a policy overridden in three or more sessions, to reword or retire, as ADR-0011 §6 does for decisions.
+   - **Handled:** the session's next stop was `clean`, or a PR opened, with no prompt from the user in between. (Phase 5: the next stop reached the policy's `<until>`, or, for a template without one, left the state it acted on. A stop short of it where the agent's last message says something failed is handled too, since the template tells it to stop and say why.)
+   - **Overridden:** the user interrupted, or answered the block's outcome with something that isn't routine. (Phase 5: a prompt before the kept-going turn ended, or a reply the extractor's model classifies as *other* to a stop still short of `<until>`. With `auto off` only interrupts are seen. Undoing a block that ended `clean` isn't seen.)
+   - **Health:** `valk decisions health` reports a policy overridden in three or more sessions, to reword or retire, as ADR-0011 §6 does for decisions. (Phase 5: each outcome is a line in `policy.jsonl` in the policy's scope, the user's for a habit, kept 90 days. That's the file phase 2 dropped, now for outcomes rather than blocks. Only sessions since the policy was accepted count. A project's health shows the user's habits too.)
    - **Stopping it:** retiring the policy (`valk decisions retire N`) stops it, and turning off the Context setting stops all of them.
 7. **What this leaves to others.**
    - **Decision #19** (which superseded #11 on 11-01: open a PR once the checks pass, no verifier) stays as text for agents the hooks don't reach. The `ship` policy is the same rule enforced, for any user, at whatever step their replies set. The PR is the review, and merging stays the user's.

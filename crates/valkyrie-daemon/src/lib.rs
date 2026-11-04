@@ -6,8 +6,11 @@ mod backlog;
 mod chat;
 mod context;
 mod extract;
+mod facts;
 mod foreground;
 mod guard;
+mod habit;
+mod pairing;
 mod pty;
 mod restore;
 mod session;
@@ -145,6 +148,12 @@ struct Registry {
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// Replies to stops short of shipping, for `habit` to learn from.
+    answers: mpsc::UnboundedSender<(SessionId, session::Answered)>,
+    answers_rx: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, session::Answered)>>>,
+    /// What agents ran, for `facts` to learn repositories' checks and CI from.
+    seen: mpsc::UnboundedSender<(SessionId, PathBuf, valkyrie_context::facts::Seen)>,
+    seen_rx: SeenRx,
     /// The backlog (DESIGN §8.12); the lock keeps ids from colliding.
     backlog: Mutex<valkyrie_context::backlog::Backlog>,
     /// Every backlog item, pushed with the queue.
@@ -432,6 +441,8 @@ fn new_registry(
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
     let (turns, turns_rx) = mpsc::unbounded_channel();
+    let (answers, answers_rx) = mpsc::unbounded_channel();
+    let (seen, seen_rx) = mpsc::unbounded_channel();
     let socket_for_restore = socket.clone();
     let registry = Arc::new(Registry {
         sessions: Mutex::default(),
@@ -464,6 +475,10 @@ fn new_registry(
         stale_check: tokio::sync::Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
+        answers,
+        answers_rx: Mutex::new(Some(answers_rx)),
+        seen,
+        seen_rx: Mutex::new(Some(seen_rx)),
         backlog: Mutex::new(valkyrie_context::backlog::Backlog::new(
             state_dir.join("backlog"),
         )),
@@ -479,6 +494,10 @@ fn new_registry(
     Ok((registry, rx))
 }
 
+/// The receiving end of `Registry::seen`, taken once by `facts::run`.
+type SeenRx =
+    Mutex<Option<mpsc::UnboundedReceiver<(SessionId, PathBuf, valkyrie_context::facts::Seen)>>>;
+
 async fn serve_forever(
     #[cfg_attr(unix, allow(unused_mut))] mut listener: Listener,
     registry: Arc<Registry>,
@@ -487,6 +506,12 @@ async fn serve_forever(
     tokio::spawn(publish_queue(registry.clone()));
     if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
         tokio::spawn(extract::run(registry.clone(), turns));
+    }
+    if let Some(answers) = registry.answers_rx.lock().unwrap().take() {
+        tokio::spawn(habit::run(registry.clone(), answers));
+    }
+    if let Some(seen) = registry.seen_rx.lock().unwrap().take() {
+        tokio::spawn(facts::run(registry.clone(), seen));
     }
     tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(watch_prs(registry.clone()));
@@ -994,18 +1019,23 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 // agent is still at it, and nothing should say it finished.
                 let turn_ended =
                     payload["hook_event_name"] == "Stop" && payload["valk_continued"].is_null();
-                // The main thread's turn, not a subagent's, and where it ran.
-                let work_in = (turn_ended && payload["agent_id"].is_null())
-                    .then(|| payload["cwd"].as_str().map(std::path::PathBuf::from))
-                    .flatten();
                 match registry.get(session) {
                     Ok(s) => {
-                        s.hook(&agent, sent_us, payload);
+                        let heard = s.hook(&agent, sent_us, payload);
+                        if let Some((cwd, seen)) = heard.seen {
+                            let _ = registry.seen.send((session, cwd, seen));
+                        }
+                        habit::record_outcomes(&registry, &s);
                         // Git and `gh` take a while; the record can wait, the hook can't.
-                        if let Some(cwd) = work_in {
+                        // Numbered by the hook, so a reply typed meanwhile waits for it.
+                        if let Some((n, cwd)) = heard.read {
+                            let answers = registry.answers.clone();
+                            let registry = registry.clone();
                             tokio::task::spawn_blocking(move || {
-                                if let Some(work) = work::at(&cwd) {
-                                    s.log_work(work);
+                                let answered = s.log_work(n, work::at(&cwd));
+                                habit::record_outcomes(&registry, &s);
+                                if let Some(answered) = answered {
+                                    let _ = answers.send((session, answered));
                                 }
                             });
                         }

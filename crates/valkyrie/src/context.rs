@@ -154,7 +154,16 @@ pub async fn decisions(
         Some(DecisionsCmd::Confirm { id }) => review(id, ReviewAction::Confirm).await,
         Some(DecisionsCmd::Health) => {
             let list = client.decisions(Some(cwd)).await?;
-            print_health(&root, &list);
+            // Your habits act in every project, so a project's health has them too.
+            let habits = match user {
+                true => Vec::new(),
+                false => {
+                    client
+                        .decisions(Some(valkyrie_context::project::user()))
+                        .await?
+                }
+            };
+            print_health(&root, &list, &habits);
             Ok(())
         }
         Some(DecisionsCmd::Show { id }) => {
@@ -465,16 +474,29 @@ async fn learn(
     Ok(())
 }
 
+/// What `valk decisions` says when `root` has nothing to list.
+/// For your habits, the one `valk decide --user` takes: how far you ship.
+fn empty_hint(root: &Path) -> String {
+    if valkyrie_context::project::is_user(root) {
+        // Body on stdin with `-`, which works the same in bash, zsh and fish.
+        return "no decisions for your habits yet; record how far you ship:\n  \
+                printf '%s\\n' 'template: ship' 'until: pr' | \
+                valk decide --user -k policy \"<title>\" -"
+            .into();
+    }
+    format!(
+        "no decisions for {} yet: `valk decide \"<title>\" \"<why>\"`",
+        where_(root)
+    )
+}
+
 fn print_list(root: &Path, list: &[Decision], all: bool) {
     let shown: Vec<&Decision> = list
         .iter()
         .filter(|d| all || matches!(d.status, DecisionStatus::Active | DecisionStatus::Proposed))
         .collect();
     if shown.is_empty() {
-        println!(
-            "no decisions for {} yet: `valk decide \"<title>\" \"<why>\"`",
-            where_(root)
-        );
+        println!("{}", empty_hint(root));
         return;
     }
     for d in shown {
@@ -492,7 +514,7 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
     }
 }
 
-fn print_health(root: &Path, list: &[Decision]) {
+fn print_health(root: &Path, list: &[Decision], habits: &[Decision]) {
     let count = |s: DecisionStatus| list.iter().filter(|d| d.status == s).count();
     let flagged: Vec<&Decision> = list.iter().filter(|d| d.fresh.review.is_some()).collect();
     let now = std::time::SystemTime::now()
@@ -525,11 +547,17 @@ fn print_health(root: &Path, list: &[Decision]) {
             d.fresh.review.as_deref().unwrap_or("")
         );
     }
-    let recurred = valkyrie_context::Store::new(store_base()).recurred(root, list);
+    let store = valkyrie_context::Store::new(store_base());
+    let recurred = store.recurred(root, list);
     for (id, times) in &recurred {
         println!("  #{id} isn't working: {}", not_working(*times));
     }
-    let waiting = count(DecisionStatus::Proposed) + flagged.len() + recurred.len();
+    let overridden = overridden(&store, root, list, habits, now);
+    for line in &overridden {
+        println!("  {line}");
+    }
+    let waiting =
+        count(DecisionStatus::Proposed) + flagged.len() + recurred.len() + overridden.len();
     println!(
         "  {}",
         if waiting == 0 {
@@ -538,6 +566,34 @@ fn print_health(root: &Path, list: &[Decision]) {
             format!("{waiting} wait on you: valk decisions, the TUI or your phone")
         }
     );
+}
+
+/// The policies in `root` and the user's habits that the user keeps
+/// overriding (ADR-0013 §6), one line each.
+pub(crate) fn overridden(
+    store: &valkyrie_context::Store,
+    root: &Path,
+    list: &[Decision],
+    habits: &[Decision],
+    now: u64,
+) -> Vec<String> {
+    use valkyrie_context::outcome::says;
+    let user = valkyrie_context::project::user();
+    let mut out: Vec<String> = store
+        .overridden(root, list, now)
+        .iter()
+        .map(|f| format!("#{} is getting overridden: {}", f.id, says(f)))
+        .collect();
+    if root != user {
+        out.extend(store.overridden(&user, habits, now).iter().map(|f| {
+            format!(
+                "your habit #{} is getting overridden: {} (`valk decisions --user`)",
+                f.id,
+                says(f)
+            )
+        }));
+    }
+    out
 }
 
 /// Why a decision whose failure recurred `times` since it was accepted needs you.
@@ -795,4 +851,32 @@ pub fn save_handoff(text: &str, from: valkyrie_proto::SessionId) -> Result<PathB
         .open(&path)?;
     std::io::Write::write_all(&mut file, text.as_bytes())?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #63: an empty habit list must suggest recording a habit, not a project
+    /// decision, and the habit it suggests must be one `valk decide --user` takes.
+    #[test]
+    fn an_empty_list_hints_at_the_scope_it_lists() {
+        let user = empty_hint(&valkyrie_context::project::user());
+        assert!(user.contains("your habits"), "{user}");
+        assert!(user.contains("valk decide --user -k policy"), "{user}");
+        let body = "template: ship\nuntil: pr";
+        assert!(user.contains("'template: ship' 'until: pr'"), "{user}");
+        assert!(
+            valkyrie_context::policy::check(body, true).is_ok(),
+            "the suggested habit must be accepted"
+        );
+
+        let project = empty_hint(Path::new("/src/app"));
+        assert!(project.contains("/src/app"), "{project}");
+        assert!(
+            project.contains("`valk decide \"<title>\" \"<why>\"`"),
+            "{project}"
+        );
+        assert!(!project.contains("--user"), "{project}");
+    }
 }

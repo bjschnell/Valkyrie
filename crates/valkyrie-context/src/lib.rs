@@ -4,13 +4,16 @@
 
 pub mod backlog;
 pub mod extract;
+pub mod facts;
 mod file;
 pub mod handoff;
 pub mod inject;
 pub mod mine;
 pub mod model;
+pub mod outcome;
 pub mod policy;
 pub mod project;
+pub mod reply;
 pub mod retro;
 pub mod skill;
 pub mod stale;
@@ -566,6 +569,128 @@ impl Store {
             .unwrap_or_else(|| serde_json::json!({}))
     }
 
+    /// Records a reply to a stop short of shipping (ADR-0013 §2). Kept in the
+    /// user scope: habits are learned across repositories (ADR-0016 §2). Past
+    /// [`FAILURES_COMPACT`] bytes, what no longer counts is dropped first.
+    pub fn record_reply(&self, record: &reply::Record, now: u64) -> Result<()> {
+        use std::io::Write;
+        let user = project::user();
+        self.mark_project(&user)?;
+        let path = self.replies_file();
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .replies(now)
+                .iter()
+                .map(|r| format!("{}\n", r.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", record.to_json())?;
+        Ok(())
+    }
+
+    /// The replies recorded over the last [`reply::REPLY_DAYS`] days, oldest first.
+    pub fn replies(&self, now: u64) -> Vec<reply::Record> {
+        std::fs::read_to_string(self.replies_file())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| reply::Record::from_json(&v))
+            .filter(|r| now.saturating_sub(r.at) <= reply::REPLY_DAYS * 86_400)
+            .collect()
+    }
+
+    fn replies_file(&self) -> PathBuf {
+        self.base
+            .join(project::key(&project::user()))
+            .join("replies.jsonl")
+    }
+
+    /// Records how a block of a policy kept in `root`'s scope turned out
+    /// (ADR-0013 §6). Past [`FAILURES_COMPACT`] bytes, what no longer counts is
+    /// dropped first.
+    pub fn record_outcome(&self, root: &Path, record: &outcome::Record, now: u64) -> Result<()> {
+        use std::io::Write;
+        self.mark_project(root)?;
+        let path = self.outcomes_file(root);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .outcomes(root, now)
+                .iter()
+                .map(|r| format!("{}\n", r.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", record.to_json())?;
+        Ok(())
+    }
+
+    /// How the blocks of `root`'s policies turned out over the last
+    /// [`outcome::OUTCOME_DAYS`] days, oldest first.
+    pub fn outcomes(&self, root: &Path, now: u64) -> Vec<outcome::Record> {
+        std::fs::read_to_string(self.outcomes_file(root))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| outcome::Record::from_json(&v))
+            .filter(|r| now.saturating_sub(r.at) <= outcome::OUTCOME_DAYS * 86_400)
+            .collect()
+    }
+
+    /// `root`'s active policies the user keeps overriding (ADR-0013 §6).
+    pub fn overridden(&self, root: &Path, decisions: &[Decision], now: u64) -> Vec<outcome::Flag> {
+        outcome::flagged(&self.outcomes(root, now), decisions)
+    }
+
+    fn outcomes_file(&self, root: &Path) -> PathBuf {
+        self.base.join(project::key(root)).join("policy.jsonl")
+    }
+
+    /// Records what ran in `root` (ADR-0016 §3). Past [`FAILURES_COMPACT`]
+    /// bytes, what no longer counts is dropped first.
+    pub fn record_fact(&self, root: &Path, seen: &facts::Sighting, now: u64) -> Result<()> {
+        use std::io::Write;
+        self.mark_project(root)?;
+        let path = self.base.join(project::key(root)).join("facts.jsonl");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .facts(root, now)
+                .iter()
+                .map(|s| format!("{}\n", s.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", seen.to_json())?;
+        Ok(())
+    }
+
+    /// What was seen run in `root` over the last [`facts::FACT_DAYS`] days.
+    pub fn facts(&self, root: &Path, now: u64) -> Vec<facts::Sighting> {
+        let path = self.base.join(project::key(root)).join("facts.jsonl");
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| facts::Sighting::from_json(&v))
+            .filter(|s| now.saturating_sub(s.at) <= facts::FACT_DAYS * 86_400)
+            .collect()
+    }
+
     fn failures_file(&self, root: &Path) -> PathBuf {
         self.base.join(project::key(root)).join("failures.jsonl")
     }
@@ -1094,6 +1219,56 @@ mod tests {
         let d = f.store.decide(&from_wt, by("human"), 1).unwrap();
         assert_eq!(d.project, f.repo);
         assert_eq!(f.store.load(&f.repo).len(), 1);
+    }
+
+    #[test]
+    fn outcomes_are_kept_in_the_policys_scope_and_flag_it_after_three_sessions() {
+        let f = Fixture::new("outcomes");
+        let policy = NewDecision {
+            kind: DecisionKind::Policy,
+            body: "template: ship\nuntil: pr".into(),
+            ..f.new_decision("Ship")
+        };
+        let d = f.store.decide(&policy, by("human"), 10).unwrap();
+        let rec = |session: &str, at: u64, overridden: bool| outcome::Record {
+            at,
+            session: session.into(),
+            policy: d.id,
+            scope: "project".into(),
+            project: f.repo.display().to_string(),
+            overridden,
+            how: "interrupted".into(),
+        };
+        for (s, at) in [("a", 20), ("b", 30)] {
+            f.store
+                .record_outcome(&f.repo, &rec(s, at, true), 40)
+                .unwrap();
+        }
+        f.store
+            .record_outcome(&f.repo, &rec("c", 35, false), 40)
+            .unwrap();
+        let list = f.store.load(&f.repo);
+        assert!(f.store.overridden(&f.repo, &list, 40).is_empty());
+        // Another scope's outcomes aren't this one's.
+        f.store
+            .record_outcome(&project::user(), &rec("u", 36, true), 40)
+            .unwrap();
+        assert!(f.store.overridden(&f.repo, &list, 40).is_empty());
+        f.store
+            .record_outcome(&f.repo, &rec("c", 37, true), 40)
+            .unwrap();
+        let flags = f.store.overridden(&f.repo, &list, 40);
+        assert_eq!(
+            flags,
+            [outcome::Flag {
+                id: d.id,
+                overridden: 3,
+                blocked: 3
+            }]
+        );
+        // Past OUTCOME_DAYS they no longer count.
+        let later = 37 + outcome::OUTCOME_DAYS * 86_400 + 1;
+        assert!(f.store.overridden(&f.repo, &list, later).is_empty());
     }
 
     #[test]
