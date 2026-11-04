@@ -10,6 +10,7 @@ mod facts;
 mod foreground;
 mod guard;
 mod habit;
+mod pairing;
 mod pty;
 mod restore;
 mod session;
@@ -1029,16 +1030,16 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                         }
                         habit::record_outcomes(&registry, &s);
                         // Git and `gh` take a while; the record can wait, the hook can't.
+                        // The read is numbered now, so a reply typed meanwhile waits for it.
                         if let Some(cwd) = work_in {
+                            let n = s.reading();
                             let answers = registry.answers.clone();
                             let registry = registry.clone();
                             tokio::task::spawn_blocking(move || {
-                                if let Some(work) = work::at(&cwd) {
-                                    let answered = s.log_work(work);
-                                    habit::record_outcomes(&registry, &s);
-                                    if let Some(answered) = answered {
-                                        let _ = answers.send((session, answered));
-                                    }
+                                let answered = s.log_work(n, work::at(&cwd));
+                                habit::record_outcomes(&registry, &s);
+                                if let Some(answered) = answered {
+                                    let _ = answers.send((session, answered));
                                 }
                             });
                         }
