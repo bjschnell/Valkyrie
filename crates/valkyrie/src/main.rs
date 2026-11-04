@@ -142,6 +142,10 @@ enum Cmd {
         /// 30 when it names a version or URL, else never).
         #[arg(long, value_name = "DAYS")]
         review_in: Option<u32>,
+        /// Record it as your habit, in every project, not this one's: how far you
+        /// ship (`-k policy`, `template: ship` and `until: commit|push|pr`).
+        #[arg(long)]
+        user: bool,
     },
     /// Hand a session's work to another agent: its goal and asks, where it left off
     /// (summarized by a small model), the files it changed, the project's decisions.
@@ -167,6 +171,9 @@ enum Cmd {
         /// Include rejected, superseded and retired ones.
         #[arg(long)]
         all: bool,
+        /// Your habits, which hold in every project, instead of this project's.
+        #[arg(long, global = true)]
+        user: bool,
         #[command(subcommand)]
         action: Option<context::DecisionsCmd>,
     },
@@ -591,6 +598,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             propose,
             supersedes,
             review_in,
+            user,
         }) => {
             let client = connect(&socket).await?.0;
             let args = context::Decide {
@@ -600,6 +608,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 propose,
                 supersedes,
                 review_in,
+                user,
             };
             context::decide(&client, args).await
         }
@@ -658,8 +667,8 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
         }
         Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
-        Some(Cmd::Decisions { all, action }) => {
-            context::decisions(&connect(&socket).await?.0, all, action).await
+        Some(Cmd::Decisions { all, user, action }) => {
+            context::decisions(&connect(&socket).await?.0, all, user, action).await
         }
         Some(Cmd::Setup(SetupCmd::Alias { dry_run, remove })) => alias::run(remove, dry_run),
         Some(Cmd::Setup(SetupCmd::Codex {

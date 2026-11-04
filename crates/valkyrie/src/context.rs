@@ -74,10 +74,15 @@ pub struct Decide {
     pub propose: bool,
     pub supersedes: Option<u32>,
     pub review_in: Option<u32>,
+    /// Into the user's habits (ADR-0016 §1), not the project's.
+    pub user: bool,
 }
 
 pub async fn decide(client: &Client, args: Decide) -> Result<()> {
-    let cwd = std::env::current_dir()?;
+    let cwd = match args.user {
+        true => valkyrie_context::project::user(),
+        false => std::env::current_dir()?,
+    };
     let body = match args.body.as_deref() {
         Some("-") => {
             let mut text = String::new();
@@ -111,9 +116,32 @@ pub async fn decide(client: &Client, args: Decide) -> Result<()> {
     Ok(())
 }
 
-pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) -> Result<()> {
-    let cwd = std::env::current_dir()?;
+pub async fn decisions(
+    client: &Client,
+    all: bool,
+    user: bool,
+    cmd: Option<DecisionsCmd>,
+) -> Result<()> {
+    let here = std::env::current_dir()?;
+    let cwd = match user {
+        true => valkyrie_context::project::user(),
+        false => here.clone(),
+    };
     let root = valkyrie_context::project::root(&cwd);
+    if user
+        && matches!(
+            cmd,
+            Some(
+                DecisionsCmd::Preview
+                    | DecisionsCmd::Export
+                    | DecisionsCmd::Mine { .. }
+                    | DecisionsCmd::Learn { .. }
+                    | DecisionsCmd::Auto { .. }
+            )
+        )
+    {
+        anyhow::bail!("that's for a project's decisions; drop --user");
+    }
     let review = async |id, action| -> Result<()> {
         let d = client.review(root.clone(), id, action, None).await?;
         println!("#{} {}: {}", d.id, d.status.as_str(), d.title);
@@ -134,15 +162,22 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
             let d = list
                 .iter()
                 .find(|d| d.id == id)
-                .with_context(|| format!("no decision #{id} in {}", root.display()))?;
+                .with_context(|| format!("no decision #{id} in {}", where_(&root)))?;
             print!("{}", valkyrie_context::render(d));
+            if d.kind == DecisionKind::Policy {
+                print_policy(client, &here).await?;
+            }
             Ok(())
         }
         Some(DecisionsCmd::Preview) => {
             let list = client.decisions(Some(cwd)).await?;
             let valk = valk_command();
+            let user = client
+                .decisions(Some(valkyrie_context::project::user()))
+                .await?;
             print!(
-                "{}",
+                "{}{}",
+                valkyrie_context::inject::habits(&user, &valk),
                 valkyrie_context::inject::block(
                     &root,
                     &list,
@@ -196,6 +231,38 @@ pub async fn decisions(client: &Client, all: bool, cmd: Option<DecisionsCmd>) ->
             Ok(())
         }
     }
+}
+
+/// How a scope is named to the user: a project's root, or their habits.
+fn where_(root: &Path) -> String {
+    match valkyrie_context::project::is_user(root) {
+        true => "your habits".into(),
+        false => root.display().to_string(),
+    }
+}
+
+/// The `ship` policy in effect in `here`'s project, the user's habit with the
+/// project's settings over it (ADR-0016 §1), and where each setting came from.
+async fn print_policy(client: &Client, here: &Path) -> Result<()> {
+    use valkyrie_context::project;
+    let root = project::root(here);
+    let ship = valkyrie_context::policy::ship(
+        &client.decisions(Some(here.to_path_buf())).await?,
+        &client.decisions(Some(project::user())).await?,
+    );
+    println!("\nIn effect in {}:", root.display());
+    match ship {
+        Some(ship) => {
+            for line in ship.describe().lines() {
+                println!("  {line}");
+            }
+        }
+        None => println!(
+            "  no ship policy: neither your habits nor this project's settings say how far to \
+             ship (`until`)"
+        ),
+    }
+    Ok(())
 }
 
 /// `valk decisions mine`: what you said again and again in this repository's
@@ -406,7 +473,7 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
     if shown.is_empty() {
         println!(
             "no decisions for {} yet: `valk decide \"<title>\" \"<why>\"`",
-            root.display()
+            where_(root)
         );
         return;
     }
@@ -557,13 +624,17 @@ pub fn hook(agent: &str, ambient: bool) {
     let text = match event {
         "SessionStart" => {
             let root = valkyrie_context::project::root(&cwd);
-            let decisions = valkyrie_context::Store::new(store_base()).load(&root);
-            valkyrie_context::inject::block(
+            let store = valkyrie_context::Store::new(store_base());
+            let valk = valk_command();
+            let habits = store.load(&valkyrie_context::project::user());
+            let mut text = valkyrie_context::inject::habits(&habits, &valk);
+            text.push_str(&valkyrie_context::inject::block(
                 &root,
-                &decisions,
+                &store.load(&root),
                 valkyrie_context::inject::BUDGET,
-                &valk_command(),
-            )
+                &valk,
+            ));
+            text
         }
         "UserPromptSubmit" => {
             let prompt = payload["prompt"].as_str().unwrap_or("");

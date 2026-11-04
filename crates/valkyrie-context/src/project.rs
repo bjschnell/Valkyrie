@@ -4,9 +4,28 @@
 use std::path::{Path, PathBuf};
 use valkyrie_proto::NoWindow;
 
+/// The user's own scope (ADR-0016 §1): decisions that hold in every project, kept
+/// beside the projects' as if it were one. Not a real path, so no directory is
+/// ever taken for it, and [`root`] and [`key`] pass it through.
+pub const USER: &str = "~user";
+
+/// The user scope's root, [`USER`].
+pub fn user() -> PathBuf {
+    PathBuf::from(USER)
+}
+
+/// Whether `root` is the user scope rather than a project.
+pub fn is_user(root: &Path) -> bool {
+    root.as_os_str() == USER
+}
+
 /// The project holding `dir`: the main worktree's root of the git repository it is
 /// in, so every worktree of a repo shares one project; outside git, `dir` itself.
+/// The user scope is its own root.
 pub fn root(dir: &Path) -> PathBuf {
+    if is_user(dir) {
+        return dir.to_path_buf();
+    }
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     for top in dir.ancestors() {
         let git = top.join(".git");
@@ -96,7 +115,11 @@ fn main_worktree(git_file: &Path) -> Option<PathBuf> {
 }
 
 /// The directory name a project's files live under: readable, and unique per root.
+/// The user scope's is `user`, which no project's can be (theirs end in a hash).
 pub fn key(root: &Path) -> String {
+    if is_user(root) {
+        return "user".into();
+    }
     let name: String = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -181,6 +204,14 @@ mod tests {
             assert_eq!(root(&dir), dir);
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_user_scope_is_its_own_root_and_never_a_projects() {
+        assert_eq!(root(&user()), user());
+        assert_eq!(key(&user()), "user");
+        assert_ne!(key(Path::new("/home/u/user")), "user");
+        assert!(is_user(&user()) && !is_user(Path::new("/home/u/~user")));
     }
 
     #[test]

@@ -131,6 +131,31 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
     out
 }
 
+/// Most of the user's habits listed; they're few, and each is a title.
+const MAX_HABITS: usize = 10;
+
+/// The user's active habits (ADR-0016 §1), which hold in every project: a title a
+/// line, put before a project's block. Empty when there are none.
+pub fn habits(user: &[Decision], valk: &str) -> String {
+    let mut active: Vec<&Decision> = user
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Active)
+        .collect();
+    if active.is_empty() {
+        return String::new();
+    }
+    active.sort_by(|a, b| b.updated.cmp(&a.updated).then(b.id.cmp(&a.id)));
+    let mut out = format!(
+        "The user's habits, which hold in every project (`{valk} decisions --user show <id>` \
+         prints one):\n"
+    );
+    for d in active.iter().take(MAX_HABITS) {
+        out.push_str(&format!("- #{} [{}] {}\n", d.id, d.kind.as_str(), d.title));
+    }
+    out.push('\n');
+    out
+}
+
 /// One line per skill, newest first, cut to [`SKILL_BUDGET`].
 fn index(skills: &[&Decision], valk: &str) -> String {
     if skills.is_empty() {
@@ -340,5 +365,19 @@ mod tests {
             out,
             r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a \"q\"\n\tb\\ \u0001"}}"#
         );
+    }
+
+    #[test]
+    fn the_users_habits_are_listed_by_title_apart_from_the_project() {
+        assert_eq!(habits(&[], "valk"), "");
+        let mut habit = d(1, DecisionKind::Policy, DecisionStatus::Active, 1);
+        habit.title = "Ship finished work as a pull request".into();
+        habit.body = "template: ship\nuntil: pr".into();
+        let proposed = d(2, DecisionKind::Policy, DecisionStatus::Proposed, 2);
+        let text = habits(&[habit, proposed], "valk");
+        assert!(!text.contains("#2"));
+        assert!(text.starts_with("The user's habits, which hold in every project"));
+        assert!(text.contains("- #1 [policy] Ship finished work as a pull request\n"));
+        assert!(!text.contains("until"));
     }
 }
