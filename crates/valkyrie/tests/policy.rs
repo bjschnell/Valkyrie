@@ -39,6 +39,38 @@ fn stop(dir: &Path, repo: &Path, active: bool) -> String {
 
 /// `stop`, with `gh` taken from `bin` first when given.
 fn stop_with(dir: &Path, repo: &Path, active: bool, bin: Option<&Path>) -> String {
+    run_hook(dir, repo, active, bin, &dir.join("run/none.sock"))
+}
+
+/// `stop_with`, with a daemon stand-in on the socket: what the hook printed, and
+/// the payload it sent.
+fn stop_heard(
+    dir: &Path,
+    repo: &Path,
+    active: bool,
+    bin: Option<&Path>,
+) -> (String, serde_json::Value) {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = run.join("d.sock");
+    let _ = std::fs::remove_file(&socket);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let daemon = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut frame = Vec::new();
+        conn.read_to_end(&mut frame).unwrap();
+        let msg: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
+        assert_eq!(msg["t"], "hook", "{msg}");
+        msg["payload"].clone()
+    });
+    let out = run_hook(dir, repo, active, bin, &socket);
+    (out, daemon.join().unwrap())
+}
+
+fn run_hook(dir: &Path, repo: &Path, active: bool, bin: Option<&Path>, socket: &Path) -> String {
     let mut path = std::env::var_os("PATH").unwrap_or_default();
     if let Some(bin) = bin {
         let dirs = std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path));
@@ -47,7 +79,7 @@ fn stop_with(dir: &Path, repo: &Path, active: bool, bin: Option<&Path>) -> Strin
     let mut child = Command::new(BIN)
         .args(["hook", "claude"])
         .env("VALK_SESSION", "1")
-        .env("VALK_SOCKET", dir.join("run/none.sock"))
+        .env("VALK_SOCKET", socket)
         .env("VALK_CONTEXT", dir.join("context"))
         .env("XDG_CONFIG_HOME", dir.join("config"))
         .env("XDG_STATE_HOME", dir.join("state"))
@@ -323,9 +355,26 @@ fn ci_fix_keeps_the_agent_on_a_red_pull_request_twice_then_lets_it_stop() {
     // Red again: the second and last block, then the user's.
     std::fs::write(&answer, red.to_string()).unwrap();
     assert!(block(stop(false)).contains("block 2 of 2"));
-    assert_eq!(stop(false), "");
+    // The stop after the last block, still red: through, and marked for the
+    // queue as the user's (ADR-0013 §3).
+    let (out, payload) = stop_heard(&dir.0, &repo, true, Some(&bin));
+    assert_eq!(out, "");
+    assert_eq!(payload["valk_ci_fix_spent"]["pr"], pr, "{payload}");
+    assert!(payload["valk_continued"].is_null());
+    // And every red stop after it.
+    let (out, payload) = stop_heard(&dir.0, &repo, false, Some(&bin));
+    assert_eq!(out, "");
+    assert_eq!(payload["valk_ci_fix_spent"]["blocks"], 2, "{payload}");
+    // Green again: an ordinary turn end.
+    std::fs::write(&answer, green.to_string()).unwrap();
+    let (_, payload) = stop_heard(&dir.0, &repo, true, Some(&bin));
+    assert!(payload["valk_ci_fix_spent"].is_null(), "{payload}");
+    std::fs::write(&answer, red.to_string()).unwrap();
     // Another pull request starts its own count.
     let other = red.to_string().replace("/pull/93", "/pull/94");
     std::fs::write(&answer, other).unwrap();
     assert!(block(stop(false)).contains("PR #94"));
+    // The stop after a first block on it isn't marked: tries are left.
+    let (_, payload) = stop_heard(&dir.0, &repo, true, Some(&bin));
+    assert!(payload["valk_ci_fix_spent"].is_null(), "{payload}");
 }

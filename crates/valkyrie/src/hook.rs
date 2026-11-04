@@ -163,18 +163,21 @@ fn send(
 /// end. `ship` (the user's habit with the project's settings over it, ADR-0016)
 /// answers work short of where the user ships it; `ci-fix`, on where the
 /// repository's `ci: gh` is accepted, answers a pull request whose checks failed,
-/// at most [`policy::CI_FIX_LIMIT`] times per pull request. Once per turn: Claude
-/// says `stop_hook_active` when the stop follows a block.
+/// at most [`policy::CI_FIX_LIMIT`] times per pull request, and marks the stop
+/// after that `valk_ci_fix_spent`. Once per turn: Claude says `stop_hook_active`
+/// when the stop follows a block.
 fn policy_block(payload: &mut Value) -> Option<String> {
     use valkyrie_context::policy;
     use valkyrie_daemon::work;
     if payload["hook_event_name"] != "Stop"
-        || payload["stop_hook_active"] == true
         || !payload["agent_id"].is_null()
         || !valkyrie_tui::context_enabled()
     {
         return None;
     }
+    // The stop right after a block: never blocked again, but `ci-fix` still looks,
+    // since the agent may have spent its last try on a red PR.
+    let active = payload["stop_hook_active"] == true;
     let cwd = PathBuf::from(payload["cwd"].as_str()?);
     let root = valkyrie_context::project::root(&cwd);
     let store = valkyrie_context::Store::new(crate::context::store_base());
@@ -182,7 +185,7 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         store.load(&root),
         store.load(&valkyrie_context::project::user()),
     );
-    let ship = policy::ship(&project, &user);
+    let ship = policy::ship(&project, &user).filter(|_| !active);
     let ci = policy::ci(&project).filter(|(ci, _)| *ci == policy::Ci::Gh);
     if ship.is_none() && ci.is_none() {
         return None;
@@ -224,11 +227,26 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         return None;
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    // Past the limit the stop goes through: what's left is the user's. Uncounted
-    // (the store can't be written), it could go on forever: no block either.
-    let block = store
+    // Past the limit the stop goes through, marked so the queue shows the PR as
+    // the user's to look at (ADR-0013 §3) rather than finished.
+    let spent = |payload: &mut Value| {
+        payload["valk_ci_fix_spent"] =
+            serde_json::json!({"pr": url, "blocks": policy::CI_FIX_LIMIT});
+    };
+    if active {
+        if store.ci_fix_blocks(&root, &url, now) >= policy::CI_FIX_LIMIT {
+            spent(payload);
+        }
+        return None;
+    }
+    // Uncounted (the store can't be written), it could go on forever: no block.
+    let Some(block) = store
         .record_ci_fix(&root, &url, now, policy::CI_FIX_LIMIT)
-        .ok()??;
+        .ok()?
+    else {
+        spent(payload);
+        return None;
+    };
     let (policy, scope) = named(source);
     payload["valk_continued"] = serde_json::json!({"template": "ci-fix", "policy": policy,
         "scope": scope, "state": state.as_str(), "pr": url, "block": block});

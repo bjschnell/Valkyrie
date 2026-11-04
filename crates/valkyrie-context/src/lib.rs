@@ -528,6 +528,17 @@ impl Store {
         write_atomic(&path, &format!("{}\n", used.to_json()))
     }
 
+    /// How many times `ci-fix` has blocked on the pull request at `pr`, as
+    /// [`Store::record_ci_fix`] counts them at `now`.
+    pub fn ci_fix_blocks(&self, root: &Path, pr: &str, now: u64) -> u32 {
+        let entry = &self.ci_fixes(root)[pr];
+        let at = entry["at"].as_u64().unwrap_or(0);
+        if now.saturating_sub(at) > FAILURE_DAYS * 86_400 {
+            return 0;
+        }
+        entry["blocks"].as_u64().unwrap_or(0) as u32
+    }
+
     /// Counts one more `ci-fix` block on the pull request at `pr` (ADR-0013 §3)
     /// and returns the new count, or `None` when it has already been blocked
     /// `limit` times. Pull requests not blocked for [`FAILURE_DAYS`] are forgotten,
@@ -1385,11 +1396,13 @@ mod tests {
         assert_eq!(record(a, 2), Some(2));
         // At the limit: not counted, not blocked.
         assert_eq!(record(a, 3), None);
+        assert_eq!(f.store.ci_fix_blocks(&f.repo, a, 3), 2);
         assert_eq!(record(b, 10 * day), Some(1));
         // Quiet for long, even one left at the limit starts over; a recent one
         // keeps its count.
         let later = (FAILURE_DAYS + 5) * day;
         assert_eq!(record(b, later), Some(2));
+        assert_eq!(f.store.ci_fix_blocks(&f.repo, a, later), 0);
         assert_eq!(record(a, later), Some(1));
     }
 
