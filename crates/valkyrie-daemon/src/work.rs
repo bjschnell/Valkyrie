@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+pub use valkyrie_context::policy::Check;
 use valkyrie_proto::NoWindow;
 
 /// Longest a `gh` lookup may take; the answer is only for the record, so a slow
@@ -49,7 +50,8 @@ pub enum Pr {
     None,
     Open {
         url: String,
-        red: bool,
+        /// Its failed checks; none: green or still running.
+        failed: Vec<Check>,
     },
     Merged {
         url: String,
@@ -60,6 +62,13 @@ pub enum Pr {
     },
     /// No `gh`, not signed in, not a GitHub remote, offline, too slow.
     Unknown,
+}
+
+impl Pr {
+    /// An open pull request with failed checks.
+    pub fn red(&self) -> bool {
+        matches!(self, Pr::Open { failed, .. } if !failed.is_empty())
+    }
 }
 
 /// Looks a pull request up from a directory (see `gh_pr`); may block.
@@ -133,10 +142,8 @@ pub fn state(
     }
     let (state, url) = match pr(cwd, &branch) {
         Pr::None => (State::NoPr, None),
-        Pr::Open { url, red: true } => (State::PrRed, Some(url)),
-        Pr::Open { url, red: false } | Pr::Merged { url } | Pr::Closed { url } => {
-            (State::Clean, Some(url))
-        }
+        Pr::Open { url, failed } if !failed.is_empty() => (State::PrRed, Some(url)),
+        Pr::Open { url, .. } | Pr::Merged { url } | Pr::Closed { url } => (State::Clean, Some(url)),
         Pr::Unknown => (State::Clean, None),
     };
     Some((state, Some(branch), url))
@@ -202,15 +209,42 @@ fn parse_pr(v: &Value) -> Pr {
         "ACTION_REQUIRED",
         "STARTUP_FAILURE",
     ];
-    let red = v["statusCheckRollup"].as_array().is_some_and(|checks| {
-        checks.iter().any(|c| {
+    let failed = v["statusCheckRollup"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
             ["conclusion", "state"]
                 .iter()
                 .filter_map(|k| c[*k].as_str())
                 .any(|s| FAILED.contains(&s))
         })
-    });
-    Pr::Open { url, red }
+        .map(|c| {
+            let text = |keys: &[&str]| {
+                keys.iter()
+                    .find_map(|k| c[*k].as_str().filter(|s| !s.is_empty()))
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            let url = text(&["detailsUrl", "targetUrl"]);
+            Check {
+                name: match (text(&["workflowName"]), text(&["name", "context"])) {
+                    (w, n) if w.is_empty() || n.is_empty() => format!("{w}{n}"),
+                    (w, n) => format!("{w} / {n}"),
+                },
+                run: actions_run(&url),
+                url,
+            }
+        })
+        .collect();
+    Pr::Open { url, failed }
+}
+
+/// The run id in a GitHub Actions link (`…/actions/runs/<id>/job/<job>`), on
+/// github.com or a GitHub Enterprise host.
+fn actions_run(url: &str) -> Option<u64> {
+    let (_, after) = url.split_once("/actions/runs/")?;
+    after.split('/').next()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -299,9 +333,17 @@ mod tests {
         git(&app, &["push", "--quiet", "-u", "origin", "fix"]);
         assert_eq!(of(&app, Pr::None), State::NoPr);
         let url = "https://example.com/pr/1".to_owned();
-        let open = |red| Pr::Open {
+        let open = |red: bool| Pr::Open {
             url: url.clone(),
-            red,
+            failed: if red {
+                vec![Check {
+                    name: "ci".into(),
+                    url: String::new(),
+                    run: None,
+                }]
+            } else {
+                vec![]
+            },
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
@@ -333,7 +375,7 @@ mod tests {
         let pr = |state: &str, checks: Value| {
             parse_pr(&json!({"state": state, "url": "u", "statusCheckRollup": checks}))
         };
-        let red = |p: Pr| matches!(p, Pr::Open { red: true, .. });
+        let red = |p: Pr| p.red();
         assert!(red(pr(
             "OPEN",
             json!([{"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"}])
@@ -350,5 +392,53 @@ mod tests {
         );
         assert_eq!(pr("CLOSED", json!([])), Pr::Closed { url: "u".into() });
         assert_eq!(pr("", json!([])), Pr::Unknown);
+    }
+
+    #[test]
+    fn names_each_failed_check_with_the_link_to_its_logs() {
+        let rollup = json!([
+            {"__typename": "CheckRun", "name": "test (windows)", "workflowName": "CI",
+             "conclusion": "FAILURE",
+             "detailsUrl": "https://github.com/o/r/actions/runs/41005952796/job/12"},
+            {"__typename": "CheckRun", "name": "fmt", "workflowName": "CI",
+             "conclusion": "SUCCESS", "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"},
+            // CI outside GitHub Actions reports a commit status (decision #24).
+            {"__typename": "StatusContext", "context": "bamboo/PLAN-JOB", "state": "FAILURE",
+             "targetUrl": "https://bamboo.example.com/browse/PLAN-JOB-7"},
+            {"__typename": "StatusContext", "context": "lint", "state": "ERROR"},
+            // GitHub Enterprise runs Actions too.
+            {"__typename": "CheckRun", "name": "build", "conclusion": "TIMED_OUT",
+             "detailsUrl": "https://git.corp.example/o/r/actions/runs/9/job/3"},
+        ]);
+        let Pr::Open { failed, .. } =
+            parse_pr(&json!({"state": "OPEN", "url": "u", "statusCheckRollup": rollup}))
+        else {
+            panic!("open");
+        };
+        assert_eq!(
+            failed,
+            [
+                Check {
+                    name: "CI / test (windows)".into(),
+                    url: "https://github.com/o/r/actions/runs/41005952796/job/12".into(),
+                    run: Some(41005952796),
+                },
+                Check {
+                    name: "bamboo/PLAN-JOB".into(),
+                    url: "https://bamboo.example.com/browse/PLAN-JOB-7".into(),
+                    run: None,
+                },
+                Check {
+                    name: "lint".into(),
+                    url: String::new(),
+                    run: None,
+                },
+                Check {
+                    name: "build".into(),
+                    url: "https://git.corp.example/o/r/actions/runs/9/job/3".into(),
+                    run: Some(9),
+                },
+            ]
+        );
     }
 }

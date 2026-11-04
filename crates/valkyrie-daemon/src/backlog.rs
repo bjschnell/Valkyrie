@@ -1007,7 +1007,7 @@ mod tests {
         // Reopened on GitHub, the mark goes.
         let reopened: PrLookup = Arc::new(|_, pr| Pr::Open {
             url: pr.to_owned(),
-            red: false,
+            failed: vec![],
         });
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);

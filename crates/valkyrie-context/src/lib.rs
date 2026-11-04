@@ -528,6 +528,47 @@ impl Store {
         write_atomic(&path, &format!("{}\n", used.to_json()))
     }
 
+    /// Counts one more `ci-fix` block on the pull request at `pr` (ADR-0013 §3)
+    /// and returns the new count, or `None` when it has already been blocked
+    /// `limit` times. Pull requests not blocked for [`FAILURE_DAYS`] are forgotten,
+    /// so one left at the limit starts over then. Two sessions stopping on one pull
+    /// request in the same instant can each count from the same number: at worst
+    /// one block too many, never a loop.
+    pub fn record_ci_fix(
+        &self,
+        root: &Path,
+        pr: &str,
+        now: u64,
+        limit: u32,
+    ) -> Result<Option<u32>> {
+        let mut all = self.ci_fixes(root);
+        let map = all.as_object_mut().context("ci-fix.json isn't an object")?;
+        map.retain(|_, v| {
+            now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+        });
+        let blocks = map.get(pr).and_then(|v| v["blocks"].as_u64()).unwrap_or(0) as u32;
+        if blocks >= limit {
+            return Ok(None);
+        }
+        map.insert(
+            pr.to_owned(),
+            serde_json::json!({"blocks": blocks + 1, "at": now}),
+        );
+        self.mark_project(root)?;
+        let path = self.base.join(project::key(root)).join("ci-fix.json");
+        write_atomic(&path, &format!("{all}\n"))?;
+        Ok(Some(blocks + 1))
+    }
+
+    fn ci_fixes(&self, root: &Path) -> serde_json::Value {
+        let path = self.base.join(project::key(root)).join("ci-fix.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
     /// Records a reply to a stop short of shipping (ADR-0013 §2). Kept in the
     /// user scope: habits are learned across repositories (ADR-0016 §2). Past
     /// [`FAILURES_COMPACT`] bytes, what no longer counts is dropped first.
@@ -1329,6 +1370,27 @@ mod tests {
         let got = f.store.skill_use(&f.repo);
         assert_eq!(got.since, 10 * day);
         assert!(!got.sessions.contains_key("old"));
+    }
+
+    #[test]
+    fn ci_fix_blocks_count_per_pull_request_and_are_forgotten() {
+        let f = Fixture::new("ci-fix");
+        let (a, b) = (
+            "https://github.com/o/r/pull/1",
+            "https://github.com/o/r/pull/2",
+        );
+        let day = 86_400;
+        let record = |pr, at| f.store.record_ci_fix(&f.repo, pr, at, 2).unwrap();
+        assert_eq!(record(a, 1), Some(1));
+        assert_eq!(record(a, 2), Some(2));
+        // At the limit: not counted, not blocked.
+        assert_eq!(record(a, 3), None);
+        assert_eq!(record(b, 10 * day), Some(1));
+        // Quiet for long, even one left at the limit starts over; a recent one
+        // keeps its count.
+        let later = (FAILURE_DAYS + 5) * day;
+        assert_eq!(record(b, later), Some(2));
+        assert_eq!(record(a, later), Some(1));
     }
 
     #[test]
