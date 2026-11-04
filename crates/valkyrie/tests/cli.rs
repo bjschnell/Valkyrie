@@ -1158,3 +1158,25 @@ fn context_hook_gives_decisions_at_session_start_only() {
     assert_silent_success(&run("aider", true, start("SessionStart")));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `valk … | head -1`: a reader that leaves early must end valk quietly, the way it
+/// ends `cat`, not with a "failed printing to stdout: Broken pipe" panic (#33).
+#[test]
+fn a_closed_stdout_ends_valk_quietly() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = temp("epipe");
+    let (reader, writer) = std::io::pipe().unwrap();
+    // Every write valk makes now fails with EPIPE, deterministically.
+    drop(reader);
+    let out = valk(&dir.join("sock"), &dir)
+        .arg("render")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-long-tool.raw"))
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.is_empty(), "valk complained: {stderr}");
+    assert_eq!(out.status.signal(), Some(libc::SIGPIPE), "{:?}", out.status);
+    let _ = std::fs::remove_dir_all(&dir);
+}
