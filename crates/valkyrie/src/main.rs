@@ -314,7 +314,38 @@ enum SetupCmd {
     },
 }
 
+/// `valk … | head -1`: once the reader is gone, `println!` panics with "failed
+/// printing to stdout: Broken pipe", since Rust ignores SIGPIPE. End the way `cat`
+/// does instead, killed by SIGPIPE, with nothing on stderr. Restoring SIGPIPE up
+/// front would do it too, but would also kill the daemon on a dead client's socket
+/// and turn a client's "daemon went away" error into a silent exit.
+#[cfg(unix)]
+fn die_quietly_on_closed_stdout() {
+    let default = std::panic::take_hook();
+    let epipe = format!(
+        "failed printing to stdout: {}",
+        std::io::Error::from_raw_os_error(libc::EPIPE)
+    );
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied());
+        if message == Some(epipe.as_str()) {
+            // SAFETY: plain libc calls; the process is ending either way.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                libc::raise(libc::SIGPIPE);
+            }
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    die_quietly_on_closed_stdout();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         // A hook must never print or exit nonzero (exit 2 blocks the agent), even
