@@ -1390,3 +1390,123 @@ fn routine_replies_in_two_sessions_propose_a_ship_habit() {
     );
     drop(daemon);
 }
+
+/// ADR-0016 §3: what agents run before a push that went through, and CI checked
+/// with their own tools after it, in two sessions, are proposed as the
+/// repository's `checks` and `ci: agent`.
+#[test]
+fn what_runs_before_pushes_in_two_sessions_proposes_the_repositorys_facts() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-facts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo) = (dir.join("bin"), dir.join("repo"));
+    for d in [&bin, &repo.join(".git"), &dir.join("run")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let exec: std::fs::Permissions = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let valk = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .args(args)
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let root = valkyrie_context::project::root(&repo);
+    let tool = |name: &str, input: &str| {
+        format!(
+            "echo '{{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"c\",\"cwd\":\"{}\",\"tool_name\":\"{name}\",\"tool_input\":{input}}}' | valk hook claude\nsleep 0.2\n",
+            repo.display()
+        )
+    };
+    for n in 0..2 {
+        let agent = bin.join(format!("agent-{n}"));
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\n{}{}{}{}{}sleep 30\n",
+                tool("Bash", r#"{"command":"cargo test -q 2>&1 | tail -3"}"#),
+                tool("Bash", r#"{"command":"ls"}"#),
+                tool("Bash", r#"{"command":"git push -u origin fix"}"#),
+                tool("mcp__bamboo__get_build", r#"{"plan":"APP"}"#),
+                tool("Bash", r#"{"command":"cargo build"}"#),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, exec.clone()).unwrap();
+        let claude = bin.join("claude");
+        let _ = std::fs::remove_file(&claude);
+        std::os::unix::fs::symlink(&agent, &claude).unwrap();
+        valk(&[
+            "new",
+            "--cwd",
+            repo.to_str().unwrap(),
+            "--",
+            claude.to_str().unwrap(),
+        ]);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10)
+            && store
+                .facts(
+                    &root,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                )
+                .len()
+                < 2 * (n + 1)
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if n == 0 {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(store.load(&root).is_empty(), "one session isn't enough");
+        }
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && store.load(&root).len() < 2 {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut found = store.load(&root);
+    found.sort_by_key(|d| d.id);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|d| d.status == valkyrie_proto::DecisionStatus::Proposed)
+    );
+    let bodies: Vec<&str> = found.iter().map(|d| d.body.as_str()).collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.starts_with("template: ship\nchecks: cargo test -q\n")),
+        "{bodies:?}"
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.starts_with("template: ship\nci: agent\n")
+                && b.contains("`mcp__bamboo__get_build`")),
+        "{bodies:?}"
+    );
+    drop(daemon);
+}

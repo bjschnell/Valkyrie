@@ -4,6 +4,7 @@
 
 pub mod backlog;
 pub mod extract;
+pub mod facts;
 mod file;
 pub mod handoff;
 pub mod inject;
@@ -566,6 +567,41 @@ impl Store {
         self.base
             .join(project::key(&project::user()))
             .join("replies.jsonl")
+    }
+
+    /// Records what ran in `root` (ADR-0016 §3). Past [`FAILURES_COMPACT`]
+    /// bytes, what no longer counts is dropped first.
+    pub fn record_fact(&self, root: &Path, seen: &facts::Sighting, now: u64) -> Result<()> {
+        use std::io::Write;
+        self.mark_project(root)?;
+        let path = self.base.join(project::key(root)).join("facts.jsonl");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .facts(root, now)
+                .iter()
+                .map(|s| format!("{}\n", s.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", seen.to_json())?;
+        Ok(())
+    }
+
+    /// What was seen run in `root` over the last [`facts::FACT_DAYS`] days.
+    pub fn facts(&self, root: &Path, now: u64) -> Vec<facts::Sighting> {
+        let path = self.base.join(project::key(root)).join("facts.jsonl");
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| facts::Sighting::from_json(&v))
+            .filter(|s| now.saturating_sub(s.at) <= facts::FACT_DAYS * 86_400)
+            .collect()
     }
 
     fn failures_file(&self, root: &Path) -> PathBuf {
