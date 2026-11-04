@@ -3025,7 +3025,7 @@ impl App {
                     "{}  ·  {} · {}{}",
                     d.kind.as_str(),
                     proposer(d),
-                    short_path(&d.project),
+                    scope_name(&d.project, short_path),
                     d.supersedes
                         .map(|n| format!(" · replaces #{n}"))
                         .unwrap_or_default()
@@ -3238,7 +3238,7 @@ impl App {
                 "{}  ·  {} · {}",
                 d.kind.as_str(),
                 proposer(d),
-                short_path(&d.project)
+                scope_name(&d.project, short_path)
             )
             .fg(t.muted),
         )];
@@ -4347,10 +4347,12 @@ fn proposer(d: &Decision) -> &str {
 }
 
 fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
-    let project = d.project.file_name().map_or_else(
-        || d.project.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
+    let project = scope_name(&d.project, |p| {
+        p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    });
     // An active decision here is one that may be out of date.
     let kind = if d.fresh.review.is_some() {
         "review?".fg(t.interrupted)
@@ -4695,6 +4697,19 @@ fn session_hints(map: &Keymap) -> Vec<(String, &'static str, Option<Action>)> {
 }
 
 /// `~/repos/x` for paths under `$HOME`.
+/// The user scope's root (ADR-0016 §1): habits that hold in every project, not a
+/// directory. Matches `valkyrie_context::project::USER`.
+const USER_SCOPE: &str = "~user";
+
+/// How a decision's scope is named in a review: "your habits" for the user's,
+/// else `path` named by `project`.
+fn scope_name(path: &std::path::Path, project: fn(&std::path::Path) -> String) -> String {
+    match path.as_os_str() == USER_SCOPE {
+        true => "your habits".into(),
+        false => project(path),
+    }
+}
+
 fn short_path(path: &std::path::Path) -> String {
     let home = valkyrie_proto::home_dir();
     if path.starts_with(&home) && home.as_os_str().len() > 1 {
@@ -5326,6 +5341,18 @@ mod tests {
             cwd: "/".into(),
             status: AgentStatus::default(),
         }
+    }
+
+    #[test]
+    fn the_users_habits_are_named_as_such_in_a_review() {
+        assert_eq!(
+            scope_name(std::path::Path::new("~user"), short_path),
+            "your habits"
+        );
+        assert_eq!(
+            scope_name(std::path::Path::new("/r/app"), short_path),
+            "/r/app"
+        );
     }
 
     fn proposed(project: &str, id: u32, title: &str) -> Decision {
