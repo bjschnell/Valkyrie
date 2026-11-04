@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, inRepo, liveSession, prLink, repoChoices, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, inRepo, liveSession, prLink, priority, repoChoices, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
-import { ITEM_KINDS, type Item, type ItemFacts, type ItemKind } from "../proto";
+import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type Priority } from "../proto";
 import { addItem, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, sendFile, shipMerged, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
@@ -64,7 +64,7 @@ export function Backlog() {
     write(REPO_KEY, r);
   };
   const items = all.filter((i) => inRepo(i, repo));
-  const columns = byColumn(items, sessions, boot);
+  const columns = byColumn(items, sessions, boot, all);
   const open = items.length - columns.done.length;
   // Only items with a branch can be found merged.
   const mergeable = items.some((i) => (i.status === "open" || agentFiled(i)) && i.branch && i.project);
@@ -203,6 +203,8 @@ export function Backlog() {
 
 function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const now = useApp((s) => s.now);
+  const items = useApp((s) => s.items);
+  const waits = lane === "done" ? [] : waitingOn(item, items);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [expanded, setExpanded] = useState(false);
@@ -270,6 +272,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
       <article className={`card item-card ${EDGE[lane]} ${lane === "done" ? "item-done" : ""}`}>
         <button className="card-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
           <span className={`kind-chip kind-${item.kind}`}>{item.kind}</span>
+          {lane !== "done" && <span className={`kind-chip prio-${priority(item)}`}>{priority(item)}</span>}
           <span className="card-prog">#{item.id}</span>
           <span className="card-prog item-folder">{folder ?? "no folder"}</span>
           <span className="card-age">{lane === "done" ? item.status : age(item.updated * 1000, now)}</span>
@@ -277,6 +280,11 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         <p className="decision-title item-title" onClick={() => setExpanded(!expanded)}>
           {item.title}
         </p>
+        {waits.length > 0 && (
+          <div className="item-live item-after">
+            after {waits.map((id) => `#${id}`).join(", ")}, not finished yet
+          </div>
+        )}
         {lane === "proposed" && (
           <div className="item-live">
             <strong className="item-needs item-proposed-pill">Proposed</strong>by {item.by}, waiting on you
@@ -467,6 +475,15 @@ let attachmentKey = 0;
  * Writing an item down (`id` absent) or changing one. A new item is one box, the
  * first line its title, so a thought dictated on a phone goes in as it comes.
  */
+const idList = (ids: number[] | undefined) => (ids ?? []).map((i) => `#${i}`).join(", ");
+
+/** "#12, 14" as [12, 14]; null if something in it isn't an item number. */
+function parseIds(text: string): number[] | null {
+  const parts = text.split(/[\s,]+/).filter(Boolean);
+  const ids = parts.map((p) => (/^#?\d+$/.test(p) ? Number(p.replace("#", "")) : NaN));
+  return ids.some((n) => !Number.isInteger(n) || n <= 0) ? null : ids;
+}
+
 export function ItemEditor({ id }: { id: number | null }) {
   const token = useApp((s) => s.token);
   const items = useApp((s) => s.items);
@@ -476,6 +493,9 @@ export function ItemEditor({ id }: { id: number | null }) {
   // An agent already on it: saving shouldn't start a second one.
   const running = item !== null && liveSession(item, sessions, boot) !== null;
   const [kind, setKind] = useState<ItemKind>(item?.kind ?? "bug");
+  const [prio, setPrio] = useState<Priority>(item ? priority(item) : "p2");
+  // What it comes after, as typed: "#12, 14".
+  const [after, setAfter] = useState(() => idList(item?.blocked_by));
   const [title, setTitle] = useState(item?.title ?? "");
   const [text, setText] = useState(() => item?.body ?? (id === null ? (read(DRAFT_KEY) ?? "") : ""));
   const [folder, setFolder] = useState<string>(
@@ -495,6 +515,8 @@ export function ItemEditor({ id }: { id: number | null }) {
     if (!item || loaded.current) return;
     loaded.current = item;
     setKind(item.kind);
+    setPrio(priority(item));
+    setAfter(idList(item.blocked_by));
     setTitle(item.title);
     setText(item.body);
     setFolder(item.project ?? "");
@@ -536,15 +558,24 @@ export function ItemEditor({ id }: { id: number | null }) {
 
   const save = async (andLaunch: boolean) => {
     if (busy || sending || empty) return;
+    const blocked_by = parseIds(after);
+    if (!blocked_by) return toast("Comes after: item numbers, like #12, 14");
     setBusy(true);
     try {
       let saved = id;
       if (id === null) {
-        saved = await addItem({ title: "", body: text, kind, cwd: folder || null, attachments: ready });
+        saved = await addItem({ title: "", body: text, kind, cwd: folder || null, attachments: ready, priority: prio, blocked_by });
         write(DRAFT_KEY, null);
         write(FOLDER_KEY, folder || null);
       } else {
-        const change = editChange(loaded.current, item, { title, body: text, kind, project: folder || null });
+        const change = editChange(loaded.current, item, {
+          title,
+          body: text,
+          kind,
+          project: folder || null,
+          priority: prio,
+          blocked_by,
+        });
         if (change && "clash" in change) {
           // Seen now: saving again replaces the other change with this one.
           loaded.current = change.was;
@@ -605,6 +636,20 @@ export function ItemEditor({ id }: { id: number | null }) {
               onClick={() => setKind(k)}
             >
               {k}
+            </button>
+          ))}
+        </div>
+
+        <div className="kind-pick" role="radiogroup" aria-label="Priority">
+          {PRIORITIES.map((p) => (
+            <button
+              key={p}
+              role="radio"
+              aria-checked={prio === p}
+              className={`kind-chip prio-${p} ${prio === p ? "on" : ""}`}
+              onClick={() => setPrio(p)}
+            >
+              {p}
             </button>
           ))}
         </div>
@@ -677,6 +722,16 @@ export function ItemEditor({ id }: { id: number | null }) {
             ))}
           </div>
         )}
+
+        <label className="field">
+          <span className="field-label">Comes after</span>
+          <input
+            value={after}
+            inputMode="numeric"
+            placeholder="Items to finish first, like #12, 14"
+            onChange={(e) => setAfter(e.target.value)}
+          />
+        </label>
 
         <label className="field">
           <span className="field-label">Repository</span>

@@ -2312,7 +2312,7 @@ impl App {
             .filter(|i| repo.is_none_or(|r| r.holds(i)))
             .cloned()
             .collect();
-        backlog::rows(&items, &self.sessions, self.boot())
+        backlog::rows_of(&items, &self.items, &self.sessions, self.boot())
     }
 
     async fn open_backlog(&mut self) {
@@ -2431,7 +2431,12 @@ impl App {
                 self.client.note_item(id, text).await?;
                 self.say(format!("noted on #{id}"));
             }
-            Do::Edit { id, kind, title } => {
+            Do::Edit {
+                id,
+                kind,
+                title,
+                priority,
+            } => {
                 let (item, _) = self
                     .client
                     .change_item(
@@ -2441,10 +2446,17 @@ impl App {
                             body: None,
                             kind,
                             cwd: None,
+                            priority,
+                            blocked_by: None,
                         },
                     )
                     .await?;
-                self.say(format!("saved #{} {}", item.id, item.title));
+                self.say(format!(
+                    "saved #{} {} ({})",
+                    item.id,
+                    item.title,
+                    item.priority.as_str()
+                ));
             }
             Do::CheckMerged | Do::ShipMerged(_) if self.ship_busy => {
                 self.say("S is already under way".into());
@@ -2526,7 +2538,7 @@ impl App {
                         body: text,
                         kind,
                         cwd,
-                        attachments: Vec::new(),
+                        ..NewItem::default()
                     })
                     .await?;
                 self.say(format!("added #{} {}", item.id, item.title));
@@ -6133,6 +6145,8 @@ mod tests {
                             .filter(|m| matches!(m, ClientMsg::AddItem { item, .. } if item.body != "fail"))
                             .count() as u32;
                         let item = Item {
+                            priority: Default::default(),
+                            blocked_by: Vec::new(),
                             id,
                             title: new.body.clone(),
                             body: String::new(),
@@ -6178,6 +6192,8 @@ mod tests {
         // An open item, selected when the page opens.
         app.on_push(ServerMsg::Items {
             items: vec![Item {
+                priority: Default::default(),
+                blocked_by: Vec::new(),
                 id: 9,
                 title: "Already here".into(),
                 body: String::new(),
@@ -6345,6 +6361,8 @@ mod tests {
         let mut app = App::new(client, PathBuf::new());
         app.settings = Settings::default();
         let item = |id: u32, title: &str, status: valkyrie_proto::ItemStatus| Item {
+            priority: Default::default(),
+            blocked_by: Vec::new(),
             id,
             title: title.into(),
             body: String::new(),

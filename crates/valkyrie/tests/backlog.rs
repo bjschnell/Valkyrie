@@ -186,12 +186,12 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     );
     assert_eq!(
         wait_for(&out.join("edit")),
-        "#2 Someone else, renamed [chore] (no folder)\n"
+        "#2 Someone else, renamed [p2 · chore] (no folder)\n"
     );
     human("valk todo edit 2 -k bug", "edit2");
     assert_eq!(
         wait_for(&out.join("edit2")),
-        "#2 Someone else, renamed [bug] (no folder)\n"
+        "#2 Someone else, renamed [p2 · bug] (no folder)\n"
     );
     human("valk todo show 2", "show2");
     assert!(
@@ -203,6 +203,32 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     wait_for(&out.join("add3"));
     human("valk todo add 'Still open'", "add4");
     wait_for(&out.join("add4"));
+    // Priority and what comes first decide what's next: #1 waits on #4.
+    human("valk todo edit 1 -p p1 --after 4", "after");
+    assert_eq!(
+        wait_for(&out.join("after")),
+        "#1 Tab rename eats the last letter [p1 after #4 · bug] (repo)\n"
+    );
+    human("valk todo edit 4 --after 1", "loop");
+    assert!(
+        wait_for(&out.join("loop")).contains("#1 already waits on #4"),
+        "no loops"
+    );
+    human("valk todo next -C .", "next");
+    assert_eq!(
+        wait_for(&out.join("next")),
+        "#3 Clients stay connected [p2 · feature] (repo)\n"
+    );
+    human("valk todo list -C .", "ordered");
+    let ordered = wait_for(&out.join("ordered"));
+    let at = |id: &str| ordered.find(id).unwrap_or(usize::MAX);
+    assert!(at("#3 ") < at("#4 ") && at("#4 ") < at("#1 "), "{ordered}");
+    assert!(ordered.contains("(after #4)"), "{ordered}");
+    human("valk todo edit 1 -p p2 --not-after 4", "unafter");
+    assert_eq!(
+        wait_for(&out.join("unafter")),
+        "#1 Tab rename eats the last letter [p2 · bug] (repo)\n"
+    );
     human("valk todo take 3", "human-take");
     assert!(
         wait_for(&out.join("human-take")).contains("from inside a valk session"),
@@ -718,7 +744,7 @@ fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
     );
     let show = wait_for(&out.join("show"));
     assert!(
-        show.starts_with("#1 fix the login redirect loop [bug · open · by human]"),
+        show.starts_with("#1 fix the login redirect loop [p2 · bug · open · by human]"),
         "{show}"
     );
     assert!(show.contains("branch: fix/login-loop\n"), "{show}");

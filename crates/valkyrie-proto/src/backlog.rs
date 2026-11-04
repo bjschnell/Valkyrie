@@ -31,6 +31,40 @@ impl ItemKind {
     }
 }
 
+/// How soon an item should be done: `P0` first. Within a lane, items are worked
+/// in this order (`order`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    P0,
+    P1,
+    #[default]
+    P2,
+    P3,
+}
+
+impl Priority {
+    pub const ALL: [Priority; 4] = [Self::P0, Self::P1, Self::P2, Self::P3];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::P2 => "p2",
+            Self::P3 => "p3",
+        }
+    }
+
+    /// `p1` or `P1`; a bare `1` too.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        let s = s.strip_prefix('p').unwrap_or(&s);
+        Self::ALL.into_iter().find(|p| &p.as_str()[1..] == s)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
@@ -73,6 +107,12 @@ pub struct Item {
     pub kind: ItemKind,
     #[serde(default)]
     pub status: ItemStatus,
+    #[serde(default)]
+    pub priority: Priority,
+    /// Items to finish first. Advisory: one still open sorts this below the ready
+    /// ones and is named in its brief, but nothing refuses a take or launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<u32>,
     /// The repository it's for; `None` until one is picked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<PathBuf>,
@@ -140,6 +180,33 @@ impl Item {
     pub fn agent_filed(&self) -> bool {
         self.status == ItemStatus::Proposed && self.filed_by.is_some() && !self.taken.is_empty()
     }
+
+    /// Those of `blocked_by` not shipped or dropped yet, as found in `items`; one
+    /// deleted is gone, so it waits on nothing.
+    pub fn waiting_on(&self, items: &[Item]) -> Vec<u32> {
+        self.blocked_by
+            .iter()
+            .copied()
+            .filter(|id| {
+                items.iter().any(|i| {
+                    i.id == *id && matches!(i.status, ItemStatus::Open | ItemStatus::Proposed)
+                })
+            })
+            .collect()
+    }
+}
+
+/// The order to work items in, the first first: those waiting on nothing, then by
+/// priority, then the oldest. Every client sorts a lane by it, so the top of the
+/// backlog is the same wherever you look.
+pub fn order(items: &[Item]) -> impl Fn(&Item, &Item) -> std::cmp::Ordering + '_ {
+    move |a, b| {
+        let waits = |i: &Item| !i.waiting_on(items).is_empty();
+        waits(a)
+            .cmp(&waits(b))
+            .then(a.priority.cmp(&b.priority))
+            .then(a.id.cmp(&b.id))
+    }
 }
 
 /// What an item was last launched with.
@@ -193,6 +260,10 @@ pub struct NewItem {
     pub body: String,
     #[serde(default)]
     pub kind: ItemKind,
+    #[serde(default)]
+    pub priority: Priority,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<u32>,
     /// A folder inside the repository it's for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
@@ -215,6 +286,11 @@ pub enum ItemChange {
         kind: Option<ItemKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<Priority>,
+        /// The whole list, replacing the one it has; empty clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked_by: Option<Vec<u32>>,
     },
     /// Ships, drops or reopens it. Shipping also takes away a worktree its launch
     /// made, when nothing is left in it.
@@ -263,6 +339,7 @@ mod tests {
             body,
             kind,
             cwd,
+            ..
         } = &edit
         else {
             panic!("{edit:?}");
@@ -287,5 +364,51 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn item(id: u32, priority: Priority, blocked_by: Vec<u32>, status: ItemStatus) -> Item {
+        let mut i: Item = serde_json::from_str(&format!(
+            r#"{{"id":{id},"title":"t","created":0,"updated":0}}"#
+        ))
+        .unwrap();
+        (i.priority, i.blocked_by, i.status) = (priority, blocked_by, status);
+        i
+    }
+
+    #[test]
+    fn items_are_worked_ready_first_then_by_priority_then_oldest() {
+        use ItemStatus::*;
+        let items = vec![
+            item(1, Priority::P2, vec![], Open),
+            item(2, Priority::P0, vec![5], Open), // waits on #5, still open
+            item(3, Priority::P1, vec![6], Open), // #6 shipped: ready
+            item(4, Priority::P1, vec![], Open),
+            item(5, Priority::P3, vec![], Open),
+            item(6, Priority::P0, vec![], Shipped),
+            item(7, Priority::P2, vec![99], Open), // #99 deleted: ready
+        ];
+        let mut sorted = items.clone();
+        sorted.sort_by(order(&items));
+        let ids: Vec<u32> = sorted.iter().map(|i| i.id).collect();
+        assert_eq!(ids, [6, 3, 4, 1, 7, 5, 2]);
+        assert_eq!(items[1].waiting_on(&items), [5]);
+    }
+
+    #[test]
+    fn old_items_read_as_p2_waiting_on_nothing() {
+        let i: Item =
+            serde_json::from_str(r#"{"id":1,"title":"t","created":0,"updated":0}"#).unwrap();
+        assert_eq!((i.priority, i.blocked_by.len()), (Priority::P2, 0));
+        assert_eq!(serde_json::to_value(Priority::P1).unwrap(), "p1");
+        assert_eq!(
+            ["P0", "1", " p3 ", "p4", ""].map(Priority::parse),
+            [
+                Some(Priority::P0),
+                Some(Priority::P1),
+                Some(Priority::P3),
+                None,
+                None
+            ]
+        );
     }
 }

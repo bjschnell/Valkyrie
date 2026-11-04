@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use backlog::{
     Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, NewItem,
-    ShippedItem,
+    Priority, ShippedItem, order,
 };
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 20;
+pub const PROTOCOL: u32 = 21;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
