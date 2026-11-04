@@ -465,16 +465,29 @@ async fn learn(
     Ok(())
 }
 
+/// What `valk decisions` says when `root` has nothing to list.
+/// For your habits, the one `valk decide --user` takes: how far you ship.
+fn empty_hint(root: &Path) -> String {
+    if valkyrie_context::project::is_user(root) {
+        // Body on stdin with `-`, which works the same in bash, zsh and fish.
+        return "no decisions for your habits yet; record how far you ship:\n  \
+                printf '%s\\n' 'template: ship' 'until: pr' | \
+                valk decide --user -k policy \"<title>\" -"
+            .into();
+    }
+    format!(
+        "no decisions for {} yet: `valk decide \"<title>\" \"<why>\"`",
+        where_(root)
+    )
+}
+
 fn print_list(root: &Path, list: &[Decision], all: bool) {
     let shown: Vec<&Decision> = list
         .iter()
         .filter(|d| all || matches!(d.status, DecisionStatus::Active | DecisionStatus::Proposed))
         .collect();
     if shown.is_empty() {
-        println!(
-            "no decisions for {} yet: `valk decide \"<title>\" \"<why>\"`",
-            where_(root)
-        );
+        println!("{}", empty_hint(root));
         return;
     }
     for d in shown {
@@ -795,4 +808,32 @@ pub fn save_handoff(text: &str, from: valkyrie_proto::SessionId) -> Result<PathB
         .open(&path)?;
     std::io::Write::write_all(&mut file, text.as_bytes())?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #63: an empty habit list must suggest recording a habit, not a project
+    /// decision, and the habit it suggests must be one `valk decide --user` takes.
+    #[test]
+    fn an_empty_list_hints_at_the_scope_it_lists() {
+        let user = empty_hint(&valkyrie_context::project::user());
+        assert!(user.contains("your habits"), "{user}");
+        assert!(user.contains("valk decide --user -k policy"), "{user}");
+        let body = "template: ship\nuntil: pr";
+        assert!(user.contains("'template: ship' 'until: pr'"), "{user}");
+        assert!(
+            valkyrie_context::policy::check(body, true).is_ok(),
+            "the suggested habit must be accepted"
+        );
+
+        let project = empty_hint(Path::new("/src/app"));
+        assert!(project.contains("/src/app"), "{project}");
+        assert!(
+            project.contains("`valk decide \"<title>\" \"<why>\"`"),
+            "{project}"
+        );
+        assert!(!project.contains("--user"), "{project}");
+    }
 }
