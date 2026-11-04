@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { DECISION_KINDS, type Decision, type DecisionKind, type ReviewAction } from "../proto";
 import { age } from "../lib/time";
+import { scopeName } from "../lib/scope";
 import { review, useApp } from "../store";
 
 /** The last part of a path: the project's name. */
-const base = (path: string) => path.split("/").filter(Boolean).pop() ?? path;
 
 /**
  * Decisions agents proposed (ADR-0007): nothing reaches another agent until it's
@@ -37,7 +37,7 @@ function ProposalCard({ d }: { d: Decision }) {
     setBusy(false);
   };
   const who = { human: "you", valkyrie: "Valkyrie, from your correction" }[d.provenance.by] ?? d.provenance.by;
-  const where = [base(d.project), d.provenance.session && d.provenance.session !== base(d.project) ? d.provenance.session : null]
+  const where = [scopeName(d.project), d.provenance.session && d.provenance.session !== scopeName(d.project) ? d.provenance.session : null]
     .filter(Boolean)
     .join(" · ");
 
@@ -94,7 +94,7 @@ function StaleCard({ d }: { d: Decision }) {
         <div className="card-head">
           <span className="kind-chip kind-gotcha">still true?</span>
           <span className="card-name">#{d.id}</span>
-          <span className="card-prog">{base(d.project)}</span>
+          <span className="card-prog">{scopeName(d.project)}</span>
         </div>
         <p className="decision-title">{d.title}</p>
         {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
