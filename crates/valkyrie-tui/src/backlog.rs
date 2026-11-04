@@ -7,12 +7,12 @@ use crate::theme::Theme;
 use crate::{fit, next_key};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{self, Stylize};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::path::PathBuf;
 use valkyrie_proto::{
-    AgentState, Item, ItemFacts, ItemKind, ItemStatus, KeptItem, Priority, SessionId, SessionInfo,
-    ShippedItem,
+    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, Priority, SessionId,
+    SessionInfo, ShippedItem,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +239,124 @@ pub(crate) enum Typing {
         text: LineEdit,
         was: (String, ItemKind),
     },
+    /// `L`'s window: what item `id` launches with.
+    Launch(LaunchForm),
+}
+
+/// A field of the launch window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Field {
+    Agent,
+    Model,
+    Worktree,
+}
+
+/// Claude Code's own aliases, which follow its newest models; Tab steps through
+/// them. Codex's names change too often to keep a list of: it's typed.
+const CLAUDE_MODELS: [&str; 4] = ["", "opus", "sonnet", "haiku"];
+
+/// What `L` launches item `id` with: the agent and model its last launch ran, to
+/// start with, and a new worktree unless an earlier launch's is reused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaunchForm {
+    pub(crate) id: u32,
+    pub(crate) agent: &'static str,
+    /// Empty for the agent's own default.
+    pub(crate) model: LineEdit,
+    pub(crate) worktree: bool,
+    /// No checkout of an earlier launch to go back to, so `worktree` decides.
+    pub(crate) fresh: bool,
+    pub(crate) field: Field,
+    /// What it was last launched with, for the model when the agent changes back.
+    last: Option<ItemLaunch>,
+}
+
+impl LaunchForm {
+    pub(crate) fn new(item: &Item) -> Self {
+        let agent = match item.launch.as_ref().map(|l| l.agent.as_str()) {
+            Some("codex") => "codex",
+            _ => "claude",
+        };
+        let mut form = Self {
+            id: item.id,
+            agent,
+            model: LineEdit::default(),
+            worktree: true,
+            fresh: item.checkout.is_none(),
+            field: Field::Model,
+            last: item.launch.clone(),
+        };
+        form.model = LineEdit::new(form.last_model());
+        form
+    }
+
+    /// The model the item's last launch of this agent ran.
+    fn last_model(&self) -> String {
+        self.last
+            .as_ref()
+            .filter(|l| l.agent == self.agent)
+            .map(|l| l.model.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn fields(&self) -> &'static [Field] {
+        if self.fresh {
+            &[Field::Agent, Field::Model, Field::Worktree]
+        } else {
+            &[Field::Agent, Field::Model]
+        }
+    }
+
+    fn step(&mut self, down: bool) {
+        let fields = self.fields();
+        let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
+        let at = if down {
+            (at + 1).min(fields.len() - 1)
+        } else {
+            at.saturating_sub(1)
+        };
+        self.field = fields[at];
+    }
+
+    /// Flips the agent, or the worktree; the model follows the agent.
+    fn change(&mut self) {
+        match self.field {
+            Field::Agent => {
+                self.agent = if self.agent == "claude" {
+                    "codex"
+                } else {
+                    "claude"
+                };
+                self.model = LineEdit::new(self.last_model());
+            }
+            Field::Worktree => self.worktree = !self.worktree,
+            Field::Model => {}
+        }
+    }
+
+    /// The next of the agent's known models after the one typed.
+    fn next_model(&mut self) {
+        let known: &[&str] = if self.agent == "claude" {
+            &CLAUDE_MODELS
+        } else {
+            &[""]
+        };
+        let now = self.model.text().trim();
+        let next = match known.iter().position(|m| *m == now) {
+            Some(at) => known[(at + 1) % known.len()],
+            None => known[0],
+        };
+        self.model = LineEdit::new(next);
+    }
+
+    fn launch(&self) -> Do {
+        Do::Launch {
+            id: self.id,
+            agent: self.agent,
+            model: Some(self.model.text().trim().to_owned()),
+            worktree: self.worktree,
+        }
+    }
 }
 
 impl Typing {
@@ -294,9 +412,12 @@ fn decode(partial: &mut Vec<u8>, bytes: &[u8]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
+    /// `model` as `ClientMsg::LaunchItem` has it: `None` is as last time.
     Launch {
         id: u32,
         agent: &'static str,
+        model: Option<String>,
+        worktree: bool,
     },
     Attach(SessionId),
     Status(u32, ItemStatus),
@@ -347,11 +468,6 @@ impl Page {
                 self.ship_armed = None;
             }
             if let Some(typing) = &mut self.typing {
-                let text = match typing {
-                    Typing::Add { text, .. }
-                    | Typing::Note { text, .. }
-                    | Typing::Edit { text, .. } => text,
-                };
                 // A CSI sequence the read cut off waits for the rest, but only so
                 // long: past `HELD_MAX` it's not a sequence, and Esc must still work.
                 let cut = key.len() <= HELD_MAX
@@ -365,6 +481,39 @@ impl Page {
                 if (whole && key == b"\x1b") || key == [0x03] {
                     self.paste = None;
                 }
+                // The launch window's other fields take keys of their own; a paste
+                // there goes into the model, the one field that takes text.
+                if let Typing::Launch(form) = typing
+                    && form.field != Field::Model
+                    && self.paste.is_none()
+                    && key != b"\x1b[200~"
+                {
+                    match key {
+                        b"\r" | b"\n" => {
+                            out.push(form.launch());
+                            self.typing = None;
+                        }
+                        b"\x1b" if whole => self.typing = None,
+                        [0x03] => self.typing = None,
+                        b" " | b"h" | b"l" | b"\x1b[C" | b"\x1bOC" | b"\x1b[D" | b"\x1bOD" => {
+                            form.change()
+                        }
+                        b"k" | b"\x1b[A" | b"\x1bOA" => form.step(false),
+                        b"j" | b"\x1b[B" | b"\x1bOB" | b"\t" => form.step(true),
+                        _ => {}
+                    }
+                    if self.typing.is_none() {
+                        self.held.clear();
+                    }
+                    continue;
+                }
+                let launching = matches!(typing, Typing::Launch(_));
+                let text = match typing {
+                    Typing::Add { text, .. }
+                    | Typing::Note { text, .. }
+                    | Typing::Edit { text, .. } => text,
+                    Typing::Launch(form) => &mut form.model,
+                };
                 // A paste is text, its line breaks spaces: a pasted error doesn't end
                 // the prompt and run its other lines as keys.
                 if let Some(after_break) = &mut self.paste {
@@ -429,6 +578,7 @@ impl Page {
                                     });
                                 }
                             }
+                            Typing::Launch(form) => out.push(form.launch()),
                             _ => {}
                         }
                     }
@@ -436,6 +586,14 @@ impl Page {
                         if let Typing::Add { kind, .. } | Typing::Edit { kind, .. } = typing {
                             let at = ItemKind::ALL.iter().position(|k| k == kind).unwrap_or(0);
                             *kind = ItemKind::ALL[(at + 1) % ItemKind::ALL.len()];
+                        }
+                        if let Typing::Launch(form) = typing {
+                            form.next_model();
+                        }
+                    }
+                    b"\x1b[A" | b"\x1bOA" | b"\x1b[B" | b"\x1bOB" if launching => {
+                        if let Typing::Launch(form) = typing {
+                            form.step(key[key.len() - 1] == b'B');
                         }
                     }
                     b"\x1b" if whole => self.typing = None,
@@ -482,11 +640,12 @@ impl Page {
                 }
             }
         }
-        if let Some(
-            Typing::Add { text, .. } | Typing::Note { text, .. } | Typing::Edit { text, .. },
-        ) = &mut self.typing
-        {
-            text.insert(&decode(&mut self.partial, &typed));
+        match &mut self.typing {
+            Some(
+                Typing::Add { text, .. } | Typing::Note { text, .. } | Typing::Edit { text, .. },
+            ) => text.insert(&decode(&mut self.partial, &typed)),
+            Some(Typing::Launch(form)) => form.model.insert(&decode(&mut self.partial, &typed)),
+            None => {}
         }
         out
     }
@@ -516,9 +675,28 @@ impl Page {
                 _ => Do::Launch {
                     id,
                     agent: "claude",
+                    model: None,
+                    worktree: true,
                 },
             },
-            b"c" if launchable && item.project.is_some() => Do::Launch { id, agent: "codex" },
+            b"c" if launchable && item.project.is_some() => Do::Launch {
+                id,
+                agent: "codex",
+                model: None,
+                worktree: true,
+            },
+            b"L" if launchable && item.project.is_some() => {
+                self.typing = Some(Typing::Launch(LaunchForm::new(item)));
+                return Vec::new();
+            }
+            b"L" if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
+            b"L" if !launchable && live.is_some() => {
+                Do::Say(format!("an agent is on #{id}: ↩ opens it"))
+            }
+            b"L" if !launchable => {
+                Do::Say(format!("#{id} is {}: o reopens it", item.status.as_str()))
+            }
+            b"L" => Do::Say(format!("#{id} has no folder yet: pick one in the web app")),
             b"a" if item.status == ItemStatus::Proposed => Do::Status(id, ItemStatus::Open),
             b"s" if item.status == ItemStatus::Open || item.agent_filed() => {
                 Do::Status(id, ItemStatus::Shipped)
@@ -611,6 +789,17 @@ impl Page {
             (Some(Typing::Note { .. }), _) => {
                 [hint(" ↩ ", "note "), hint(" esc ", "cancel ")].concat()
             }
+            (Some(Typing::Launch(form)), _) => [
+                hint(" ↩ ", "launch "),
+                hint(" ↑↓ ", "field "),
+                if form.field == Field::Model {
+                    hint(" tab ", "next model ")
+                } else {
+                    hint(" ␣ ", "change ")
+                },
+                hint(" esc ", "cancel "),
+            ]
+            .concat(),
             (None, Some((Lane::Proposed, _))) => [
                 hint(" a ", "accept "),
                 hint(" e ", "edit "),
@@ -632,16 +821,22 @@ impl Page {
             ]
             .concat(),
             (None, Some((lane, item))) => {
+                let with = hint(" L ", "with… ");
                 let open = if taken_only(item, sessions, boot) {
-                    [hint(" ↩ ", "launch "), hint(" o ", "open its session ")].concat()
+                    [
+                        hint(" ↩ ", "launch "),
+                        with,
+                        hint(" o ", "open its session "),
+                    ]
+                    .concat()
                 } else if live(item, sessions, boot).is_some() {
                     hint(" ↩ ", "open ").to_vec()
                 } else if item.agent_filed() {
                     hint(" a ", "accept ").to_vec()
                 } else if *lane == Lane::Review {
-                    hint(" ↩ ", "relaunch ").to_vec()
+                    [hint(" ↩ ", "relaunch "), with].concat()
                 } else {
-                    hint(" ↩ ", "launch ").to_vec()
+                    [hint(" ↩ ", "launch "), with].concat()
                 };
                 let rest = [
                     hint(" s ", "ship "),
@@ -663,6 +858,7 @@ impl Page {
             ]
             .concat(),
         };
+        let hints = fit_hints(hints, rect.width.saturating_sub(4) as usize);
         let open = rows.iter().filter(|(l, _)| *l != Lane::Done).count();
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -722,7 +918,11 @@ impl Page {
                 "  nothing written down: n adds a bug or an idea".fg(t.muted),
             ));
         }
-        if let Some(typing) = &self.typing {
+        if let Some(typing) = self
+            .typing
+            .as_ref()
+            .filter(|t| !matches!(t, Typing::Launch(_)))
+        {
             lines.push(Line::default());
             lines.push(typing_line(typing, list.width as usize, t));
             cursor_line = lines.len() - 1;
@@ -750,7 +950,99 @@ impl Page {
                 detail,
             );
         }
+        if let Some(Typing::Launch(form)) = &self.typing {
+            launch_window(frame, rect, form, t);
+        }
     }
+}
+
+/// The hints, key and word in pairs, that fit in `room` columns: the first ones,
+/// which matter most, since a centered title too wide loses its start.
+fn fit_hints(hints: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
+    let mut used = 0;
+    hints
+        .chunks(2)
+        .take_while(|pair| {
+            used += pair.iter().map(Span::width).sum::<usize>();
+            used <= room
+        })
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+/// `L`'s window, over the middle of the page: a row per field, the one being
+/// changed marked, and a line on what it does.
+fn launch_window(frame: &mut ratatui::Frame, over: Rect, form: &LaunchForm, t: &Theme) {
+    let fields = form.fields();
+    let width = over.width.saturating_sub(4).min(56);
+    let height = (fields.len() as u16 + 4).min(over.height);
+    let rect = Rect::new(
+        over.x + (over.width - width) / 2,
+        over.y + over.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style::Style::new().fg(t.accent))
+        .title(format!(" Launch #{} ", form.id).fg(t.fg).bold())
+        .style(style::Style::new().bg(t.panel).fg(t.fg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let room = inner.width.saturating_sub(12) as usize;
+    let mut lines: Vec<Line> = fields
+        .iter()
+        .map(|field| {
+            let here = *field == form.field;
+            let name = match field {
+                Field::Agent => "agent",
+                Field::Model => "model",
+                Field::Worktree => "worktree",
+            };
+            let mark = if here { "›" } else { " " };
+            let label = format!(" {mark} {name:<9}");
+            let mut spans = vec![if here {
+                label.fg(t.accent).bold()
+            } else {
+                label.fg(t.muted)
+            }];
+            match field {
+                Field::Agent => spans.extend(["claude", "codex"].map(|a| {
+                    if a == form.agent {
+                        format!("● {a}  ").fg(t.fg).bold()
+                    } else {
+                        format!("○ {a}  ").fg(t.muted)
+                    }
+                })),
+                Field::Model if here => spans.extend(form.model.spans(room, t)),
+                Field::Model if form.model.text().trim().is_empty() => {
+                    spans.push("default".fg(t.muted))
+                }
+                Field::Model => spans.push(form.model.text().to_owned().fg(t.fg)),
+                Field::Worktree => spans.push(
+                    if form.worktree {
+                        "its own"
+                    } else {
+                        "the repository itself"
+                    }
+                    .fg(t.fg),
+                ),
+            }
+            Line::from(spans)
+        })
+        .collect();
+    lines.push(Line::default());
+    let note = match form.field {
+        Field::Model if form.agent == "claude" => "empty is the default; tab: opus, sonnet, haiku",
+        Field::Model => "as codex names it; empty is its default",
+        _ if !form.fresh => "goes back to its earlier checkout",
+        Field::Agent => "the model follows the agent",
+        Field::Worktree => "a new worktree on its branch, or none",
+    };
+    lines.push(Line::from(format!("   {note}").fg(t.muted)));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// What `S`'s answer was, for how to word it.
@@ -917,6 +1209,7 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             kind_color(*kind, t),
             text,
         ),
+        Typing::Launch(form) => (format!(" #{} model ", form.id), t.accent, &form.model),
     };
     let room = width.saturating_sub(label.chars().count() + 1);
     let mut spans = vec![label.fg(t.bg).bg(color).bold(), " ".into()];
@@ -972,6 +1265,11 @@ fn detail_lines(
     }
     if let Some(pr) = &item.pr {
         out.push(Line::from(format!(" pr: {pr}").fg(t.muted)));
+    }
+    if let Some(l) = item.launch.as_ref().filter(|l| !l.model.is_empty()) {
+        out.push(Line::from(
+            format!(" launches {} on {}", l.agent, l.model).fg(t.muted),
+        ));
     }
     if let Some(f) = facts {
         let mut parts = vec![match f.ahead {
@@ -1048,9 +1346,127 @@ mod tests {
             unaccepted: false,
             pr_closed: false,
             notes: Vec::new(),
+            launch: None,
             created: 0,
             updated,
         }
+    }
+
+    #[test]
+    fn l_opens_a_window_that_launches_with_a_model() {
+        let rows = rows(&[item(1, 1)], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        let launch = |agent, model: &str, worktree| {
+            vec![Do::Launch {
+                id: 1,
+                agent,
+                model: Some(model.to_owned()),
+                worktree,
+            }]
+        };
+        // It opens on the model, the agent's default; Tab steps through the aliases.
+        assert!(press(&mut page, b"L").is_empty());
+        assert!(matches!(&page.typing, Some(Typing::Launch(f)) if f.field == Field::Model));
+        assert!(press(&mut page, b"\t\t").is_empty());
+        assert_eq!(press(&mut page, b"\r"), launch("claude", "sonnet", true));
+        assert_eq!(page.typing, None, "launching closes it");
+
+        // Typed, in two reads, and the worktree turned off two fields down.
+        assert!(press(&mut page, b"Lclaude-opus").is_empty());
+        assert!(press(&mut page, b"-5-5\x1b[B").is_empty());
+        assert!(
+            press(&mut page, b" ").is_empty(),
+            "a space flips the worktree"
+        );
+        assert_eq!(
+            press(&mut page, b"\r"),
+            launch("claude", "claude-opus-5-5", false)
+        );
+
+        // Up to the agent: codex, whose model starts at its default.
+        assert!(press(&mut page, b"Lopus\x1b[A").is_empty());
+        assert!(press(&mut page, b"l\x1b[B").is_empty());
+        assert!(
+            press(&mut page, b"gpt-5").is_empty(),
+            "typed on the model field"
+        );
+        assert_eq!(press(&mut page, b"\r"), launch("codex", "gpt-5", true));
+
+        // Esc gives up, and the keys are the page's again.
+        assert!(press(&mut page, b"L").is_empty());
+        assert!(press(&mut page, b"\x1b").is_empty());
+        assert_eq!(page.typing, None);
+        assert_eq!(press(&mut page, b"\x1b"), [Do::Close]);
+    }
+
+    #[test]
+    fn the_launch_window_starts_from_the_last_launch() {
+        let launched = Item {
+            launch: Some(ItemLaunch {
+                agent: "codex".into(),
+                model: "gpt-5-codex".into(),
+            }),
+            checkout: Some("/r/app-fix-1".into()),
+            ..item(1, 1)
+        };
+        let rows = rows(&[launched], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        assert!(press(&mut page, b"L").is_empty());
+        let Some(Typing::Launch(form)) = &page.typing else {
+            panic!("{:?}", page.typing)
+        };
+        assert_eq!((form.agent, form.model.text()), ("codex", "gpt-5-codex"));
+        // Its earlier checkout is reused: no worktree field to move to.
+        assert_eq!(form.fields(), [Field::Agent, Field::Model]);
+        assert!(press(&mut page, b"\x1b[B\x1b[B").is_empty());
+        // Back to claude, which it never ran: claude's own default.
+        assert!(press(&mut page, b"\x1b[A ").is_empty());
+        let Some(Typing::Launch(form)) = &page.typing else {
+            panic!()
+        };
+        assert_eq!((form.agent, form.model.text()), ("claude", ""));
+        // A pasted name lands in the model, whichever field it's on.
+        assert!(press(&mut page, b"\x1b[200~opus\x1b[201~").is_empty());
+        assert_eq!(
+            press(&mut page, b"\r"),
+            [Do::Launch {
+                id: 1,
+                agent: "claude",
+                model: Some("opus".into()),
+                worktree: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn hints_too_wide_lose_their_end_not_their_start() {
+        let pair = |k: &'static str, w: &'static str| [Span::raw(k), Span::raw(w)];
+        let hints = [
+            pair(" ↩ ", "launch "),
+            pair(" L ", "with… "),
+            pair(" esc ", "close "),
+        ]
+        .concat();
+        let words = |h: Vec<Span>| h.iter().map(|s| s.content.to_string()).collect::<String>();
+        assert_eq!(
+            words(fit_hints(hints.clone(), 80)),
+            " ↩ launch  L with…  esc close "
+        );
+        assert_eq!(words(fit_hints(hints, 20)), " ↩ launch  L with… ");
+    }
+
+    #[test]
+    fn l_says_why_when_it_cant_launch() {
+        let proposed = Item {
+            status: ItemStatus::Proposed,
+            ..item(1, 1)
+        };
+        let rows = rows(&[proposed], &[], 7);
+        let mut page = Page::default();
+        assert!(matches!(page.keys(b"L", &rows, &[], 7)[..], [Do::Say(_)]));
+        assert_eq!(page.typing, None);
     }
 
     fn session(id: SessionId, state: AgentState) -> SessionInfo {
@@ -1140,7 +1556,9 @@ mod tests {
             page.keys(b"\r", &rows, &[working(4)], 7),
             [Do::Launch {
                 id: 1,
-                agent: "claude"
+                agent: "claude",
+                model: None,
+                worktree: true,
             }]
         );
         assert_eq!(page.keys(b"o", &rows, &[working(4)], 7), [Do::Attach(4)]);
@@ -1282,14 +1700,18 @@ mod tests {
             press(&mut page, b"j\r"),
             [Do::Launch {
                 id: 1,
-                agent: "claude"
+                agent: "claude",
+                model: None,
+                worktree: true,
             }]
         );
         assert_eq!(
             press(&mut page, b"c"),
             [Do::Launch {
                 id: 1,
-                agent: "codex"
+                agent: "codex",
+                model: None,
+                worktree: true,
             }]
         );
         assert_eq!(press(&mut page, b"s"), [Do::Status(1, ItemStatus::Shipped)]);

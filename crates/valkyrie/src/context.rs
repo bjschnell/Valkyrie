@@ -173,6 +173,17 @@ pub async fn decisions(
                 .find(|d| d.id == id)
                 .with_context(|| format!("no decision #{id} in {}", where_(&root)))?;
             print!("{}", valkyrie_context::render(d));
+            if let Some(session) = reader()
+                && d.status == DecisionStatus::Active
+            {
+                let store = valkyrie_context::Store::new(store_base());
+                record_served(
+                    &store,
+                    &root,
+                    &session,
+                    [(d.id, valkyrie_context::served::Layer::Show)],
+                );
+            }
             if d.kind == DecisionKind::Policy {
                 print_policy(client, &here).await?;
             }
@@ -556,8 +567,15 @@ fn print_health(root: &Path, list: &[Decision], habits: &[Decision]) {
     for line in &overridden {
         println!("  {line}");
     }
-    let waiting =
-        count(DecisionStatus::Proposed) + flagged.len() + recurred.len() + overridden.len();
+    let unserved = store.unserved(root, list, now);
+    for (id, days) in &unserved {
+        println!("  #{id}: {}", valkyrie_context::served::says(*days));
+    }
+    let waiting = count(DecisionStatus::Proposed)
+        + flagged.len()
+        + recurred.len()
+        + overridden.len()
+        + unserved.len();
     println!(
         "  {}",
         if waiting == 0 {
@@ -684,12 +702,22 @@ pub fn hook(agent: &str, ambient: bool) {
             let valk = valk_command();
             let habits = store.load(&valkyrie_context::project::user());
             let mut text = valkyrie_context::inject::habits(&habits, &valk);
-            text.push_str(&valkyrie_context::inject::block(
+            let (block, shown) = valkyrie_context::inject::laid_out(
                 &root,
                 &store.load(&root),
                 valkyrie_context::inject::BUDGET,
                 &valk,
-            ));
+            );
+            text.push_str(&block);
+            if let Some(session) = payload["session_id"].as_str().filter(|s| !s.is_empty()) {
+                use valkyrie_context::served::Layer;
+                let serves = shown
+                    .whole
+                    .iter()
+                    .map(|id| (*id, Layer::Block))
+                    .chain(shown.titles.iter().map(|id| (*id, Layer::Title)));
+                record_served(&store, &root, session, serves);
+            }
             text
         }
         "UserPromptSubmit" => {
@@ -718,6 +746,39 @@ pub fn hook(agent: &str, ambient: bool) {
         _ => return,
     };
     println!("{}", valkyrie_context::inject::hook_output(event, &text));
+}
+
+/// Logs decisions served to `session` in `root` (ADR-0014 §5). Measuring only:
+/// a failure to write is dropped, never shown to the agent.
+pub(crate) fn record_served(
+    store: &valkyrie_context::Store,
+    root: &Path,
+    session: &str,
+    serves: impl IntoIterator<Item = (u32, valkyrie_context::served::Layer)>,
+) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let serves: Vec<valkyrie_context::served::Serve> = serves
+        .into_iter()
+        .map(|(id, layer)| valkyrie_context::served::Serve {
+            session: session.to_owned(),
+            id,
+            layer,
+            at,
+        })
+        .collect();
+    let _ = store.record_served(root, &serves, at);
+}
+
+/// The session a read from inside a Valkyrie session is served to, for the
+/// serving log; `None` outside one, where it's you reading, not an agent.
+pub(crate) fn reader() -> Option<String> {
+    let id = std::env::var("VALK_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    Some(format!("valk:{id}"))
 }
 
 /// Asks the daemon what this session's agent should hear about the agents beside

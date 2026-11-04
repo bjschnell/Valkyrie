@@ -117,6 +117,11 @@ pub enum TodoCmd {
         id: u32,
         #[arg(long, default_value = "claude", value_parser = ["claude", "codex"])]
         agent: String,
+        /// The model to run, as the agent names it (`opus`, `gpt-5-codex`), or
+        /// `default` for the agent's own. Without it, the item's last launch of
+        /// that agent decides.
+        #[arg(short, long)]
+        model: Option<String>,
         /// Work in the repository itself instead of a new worktree.
         #[arg(long)]
         no_worktree: bool,
@@ -485,6 +490,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
         TodoCmd::Launch {
             id,
             agent,
+            model,
             no_worktree,
             attach,
         } => {
@@ -492,7 +498,10 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 cols: 120,
                 rows: 40,
             };
-            let info = client.launch_item(id, &agent, !no_worktree, size).await?;
+            let model = model.map(|m| if m == "default" { String::new() } else { m });
+            let info = client
+                .launch_item(id, &agent, !no_worktree, size, model)
+                .await?;
             if attach {
                 return Ok(Some(info));
             }

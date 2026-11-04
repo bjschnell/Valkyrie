@@ -15,6 +15,7 @@ pub mod policy;
 pub mod project;
 pub mod reply;
 pub mod retro;
+pub mod served;
 pub mod skill;
 pub mod stale;
 
@@ -665,6 +666,67 @@ impl Store {
 
     fn outcomes_file(&self, root: &Path) -> PathBuf {
         self.base.join(project::key(root)).join("policy.jsonl")
+    }
+
+    /// Records decisions served to a session in `root` (ADR-0014 §5). Written
+    /// by the hooks themselves, so appends from two sessions can meet; each
+    /// batch is one small write. Once the oldest line is a week past
+    /// [`served::SERVED_DAYS`], what no longer counts is dropped first: only
+    /// that line is read, so a busy project's hooks don't re-read the log each
+    /// time. An append racing a compaction can be lost; it's only a measure.
+    pub fn record_served(&self, root: &Path, serves: &[served::Serve], now: u64) -> Result<()> {
+        use std::io::{BufRead, Write};
+        if serves.is_empty() {
+            return Ok(());
+        }
+        self.mark_project(root)?;
+        let path = self.served_file(root);
+        let oldest = std::fs::File::open(&path).ok().and_then(|f| {
+            let mut first = String::new();
+            std::io::BufReader::new(f).read_line(&mut first).ok()?;
+            serde_json::from_str::<serde_json::Value>(&first).ok()?["at"].as_u64()
+        });
+        if oldest.is_some_and(|at| now.saturating_sub(at) > (served::SERVED_DAYS + 7) * 86_400) {
+            let kept: String = self
+                .served(root, now)
+                .iter()
+                .map(|s| format!("{}\n", s.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let lines: String = serves
+            .iter()
+            .map(|s| format!("{}\n", s.to_json()))
+            .collect();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        file.write_all(lines.as_bytes())?;
+        Ok(())
+    }
+
+    /// What was served in `root` over the last [`served::SERVED_DAYS`] days,
+    /// oldest first.
+    pub fn served(&self, root: &Path, now: u64) -> Vec<served::Serve> {
+        std::fs::read_to_string(self.served_file(root))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| served::Serve::from_json(&v))
+            .filter(|s| now.saturating_sub(s.at) <= served::SERVED_DAYS * 86_400)
+            .collect()
+    }
+
+    /// `root`'s active decisions no session got lately (ADR-0014 §5), with how
+    /// many days.
+    pub fn unserved(&self, root: &Path, decisions: &[Decision], now: u64) -> Vec<(u32, u64)> {
+        served::unserved(decisions, &self.served(root, now), now)
+    }
+
+    fn served_file(&self, root: &Path) -> PathBuf {
+        self.base.join(project::key(root)).join("served.jsonl")
     }
 
     /// Records what ran in `root` (ADR-0016 §3). Past [`FAILURES_COMPACT`]
@@ -1381,6 +1443,53 @@ mod tests {
         let got = f.store.skill_use(&f.repo);
         assert_eq!(got.since, 10 * day);
         assert!(!got.sessions.contains_key("old"));
+    }
+
+    #[test]
+    fn serves_are_appended_and_old_ones_dont_count() {
+        use served::{Layer, Serve};
+        let f = Fixture::new("served");
+        let day = 86_400;
+        assert!(f.store.served(&f.repo, day).is_empty());
+        let serve = |id, layer, at| Serve {
+            session: "s1".into(),
+            id,
+            layer,
+            at,
+        };
+        f.store
+            .record_served(&f.repo, &[serve(1, Layer::Block, day)], day)
+            .unwrap();
+        f.store
+            .record_served(&f.repo, &[serve(2, Layer::Title, 50 * day)], 50 * day)
+            .unwrap();
+        f.store.record_served(&f.repo, &[], 50 * day).unwrap();
+        assert_eq!(
+            f.store.served(&f.repo, 50 * day),
+            [
+                serve(1, Layer::Block, day),
+                serve(2, Layer::Title, 50 * day)
+            ]
+        );
+        // Past the window, the first one is gone.
+        let later = (served::SERVED_DAYS + 2) * day;
+        assert_eq!(
+            f.store.served(&f.repo, later),
+            [serve(2, Layer::Title, 50 * day)]
+        );
+        // A week past it, the next write drops it from the file too.
+        let file = f.store.served_file(&f.repo);
+        let lines = || std::fs::read_to_string(&file).unwrap().lines().count();
+        f.store
+            .record_served(&f.repo, &[serve(3, Layer::Show, later)], later)
+            .unwrap();
+        assert_eq!(lines(), 3);
+        let much_later = (served::SERVED_DAYS + 9) * day;
+        f.store
+            .record_served(&f.repo, &[serve(4, Layer::Show, much_later)], much_later)
+            .unwrap();
+        assert_eq!(lines(), 3);
+        assert_eq!(f.store.served(&f.repo, much_later)[0].id, 2);
     }
 
     #[test]

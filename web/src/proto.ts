@@ -190,6 +190,8 @@ export interface Item {
   pr_closed?: boolean;
   /** Handoffs left on it, oldest first. */
   notes?: ItemNote[];
+  /** The agent and model its last launch ran; `model` absent for the agent's default. */
+  launch?: { agent: string; model?: string };
   /** Seconds since the epoch. */
   created: number;
   updated: number;
@@ -282,7 +284,16 @@ export type Request =
   /** Ships every open item whose branch is merged, as last fetched; `dry_run` only
    * says what would ship, `only` ships just those (each checked again). */
   | { t: "ship_merged"; dry_run: boolean; only: number[] | null }
-  | { t: "launch_item"; id: number; agent: "claude" | "codex"; worktree: boolean; size: Size; env: [string, string | null][] };
+  | {
+      t: "launch_item";
+      id: number;
+      agent: "claude" | "codex";
+      worktree: boolean;
+      size: Size;
+      env: [string, string | null][];
+      /** Absent: as the item's last launch of `agent`; `""`: the agent's default. */
+      model?: string;
+    };
 
 /** Fire-and-forget messages. */
 export type Notice =

@@ -56,6 +56,22 @@ fn rank(kind: DecisionKind) -> u8 {
 /// (with `valk`, the command that runs Valkyrie), so a project with none yet can
 /// start collecting them.
 pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> String {
+    laid_out(root, decisions, budget, valk).0
+}
+
+/// The decisions a block showed: by id, with their body or as a title only.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Shown {
+    /// Shown with their body (or with no body to show).
+    pub whole: Vec<u32>,
+    /// Shown as a title line only.
+    pub titles: Vec<u32>,
+}
+
+/// [`block`], and which decisions it showed and how, for the serving log
+/// (ADR-0014 §5). Skills aren't in it: their reads are measured instead.
+pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> (String, Shown) {
+    let mut seen = Shown::default();
     let propose = how_to_propose(valk);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -100,7 +116,8 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
         for (d, title) in active.iter().zip(&titles) {
             rest -= title.len();
             let full = entry(d, now, true);
-            let line = if bodies && out.len() + full.len() + rest + footer_room <= budget {
+            let whole = bodies && out.len() + full.len() + rest + footer_room <= budget;
+            let line = if whole {
                 full
             } else {
                 bodies = false;
@@ -110,6 +127,11 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
                 break;
             }
             out.push_str(&line);
+            if whole {
+                seen.whole.push(d.id);
+            } else {
+                seen.titles.push(d.id);
+            }
             shown += 1;
         }
         if !bodies {
@@ -128,7 +150,7 @@ pub fn block(root: &Path, decisions: &[Decision], budget: usize, valk: &str) -> 
     out.push_str(&index(&skills, valk));
     out.push_str(&propose);
     out.push('\n');
-    out
+    (out, seen)
 }
 
 /// Most of the user's habits listed; they're few, and each is a title.
@@ -317,6 +339,17 @@ mod tests {
         assert!(!text.contains("more not shown"));
         // The highest-ranked (constraints, newest id first) keep their bodies.
         assert!(text.contains("Title 12: yyy"), "{text}");
+        // What the serving log is told matches what the text shows.
+        let (same, shown) = laid_out(Path::new("/r/app"), &all, BUDGET, "valk");
+        assert_eq!(same, text);
+        assert_eq!(shown.whole.len() + shown.titles.len(), 13);
+        assert!(shown.whole.contains(&12) && shown.titles.contains(&13));
+        for id in &shown.whole {
+            assert!(text.contains(&format!("Title {id}: ")), "#{id}");
+        }
+        for id in &shown.titles {
+            assert!(text.contains(&format!("Title {id}\n")), "#{id}");
+        }
     }
 
     #[test]

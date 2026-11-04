@@ -622,6 +622,7 @@ impl Client {
         agent: &str,
         worktree: bool,
         size: Size,
+        model: Option<String>,
     ) -> Result<SessionInfo> {
         let agent = agent.to_owned();
         let env = crate::login_env();
@@ -633,6 +634,7 @@ impl Client {
                 worktree,
                 size,
                 env,
+                model,
             })
             .await?
         {

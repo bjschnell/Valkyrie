@@ -164,6 +164,10 @@ pub struct Item {
     /// the user's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<ItemNote>,
+    /// The agent and model its last launch ran: the next launch of that agent
+    /// keeps the model unless it's given another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<ItemLaunch>,
     /// Seconds since the epoch.
     pub created: u64,
     pub updated: u64,
@@ -203,6 +207,16 @@ pub fn order(items: &[Item]) -> impl Fn(&Item, &Item) -> std::cmp::Ordering + '_
             .then(a.priority.cmp(&b.priority))
             .then(a.id.cmp(&b.id))
     }
+}
+
+/// What an item was last launched with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemLaunch {
+    /// `claude` or `codex`.
+    pub agent: String,
+    /// Empty for the agent's own default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

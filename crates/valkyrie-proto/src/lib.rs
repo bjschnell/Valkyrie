@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use backlog::{
-    Item, ItemChange, ItemFacts, ItemKind, ItemNote, ItemStatus, KeptItem, NewItem, Priority,
-    ShippedItem, order,
+    Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, NewItem,
+    Priority, ShippedItem, order,
 };
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 20;
+pub const PROTOCOL: u32 = 21;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -466,6 +466,10 @@ pub enum ClientMsg {
         size: Size,
         #[serde(default)]
         env: Vec<(String, Option<String>)>,
+        /// The model to run (protocol 20): `None` keeps the one the item's last
+        /// launch of `agent` ran, `""` is the agent's own default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Judges each linked worktree of `cwd`'s repository for removal (DESIGN §4.3),
     /// and with `remove` takes away those that pass: the user only. Replies
