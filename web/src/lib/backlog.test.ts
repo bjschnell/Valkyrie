@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, byColumn, inRepo, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, takenOnly, wouldShip } from "./backlog";
+import { agentFiled, byColumn, inRepo, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -119,10 +119,29 @@ describe("cardActions", () => {
 });
 
 describe("byLane", () => {
-  it("sorts each lane newest first", () => {
+  it("sorts each lane in the order to work it, and done newest first", () => {
     const lanes = byLane([item({ id: 1, updated: 5 }), item({ id: 2, updated: 9 }), item({ id: 3, status: "shipped" })], [], 7);
-    expect(lanes.backlog.map((i) => i.id)).toEqual([2, 1]);
+    expect(lanes.backlog.map((i) => i.id)).toEqual([1, 2]);
     expect(lanes.done.map((i) => i.id)).toEqual([3]);
+    const done = byLane([item({ id: 4, status: "shipped", updated: 1 }), item({ id: 5, status: "dropped", updated: 9 })], [], 7);
+    expect(done.done.map((i) => i.id)).toEqual([5, 4]);
+  });
+
+  it("puts ready items first, then by priority, then the oldest", () => {
+    const all = [
+      item({ id: 1 }),
+      item({ id: 2, priority: "p0", blocked_by: [5] }), // #5 still open
+      item({ id: 3, priority: "p1", blocked_by: [6] }), // #6 shipped
+      item({ id: 4, priority: "p1" }),
+      item({ id: 5, priority: "p3" }),
+      item({ id: 6, status: "shipped" }),
+      item({ id: 7, blocked_by: [99] }), // #99 deleted
+    ];
+    expect(byLane(all, [], 7).backlog.map((i) => i.id)).toEqual([3, 4, 1, 7, 5, 2]);
+    expect(waitingOn(all[1], all)).toEqual([5]);
+    // What it waits on may be in a repository the board doesn't show.
+    expect(byLane([all[1], all[3]], [], 7, all).backlog.map((i) => i.id)).toEqual([4, 2]);
+    expect(byLane([all[1], all[3]], [], 7).backlog.map((i) => i.id)).toEqual([2, 4]);
   });
 });
 
@@ -169,6 +188,18 @@ describe("editChange", () => {
       kind: "chore",
       cwd: "/r/b",
     });
+  });
+
+  it("sends priority and what it comes after only when changed here", () => {
+    expect(editChange(was, was, { ...mine, priority: "p2", blocked_by: [] })).toBeNull();
+    expect(editChange(was, was, { ...mine, priority: "p0", blocked_by: [3, 2, 3] })).toEqual({
+      do: "edit",
+      priority: "p0",
+      blocked_by: [3, 2, 3],
+    });
+    const now = { ...was, priority: "p1" as const };
+    expect(editChange(was, now, { ...mine, priority: "p3" })).toMatchObject({ clash: expect.stringMatching(/priority/) });
+    expect(editChange(was, now, { ...mine, priority: "p2" })).toBeNull();
   });
 
   it("keeps a change made elsewhere to a field not touched here", () => {

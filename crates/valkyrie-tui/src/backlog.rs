@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::path::PathBuf;
 use valkyrie_proto::{
-    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, SessionId,
+    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, Priority, SessionId,
     SessionInfo, ShippedItem,
 };
 
@@ -125,20 +125,41 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
     }
 }
 
-/// Items in page order, each with its lane: by lane, then newest first. Only the
-/// newest few done ones.
+/// Items in page order, each with its lane: by lane, then in the order to work
+/// them (`valkyrie_proto::order`), the done ones newest first. Only the newest few
+/// done ones.
 pub(crate) fn rows(items: &[Item], sessions: &[SessionInfo], boot: u64) -> Vec<(Lane, Item)> {
-    let mut out: Vec<(Lane, Item)> = items
+    rows_of(items, items, sessions, boot)
+}
+
+/// `rows` for `shown`, those of `all` the page lists: what an item waits on may be
+/// in a repository it doesn't show. Each row's `blocked_by` is cut to the items it
+/// still waits on, which is all a row says of them.
+pub(crate) fn rows_of(
+    shown: &[Item],
+    all: &[Item],
+    sessions: &[SessionInfo],
+    boot: u64,
+) -> Vec<(Lane, Item)> {
+    let mut out: Vec<(Lane, Item)> = shown
         .iter()
         .map(|i| (lane(i, sessions, boot), i.clone()))
         .collect();
     let rank = |l: Lane| Lane::ORDER.iter().position(|&o| o == l).unwrap_or(0);
+    let order = valkyrie_proto::order(all);
     out.sort_by(|(la, a), (lb, b)| {
-        rank(*la)
-            .cmp(&rank(*lb))
-            .then(b.updated.cmp(&a.updated))
-            .then(b.id.cmp(&a.id))
+        rank(*la).cmp(&rank(*lb)).then_with(|| match la {
+            Lane::Done => b.updated.cmp(&a.updated).then(b.id.cmp(&a.id)),
+            _ => order(a, b),
+        })
     });
+    // A done item waits on nothing worth showing, as the web card has it.
+    for (lane, item) in &mut out {
+        item.blocked_by = match lane {
+            Lane::Done => Vec::new(),
+            _ => item.waiting_on(all),
+        };
+    }
     // Sorted newest first: the newest few done ones stay.
     let mut done = 0;
     out.retain(|(l, _)| {
@@ -414,6 +435,7 @@ pub(crate) enum Do {
         id: u32,
         kind: Option<ItemKind>,
         title: Option<String>,
+        priority: Option<Priority>,
     },
     /// Fetch, then ask what's merged, to show before shipping it.
     CheckMerged,
@@ -548,7 +570,12 @@ impl Page {
                                 let title = (title != was.0).then(|| title.to_owned());
                                 let kind = (kind != was.1).then_some(kind);
                                 if title.is_some() || kind.is_some() {
-                                    out.push(Do::Edit { id, kind, title });
+                                    out.push(Do::Edit {
+                                        id,
+                                        kind,
+                                        title,
+                                        priority: None,
+                                    });
                                 }
                             }
                             Typing::Launch(form) => out.push(form.launch()),
@@ -675,6 +702,24 @@ impl Page {
                 Do::Status(id, ItemStatus::Shipped)
             }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
+            // Up toward p0, down toward p3; nothing past either end.
+            b"+" | b"=" | b"-" if lane != Lane::Done => {
+                let at = Priority::ALL.iter().position(|&p| p == item.priority);
+                let to = match (key, at) {
+                    (b"-", Some(i)) => Priority::ALL.get(i + 1),
+                    (_, Some(i)) => i.checked_sub(1).and_then(|i| Priority::ALL.get(i)),
+                    (_, None) => None,
+                };
+                match to {
+                    Some(&p) => Do::Edit {
+                        id,
+                        kind: None,
+                        title: None,
+                        priority: Some(p),
+                    },
+                    None => Do::Say(format!("#{id} is already {}", item.priority.as_str())),
+                }
+            }
             b"o" if lane == Lane::Done => Do::Status(id, ItemStatus::Open),
             b"o" if live.is_some() => Do::Attach(live.unwrap_or_default()),
             b"N" => {
@@ -758,6 +803,7 @@ impl Page {
             (None, Some((Lane::Proposed, _))) => [
                 hint(" a ", "accept "),
                 hint(" e ", "edit "),
+                hint(" +/- ", "priority "),
                 hint(" x ", "delete "),
                 hint(" r ", "repo "),
                 hint(" n ", "new "),
@@ -796,6 +842,7 @@ impl Page {
                     hint(" s ", "ship "),
                     hint(" S ", "merged "),
                     hint(" e ", "edit "),
+                    hint(" +/- ", "priority "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
                     hint(" r ", "repo "),
@@ -1081,6 +1128,15 @@ fn kind_color(kind: ItemKind, t: &Theme) -> style::Color {
     }
 }
 
+/// P0 and P1 stand out; the rest stay quiet.
+fn priority_color(p: Priority, t: &Theme) -> style::Color {
+    match p {
+        Priority::P0 => t.needs,
+        Priority::P1 => t.accent,
+        Priority::P2 | Priority::P3 => t.muted,
+    }
+}
+
 fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> Line<'static> {
     let folder = item
         .project
@@ -1088,19 +1144,35 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
         .and_then(|p| p.file_name())
         .map_or("no folder".into(), |n| n.to_string_lossy().into_owned());
     let head = format!(" #{:<4}", item.id);
+    let prio = format!("{:<3}", item.priority.as_str());
     let kind = format!("{:<8}", item.kind.as_str());
     // The lane as a column too, so a row still says its state when the heading scrolls away.
     let state = format!("{:<12}", lane.title());
     let folder = format!("  {}", fit(&folder, 16));
-    let room = (width as usize)
-        .saturating_sub(head.len() + kind.len() + state.len() + folder.chars().count() + 1);
+    // What it still waits on (`rows_of` cut `blocked_by` to that), before the folder.
+    let after = match item.blocked_by.as_slice() {
+        [] => String::new(),
+        [one] => format!(" after #{one}"),
+        [one, rest @ ..] => format!(" after #{one} +{}", rest.len()),
+    };
+    let room = (width as usize).saturating_sub(
+        head.len()
+            + prio.len()
+            + kind.len()
+            + state.len()
+            + after.len()
+            + folder.chars().count()
+            + 1,
+    );
     let title_fg = if lane == Lane::Done { t.muted } else { t.fg };
     let mut line = Line::from(vec![
         head.fg(t.muted),
+        prio.fg(priority_color(item.priority, t)),
         kind.fg(kind_color(item.kind, t)),
         state.fg(lane.color(t)),
         // Padded, so the folders line up at the right.
         format!("{:<room$}", fit(&item.title, room)).fg(title_fg),
+        after.fg(t.accent2),
         folder.fg(t.muted),
     ]);
     if selected {
@@ -1166,6 +1238,7 @@ fn detail_lines(
                 (true, false) => "· PR open ".fg(t.muted),
                 (false, _) => "".into(),
             },
+            format!("· {} ", item.priority.as_str()).fg(priority_color(item.priority, t)),
             match live {
                 Some(s) => format!("· tab {} {} ", s.id, s.status.state.label()).fg(t.muted),
                 None => "".into(),
@@ -1182,6 +1255,12 @@ fn detail_lines(
     } else if item.agent_filed() {
         out.push(Line::from(
             format!(" agent-filed by {}, not accepted yet: a", item.by).fg(t.accent2),
+        ));
+    }
+    if !item.blocked_by.is_empty() {
+        let ids: Vec<String> = item.blocked_by.iter().map(|id| format!("#{id}")).collect();
+        out.push(Line::from(
+            format!(" after {}, not finished yet", ids.join(", ")).fg(t.accent2),
         ));
     }
     if let Some(pr) = &item.pr {
@@ -1246,6 +1325,8 @@ mod tests {
 
     fn item(id: u32, updated: u64) -> Item {
         Item {
+            priority: Default::default(),
+            blocked_by: Vec::new(),
             id,
             title: format!("item {id}"),
             body: String::new(),
@@ -1700,6 +1781,7 @@ mod tests {
         assert_eq!(
             press(&mut page, b"e\x1b[H\x1b[3~X\t\r"),
             [Do::Edit {
+                priority: None,
                 id: 1,
                 kind: Some(ItemKind::Feature),
                 title: Some(format!("X{}", title.chars().skip(1).collect::<String>())),
@@ -1709,6 +1791,7 @@ mod tests {
         assert_eq!(
             press(&mut page, b"e\t\r"),
             [Do::Edit {
+                priority: None,
                 id: 1,
                 kind: Some(ItemKind::Feature),
                 title: None,
@@ -1966,5 +2049,53 @@ mod tests {
         };
         page.keys(&[b"\x1b[".as_slice(), &[b'1'; 40]].concat(), &[], &[], 7);
         assert!(page.held.is_empty(), "past the cap it isn't held");
+    }
+
+    #[test]
+    fn a_lane_is_in_the_order_to_work_it_and_plus_minus_move_priority() {
+        let mut urgent = item(1, 1);
+        urgent.priority = Priority::P0;
+        let mut waits = item(2, 9);
+        waits.priority = Priority::P0;
+        waits.blocked_by = vec![3, 4];
+        let later = item(3, 5);
+        let mut gone = item(4, 1);
+        gone.status = ItemStatus::Shipped;
+        let all = [urgent, waits, later, gone];
+        let rows = rows(&all, &[], 7);
+        let order: Vec<(Lane, u32)> = rows.iter().map(|(l, i)| (*l, i.id)).collect();
+        assert_eq!(
+            order,
+            [
+                (Lane::Backlog, 1),
+                (Lane::Backlog, 3),
+                (Lane::Backlog, 2),
+                (Lane::Done, 4)
+            ]
+        );
+        // The row keeps only what's still open of what it waits on.
+        assert_eq!(rows[2].1.blocked_by, [3]);
+        let t = crate::theme::DRACULA;
+        let line: String = item_line(&rows[2].1, Lane::Backlog, false, 90, &t)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(line.contains("p0") && line.contains("after #3"), "{line}");
+
+        let mut page = Page::default();
+        let edit = |priority| Do::Edit {
+            id: 3,
+            kind: None,
+            title: None,
+            priority: Some(priority),
+        };
+        page.cursor = 1;
+        assert_eq!(page.keys(b"+", &rows, &[], 7), [edit(Priority::P1)]);
+        assert_eq!(page.keys(b"-", &rows, &[], 7), [edit(Priority::P3)]);
+        page.cursor = 0;
+        assert!(
+            matches!(&page.keys(b"+", &rows, &[], 7)[..], [Do::Say(s)] if s.contains("already p0"))
+        );
     }
 }

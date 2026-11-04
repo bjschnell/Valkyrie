@@ -1,7 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
-import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, SessionInfo, ShippedItem } from "../proto";
+import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, Priority, SessionInfo, ShippedItem } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -81,11 +81,32 @@ export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
   return item.pr || item.checkout || (item.sessions?.length ?? 0) > 0 ? "review" : "backlog";
 }
 
-/** Items by lane, each lane newest first; the done ones by when they were closed. */
-export function byLane(items: Item[], sessions: SessionInfo[], boot: number): Record<Lane, Item[]> {
+export const priority = (item: Item): Priority => item.priority ?? "p2";
+
+/** Those of what `item` comes after that aren't shipped or dropped yet; a deleted one
+ * is gone, so it waits on nothing. */
+export function waitingOn(item: Item, items: Item[]): number[] {
+  return (item.blocked_by ?? []).filter((id) =>
+    items.some((i) => i.id === id && (i.status === "open" || i.status === "proposed")),
+  );
+}
+
+/** The order to work items in, as the daemon's `order`: those waiting on nothing,
+ * then by priority, then the oldest. */
+export function order(items: Item[]): (a: Item, b: Item) => number {
+  const waits = (i: Item) => (waitingOn(i, items).length ? 1 : 0);
+  return (a, b) => waits(a) - waits(b) || priority(a).localeCompare(priority(b)) || a.id - b.id;
+}
+
+/** Items by lane, each in the order to work it (`order`); the done ones newest
+ * first, by when they were closed. `all` is every item, for what they wait on. */
+export function byLane(items: Item[], sessions: SessionInfo[], boot: number, all: Item[] = items): Record<Lane, Item[]> {
   const out: Record<Lane, Item[]> = { proposed: [], needs: [], running: [], review: [], backlog: [], done: [] };
   for (const item of items) out[lane(item, sessions, boot)].push(item);
-  for (const l of Object.values(out)) l.sort((a, b) => b.updated - a.updated || b.id - a.id);
+  const work = order(all);
+  for (const [l, list] of Object.entries(out)) {
+    list.sort(l === "done" ? (a, b) => b.updated - a.updated || b.id - a.id : work);
+  }
   return out;
 }
 
@@ -94,8 +115,9 @@ export function byColumn(
   items: Item[],
   sessions: SessionInfo[],
   boot: number,
+  all: Item[] = items,
 ): Record<Column, { item: Item; lane: Lane }[]> {
-  const lanes = byLane(items, sessions, boot);
+  const lanes = byLane(items, sessions, boot, all);
   const out = {} as Record<Column, { item: Item; lane: Lane }[]>;
   for (const { column, lanes: of } of COLUMNS) out[column] = of.flatMap((lane) => lanes[lane].map((item) => ({ item, lane })));
   return out;
@@ -166,7 +188,7 @@ export function wouldShip(shipped: ShippedItem[], kept: KeptItem[]): string {
 export function editChange(
   was: Item | null,
   now: Item | null,
-  mine: { title: string; body: string; kind: ItemKind; project: string | null },
+  mine: { title: string; body: string; kind: ItemKind; project: string | null; priority?: Priority; blocked_by?: number[] },
 ): ItemChange | { clash: string; was: Item } | null {
   if (!was) return null;
   const change: Extract<ItemChange, { do: "edit" }> = { do: "edit" };
@@ -187,6 +209,21 @@ export function editChange(
   if (field("body", mine.body)) change.body = mine.body;
   if (field("kind", mine.kind)) change.kind = mine.kind;
   if (mine.project !== null && field("project", mine.project)) change.cwd = mine.project;
+  // Compared as the daemon keeps them: no priority is p2, the list sorted.
+  const ids = (l: number[] | undefined) => [...new Set(l ?? [])].sort((a, b) => a - b).join(",");
+  const other = <V>(what: string, mineV: V, wasV: V, nowV: V) => {
+    if (mineV === wasV) return false;
+    if (now && nowV !== wasV && nowV !== mineV) clash.push(what);
+    return true;
+  };
+  if (mine.priority && other("priority", mine.priority, priority(was), now ? priority(now) : priority(was))) {
+    change.priority = mine.priority;
+    if (now) seen = { ...seen, priority: now.priority };
+  }
+  if (mine.blocked_by && other("order", ids(mine.blocked_by), ids(was.blocked_by), ids((now ?? was).blocked_by))) {
+    change.blocked_by = mine.blocked_by;
+    if (now) seen = { ...seen, blocked_by: now.blocked_by };
+  }
   if (clash.length) {
     const what = clash.join(" and ");
     return { clash: `#${was.id}'s ${what} changed elsewhere since you opened it: save again to replace it`, was: seen };

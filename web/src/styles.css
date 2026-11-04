@@ -2389,6 +2389,12 @@ button.title-name {
 .kind-bug { --kind: var(--blocked); }
 .kind-feature { --kind: var(--accent); }
 .kind-chore { --kind: var(--soft); }
+/* Priority wears the kind chip's shape: p0 and p1 stand out, the rest stay quiet. */
+.prio-p0 { --kind: var(--needs); }
+.prio-p1 { --kind: var(--accent); }
+.prio-p2,
+.prio-p3 { --kind: var(--soft); }
+.item-after { color: var(--interrupted); }
 
 .icon-btn {
   position: relative;
