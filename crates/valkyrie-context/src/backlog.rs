@@ -5,7 +5,9 @@
 use crate::{MAX_TITLE, file, project, shown, write_atomic};
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
-use valkyrie_proto::{Item, ItemChange, ItemKind, ItemNote, ItemStatus, NewItem, SessionId};
+use valkyrie_proto::{
+    Item, ItemChange, ItemKind, ItemLaunch, ItemNote, ItemStatus, NewItem, SessionId,
+};
 
 /// Longest body kept: room for a bug report with its logs, not a whole file.
 pub const MAX_BODY: usize = 20_000;
@@ -119,6 +121,7 @@ impl Backlog {
             unaccepted: false,
             pr_closed: false,
             notes: Vec::new(),
+            launch: None,
             created: now,
             updated: now,
         };
@@ -272,6 +275,16 @@ impl Backlog {
         }
         item.updated = now;
         self.write(&item)?;
+        Ok(item)
+    }
+
+    /// Records what `id` was just launched with, for its next launch to keep.
+    pub fn launched_with(&self, id: u32, launch: ItemLaunch) -> Result<Item> {
+        let mut item = self.get(id)?;
+        if item.launch.as_ref() != Some(&launch) {
+            item.launch = Some(launch);
+            self.write(&item)?;
+        }
         Ok(item)
     }
 
@@ -828,6 +841,20 @@ mod tests {
     }
 
     #[test]
+    fn what_an_item_was_launched_with_is_kept() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        b.add(&new("x", "", ItemKind::Feature), "human", 1).unwrap();
+        assert_eq!(b.get(1).unwrap().launch, None);
+        let opus = ItemLaunch {
+            agent: "claude".into(),
+            model: "opus".into(),
+        };
+        b.launched_with(1, opus.clone()).unwrap();
+        assert_eq!(b.get(1).unwrap().launch, Some(opus));
+    }
+
+    #[test]
     fn a_take_links_the_session_once_and_sets_branch_and_pr_but_no_checkout() {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
@@ -1002,6 +1029,7 @@ mod tests {
             unaccepted: false,
             pr_closed: false,
             notes: Vec::new(),
+            launch: None,
             created: 0,
             updated: 0,
         };

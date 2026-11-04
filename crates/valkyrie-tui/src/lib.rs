@@ -2400,9 +2400,17 @@ impl App {
                 self.backlog = None;
                 self.switch_to(id).await;
             }
-            Do::Launch { id, agent } => {
+            Do::Launch {
+                id,
+                agent,
+                model,
+                worktree,
+            } => {
                 let size = self.session_size()?;
-                let info = self.client.launch_item(id, agent, true, size).await?;
+                let info = self
+                    .client
+                    .launch_item(id, agent, worktree, size, model)
+                    .await?;
                 self.backlog = None;
                 self.refresh().await;
                 self.switch_to(info.id).await;
@@ -6144,6 +6152,7 @@ mod tests {
                             unaccepted: false,
                             pr_closed: false,
                             notes: Vec::new(),
+                            launch: None,
                             created: 0,
                             updated: 0,
                         };
@@ -6188,6 +6197,7 @@ mod tests {
                 unaccepted: false,
                 pr_closed: false,
                 notes: Vec::new(),
+                launch: None,
                 created: 0,
                 updated: 1,
             }],
@@ -6354,6 +6364,7 @@ mod tests {
             unaccepted: false,
             pr_closed: false,
             notes: Vec::new(),
+            launch: None,
             created: 0,
             updated: u64::from(id),
         };
