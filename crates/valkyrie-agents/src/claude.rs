@@ -192,6 +192,20 @@ fn normalize(p: &Value) -> Option<AgentEvent> {
         }
         // A policy blocked this stop (ADR-0013 §5): the turn goes on.
         "Stop" if !p["valk_continued"].is_null() => return None,
+        // `ci-fix` gave up on a red pull request (ADR-0013 §3): the user's now.
+        "Stop" if !p["valk_ci_fix_spent"].is_null() => {
+            let spent = &p["valk_ci_fix_spent"];
+            let url = spent["pr"].as_str().unwrap_or("");
+            let pr = url
+                .rsplit_once("/pull/")
+                .map_or("its pull request".to_owned(), |(_, n)| format!("PR #{n}"));
+            E::TurnFailed {
+                summary: format!(
+                    "CI still red on {pr} after {} fixes",
+                    spent["blocks"].as_u64().unwrap_or(0)
+                ),
+            }
+        }
         "Stop" => E::TurnEnded {
             summary: p["last_assistant_message"]
                 .as_str()
@@ -488,6 +502,16 @@ mod tests {
         assert_eq!(
             n(json!({"hook_event_name": "Stop", "valk_continued": {"policy": 3}})),
             None
+        );
+        // One `ci-fix` gave up on: the user's, not finished.
+        assert_eq!(
+            n(
+                json!({"hook_event_name": "Stop", "last_assistant_message": "Still red.",
+                "valk_ci_fix_spent": {"pr": "https://github.com/o/r/pull/93", "blocks": 2}})
+            ),
+            Some(E::TurnFailed {
+                summary: "CI still red on PR #93 after 2 fixes".into()
+            })
         );
     }
 

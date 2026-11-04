@@ -42,7 +42,7 @@ The user's line for what an agent may decide: anything code, scripts or infrastr
      - **What turns it on:** the repository's own accepted `ci: gh` fact (ADR-0016 §3), never one in the user scope, not a `template: ci-fix` decision of its own and not any red PR. It needs no `until`, so a repository can fix CI without a shipping habit.
      - **Flaky CI (#17):** a failure in code the agent didn't change is looked up in `valk todo list` and filed if it's new, then the failed jobs are rerun once (`gh run rerun <run> --failed`). Filing it and stopping without a retry left the user typing "rerun it" by hand, as during the trial. The twice-per-PR limit still bounds it.
      - **The limit** is counted per PR URL in the project's state dir (`ci-fix.json`), since the hook keeps nothing between turns. A PR not blocked for 90 days starts over, even one left at the limit. Two sessions stopping on one PR in the same instant can each count from the same number: at worst one extra block.
-     - **Not built yet:** marking the stop that goes through after the limit as needing you in the queue. Today that stop is an ordinary turn end with a `pr-red` work state.
+     - **After the limit:** a red stop that goes through, including the one right after the last block, is marked `valk_ci_fix_spent` and shows in the queue as *blocked* ("CI still red on PR #N after 2 fixes"), not *finished*. It's still a turn end for everything else (replies, the extractor).
 
    **`<checks>`** is the project's check command, the only free parameter, and it is part of what the user accepts. `<until>` is a choice from a fixed list, not text.
 4. **Policies are proposed early, from evidence.** As the user chose on 2026-11-01, an offer comes early rather than after a long wait.
