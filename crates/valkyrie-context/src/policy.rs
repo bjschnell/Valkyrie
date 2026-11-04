@@ -26,6 +26,11 @@ impl Until {
         }
     }
 
+    /// `commit`, `push` or `pr`.
+    pub fn parse_str(s: &str) -> Option<Until> {
+        Until::parse(s)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Until::Commit => "commit",
@@ -91,10 +96,15 @@ pub const FORMAT: &str = "a policy's body is `template: ship`, then one or more 
      `until: commit|push|pr`, `checks: <command>` and `ci: gh|agent|none`, one a line";
 
 /// Reads a policy's body. Unknown keys and templates are refused, so a typo can't
-/// accept a policy that silently does nothing.
+/// accept a policy that silently does nothing. Lines starting `>` are evidence
+/// quoted for the reviewer (a learned policy's replies), never settings.
 pub fn parse(body: &str) -> Result<Settings, String> {
     let (mut template, mut out) = (None, Settings::default());
-    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    for line in body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('>'))
+    {
         let Some((key, value)) = line.split_once(':') else {
             return Err(format!("{line:?} isn't `key: value`; {FORMAT}"));
         };
@@ -291,7 +301,8 @@ mod tests {
 
     #[test]
     fn reads_ship_settings_and_refuses_anything_else() {
-        let s = parse("template: ship\nuntil: pr\nchecks: cargo test\nci: gh\n").unwrap();
+        let s = parse("template: ship\nuntil: pr\nchecks: cargo test\nci: gh\n\n> “ship it”\n")
+            .unwrap();
         assert_eq!(
             s,
             Settings {

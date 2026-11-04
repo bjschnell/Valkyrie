@@ -358,6 +358,13 @@ How it works:
 
    (The body comes on stdin with `-`, which works the same in bash, zsh and fish.)
 
+   You rarely need to write the habit yourself. When an agent stops short of
+   shipping and you answer with a routine "commit it" or "ship it", a small model
+   (under `valk decisions auto`, short replies only) notes how far you sent the
+   work, as the next stop shows it got there. After that happens in two
+   sessions, in any repositories, the habit is proposed for you to accept, with
+   your replies quoted. Reject it and it isn't offered again for 30 days.
+
    `until` is `commit`, `push` or `pr`; `checks` and `ci` (`gh`, `agent` or
    `none`) are optional. A repository's settings lie over your habit, and one that
    sets `until` itself wins there. `valk decisions show <id>` on a policy prints

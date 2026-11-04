@@ -8,6 +8,7 @@ mod context;
 mod extract;
 mod foreground;
 mod guard;
+mod habit;
 mod pty;
 mod restore;
 mod session;
@@ -145,6 +146,9 @@ struct Registry {
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// Replies to stops short of shipping, for `habit` to learn from.
+    answers: mpsc::UnboundedSender<(SessionId, session::Answered)>,
+    answers_rx: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, session::Answered)>>>,
     /// The backlog (DESIGN §8.12); the lock keeps ids from colliding.
     backlog: Mutex<valkyrie_context::backlog::Backlog>,
     /// Every backlog item, pushed with the queue.
@@ -432,6 +436,7 @@ fn new_registry(
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
     let (turns, turns_rx) = mpsc::unbounded_channel();
+    let (answers, answers_rx) = mpsc::unbounded_channel();
     let socket_for_restore = socket.clone();
     let registry = Arc::new(Registry {
         sessions: Mutex::default(),
@@ -464,6 +469,8 @@ fn new_registry(
         stale_check: tokio::sync::Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
+        answers,
+        answers_rx: Mutex::new(Some(answers_rx)),
         backlog: Mutex::new(valkyrie_context::backlog::Backlog::new(
             state_dir.join("backlog"),
         )),
@@ -487,6 +494,9 @@ async fn serve_forever(
     tokio::spawn(publish_queue(registry.clone()));
     if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
         tokio::spawn(extract::run(registry.clone(), turns));
+    }
+    if let Some(answers) = registry.answers_rx.lock().unwrap().take() {
+        tokio::spawn(habit::run(registry.clone(), answers));
     }
     tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(watch_prs(registry.clone()));
@@ -1003,9 +1013,12 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                         s.hook(&agent, sent_us, payload);
                         // Git and `gh` take a while; the record can wait, the hook can't.
                         if let Some(cwd) = work_in {
+                            let answers = registry.answers.clone();
                             tokio::task::spawn_blocking(move || {
-                                if let Some(work) = work::at(&cwd) {
-                                    s.log_work(work);
+                                if let Some(work) = work::at(&cwd)
+                                    && let Some(answered) = s.log_work(work)
+                                {
+                                    let _ = answers.send((session, answered));
                                 }
                             });
                         }
