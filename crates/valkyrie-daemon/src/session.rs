@@ -255,12 +255,17 @@ struct State {
     answer: Option<(String, String)>,
     /// What the agent ran, for the repository's facts (ADR-0016 §3).
     watch: crate::facts::Watch,
+    /// Where the stops policies kept going led (ADR-0013 §6).
+    blocks: valkyrie_context::outcome::Follow,
 }
 
 /// A reply to a stop short of shipping, and how far the work got by the next
 /// stop (ADR-0013 §2): for `habit` to classify.
 #[derive(Debug, Clone)]
 pub struct Answered {
+    /// The block the stop followed, when the policy's work stopped short of
+    /// where it sent it: the reply says whether the user overrode it.
+    pub block: Option<valkyrie_context::outcome::Kept>,
     /// The state the work stopped in.
     pub before: String,
     pub prompt: String,
@@ -393,6 +398,7 @@ impl Session {
             unshipped: None,
             watch: Default::default(),
             answer: None,
+            blocks: Default::default(),
         };
         state.log(
             now_ms,
@@ -485,6 +491,7 @@ impl Session {
             unshipped: None,
             watch: Default::default(),
             answer: None,
+            blocks: Default::default(),
         };
         state.log(now, "resume", json!({"generation": generation}));
         let reap = match (saved.exited, saved.pid) {
@@ -869,7 +876,9 @@ impl Session {
         let after = work["state"].as_str().unwrap_or_default().to_owned();
         let pr = work["pr"].is_string();
         state.log(now_ms(), "work", work);
+        let block = state.blocks.stopped(&after, pr);
         let answered = state.answer.take().map(|(before, prompt)| Answered {
+            block,
             before,
             prompt,
             after: after.clone(),
@@ -879,6 +888,12 @@ impl Session {
         state.unshipped =
             matches!(after.as_str(), "uncommitted" | "unpushed" | "no-pr").then_some(after);
         answered
+    }
+
+    /// How blocks turned out since the last call, for the daemon to record:
+    /// each with whether the user overrode it, and how that was seen.
+    pub fn take_outcomes(&self) -> Vec<valkyrie_context::outcome::Outcome> {
+        self.state.lock().unwrap().blocks.take()
     }
 
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
@@ -911,6 +926,7 @@ impl Session {
         if ours {
             state.activity.note(&payload, now);
             state.guard.hook(&payload);
+            state.blocks.hook(&payload, &self.cwd);
             // The user's first prompt after a stop short of shipping answers it.
             if payload["hook_event_name"] == "UserPromptSubmit" {
                 let unshipped = state.unshipped.take();

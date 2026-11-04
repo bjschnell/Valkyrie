@@ -154,7 +154,16 @@ pub async fn decisions(
         Some(DecisionsCmd::Confirm { id }) => review(id, ReviewAction::Confirm).await,
         Some(DecisionsCmd::Health) => {
             let list = client.decisions(Some(cwd)).await?;
-            print_health(&root, &list);
+            // Your habits act in every project, so a project's health has them too.
+            let habits = match user {
+                true => Vec::new(),
+                false => {
+                    client
+                        .decisions(Some(valkyrie_context::project::user()))
+                        .await?
+                }
+            };
+            print_health(&root, &list, &habits);
             Ok(())
         }
         Some(DecisionsCmd::Show { id }) => {
@@ -492,7 +501,7 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
     }
 }
 
-fn print_health(root: &Path, list: &[Decision]) {
+fn print_health(root: &Path, list: &[Decision], habits: &[Decision]) {
     let count = |s: DecisionStatus| list.iter().filter(|d| d.status == s).count();
     let flagged: Vec<&Decision> = list.iter().filter(|d| d.fresh.review.is_some()).collect();
     let now = std::time::SystemTime::now()
@@ -525,11 +534,17 @@ fn print_health(root: &Path, list: &[Decision]) {
             d.fresh.review.as_deref().unwrap_or("")
         );
     }
-    let recurred = valkyrie_context::Store::new(store_base()).recurred(root, list);
+    let store = valkyrie_context::Store::new(store_base());
+    let recurred = store.recurred(root, list);
     for (id, times) in &recurred {
         println!("  #{id} isn't working: {}", not_working(*times));
     }
-    let waiting = count(DecisionStatus::Proposed) + flagged.len() + recurred.len();
+    let overridden = overridden(&store, root, list, habits, now);
+    for line in &overridden {
+        println!("  {line}");
+    }
+    let waiting =
+        count(DecisionStatus::Proposed) + flagged.len() + recurred.len() + overridden.len();
     println!(
         "  {}",
         if waiting == 0 {
@@ -538,6 +553,34 @@ fn print_health(root: &Path, list: &[Decision]) {
             format!("{waiting} wait on you: valk decisions, the TUI or your phone")
         }
     );
+}
+
+/// The policies in `root` and the user's habits that the user keeps
+/// overriding (ADR-0013 §6), one line each.
+pub(crate) fn overridden(
+    store: &valkyrie_context::Store,
+    root: &Path,
+    list: &[Decision],
+    habits: &[Decision],
+    now: u64,
+) -> Vec<String> {
+    use valkyrie_context::outcome::says;
+    let user = valkyrie_context::project::user();
+    let mut out: Vec<String> = store
+        .overridden(root, list, now)
+        .iter()
+        .map(|f| format!("#{} is getting overridden: {}", f.id, says(f)))
+        .collect();
+    if root != user {
+        out.extend(store.overridden(&user, habits, now).iter().map(|f| {
+            format!(
+                "your habit #{} is getting overridden: {} (`valk decisions --user`)",
+                f.id,
+                says(f)
+            )
+        }));
+    }
+    out
 }
 
 /// Why a decision whose failure recurred `times` since it was accepted needs you.

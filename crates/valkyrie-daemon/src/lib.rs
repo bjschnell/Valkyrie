@@ -1027,14 +1027,18 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                         if let Some((cwd, seen)) = s.hook(&agent, sent_us, payload) {
                             let _ = registry.seen.send((session, cwd, seen));
                         }
+                        habit::record_outcomes(&registry, &s);
                         // Git and `gh` take a while; the record can wait, the hook can't.
                         if let Some(cwd) = work_in {
                             let answers = registry.answers.clone();
+                            let registry = registry.clone();
                             tokio::task::spawn_blocking(move || {
-                                if let Some(work) = work::at(&cwd)
-                                    && let Some(answered) = s.log_work(work)
-                                {
-                                    let _ = answers.send((session, answered));
+                                if let Some(work) = work::at(&cwd) {
+                                    let answered = s.log_work(work);
+                                    habit::record_outcomes(&registry, &s);
+                                    if let Some(answered) = answered {
+                                        let _ = answers.send((session, answered));
+                                    }
                                 }
                             });
                         }
