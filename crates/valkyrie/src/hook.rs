@@ -183,7 +183,7 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         store.load(&valkyrie_context::project::user()),
     );
     let ship = policy::ship(&project, &user);
-    let ci = policy::ci(&project, &user).filter(|(ci, _)| *ci == policy::Ci::Gh);
+    let ci = policy::ci(&project).filter(|(ci, _)| *ci == policy::Ci::Gh);
     if ship.is_none() && ci.is_none() {
         return None;
     }
@@ -223,19 +223,18 @@ fn policy_block(payload: &mut Value) -> Option<String> {
     let Some(work::Pr::Open { failed, .. }) = seen.take() else {
         return None;
     };
-    // Past the limit the stop goes through: what's left is the user's.
-    if store.ci_fix_blocks(&root, &url) >= policy::CI_FIX_LIMIT {
-        return None;
-    }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    // Uncounted, it could go on forever: no block.
-    let block = store.record_ci_fix(&root, &url, now).ok()?;
+    // Past the limit the stop goes through: what's left is the user's. Uncounted
+    // (the store can't be written), it could go on forever: no block either.
+    let block = store
+        .record_ci_fix(&root, &url, now, policy::CI_FIX_LIMIT)
+        .ok()??;
     let (policy, scope) = named(source);
     payload["valk_continued"] = serde_json::json!({"template": "ci-fix", "policy": policy,
         "scope": scope, "state": state.as_str(), "pr": url, "block": block});
     Some(policy::ci_fix(
         source,
-        policy::checks(&project, &user).as_ref(),
+        policy::checks(&project).as_ref(),
         &url,
         &branch,
         &failed,

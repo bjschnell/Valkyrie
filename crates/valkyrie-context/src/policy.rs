@@ -296,20 +296,19 @@ pub fn reason(ship: &Ship, state: &str, branch: &str) -> String {
 /// one pull request before its stops go through to the user.
 pub const CI_FIX_LIMIT: u32 = 2;
 
-/// Where CI runs in a project, whatever says how far to ship: the newest `ci`
-/// setting, the project's over the user's. `None`: nothing recorded, so `ci-fix`
-/// is off (the user accepts it with the repository's `ci` fact, ADR-0016 §3).
-pub fn ci(project: &[Decision], user: &[Decision]) -> Option<(Ci, Source)> {
-    let (project, user) = (settings(project), settings(user));
-    let scopes: [Scope; 2] = [(&project, Source::Project), (&user, Source::User)];
-    pick(&scopes, |s| s.ci)
+/// Where CI runs in a project, whatever says how far to ship: its newest `ci`
+/// setting. `None`: nothing recorded, so `ci-fix` is off. Only the project's own
+/// decisions count: it's a fact about the repository (ADR-0016 §3), so a stray
+/// one in the user scope can't turn `ci-fix` on everywhere.
+pub fn ci(project: &[Decision]) -> Option<(Ci, Source)> {
+    let project = settings(project);
+    pick(&[(&project, Source::Project)], |s| s.ci)
 }
 
 /// The project's `checks`, the same way: for `ci-fix` where no `until` is set.
-pub fn checks(project: &[Decision], user: &[Decision]) -> Option<(String, Source)> {
-    let (project, user) = (settings(project), settings(user));
-    let scopes: [Scope; 2] = [(&project, Source::Project), (&user, Source::User)];
-    pick(&scopes, |s| s.checks.clone())
+pub fn checks(project: &[Decision]) -> Option<(String, Source)> {
+    let project = settings(project);
+    pick(&[(&project, Source::Project)], |s| s.checks.clone())
 }
 
 /// A failed check on a pull request, named the way GitHub shows it, with the link
@@ -531,17 +530,11 @@ mod tests {
     #[test]
     fn ci_is_read_without_anything_saying_how_far_to_ship() {
         let facts = [policy(39, 9, "template: ship\nchecks: make\nci: gh")];
-        assert_eq!(ci(&facts, &[]), Some((Ci::Gh, Source::Project(39))));
-        assert_eq!(
-            checks(&facts, &[]),
-            Some(("make".into(), Source::Project(39)))
-        );
-        assert_eq!(ci(&[], &[policy(1, 1, "template: ship\nuntil: pr")]), None);
+        assert_eq!(ci(&facts), Some((Ci::Gh, Source::Project(39))));
+        assert_eq!(checks(&facts), Some(("make".into(), Source::Project(39))));
+        assert_eq!(ci(&[policy(1, 1, "template: ship\nuntil: pr")]), None);
         let off = [policy(40, 10, "template: ship\nci: none")];
-        assert_eq!(
-            ci(&[facts[0].clone(), off[0].clone()], &[]).unwrap().0,
-            Ci::None
-        );
+        assert_eq!(ci(&[facts[0].clone(), off[0].clone()]).unwrap().0, Ci::None);
     }
 
     #[test]

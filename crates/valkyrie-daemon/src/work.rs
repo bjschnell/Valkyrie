@@ -240,10 +240,10 @@ fn parse_pr(v: &Value) -> Pr {
     Pr::Open { url, failed }
 }
 
-/// The run id in a GitHub Actions link (`…/actions/runs/<id>/job/<job>`).
+/// The run id in a GitHub Actions link (`…/actions/runs/<id>/job/<job>`), on
+/// github.com or a GitHub Enterprise host.
 fn actions_run(url: &str) -> Option<u64> {
-    let rest = url.strip_prefix("https://github.com/")?;
-    let (_, after) = rest.split_once("/actions/runs/")?;
+    let (_, after) = url.split_once("/actions/runs/")?;
     after.split('/').next()?.parse().ok()
 }
 
@@ -406,6 +406,9 @@ mod tests {
             {"__typename": "StatusContext", "context": "bamboo/PLAN-JOB", "state": "FAILURE",
              "targetUrl": "https://bamboo.example.com/browse/PLAN-JOB-7"},
             {"__typename": "StatusContext", "context": "lint", "state": "ERROR"},
+            // GitHub Enterprise runs Actions too.
+            {"__typename": "CheckRun", "name": "build", "conclusion": "TIMED_OUT",
+             "detailsUrl": "https://git.corp.example/o/r/actions/runs/9/job/3"},
         ]);
         let Pr::Open { failed, .. } =
             parse_pr(&json!({"state": "OPEN", "url": "u", "statusCheckRollup": rollup}))
@@ -429,6 +432,11 @@ mod tests {
                     name: "lint".into(),
                     url: String::new(),
                     run: None,
+                },
+                Check {
+                    name: "build".into(),
+                    url: "https://git.corp.example/o/r/actions/runs/9/job/3".into(),
+                    run: Some(9),
                 },
             ]
         );
