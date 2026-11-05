@@ -435,7 +435,7 @@ impl Backlog {
 }
 
 /// Most items one can wait on.
-const MAX_BLOCKERS: usize = 20;
+pub(crate) const MAX_BLOCKERS: usize = 20;
 
 /// `ids` as item `id` (0 for one being added) may wait on, sorted with repeats
 /// dropped: items that exist, not itself, and none that waits on it in turn.

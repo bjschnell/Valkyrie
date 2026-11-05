@@ -11,6 +11,7 @@ pub mod handoff;
 pub mod inject;
 pub mod mine;
 pub mod model;
+pub mod order;
 pub mod outcome;
 pub mod policy;
 pub mod project;

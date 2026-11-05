@@ -4,11 +4,11 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
-import type { Decision, Item, ItemChange, ItemFacts, Modes, NewItem, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
+import type { Decision, Item, ItemChange, ItemFacts, Modes, NewItem, OrderProposal, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
-import { shippedSummary, wouldShip } from "./lib/backlog";
+import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { keyBytes, messageBytes, pathBytes, textBytes, type Key } from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
@@ -48,6 +48,8 @@ interface State {
   proposals: Decision[];
   /** The backlog (DESIGN §8.12), as the daemon pushes it. */
   items: Item[];
+  /** Build orders waiting on the user (ADR-0019 §2), pushed with the items. */
+  orders: OrderProposal[];
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -75,6 +77,7 @@ export const useApp = create<State>(() => ({
   queue: [],
   proposals: [],
   items: [],
+  orders: [],
   boot: 0,
   openId: null,
   screen: null,
@@ -170,7 +173,7 @@ function onPush(msg: ServerMsg): void {
       set({ proposals: msg.items });
       break;
     case "items":
-      set({ items: msg.items });
+      set({ items: msg.items, orders: msg.orders ?? [] });
       break;
     case "screen":
       if (msg.session === get().openId) set({ screen: apply(get().screen, msg.update) });
@@ -539,6 +542,33 @@ export async function shipMerged(only: number[]): Promise<void> {
     if (reply.t === "shipped") toast(shippedSummary(reply.shipped, reply.kept));
   } catch (e) {
     toast((e as Error).message);
+  }
+}
+
+/** Asks for a build order of `cwd`'s repository; it arrives with the items. A model
+ * works it out, so this can take a minute. */
+export async function planOrder(cwd: string): Promise<boolean> {
+  if (!conn) return false;
+  try {
+    const reply = await conn.request({ t: "plan_order", cwd });
+    if (reply.t === "order") toast(`Build order ready: ${reply.order.steps.length} items`);
+    return true;
+  } catch (e) {
+    toast((e as Error).message);
+    return false;
+  }
+}
+
+/** Accepts (only `items`' changes, or all) or declines a build order, toasting what changed. */
+export async function answerOrder(order: OrderProposal, accept: boolean, items?: number[]): Promise<boolean> {
+  if (!conn) return false;
+  try {
+    const reply = await conn.request({ t: "answer_order", project: order.project, id: order.id, accept, items });
+    if (reply.t === "order_applied") toast(appliedSummary(accept, reply.applied));
+    return true;
+  } catch (e) {
+    toast((e as Error).message);
+    return false;
   }
 }
 

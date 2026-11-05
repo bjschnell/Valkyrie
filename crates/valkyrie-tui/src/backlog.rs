@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::path::PathBuf;
 use valkyrie_proto::{
-    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, Priority, SessionId,
-    SessionInfo, ShippedItem,
+    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, OrderProposal,
+    Priority, SessionId, SessionInfo, ShippedItem,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +392,20 @@ pub(crate) struct Page {
     held: Vec<u8>,
     /// The start of a character a read cut off, while typing.
     partial: Vec<u8>,
+    /// Build orders waiting on the user, as last pushed: the app keeps it in step.
+    pub(crate) orders: Vec<OrderProposal>,
+    /// The build order open over the page (`O`).
+    pub(crate) order: Option<OrderView>,
+}
+
+/// A build order open over the page: which, where the cursor is, and the items
+/// whose changes the user unticked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrderView {
+    pub(crate) id: u64,
+    pub(crate) project: PathBuf,
+    pub(crate) cursor: usize,
+    pub(crate) skip: Vec<u32>,
 }
 
 /// `bytes` as text after what `partial` holds, keeping a character cut off at the
@@ -443,6 +457,15 @@ pub(crate) enum Do {
     ShipMerged(Vec<u32>),
     /// Show the next repository's items (`Repo::next`).
     NextRepo,
+    /// Ask for a build order of this repository (`P`).
+    Plan(PathBuf),
+    /// Accept (only `items`' changes, or all with `None`) or decline a build order.
+    AnswerOrder {
+        project: PathBuf,
+        id: u64,
+        accept: bool,
+        items: Option<Vec<u32>>,
+    },
     Say(String),
 }
 
@@ -466,6 +489,10 @@ impl Page {
             // Like `x x`: any other key, typing included, and it's not shipped.
             if key != b"S" || self.typing.is_some() {
                 self.ship_armed = None;
+            }
+            if self.order.is_some() {
+                out.extend(self.order_key(key, whole));
+                continue;
             }
             if let Some(typing) = &mut self.typing {
                 // A CSI sequence the read cut off waits for the rest, but only so
@@ -626,6 +653,28 @@ impl Page {
                 b"G" => self.cursor = rows.len().saturating_sub(1),
                 b"n" => self.typing = Some(Typing::add()),
                 b"r" => out.push(Do::NextRepo),
+                b"P" => out.push(match self.scope(rows) {
+                    Some(project) => Do::Plan(project),
+                    None => Do::Say("pick a repository first: r".into()),
+                }),
+                b"O" => {
+                    let scope = self.scope(rows);
+                    let waiting = self
+                        .orders
+                        .iter()
+                        .find(|o| scope.as_ref().is_none_or(|p| *p == o.project));
+                    match waiting {
+                        Some(o) => {
+                            self.order = Some(OrderView {
+                                id: o.id,
+                                project: o.project.clone(),
+                                cursor: 0,
+                                skip: Vec::new(),
+                            })
+                        }
+                        None => out.push(Do::Say("no build order waits: P asks for one".into())),
+                    }
+                }
                 b"S" => out.push(match self.ship_armed.take() {
                     Some(ids) => Do::ShipMerged(ids),
                     None => Do::CheckMerged,
@@ -648,6 +697,84 @@ impl Page {
             None => {}
         }
         out
+    }
+
+    /// The repository `P` and `O` are about: the one the page shows, else the
+    /// selected item's.
+    fn scope(&self, rows: &[(Lane, Item)]) -> Option<PathBuf> {
+        match &self.repo {
+            Repo::In(root) => Some(root.clone()),
+            Repo::NoFolder => None,
+            Repo::All => rows.get(self.cursor).and_then(|(_, i)| i.project.clone()),
+        }
+    }
+
+    /// The open build order, if it still waits.
+    pub(crate) fn open_order(&self) -> Option<(&OrderView, &OrderProposal)> {
+        let view = self.order.as_ref()?;
+        let o = self
+            .orders
+            .iter()
+            .find(|o| o.id == view.id && o.project == view.project)?;
+        Some((view, o))
+    }
+
+    /// A key while a build order is open over the page.
+    fn order_key(&mut self, key: &[u8], whole: bool) -> Vec<Do> {
+        let Some(steps) = self.open_order().map(|(_, o)| o.steps.clone()) else {
+            // Answered or replaced meanwhile.
+            self.order = None;
+            return vec![Do::Say("that build order is gone".into())];
+        };
+        let view = self.order.as_mut().unwrap();
+        match key {
+            b"k" | b"\x1b[A" | b"\x1bOA" => view.cursor = view.cursor.saturating_sub(1),
+            b"j" | b"\x1b[B" | b"\x1bOB" => {
+                view.cursor = (view.cursor + 1).min(steps.len().saturating_sub(1))
+            }
+            b" " => {
+                if let Some(step) = steps.get(view.cursor).filter(|s| s.change().is_some()) {
+                    match view.skip.iter().position(|&i| i == step.item) {
+                        Some(at) => {
+                            view.skip.remove(at);
+                        }
+                        None => view.skip.push(step.item),
+                    }
+                }
+            }
+            b"\r" | b"\n" | b"a" => {
+                let view = self.order.take().unwrap();
+                let items = (!view.skip.is_empty()).then(|| {
+                    steps
+                        .iter()
+                        .filter(|s| s.change().is_some() && !view.skip.contains(&s.item))
+                        .map(|s| s.item)
+                        .collect::<Vec<_>>()
+                });
+                if items.as_ref().is_some_and(Vec::is_empty) {
+                    return vec![Do::Say("every change unticked: d declines it".into())];
+                }
+                return vec![Do::AnswerOrder {
+                    project: view.project,
+                    id: view.id,
+                    accept: true,
+                    items,
+                }];
+            }
+            b"d" => {
+                let view = self.order.take().unwrap();
+                return vec![Do::AnswerOrder {
+                    project: view.project,
+                    id: view.id,
+                    accept: false,
+                    items: None,
+                }];
+            }
+            b"q" | [0x03] => self.order = None,
+            b"\x1b" if whole => self.order = None,
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn on_item(
@@ -847,6 +974,7 @@ impl Page {
                     hint(" d ", "drop "),
                     hint(" r ", "repo "),
                     hint(" n ", "new "),
+                    hint(" P ", "order "),
                     hint(" esc ", "close "),
                 ];
                 [open, rest.concat()].concat()
@@ -871,6 +999,11 @@ impl Page {
                         .map(|r| vec![format!("{r} ").fg(t.accent).bold()])
                         .unwrap_or_default(),
                     vec![format!("{open} open ").fg(t.muted)],
+                    if self.waiting_order(rows) {
+                        vec![" build order waits: O ".fg(t.accent).bold()]
+                    } else {
+                        vec![]
+                    },
                 ]
                 .concat(),
             ))
@@ -953,7 +1086,125 @@ impl Page {
         if let Some(Typing::Launch(form)) = &self.typing {
             launch_window(frame, rect, form, t);
         }
+        if let Some((view, order)) = self.open_order() {
+            order_window(frame, rect, view, order, rows, t);
+        }
     }
+
+    /// Whether a build order waits for what the page shows.
+    fn waiting_order(&self, rows: &[(Lane, Item)]) -> bool {
+        match &self.repo {
+            Repo::All => !self.orders.is_empty(),
+            _ => {
+                let scope = self.scope(rows);
+                self.orders
+                    .iter()
+                    .any(|o| Some(&o.project) == scope.as_ref())
+            }
+        }
+    }
+}
+
+/// A build order over the page: each step with its tick, what accepting it
+/// changes, and why.
+fn order_window(
+    frame: &mut ratatui::Frame,
+    over: Rect,
+    view: &OrderView,
+    order: &OrderProposal,
+    rows: &[(Lane, Item)],
+    t: &Theme,
+) {
+    let width = over.width.saturating_sub(6).min(100);
+    let height = over.height.saturating_sub(4);
+    let rect =
+        Rect::new(over.x + (over.width - width) / 2, over.y + 2, width, height).intersection(over);
+    frame.render_widget(Clear, rect);
+    let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
+    let hints = [
+        hint(" ␣ ", "tick "),
+        hint(" ↩ ", "accept ticked "),
+        hint(" d ", "decline "),
+        hint(" esc ", "later "),
+    ]
+    .concat();
+    let name = order.project.file_name().map_or_else(
+        || order.project.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style::Style::new().fg(t.accent))
+        .title(Line::from(vec![
+            format!(" Build order for {name} ").fg(t.fg).bold(),
+            format!("({}) ", order.trigger).fg(t.muted),
+        ]))
+        .title_bottom(Line::from(fit_hints(hints, width.saturating_sub(4) as usize)).centered())
+        .style(style::Style::new().bg(t.panel).fg(t.fg));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let mut lines = Vec::new();
+    let mut cursor_line = 0;
+    for (n, step) in order.steps.iter().enumerate() {
+        let item = rows.iter().map(|(_, i)| i).find(|i| i.id == step.item);
+        let changes = step_changes(step, item);
+        let tick = match (step.change().is_some(), view.skip.contains(&step.item)) {
+            (false, _) => "   ",
+            (true, true) => "[ ]",
+            (true, false) => "[x]",
+        };
+        if n == view.cursor {
+            cursor_line = lines.len();
+        }
+        let title = item.map_or("(not shown)", |i| i.title.as_str());
+        let head = format!(" {tick} {:>2}. #{} ", n + 1, step.item);
+        let room = (inner.width as usize)
+            .saturating_sub(head.chars().count() + changes.chars().count() + 2);
+        let mut line = Line::from(vec![
+            head.fg(if n == view.cursor { t.accent } else { t.fg })
+                .bold(),
+            fit(title, room).fg(t.fg),
+            format!("  {changes}").fg(t.accent),
+        ]);
+        if n == view.cursor {
+            line = line.style(style::Style::new().bg(t.selection));
+        }
+        lines.push(line);
+        if !step.reason.is_empty() {
+            lines.push(Line::from(format!("          {}", step.reason).fg(t.muted)));
+        }
+    }
+    let room = inner.height.max(1) as usize;
+    let top = cursor_line.saturating_sub(room.saturating_sub(3));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((top as u16, 0)),
+        inner,
+    );
+}
+
+/// What accepting `step` changes on `item`: `p2→p1, after #37`; empty for none.
+pub(crate) fn step_changes(step: &valkyrie_proto::OrderStep, item: Option<&Item>) -> String {
+    let mut parts = Vec::new();
+    if let Some(p) = step.priority {
+        parts.push(match item {
+            Some(i) => format!("{}→{}", i.priority.as_str(), p.as_str()),
+            None => p.as_str().to_owned(),
+        });
+    }
+    if let Some(after) = &step.blocked_by {
+        let had = item.map(|i| i.blocked_by.as_slice()).unwrap_or_default();
+        let added: Vec<String> = after
+            .iter()
+            .filter(|b| !had.contains(b))
+            .map(|b| format!("#{b}"))
+            .collect();
+        if !added.is_empty() {
+            parts.push(format!("after {}", added.join(", ")));
+        }
+    }
+    parts.join(", ")
 }
 
 /// The hints, key and word in pairs, that fit in `room` columns: the first ones,
@@ -1351,6 +1602,99 @@ mod tests {
             created: 0,
             updated,
         }
+    }
+
+    fn step(
+        item: u32,
+        priority: Option<Priority>,
+        blocked_by: Option<Vec<u32>>,
+    ) -> valkyrie_proto::OrderStep {
+        valkyrie_proto::OrderStep {
+            item,
+            reason: format!("why {item}"),
+            priority,
+            blocked_by,
+        }
+    }
+
+    fn proposal(steps: Vec<valkyrie_proto::OrderStep>) -> OrderProposal {
+        OrderProposal {
+            id: 42,
+            project: "/r/app".into(),
+            made: 0,
+            trigger: "you asked".into(),
+            steps,
+        }
+    }
+
+    #[test]
+    fn p_asks_for_the_shown_repositorys_order_and_o_opens_it_to_tick_and_accept() {
+        let rows = rows(&[item(1, 1), item(2, 1), item(3, 1)], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        // Every repository shown: the selected item's.
+        assert_eq!(press(&mut page, b"P"), [Do::Plan("/r/app".into())]);
+        assert!(matches!(&press(&mut page, b"O")[..], [Do::Say(s)] if s.contains("P asks")));
+        page.orders = vec![proposal(vec![
+            step(2, Some(Priority::P0), None),
+            step(3, None, None), // a place only: no tick
+            step(1, None, Some(vec![2])),
+        ])];
+        assert!(press(&mut page, b"O").is_empty());
+        assert_eq!(page.order.as_ref().map(|v| v.id), Some(42));
+        // Untick #2, try the place-only #3 (nothing to tick), keep #1.
+        assert!(press(&mut page, b" j j").is_empty());
+        assert_eq!(page.order.as_ref().unwrap().skip, [2]);
+        assert_eq!(
+            press(&mut page, b"\r"),
+            [Do::AnswerOrder {
+                project: "/r/app".into(),
+                id: 42,
+                accept: true,
+                items: Some(vec![1]),
+            }]
+        );
+        assert!(page.order.is_none());
+        // Opened again and accepted untouched: all of it.
+        press(&mut page, b"O");
+        assert!(matches!(
+            &press(&mut page, b"a")[..],
+            [Do::AnswerOrder {
+                accept: true,
+                items: None,
+                ..
+            }]
+        ));
+        press(&mut page, b"O");
+        assert!(matches!(
+            &press(&mut page, b"d")[..],
+            [Do::AnswerOrder { accept: false, .. }]
+        ));
+        // Esc leaves it for later; one answered elsewhere closes on the next key.
+        press(&mut page, b"O");
+        assert!(press(&mut page, b"\x1b").is_empty());
+        assert!(page.order.is_none());
+        press(&mut page, b"O");
+        page.orders.clear();
+        assert!(matches!(&press(&mut page, b"j")[..], [Do::Say(_)]));
+        assert!(page.order.is_none());
+    }
+
+    #[test]
+    fn a_step_says_what_accepting_it_changes() {
+        let mut i = item(1, 1);
+        i.blocked_by = vec![5];
+        let step = |priority, blocked_by| valkyrie_proto::OrderStep {
+            item: 1,
+            reason: String::new(),
+            priority,
+            blocked_by,
+        };
+        assert_eq!(
+            step_changes(&step(Some(Priority::P1), Some(vec![2, 5])), Some(&i)),
+            "p2→p1, after #2"
+        );
+        assert_eq!(step_changes(&step(None, None), Some(&i)), "");
     }
 
     #[test]

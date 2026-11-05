@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
 pub use backlog::{
     Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, NewItem,
-    Priority, ShippedItem, order,
+    OrderApplied, OrderProposal, OrderStep, Priority, ShippedItem, order,
 };
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 23;
+pub const PROTOCOL: u32 = 24;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -408,6 +408,25 @@ pub enum ClientMsg {
         req: ReqId,
         id: u32,
     },
+    /// Asks the model for a build order of `cwd`'s repository's open items
+    /// (ADR-0019 §2, protocol 24), replacing any it has waiting. Refused while
+    /// `valk decisions auto` is off, or past the hourly limit. Replies `Order`.
+    PlanOrder {
+        req: ReqId,
+        cwd: PathBuf,
+    },
+    /// Accepts or declines a repository's build order: the user only. `accept`
+    /// with `items` applies only those items' changes; with `None`, all of them.
+    /// Either answer clears it. Refused if `id` isn't the one waiting. Replies
+    /// `OrderApplied` (empty when declined).
+    AnswerOrder {
+        req: ReqId,
+        project: PathBuf,
+        id: u64,
+        accept: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<Vec<u32>>,
+    },
     /// Claims an accepted item for the caller's session, as a launch would link it,
     /// so its lane follows that session; and records its branch and pull request,
     /// when given. From inside a valk session only, agent or user. Refused while
@@ -520,6 +539,10 @@ pub enum ServerMsg {
     /// whenever one changes (DESIGN §8.12).
     Items {
         items: Vec<Item>,
+        /// Build orders waiting on the user, one per repository at most
+        /// (protocol 24).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        orders: Vec<OrderProposal>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.
@@ -591,6 +614,15 @@ pub enum Reply {
     },
     Items {
         items: Vec<Item>,
+        /// Build orders waiting on the user (protocol 24).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        orders: Vec<OrderProposal>,
+    },
+    Order {
+        order: Box<OrderProposal>,
+    },
+    OrderApplied {
+        applied: OrderApplied,
     },
     /// `None`: no checkout of its own to look at (not launched, shipped, or
     /// started in the repository itself).

@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, editChange, factsLine, inRepo, liveSession, prLink, priority, repoChoices, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, liveSession, ordersShown, planScope, prLink, priority, repoChoices, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
-import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type Priority } from "../proto";
-import { addItem, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, sendFile, shipMerged, toast, useApp } from "../store";
+import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type OrderProposal, type Priority } from "../proto";
+import { addItem, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
 
@@ -51,6 +51,7 @@ const EDGE: Record<Lane, string> = {
  */
 export function Backlog() {
   const all = useApp((s) => s.items);
+  const orders = useApp((s) => s.orders);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [showDone, setShowDone] = useState(false);
@@ -94,6 +95,20 @@ export function Backlog() {
     }
   };
 
+  // A build order (ADR-0019 §2): asked of a model, so it can take a minute.
+  const scope = planScope(repo, items);
+  const [planning, setPlanning] = useState(false);
+  const plan = async () => {
+    if (!scope) return;
+    setPlanning(true);
+    try {
+      await planOrder(scope);
+    } finally {
+      setPlanning(false);
+    }
+  };
+  const shownOrders = ordersShown(orders, repo);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("textarea, input, select") || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -118,6 +133,16 @@ export function Backlog() {
         <div className="title">
           <div className="title-name">Backlog</div>
         </div>
+        {open > 1 && (
+          <button
+            className="ghost"
+            disabled={planning || !scope}
+            title={scope ? "A model proposes what to do first; nothing changes until you accept" : "Pick a repository first"}
+            onClick={() => void plan()}
+          >
+            {planning ? "Planning…" : "Plan order"}
+          </button>
+        )}
         {mergeable && (
           <button
             className={ready ? "primary" : "ghost"}
@@ -149,6 +174,9 @@ export function Backlog() {
             </select>
           </div>
         )}
+        {shownOrders.map((o) => (
+          <OrderCard key={`${o.project}:${o.id}`} order={o} items={all} />
+        ))}
         {open === 0 && repo !== null && (
           <div className="calm backlog-calm">
             <div className="calm-title">Nothing open here</div>
@@ -198,6 +226,65 @@ export function Backlog() {
         )}
       </main>
     </div>
+  );
+}
+
+/**
+ * A build order waiting on the user: each item in the order proposed, why, and what
+ * accepting it changes. Untick an item to leave it as it is; nothing changes until
+ * Accept, and Decline changes nothing.
+ */
+function OrderCard({ order, items }: { order: OrderProposal; items: Item[] }) {
+  const [skip, setSkip] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const changing = order.steps.filter((s) => changesSomething(s));
+  const ticked = changing.filter((s) => !skip.includes(s.item)).map((s) => s.item);
+  const toggle = (id: number) => setSkip((k) => (k.includes(id) ? k.filter((i) => i !== id) : [...k, id]));
+  const answer = async (accept: boolean) => {
+    setBusy(true);
+    try {
+      await answerOrder(order, accept, accept && skip.length ? ticked : undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="order-card" aria-label={`Build order for ${base(order.project)}`}>
+      <div className="order-head">
+        <div className="order-title">Build order for {base(order.project)}</div>
+        <div className="order-why">{order.trigger}</div>
+      </div>
+      <ol className="order-steps">
+        {order.steps.map((step) => {
+          const item = items.find((i) => i.id === step.item);
+          const changes = stepChanges(step, item);
+          const can = changesSomething(step);
+          return (
+            <li key={step.item} className={can && skip.includes(step.item) ? "order-skipped" : ""}>
+              <label className="order-step">
+                {can ? (
+                  <input type="checkbox" checked={!skip.includes(step.item)} disabled={busy} onChange={() => toggle(step.item)} />
+                ) : (
+                  <span className="order-nobox" />
+                )}
+                <span className="order-id">#{step.item}</span>
+                <span className="order-name">{item?.title ?? "(gone)"}</span>
+                {changes && <span className="order-change">{changes}</span>}
+              </label>
+              {step.reason && <div className="order-reason">{step.reason}</div>}
+            </li>
+          );
+        })}
+      </ol>
+      <div className="order-actions">
+        <button className="ghost" disabled={busy} onClick={() => void answer(false)}>
+          Decline
+        </button>
+        <button className="primary" disabled={busy || (changing.length > 0 && ticked.length === 0)} onClick={() => void answer(true)}>
+          {changing.length === 0 ? "Clear" : ticked.length === changing.length ? "Accept all" : `Accept ${ticked.length}`}
+        </button>
+      </div>
+    </section>
   );
 }
 

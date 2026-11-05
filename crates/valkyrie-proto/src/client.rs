@@ -471,8 +471,47 @@ impl Client {
     }
 
     pub async fn items(&self) -> Result<Vec<crate::Item>> {
+        Ok(self.backlog().await?.0)
+    }
+
+    /// Every backlog item, and the build orders waiting on the user.
+    pub async fn backlog(&self) -> Result<(Vec<crate::Item>, Vec<crate::OrderProposal>)> {
         match self.request(|req| ClientMsg::Items { req }).await? {
-            Reply::Items { items } => Ok(items),
+            Reply::Items { items, orders } => Ok((items, orders)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Asks for a build order of `cwd`'s repository (`ClientMsg::PlanOrder`).
+    pub async fn plan_order(&self, cwd: std::path::PathBuf) -> Result<crate::OrderProposal> {
+        match self
+            .request(|req| ClientMsg::PlanOrder { req, cwd })
+            .await?
+        {
+            Reply::Order { order } => Ok(*order),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Accepts (all, or only `items`) or declines a build order.
+    pub async fn answer_order(
+        &self,
+        project: std::path::PathBuf,
+        id: u64,
+        accept: bool,
+        items: Option<Vec<u32>>,
+    ) -> Result<crate::OrderApplied> {
+        match self
+            .request(|req| ClientMsg::AnswerOrder {
+                req,
+                project,
+                id,
+                accept,
+                items,
+            })
+            .await?
+        {
+            Reply::OrderApplied { applied } => Ok(applied),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
