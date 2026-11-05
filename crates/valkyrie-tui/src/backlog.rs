@@ -1345,6 +1345,7 @@ mod tests {
             filed_by: None,
             unaccepted: false,
             pr_closed: false,
+            joined: Default::default(),
             notes: Vec::new(),
             launch: None,
             created: 0,
@@ -1594,6 +1595,7 @@ mod tests {
             filed_by: None,
             unaccepted: false,
             pr_closed: false,
+            joined: Default::default(),
             ..filed.clone()
         };
         assert_eq!(lane(&proposed, &working, 7), Lane::Proposed);
