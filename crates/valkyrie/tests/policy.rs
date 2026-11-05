@@ -50,8 +50,21 @@ fn stop_heard(
     active: bool,
     bin: Option<&Path>,
 ) -> (String, serde_json::Value) {
+    stop_on(dir, repo, active, bin, None)
+}
+
+/// `stop_heard` in a session on `item`, which the stand-in gives the hook when it
+/// asks (`ClientMsg::MyItem`); none, and it answers as the daemon does then.
+fn stop_on(
+    dir: &Path,
+    repo: &Path,
+    active: bool,
+    bin: Option<&Path>,
+    item: Option<valkyrie_proto::Item>,
+) -> (String, serde_json::Value) {
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
+    use valkyrie_proto::{Reply, ServerMsg, codec};
     let run = dir.join("run");
     std::fs::create_dir_all(&run).unwrap();
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -59,12 +72,35 @@ fn stop_heard(
     let _ = std::fs::remove_file(&socket);
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let daemon = std::thread::spawn(move || {
-        let (mut conn, _) = listener.accept().unwrap();
-        let mut frame = Vec::new();
-        conn.read_to_end(&mut frame).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
-        assert_eq!(msg["t"], "hook", "{msg}");
-        msg["payload"].clone()
+        loop {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut len = [0u8; 4];
+            conn.read_exact(&mut len).unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            conn.read_exact(&mut body).unwrap();
+            let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            match msg["t"].as_str() {
+                Some("my_item") => {
+                    let req = msg["req"].as_u64().unwrap();
+                    let reply = match &item {
+                        Some(item) => ServerMsg::Ok {
+                            req,
+                            reply: Reply::Item {
+                                item: Box::new(item.clone()),
+                                note: None,
+                            },
+                        },
+                        None => ServerMsg::Err {
+                            req,
+                            message: "this session isn't on a backlog item; say which".into(),
+                        },
+                    };
+                    conn.write_all(&codec::encode(&reply).unwrap()).unwrap();
+                }
+                Some("hook") => return msg["payload"].clone(),
+                _ => panic!("unexpected {msg}"),
+            }
+        }
     });
     let out = run_hook(dir, repo, active, bin, &socket);
     (out, daemon.join().unwrap())
@@ -380,4 +416,104 @@ fn ci_fix_keeps_the_agent_on_a_red_pull_request_twice_then_lets_it_stop() {
     // The stop after a first block on it isn't marked: tries are left.
     let (_, payload) = stop_heard(&dir.0, &repo, true, Some(&bin));
     assert!(payload["valk_ci_fix_spent"].is_null(), "{payload}");
+}
+
+/// A session that took another item and works it in a second worktree stops with
+/// its cwd still in the first (backlog #68): `ci-fix` reads the item's branch and
+/// pull request, not the cwd's merged one.
+#[test]
+fn ci_fix_reads_the_taken_items_worktree_not_the_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Dir(std::env::temp_dir().join(format!("valkyrie-taken-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    let repo = dir.0.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(
+        &dir.0,
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    git(&repo, &["remote", "add", "origin", "../origin.git"]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+    // The cwd: the first item's branch, pushed, its PR merged.
+    git(&repo, &["checkout", "--quiet", "-b", "fix/38"]);
+    std::fs::write(repo.join("a.txt"), "38").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "38"]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "fix/38"]);
+    // The item it took next, in a worktree of its own, its PR red.
+    let other = dir.0.join("app-65");
+    let other_s = other.to_str().unwrap();
+    git(
+        &repo,
+        &[
+            "worktree", "add", "--quiet", "-b", "fix/65", other_s, "main",
+        ],
+    );
+    std::fs::write(other.join("a.txt"), "65").unwrap();
+    git(&other, &["commit", "--quiet", "-am", "65"]);
+    git(&other, &["push", "--quiet", "-u", "origin", "fix/65"]);
+
+    // A `gh` that knows both: #101 by its URL is red, anything else merged.
+    let (merged, red) = (
+        "https://github.com/o/r/pull/98",
+        "https://github.com/o/r/pull/101",
+    );
+    let bin = dir.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    let red_json = serde_json::json!({"state": "OPEN", "url": red, "statusCheckRollup": [
+        {"name": "test", "workflowName": "CI", "conclusion": "FAILURE",
+         "detailsUrl": "https://github.com/o/r/actions/runs/7/job/1"}]});
+    let merged_json =
+        serde_json::json!({"state": "MERGED", "url": merged, "statusCheckRollup": []});
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\nif [ \"$3\" = '{red}' ]; then echo '{red_json}'; else echo '{merged_json}'; fi\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let store = valkyrie_context::Store::new(dir.0.join("context"));
+    let human = Provenance {
+        by: "human".into(),
+        ..Default::default()
+    };
+    store
+        .decide(
+            &NewDecision {
+                cwd: repo.clone(),
+                title: "Checks to run before shipping".into(),
+                body: "template: ship\nchecks: make check\nci: gh".into(),
+                kind: DecisionKind::Policy,
+                propose: false,
+                supersedes: None,
+                review_every: None,
+                session: None,
+                scope: None,
+            },
+            human,
+            1,
+        )
+        .unwrap();
+
+    // On no item: the cwd's merged PR, nothing to fix.
+    let (out, _) = stop_on(&dir.0, &repo, false, Some(&bin), None);
+    assert_eq!(out, "");
+    // On #65: its worktree and its red PR.
+    let item: valkyrie_proto::Item = serde_json::from_value(serde_json::json!({
+        "id": 65, "title": "t", "created": 0, "updated": 0, "sessions": [1], "taken": [1],
+        "project": repo, "branch": "fix/65", "branch_taken": true, "pr": red,
+    }))
+    .unwrap();
+    let (out, payload) = stop_on(&dir.0, &repo, false, Some(&bin), Some(item));
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect(&out);
+    assert_eq!(v["decision"], "block", "{out}");
+    let reason = v["reason"].as_str().unwrap();
+    assert!(reason.contains("PR #101 (branch `fix/65`)"), "{reason}");
+    assert_eq!(payload["valk_continued"]["pr"], red, "{payload}");
 }

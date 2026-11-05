@@ -427,7 +427,7 @@ impl Registry {
 
     /// The item live session `id` is on: the one it took or was launched on last,
     /// when several.
-    fn item_of(&self, id: SessionId) -> Option<Item> {
+    pub(crate) fn item_of(&self, id: SessionId) -> Option<Item> {
         let items = self.backlog.lock().unwrap().load();
         self.item_of_in(&items, id)
     }

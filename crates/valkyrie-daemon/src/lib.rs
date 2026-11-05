@@ -1032,7 +1032,8 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                             let answers = registry.answers.clone();
                             let registry = registry.clone();
                             tokio::task::spawn_blocking(move || {
-                                let answered = s.log_work(n, work::at(&cwd));
+                                let item = registry.item_of(session);
+                                let answered = s.log_work(n, work::at(&cwd, item.as_ref()));
                                 habit::record_outcomes(&registry, &s);
                                 if let Some(answered) = answered {
                                     let _ = answers.send((session, answered));

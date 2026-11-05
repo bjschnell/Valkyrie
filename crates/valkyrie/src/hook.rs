@@ -30,6 +30,8 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(300);
 /// Longest a policy waits on `gh` for a pull request: Claude gives the
 /// hook 5 s, and an unanswered lookup lets the stop through.
 const GH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest a policy waits on the daemon for the session's backlog item.
+const ITEM_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Never fails; prints only a policy's block (see the module doc); errors only go
 /// to `$VALK_HOOK_LOG` if set.
@@ -179,7 +181,11 @@ fn policy_block(payload: &mut Value) -> Option<String> {
     // since the agent may have spent its last try on a red PR.
     let active = payload["stop_hook_active"] == true;
     let cwd = PathBuf::from(payload["cwd"].as_str()?);
-    let root = valkyrie_context::project::root(&cwd);
+    // A session that took another item works it where that item's branch is,
+    // which its cwd may not be (ADR-0013 §1); the policies are that project's.
+    let item = my_item();
+    let dir = work::dir(&cwd, item.as_ref());
+    let root = valkyrie_context::project::root(&dir);
     let store = valkyrie_context::Store::new(crate::context::store_base());
     let (project, user) = (
         store.load(&root),
@@ -196,15 +202,15 @@ fn policy_block(payload: &mut Value) -> Option<String> {
             .as_ref()
             .is_some_and(|s| s.until.0 == policy::Until::Pr);
     let seen = std::cell::RefCell::new(None);
-    let pr = |dir: &Path, branch: &str| {
+    let pr = |dir: &Path, which: &str| {
         if !ask {
             return work::Pr::Unknown;
         }
-        let pr = work::gh_pr(dir, branch, GH_TIMEOUT);
+        let pr = work::gh_pr(dir, which, GH_TIMEOUT);
         *seen.borrow_mut() = Some(pr.clone());
         pr
     };
-    let (state, branch, url) = work::state(&cwd, &pr)?;
+    let (state, branch, url, _) = work::state_for(&dir, item.as_ref(), &pr)?;
     let branch = branch.unwrap_or_default();
     let named = |source: policy::Source| match source {
         policy::Source::User(id) => (id, "user"),
@@ -258,6 +264,23 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         &failed,
         block,
     ))
+}
+
+/// The backlog item this session is on (`ClientMsg::MyItem`), asked of the daemon
+/// that runs it. Blocking, and quick to give up: none, and the stop is read in
+/// its cwd as before.
+fn my_item() -> Option<valkyrie_proto::Item> {
+    let socket = std::env::var_os("VALK_SOCKET")?;
+    let frame = valkyrie_proto::codec::encode(&ClientMsg::MyItem { req: 1 }).ok()?;
+    let body =
+        valkyrie_proto::ipc::exchange(Path::new(&socket), &frame, true, ITEM_TIMEOUT).ok()?;
+    match serde_json::from_slice(&body).ok()? {
+        valkyrie_proto::ServerMsg::Ok {
+            reply: valkyrie_proto::Reply::Item { item, .. },
+            ..
+        } => Some(*item),
+        _ => None,
+    }
 }
 
 /// Drops tool output and caps long strings; the final reply is kept whole because
