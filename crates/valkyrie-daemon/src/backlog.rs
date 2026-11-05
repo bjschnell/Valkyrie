@@ -28,11 +28,14 @@ impl Registry {
         Reply::Items {
             items: self.backlog.lock().unwrap().load(),
             orders: self.order_book.lock().unwrap().pending(),
+            launches: self.dispatch.lock().unwrap().pending(),
         }
     }
 
     /// Pushes the items to queue watchers, if they changed.
     pub(crate) fn refresh_items(&self) {
+        // The dispatch watcher looks again: an item may be ready, or taken.
+        self.dispatch_kick.notify_one();
         let items = self.backlog.lock().unwrap().load();
         self.items.send_if_modified(|current| {
             let changed = **current != items;
@@ -206,7 +209,7 @@ impl Registry {
 
     /// The sessions other than `mine` still running on `item` on this daemon, by
     /// launch or take, newest first.
-    fn holders(&self, item: &Item, mine: Option<SessionId>) -> Vec<SessionId> {
+    pub(crate) fn holders(&self, item: &Item, mine: Option<SessionId>) -> Vec<SessionId> {
         if item.boot != self.boot {
             return Vec::new();
         }
@@ -966,7 +969,16 @@ fn adopted_branch(cwd: &std::path::Path) -> Option<String> {
 }
 
 /// The command that starts `agent` on `brief`, on `model` unless it's empty.
+/// What tests start instead of a real agent: `sleep`, never `claude` itself.
+#[cfg(test)]
+pub(crate) static AGENT_STANDIN: std::sync::Mutex<Option<Vec<String>>> =
+    std::sync::Mutex::new(None);
+
 fn agent_command(agent: &str, model: &str, brief: String) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(standin) = AGENT_STANDIN.lock().unwrap().clone() {
+        return standin;
+    }
     let mut command = vec![agent.to_owned()];
     if !model.is_empty() {
         let flag = if agent == "codex" { "-m" } else { "--model" };

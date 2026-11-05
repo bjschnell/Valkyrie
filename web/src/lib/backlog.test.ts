@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
-import type { AgentState, Item, OrderProposal, SessionInfo } from "../proto";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
   id: 1,
@@ -305,6 +305,17 @@ describe("repo filter", () => {
   it("names repositories that share a name by their path", () => {
     const other = item({ id: 5, project: "/work/valkyrie" });
     expect(repoChoices([a, other]).map((c) => c.label)).toEqual(["/home/u/valkyrie", "/work/valkyrie"]);
+  });
+});
+
+describe("launch offer", () => {
+  const offer = (project: string, model?: string): LaunchOffer => ({ id: 1, project, item: 3, title: "t", agent: "claude", model, why: "w", made: 0 });
+
+  it("shows the shown repository's, and what it starts on", () => {
+    expect(launchesShown([offer("/a"), offer("/b")], "/b").map((o) => o.project)).toEqual(["/b"]);
+    expect(launchesShown([offer("/a"), offer("/b")], null)).toHaveLength(2);
+    expect(launchesOn(offer("/a"))).toBe("claude");
+    expect(launchesOn(offer("/a", "opus"))).toBe("claude · opus");
   });
 });
 

@@ -92,7 +92,7 @@ pub fn failed_tests(log: &str) -> Vec<String> {
 
 /// An open bug that names where `log` failed: a panic's `file:line` (#17 lists
 /// them), or a failed test's name, when it's long enough not to match by chance.
-fn matching_bug<'a>(log: &str, bugs: &'a [Bug]) -> Option<&'a Bug> {
+pub(crate) fn matching_bug<'a>(log: &str, bugs: &'a [Bug]) -> Option<&'a Bug> {
     let wheres = panics(log);
     let tests: Vec<String> = failed_tests(log)
         .into_iter()
@@ -117,19 +117,23 @@ pub fn call(f: &Failure, changed: &[String], bugs: &[Bug]) -> Call {
     if let Some((n, _)) = matching_bug(&f.log, bugs) {
         return Call::Flake(format!("{} matches #{n}", f.check));
     }
-    let wheres = panics(&f.log);
-    if let Some(w) = wheres.iter().find(|w| {
-        let file = w.rsplit_once(':').map_or(w.as_str(), |(f, _)| f);
-        changed
-            .iter()
-            .any(|c| file.ends_with(c.as_str()) || c.ends_with(file))
-    }) {
+    if let Some(w) = touches(&f.log, changed) {
         return Call::Real(format!("{} fails at {w}, which this PR changes", f.check));
     }
     if f.passed_before {
         return Call::Flake(format!("{} passed on another run of this commit", f.check));
     }
     Call::Unsure
+}
+
+/// The first place `log` panicked in a file the pull request changes.
+pub(crate) fn touches(log: &str, changed: &[String]) -> Option<String> {
+    panics(log).into_iter().find(|w| {
+        let file = w.rsplit_once(':').map_or(w.as_str(), |(f, _)| f);
+        changed
+            .iter()
+            .any(|c| file.ends_with(c.as_str()) || c.ends_with(file))
+    })
 }
 
 /// The rules over every failed check: all flakes rerun; any real one, ci-fix.
