@@ -95,6 +95,11 @@ the daemon: Claude and Codex conversations resume, and shell sessions reopen in 
 last directories, but running commands stop. This differs from Unix's live upgrade
 handoff. Logging out or rebooting also stops running programs.
 
+A terminal opened with Run as administrator gets a daemon of its own, so its
+sessions are elevated too. Its tabs are separate from your usual ones, and an
+unelevated `valk` can't reach them. `valk upgrade` restarts only the daemon of the
+terminal that runs it, so run it from an administrator terminal as well if one is open.
+
 State and transcripts live under `%LOCALAPPDATA%\Valkyrie`, and settings under
 `%APPDATA%\Valkyrie`. Shell tabs use PowerShell 7 when it is on PATH, otherwise
 Windows PowerShell; `SHELL` overrides the choice. Links open in your Windows browser,
