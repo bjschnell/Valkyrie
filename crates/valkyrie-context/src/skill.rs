@@ -475,6 +475,7 @@ pub fn found(d: &Value, skills: &[u32]) -> Option<(Found, Option<u32>)> {
             kind: DecisionKind::Skill,
             title: extract::clip(title, 150),
             body: extract::clip(body, crate::MAX_SKILL_BODY),
+            scope: Vec::new(),
         },
         patch,
     ))
@@ -520,6 +521,9 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             pinned: false,
+            scope: Vec::new(),
+            proposed_scope: None,
+            scope_asked: false,
             provenance: Provenance::default(),
             fresh: Default::default(),
         }

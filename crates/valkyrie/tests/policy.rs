@@ -136,6 +136,7 @@ fn a_ship_policy_keeps_the_turn_going_until_work_is_where_the_user_ships_it() {
         supersedes: None,
         review_every: None,
         session: None,
+        scope: None,
     };
     let human = Provenance {
         by: "human".into(),
@@ -212,6 +213,7 @@ fn the_users_habit_ships_in_a_repository_with_no_policy_of_its_own() {
         supersedes: None,
         review_every: None,
         session: None,
+        scope: None,
     };
     // The habit, recorded once for every project.
     let user = valkyrie_context::project::user();
@@ -318,6 +320,7 @@ fn ci_fix_keeps_the_agent_on_a_red_pull_request_twice_then_lets_it_stop() {
                 supersedes: None,
                 review_every: None,
                 session: None,
+                scope: None,
             },
             human,
             1,

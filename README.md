@@ -295,8 +295,15 @@ valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume 
 valk decisions health     # what waits on you; decisions that may be out of date or not working
 valk decisions mine       # propose decisions from what you keep telling agents
 valk decisions learn 3    # propose a skill from what session 3 did
+valk decisions scope 7 'crates/valkyrie-tui/**'   # agents get #7 when they open a TUI file
+valk decisions scope --propose   # once: a small model proposes scopes for your decisions
 claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
 ```
+
+A decision can have a *scope*: path globs it's about. Its body then reaches an
+agent the first time the agent reads or edits a file in them, instead of every
+session up front. Each proposal comes with one (else it's the files its text
+names); you change it on review or with `valk decisions scope`.
 
 How it works:
 

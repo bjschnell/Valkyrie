@@ -34,6 +34,30 @@ pub enum DecisionsCmd {
     },
     /// Print the block agents get at session start.
     Preview,
+    /// Where a decision applies: path globs relative to the project root
+    /// (`crates/valkyrie-tui/**`). Agents get its body the first time they read
+    /// or edit a file in them. With only an id, shows its scope.
+    Scope {
+        /// The decision.
+        #[arg(required_unless_present = "propose")]
+        id: Option<u32>,
+        /// The globs to set; they replace its scope.
+        #[arg(value_name = "GLOB")]
+        globs: Vec<String>,
+        /// Let it apply everywhere: clear its scope.
+        #[arg(long, conflicts_with_all = ["globs", "accept", "decline"])]
+        everywhere: bool,
+        /// Accept the scope proposed for it.
+        #[arg(long, conflicts_with_all = ["globs", "decline"])]
+        accept: bool,
+        /// Turn down the scope proposed for it; it isn't proposed again.
+        #[arg(long, conflicts_with = "globs")]
+        decline: bool,
+        /// Have a small model propose a scope, once, for each active decision
+        /// that has none. You review each before it applies.
+        #[arg(long, conflicts_with_all = ["id", "globs", "everywhere", "accept", "decline"])]
+        propose: bool,
+    },
     /// Copy the active decisions into <repo>/.valkyrie/decisions/ for git.
     Export,
     /// Find what you keep telling agents in this repo's transcripts, and have a
@@ -86,6 +110,8 @@ pub struct Decide {
     pub review_in: Option<u32>,
     /// Into the user's habits (ADR-0016 §1), not the project's.
     pub user: bool,
+    /// Path globs it applies to; empty: the files it names.
+    pub scope: Vec<String>,
 }
 
 pub async fn decide(client: &Client, args: Decide) -> Result<()> {
@@ -114,6 +140,7 @@ pub async fn decide(client: &Client, args: Decide) -> Result<()> {
             session: std::env::var("VALK_SESSION")
                 .ok()
                 .and_then(|s| s.parse().ok()),
+            scope: (!args.scope.is_empty()).then_some(args.scope),
         })
         .await?;
     match d.status {
@@ -143,6 +170,7 @@ pub async fn decisions(
             cmd,
             Some(
                 DecisionsCmd::Preview
+                    | DecisionsCmd::Scope { .. }
                     | DecisionsCmd::Pin { .. }
                     | DecisionsCmd::Unpin { .. }
                     | DecisionsCmd::Export
@@ -231,6 +259,47 @@ pub async fn decisions(
             }
             Ok(())
         }
+        Some(DecisionsCmd::Scope { propose: true, .. }) => {
+            propose_scopes(client, &cwd, &root).await
+        }
+        Some(DecisionsCmd::Scope {
+            id: Some(id),
+            globs,
+            everywhere,
+            accept,
+            decline,
+            propose: false,
+        }) => {
+            let list = client.decisions(Some(cwd)).await?;
+            let d = list
+                .iter()
+                .find(|d| d.id == id)
+                .with_context(|| format!("no decision #{id} in {}", where_(&root)))?;
+            let action = if accept {
+                let Some(proposed) = d.proposed_scope.clone() else {
+                    anyhow::bail!("#{id} has no proposed scope");
+                };
+                ReviewAction::Scope { scope: proposed }
+            } else if decline {
+                ReviewAction::DeclineScope
+            } else if everywhere || !globs.is_empty() {
+                ReviewAction::Scope { scope: globs }
+            } else {
+                println!("#{id} {}", d.title);
+                println!("  scope: {}", scope_text(&d.scope));
+                if let Some(p) = &d.proposed_scope {
+                    println!(
+                        "  proposed: {} (`valk decisions scope {id} --accept` or --decline)",
+                        p.join(", ")
+                    );
+                }
+                return Ok(());
+            };
+            let d = client.review(root.clone(), id, action, None).await?;
+            println!("#{} scope: {}", d.id, scope_text(&d.scope));
+            Ok(())
+        }
+        Some(DecisionsCmd::Scope { .. }) => unreachable!("clap requires an id without --propose"),
         Some(DecisionsCmd::Preview) => {
             let list = client.decisions(Some(cwd)).await?;
             let valk = valk_command();
@@ -294,6 +363,94 @@ pub async fn decisions(
             Ok(())
         }
     }
+}
+
+/// A decision's scope as the user reads it.
+fn scope_text(scope: &[String]) -> String {
+    match scope.is_empty() {
+        true => "everywhere".into(),
+        false => scope.join(", "),
+    }
+}
+
+/// `valk decisions scope --propose`: a small model proposes, once, a scope for
+/// each active decision in `root` that has none (ADR-0014 §2). The user reviews
+/// each; one the model says holds everywhere is marked asked, with no card.
+async fn propose_scopes(client: &Client, cwd: &Path, root: &Path) -> Result<()> {
+    use valkyrie_context::{model, scope};
+    let auto = valkyrie_proto::AutoMode::parse(&client.auto(None).await?);
+    // `auto off` keeps what's in your project on this machine; that holds here too.
+    anyhow::ensure!(
+        auto.is_some_and(|a| a != valkyrie_proto::AutoMode::Off),
+        "`valk decisions auto` is off, so nothing goes to the model; set scopes yourself with \
+         `valk decisions scope N GLOB…`"
+    );
+    let known = client.decisions(Some(cwd.to_owned())).await?;
+    let ask: Vec<Decision> = known
+        .into_iter()
+        .filter(|d| d.status == DecisionStatus::Active)
+        .filter(|d| !matches!(d.kind, DecisionKind::Skill | DecisionKind::Policy))
+        .filter(|d| !d.scope_asked && d.scope.is_empty() && d.proposed_scope.is_none())
+        .collect();
+    if ask.is_empty() {
+        println!("Every active decision here has had its scope settled; nothing to ask.");
+        return Ok(());
+    }
+    let checkout = valkyrie_context::project::checkout(cwd);
+    let paths = scope::paths(&checkout);
+    anyhow::ensure!(
+        !paths.is_empty(),
+        "{} isn't a git checkout with files in it: there are no paths to scope to",
+        checkout.display()
+    );
+    eprintln!(
+        "Asking a small model (claude -p --model haiku, no tools) to scope {} decisions…",
+        ask.len()
+    );
+    let prompt = scope::prompt(&ask, &paths);
+    let dir = store_base();
+    let reply = tokio::task::spawn_blocking(move || {
+        valkyrie_proto::ensure_private_dir(&dir)?;
+        model::ask(
+            &model::command(scope::SYSTEM),
+            &prompt,
+            &dir,
+            std::time::Duration::from_secs(180),
+        )
+    })
+    .await??;
+    let replied = scope::parse_reply(&reply);
+    let (mut proposed, mut everywhere) = (0, 0);
+    for d in &ask {
+        // Left out of the reply: asked again next time.
+        let Some(globs) = replied.get(&d.id) else {
+            continue;
+        };
+        let globs = scope::proposed(globs, &checkout);
+        let action = ReviewAction::ProposeScope {
+            scope: globs.clone(),
+        };
+        match client.review(root.to_owned(), d.id, action, None).await {
+            Ok(_) if globs.is_empty() => everywhere += 1,
+            Ok(_) => {
+                println!("#{} {}: {}", d.id, d.title, globs.join(", "));
+                proposed += 1;
+            }
+            Err(e) => eprintln!("#{}: {e:#}", d.id),
+        }
+    }
+    println!(
+        "{proposed} {} proposed, {everywhere} {} everywhere{}.",
+        if proposed == 1 { "scope" } else { "scopes" },
+        if everywhere == 1 { "holds" } else { "hold" },
+        match proposed {
+            0 => String::new(),
+            _ => "; review them with `valk decisions scope N --accept|--decline`, the TUI or \
+                  your phone"
+                .into(),
+        }
+    );
+    Ok(())
 }
 
 /// How a scope is named to the user: a project's root, or their habits.
@@ -387,7 +544,8 @@ async fn mine(client: &Client, cwd: &Path, root: &Path, days: u64, dry_run: bool
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let prompt = mine::prompt(&name, &known, &repeats);
+    let prompt = mine::prompt(&name, &known, &repeats)
+        + &valkyrie_context::scope::paths(&valkyrie_context::project::checkout(cwd));
     let dir = store_base();
     let reply = tokio::task::spawn_blocking(move || {
         valkyrie_proto::ensure_private_dir(&dir)?;
@@ -423,6 +581,11 @@ async fn mine(client: &Client, cwd: &Path, root: &Path, days: u64, dry_run: bool
                 session: std::env::var("VALK_SESSION")
                     .ok()
                     .and_then(|s| s.parse().ok()),
+                scope: Some(valkyrie_context::scope::proposed(
+                    &found.scope,
+                    &valkyrie_context::project::checkout(cwd),
+                ))
+                .filter(|s| !s.is_empty()),
             })
             .await?;
         println!("#{} proposed: {}", d.id, d.title);
@@ -515,6 +678,7 @@ async fn learn(
             supersedes: patch,
             review_every: None,
             session: Some(id),
+            scope: None,
         })
         .await?;
     match patch {
@@ -561,6 +725,15 @@ fn print_list(root: &Path, list: &[Decision], all: bool) {
         };
         if d.pinned && d.status == DecisionStatus::Active {
             status.push_str(" (pinned)");
+        }
+        if let Some(p) = d
+            .proposed_scope
+            .as_ref()
+            .filter(|_| d.status == DecisionStatus::Active)
+        {
+            status.push_str(&format!(" (scope proposed: {})", p.join(", ")));
+        } else if !d.scope.is_empty() {
+            status.push_str(&format!(" [{}]", d.scope.join(", ")));
         }
         println!(
             "{:>4}  {:<10} {}{status}",
@@ -617,7 +790,20 @@ fn print_health(root: &Path, list: &[Decision], habits: &[Decision]) {
     for (id, days) in &unserved {
         println!("  #{id}: {}", valkyrie_context::served::says(*days));
     }
+    let scopes: Vec<&Decision> = list
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Active && d.proposed_scope.is_some())
+        .collect();
+    for d in &scopes {
+        println!(
+            "  #{} has a scope proposed: {} (`valk decisions scope {} --accept` or --decline)",
+            d.id,
+            d.proposed_scope.as_deref().unwrap_or_default().join(", "),
+            d.id
+        );
+    }
     let waiting = count(DecisionStatus::Proposed)
+        + scopes.len()
         + flagged.len()
         + recurred.len()
         + overridden.len()
@@ -817,9 +1003,54 @@ pub fn hook(agent: &str, ambient: bool) {
             }
             text
         }
+        "PreToolUse" => match file_decisions(&payload, &cwd) {
+            Some(text) => text,
+            None => return,
+        },
         _ => return,
     };
     println!("{}", valkyrie_context::inject::hook_output(event, &text));
+}
+
+/// The tools whose file a decision's scope is matched against (ADR-0014 §2).
+pub(crate) const FILE_TOOLS: &[&str] = &["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// On a `Read`, `Edit` or `Write`, the decisions scoped to its file that the
+/// session hasn't had (ADR-0014 §2), logged as served. The log is read only
+/// when something's scoped there, since this runs on every file the agent
+/// touches, and the text is added only once it's logged, as a prompt's is.
+fn file_decisions(payload: &serde_json::Value, cwd: &Path) -> Option<String> {
+    use valkyrie_context::{scope, served};
+    let tool = payload["tool_name"].as_str()?;
+    if !FILE_TOOLS.contains(&tool) {
+        return None;
+    }
+    let input = &payload["tool_input"];
+    let file = input["file_path"]
+        .as_str()
+        .or_else(|| input["notebook_path"].as_str())
+        .filter(|f| !f.is_empty())?;
+    let session = payload["session_id"].as_str().filter(|s| !s.is_empty())?;
+    let (root, path) = scope::locate(Path::new(file), cwd)?;
+    let store = valkyrie_context::Store::new(store_base());
+    let known = store.load(&root);
+    let none = std::collections::BTreeSet::new();
+    if scope::for_file(&path, &known, &none).is_empty() {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let had = served::had(&store.served(&root, now), session, reader().as_deref());
+    let found = scope::for_file(&path, &known, &had);
+    record_served(
+        &store,
+        &root,
+        session,
+        found.iter().map(|d| (d.id, served::Layer::File)),
+    )
+    .then(|| scope::file_section(&path, &found, &valk_command()))
 }
 
 /// Logs decisions served to `session` in `root` (ADR-0014 §5), and says whether

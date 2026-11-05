@@ -20,6 +20,17 @@ export const inFull = (d: Decision) => d.kind === "constraint" || !!d.pinned;
 export const pinnable = (d: Decision) =>
   d.project !== USER_SCOPE && !["constraint", "skill", "policy"].includes(d.kind);
 
+/** Globs typed into a scope field, split on spaces, commas and new lines. */
+export const parseScope = (text: string) =>
+  text
+    .split(/[\s,]+/)
+    .map((g) => g.trim())
+    .filter(Boolean);
+
+/** Whether `d` waits on you for a scope (ADR-0014 §2): active, with one proposed,
+ * and not also flagged as out of date, which comes first. */
+export const scoping = (d: Decision) => d.status === "active" && !d.fresh?.review && !!d.proposed_scope?.length;
+
 /** Active decisions by project, the ones in full first, then as the block ranks them. */
 export function byProject(list: Decision[]): [string, Decision[]][] {
   const groups = new Map<string, Decision[]>();

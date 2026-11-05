@@ -162,11 +162,20 @@ impl Registry {
         flagged.sort();
         flagged.dedup();
         for root in flagged {
-            items.extend(store.load(&root).into_iter().filter_map(|mut d| {
+            for mut d in store.load(&root) {
                 d.fresh.review = flag(&stale, &d);
-                (d.status == valkyrie_proto::DecisionStatus::Active && d.fresh.review.is_some())
-                    .then_some(d)
-            }));
+                if d.status != valkyrie_proto::DecisionStatus::Active || d.fresh.review.is_none() {
+                    continue;
+                }
+                // Already here with a proposed scope: one card, out of date first.
+                match items
+                    .iter_mut()
+                    .find(|i| i.project == d.project && i.id == d.id)
+                {
+                    Some(item) => item.fresh.review = d.fresh.review,
+                    None => items.push(d),
+                }
+            }
         }
         drop((stale, store));
         self.proposals.send_if_modified(|current| {
@@ -235,7 +244,11 @@ impl Registry {
         seen: Option<u64>,
         peer: Option<Peer>,
     ) -> Result<Reply> {
-        self.vouch(peer, "reviewing decisions")?;
+        // A proposed scope is only a proposal (ADR-0014 §2): it waits on the user
+        // like an agent's decision does.
+        if !matches!(action, ReviewAction::ProposeScope { .. }) {
+            self.vouch(peer, "reviewing decisions")?;
+        }
         // Before taking the lock: it runs `git`.
         let head = valkyrie_context::project::head(project);
         let decision =

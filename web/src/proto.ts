@@ -72,6 +72,13 @@ export interface Decision {
   superseded_by?: number;
   /** Its body goes in every session's block (ADR-0014 §1); only you set it. */
   pinned?: boolean;
+  /** Path globs relative to the project root it applies to (ADR-0014 §2): agents
+   * get its body when they first open a file in them. Absent: everywhere. */
+  scope?: string[];
+  /** A scope proposed for it once, waiting on you. */
+  proposed_scope?: string[];
+  /** Its scope is settled, so it isn't proposed one again. */
+  scope_asked?: boolean;
   provenance: {
     /** `human`, or the agent that proposed it. */
     by: string;
@@ -98,9 +105,16 @@ export type ReviewAction =
   /** Put an active decision's body in every session's block, or take it back to a title. */
   | { a: "pin" }
   | { a: "unpin" }
-  | { a: "edit"; title: string; body: string; kind: DecisionKind }
+  /** `scope` absent leaves it as it is. */
+  | { a: "edit"; title: string; body: string; kind: DecisionKind; scope?: string[] }
   /** Reword a proposal and accept it; refused once it isn't a proposal any more. */
-  | { a: "revise"; title: string; body: string; kind: DecisionKind };
+  | { a: "revise"; title: string; body: string; kind: DecisionKind; scope?: string[] }
+  /** Set where it applies, settling any proposed scope; empty: everywhere. */
+  | { a: "scope"; scope: string[] }
+  /** Propose a scope for an active decision that has none, once. */
+  | { a: "propose_scope"; scope: string[] }
+  /** Turn a proposed scope down; it isn't proposed again. */
+  | { a: "decline_scope" };
 
 export type Color = "default" | { indexed: number } | { rgb: [number, number, number] };
 

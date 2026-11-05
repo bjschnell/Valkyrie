@@ -23,8 +23,17 @@ const EVENTS: &[&str] = &[
 ];
 /// Seconds; the hook itself returns in milliseconds.
 const HOOK_TIMEOUT: u64 = 5;
-/// The events the context hook answers (ADR-0007).
-const CONTEXT_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit"];
+/// The events the context hook answers (ADR-0007), and on `PreToolUse` only
+/// for the tools that open a file (ADR-0014 §2), so a shell command never
+/// starts it.
+const CONTEXT_EVENTS: &[(&str, Option<&str>)] = &[
+    ("SessionStart", None),
+    ("UserPromptSubmit", None),
+    ("PreToolUse", Some(FILE_TOOLS)),
+];
+/// The tools whose file decisions are scoped to; the context hook keeps the
+/// same list.
+const FILE_TOOLS: &str = "Read|Edit|Write|MultiEdit|NotebookEdit";
 /// A subagent's dialogs and tool calls happen in the same terminal, but its
 /// Stop/SessionStart must not settle the parent.
 const SUBAGENT_EVENTS: &[&str] = &[
@@ -74,13 +83,20 @@ pub(crate) fn hook_settings(command: &str, context: Option<&str>) -> Value {
     let hooks: serde_json::Map<String, Value> = EVENTS
         .iter()
         .map(|&e| {
-            let mut list = vec![hook(command)];
-            if CONTEXT_EVENTS.contains(&e)
-                && let Some(context) = context
-            {
-                list.push(hook(context));
+            let mut groups = vec![json!({ "hooks": [hook(command)] })];
+            let answers = CONTEXT_EVENTS.iter().find(|(event, _)| *event == e);
+            if let (Some((_, matcher)), Some(context)) = (answers, context) {
+                match matcher {
+                    None => groups[0]["hooks"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(hook(context)),
+                    Some(matcher) => {
+                        groups.push(json!({ "matcher": matcher, "hooks": [hook(context)] }))
+                    }
+                }
             }
-            (e.to_string(), json!([{ "hooks": list }]))
+            (e.to_string(), Value::Array(groups))
         })
         .collect();
     json!({ "hooks": hooks })
@@ -548,7 +564,9 @@ mod tests {
             2
         );
         assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(again["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        // The observer, and the context hook for the tools that open a file.
+        assert_eq!(again["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(again["hooks"]["PreToolUse"][1]["matcher"], FILE_TOOLS);
         assert_eq!(again["model"], "opus");
         assert_eq!(remove_ambient(again), user);
     }
@@ -581,6 +599,14 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(prompt[1]["command"], start[1]["command"]);
+        // On a tool call, only one that opens a file starts the context hook
+        // (ADR-0014 §2); every call still reaches the observer.
+        let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert!(pre[0].get("matcher").is_none());
+        assert_eq!(pre[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(pre[1]["matcher"], "Read|Edit|Write|MultiEdit|NotebookEdit");
+        assert_eq!(pre[1]["hooks"][0]["command"], start[1]["command"]);
         assert_eq!(
             settings["hooks"]["Stop"][0]["hooks"]
                 .as_array()

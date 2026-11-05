@@ -177,6 +177,7 @@ fn learn(registry: &Registry, session: &str, cwd: &Path, seen: facts::Seen) {
             supersedes: None,
             review_every: None,
             session: None,
+            scope: None,
         };
         let provenance = Provenance {
             by: "valkyrie".into(),

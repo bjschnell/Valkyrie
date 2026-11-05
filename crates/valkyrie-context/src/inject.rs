@@ -17,8 +17,9 @@ fn how_to_propose(valk: &str) -> String {
     format!(
         "When you and the user settle something that should hold in future sessions (a \
          design choice, a constraint, a gotcha), propose it with `{valk} decide --kind \
-         <decision|constraint|pattern|gotcha|fix> \"<title>\" \"<a sentence or two>\"`. \
-         It goes to the user for review; propose sparingly. A procedure worth \
+         <decision|constraint|pattern|gotcha|fix> \"<title>\" \"<a sentence or two>\"`, \
+         with `--scope <glob>` for the files it's about (agents then get it when they open \
+         one). It goes to the user for review; propose sparingly. A procedure worth \
          repeating (steps, pitfalls, how to verify) is a skill: `{valk} decide --kind skill \
          \"<when to use it>\" -` with the steps on stdin.\n\nFix what you have to in order \
          to deliver your task, as part of this change. Anything else you find broken, keep \
@@ -39,7 +40,7 @@ fn how_to_propose(valk: &str) -> String {
     )
 }
 
-fn rank(kind: DecisionKind) -> u8 {
+pub(crate) fn rank(kind: DecisionKind) -> u8 {
     match kind {
         DecisionKind::Constraint => 0,
         DecisionKind::Gotcha => 1,
@@ -292,6 +293,9 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             pinned: false,
+            scope: Vec::new(),
+            proposed_scope: None,
+            scope_asked: false,
             provenance: Provenance::default(),
             fresh: Default::default(),
         }
