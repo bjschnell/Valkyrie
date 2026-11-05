@@ -215,24 +215,47 @@ pub fn matches(glob: &str, path: &str) -> bool {
     parts(&glob, &path)
 }
 
+/// Whether `path`'s parts match `glob`'s, `**` standing for any number of them.
+/// A table over both, so no glob makes it backtrack without end: the hook
+/// that runs it has 5 s.
 fn parts(glob: &[&str], path: &[&str]) -> bool {
-    match glob.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => (0..=path.len()).any(|skip| parts(rest, &path[skip..])),
-        Some((g, rest)) => path
-            .split_first()
-            .is_some_and(|(p, more)| part(g.as_bytes(), p.as_bytes()) && parts(rest, more)),
-    }
+    wildcard(
+        glob,
+        path,
+        |g| *g == "**",
+        |g, p| part(g.as_bytes(), p.as_bytes()),
+    )
 }
 
 /// `*` and `?` within one part of a path.
 fn part(glob: &[u8], name: &[u8]) -> bool {
-    match glob.split_first() {
-        None => name.is_empty(),
-        Some((b'*', rest)) => (0..=name.len()).any(|skip| part(rest, &name[skip..])),
-        Some((b'?', rest)) => !name.is_empty() && part(rest, &name[1..]),
-        Some((c, rest)) => name.first() == Some(c) && part(rest, &name[1..]),
+    wildcard(glob, name, |g| *g == b'*', |g, c| *g == b'?' || g == c)
+}
+
+/// The wildcard match both levels share: `any` matches any run of items,
+/// `one` decides a single item. `ok[j]`: `glob[..i]` matches `items[..j]`.
+fn wildcard<G, T>(
+    glob: &[G],
+    items: &[T],
+    any: impl Fn(&G) -> bool,
+    one: impl Fn(&G, &T) -> bool,
+) -> bool {
+    let mut ok = vec![false; items.len() + 1];
+    ok[0] = true;
+    for g in glob {
+        if any(g) {
+            // A run may be empty, or take one more item than the one before.
+            for j in 1..ok.len() {
+                ok[j] = ok[j] || ok[j - 1];
+            }
+        } else {
+            for j in (1..ok.len()).rev() {
+                ok[j] = ok[j - 1] && one(g, &items[j - 1]);
+            }
+            ok[0] = false;
+        }
     }
+    ok[items.len()]
 }
 
 /// `file` as a path relative to the checkout it's in (`/` between parts), with
@@ -328,6 +351,17 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|g| g.to_string()).collect()
+    }
+
+    #[test]
+    fn a_glob_made_to_backtrack_still_matches_at_once() {
+        let started = std::time::Instant::now();
+        let name = "a".repeat(200);
+        assert!(!matches(&format!("{}b", "*a".repeat(40)), &name));
+        let deep = vec!["d"; 60].join("/");
+        assert!(!matches(&format!("{}x", "**/".repeat(60)), &deep));
+        assert!(matches(&format!("{}d", "**/".repeat(60)), &deep));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

@@ -3297,6 +3297,11 @@ impl App {
                 )
                 .fg(t.accent2),
             ));
+        } else if !d.scope.is_empty() {
+            // Accepting it takes its scope too, so that's shown before you do.
+            lines.push(Line::from(
+                format!("applies to {}", d.scope.join(", ")).fg(t.muted),
+            ));
         }
         lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
         self.draw_proposal_text(frame, body, d, lines);

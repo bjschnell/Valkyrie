@@ -1022,7 +1022,10 @@ pub(crate) const FILE_TOOLS: &[&str] = &["Read", "Edit", "Write", "MultiEdit", "
 fn file_decisions(payload: &serde_json::Value, cwd: &Path) -> Option<String> {
     use valkyrie_context::{scope, served};
     let tool = payload["tool_name"].as_str()?;
-    if !FILE_TOOLS.contains(&tool) {
+    // A subagent's call carries its parent's session id: serving it there
+    // would log the decisions as had by the parent, which then never sees
+    // them when it edits the file itself.
+    if !FILE_TOOLS.contains(&tool) || !payload["agent_id"].is_null() {
         return None;
     }
     let input = &payload["tool_input"];

@@ -1743,5 +1743,13 @@ fn a_file_gets_the_decisions_scoped_to_it_once_a_session() {
     );
     // Outside the project, nothing.
     assert_eq!(tool("a", "Read", "/etc/hostname").trim(), "");
+    // A subagent's read, under its parent's session id, gets nothing and
+    // doesn't use up the parent's serve.
+    let sub = hook(
+        serde_json::json!({"hook_event_name":"PreToolUse","session_id":"c",
+        "agent_id":"sub-1","tool_name":"Read","tool_input":{"file_path":proto},"cwd":repo}),
+    );
+    assert_eq!(sub.trim(), "");
+    assert!(tool("c", "Read", proto).contains("Update the TS types"));
     let _ = std::fs::remove_dir_all(&dir);
 }
