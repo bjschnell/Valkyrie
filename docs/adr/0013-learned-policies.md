@@ -67,6 +67,8 @@ The user's line for what an agent may decide: anything code, scripts or infrastr
    - **Decision #19** (which superseded #11 on 11-01: open a PR once the checks pass, no verifier) stays as text for agents the hooks don't reach. The `ship` policy is the same rule enforced, for any user, at whatever step their replies set. The PR is the review, and merging stays the user's.
    - **The supervisor** (DESIGN §7) is for what a hook can't see: a PR that goes red after its session ended, work across sessions, and anything that needs judgement rather than a template.
 
+     **Changed 2026-11-04 (backlog #67).** The most common case of the first, CI failing minutes after the agent's last stop, is now covered without a supervisor. The daemon already reads each backlog item's PR every 5 minutes to ship it on merge (ADR-0015 §2). When that read finds failed checks, each of the item's sessions from this daemon boot that is sitting idle (`idle` or `done`) shows as blocked in the queue: "CI red on PR #N: <checks>". It only flags. Nothing is typed into the agent, and you decide whether to prompt it. A session that's working, waiting on you or already blocked keeps what it shows. Once you've seen the flag, the same flag isn't raised again. It comes back only when the session goes idle again, or when a different set of checks fails. A session that isn't on a backlog item with a recorded PR isn't covered, so that part is still the supervisor's.
+
 ## Phases
 1. Stop states, and `pings` counting `unshipped` and `pr-red` stops.
 2. The `policy` kind, the `ship` template and enforcement on `Stop`. Policies come from `valk decide --kind policy` for now.
