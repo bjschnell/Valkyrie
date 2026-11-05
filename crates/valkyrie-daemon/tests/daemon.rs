@@ -1156,6 +1156,7 @@ async fn decisions_are_proposed_pushed_and_listed() {
         supersedes: None,
         review_every: None,
         session: None,
+        scope: None,
     };
     let first = client.decide(new("First")).await.unwrap();
     assert_eq!(first.status, DecisionStatus::Proposed);
@@ -1301,6 +1302,7 @@ async fn unread_skills_are_flagged_then_retired() {
             supersedes: None,
             review_every: None,
             session: None,
+            scope: None,
         };
         let by = Provenance {
             by: "human".into(),

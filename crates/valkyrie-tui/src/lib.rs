@@ -2145,6 +2145,21 @@ impl App {
     async fn review_at(&mut self, i: usize, yes: bool) -> Option<String> {
         let d = self.proposals.get(i)?;
         let (project, id, title, seen) = (d.project.clone(), d.id, d.title.clone(), d.updated);
+        // A scope proposed for an active decision (ADR-0014 §2): `a` takes it,
+        // `d` leaves the decision where it was, everywhere.
+        if let Some(scope) = scoping(d) {
+            let scope = scope.to_vec();
+            let (action, done) = match yes {
+                true => (ReviewAction::Scope { scope }, "scoped"),
+                false => (ReviewAction::DeclineScope, "kept everywhere:"),
+            };
+            return Some(
+                match self.client.review(project, id, action, Some(seen)).await {
+                    Ok(_) => format!("{done} #{id} {title}"),
+                    Err(e) => format!("review failed: {e:#}"),
+                },
+            );
+        }
         let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
         let armed = self.retire_armed.take() == Some((project.clone(), id));
         if flagged && !yes && !armed {
@@ -3016,6 +3031,7 @@ impl App {
                 &self.status,
                 in_proposals,
                 self.proposal().is_some_and(|d| d.fresh.review.is_some()),
+                self.proposal().and_then(scoping).is_some(),
                 self.adoptable().is_some(),
                 t,
             ),
@@ -3213,6 +3229,13 @@ impl App {
                 ("d", "retire"),
                 ("esc", "back"),
             ]
+        } else if scoping(d).is_some() {
+            &[
+                ("j/k", "move"),
+                ("a", "scope it"),
+                ("d", "keep everywhere"),
+                ("esc", "back"),
+            ]
         } else {
             &[
                 ("j/k", "move"),
@@ -3265,6 +3288,19 @@ impl App {
         if let Some(why) = &d.fresh.review {
             lines.push(Line::from(
                 format!("may be out of date: {why}").fg(t.interrupted),
+            ));
+        } else if let Some(scope) = scoping(d) {
+            lines.push(Line::from(
+                format!(
+                    "scope it to {}? agents get it when they open these",
+                    scope.join(", ")
+                )
+                .fg(t.accent2),
+            ));
+        } else if !d.scope.is_empty() {
+            // Accepting it takes its scope too, so that's shown before you do.
+            lines.push(Line::from(
+                format!("applies to {}", d.scope.join(", ")).fg(t.muted),
             ));
         }
         lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
@@ -4373,9 +4409,11 @@ fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
             |n| n.to_string_lossy().into_owned(),
         )
     });
-    // An active decision here is one that may be out of date.
+    // An active decision here may be out of date, or have a scope proposed.
     let kind = if d.fresh.review.is_some() {
         "review?".fg(t.interrupted)
+    } else if scoping(d).is_some() {
+        "scope?".fg(t.accent2)
     } else {
         d.kind.as_str().fg(t.accent2)
     };
@@ -4403,11 +4441,23 @@ fn proposal_table<'a>(rows: impl IntoIterator<Item = TableRow<'a>>, t: &Theme) -
     .highlight_spacing(HighlightSpacing::Always)
 }
 
+/// The scope proposed for `d`, when that's what it waits on (ADR-0014 §2): an
+/// active decision not also flagged as out of date, which comes first.
+fn scoping(d: &Decision) -> Option<&[String]> {
+    if d.status != valkyrie_proto::DecisionStatus::Active || d.fresh.review.is_some() {
+        return None;
+    }
+    d.proposed_scope.as_deref()
+}
+
 /// A proposal's body on one line (its title when it has none), with the session it
 /// came from.
 fn proposal_text(d: &Decision) -> String {
     if let Some(why) = &d.fresh.review {
         return format!("may be out of date: {why}");
+    }
+    if let Some(scope) = scoping(d) {
+        return format!("scope it to {}?", scope.join(", "));
     }
     let body = d.body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut text = if body.is_empty() {
@@ -4522,6 +4572,7 @@ fn footer_line(
     status: &str,
     proposal: bool,
     flagged: bool,
+    scope: bool,
     adoptable: bool,
     t: &Theme,
 ) -> Line<'static> {
@@ -4532,6 +4583,8 @@ fn footer_line(
     }
     let context: &[(&str, &str)] = if flagged {
         &[("a", "still holds"), ("d", "retire"), ("↩", "why")]
+    } else if scope {
+        &[("a", "scope it"), ("d", "keep everywhere"), ("↩", "read")]
     } else if proposal {
         &[("a", "accept"), ("d", "reject"), ("↩", "read")]
     } else if adoptable {
@@ -5388,6 +5441,9 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             pinned: false,
+            scope: Vec::new(),
+            proposed_scope: None,
+            scope_asked: false,
             provenance: valkyrie_proto::Provenance {
                 by: "claude".into(),
                 ..Default::default()

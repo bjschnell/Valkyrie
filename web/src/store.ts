@@ -413,6 +413,9 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   unpin: "Unpinned",
   edit: "Saved",
   revise: "Accepted",
+  scope: "Scoped",
+  propose_scope: "Scope proposed for",
+  decline_scope: "Kept everywhere:",
 };
 
 /** Accepts, rejects or rewords a proposed decision; the daemon pushes the new list. */

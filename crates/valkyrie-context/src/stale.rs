@@ -163,6 +163,9 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             pinned: false,
+            scope: Vec::new(),
+            proposed_scope: None,
+            scope_asked: false,
             provenance: Provenance {
                 commit: commit.map(str::to_owned),
                 ..Provenance::default()

@@ -94,7 +94,8 @@ fn tools() -> Value {
                 "title": {"type": "string", "description": "One line, imperative"},
                 "body": {"type": "string", "description": "A sentence or two: the rule and why (a skill's: Markdown steps, pitfalls, how to verify)"},
                 "kind": {"type": "string", "enum": kinds},
-                "supersedes": {"type": "integer", "description": "The active decision this replaces"}
+                "supersedes": {"type": "integer", "description": "The active decision this replaces"},
+                "scope": {"type": "array", "items": {"type": "string"}, "description": "Path globs relative to the project root it's about (crates/foo/**, web/src/*.ts); agents get it when they open a file in them. Leave out for the files it names; [] when it holds everywhere"}
             }, "required": ["title", "body"]}
         },
         {
@@ -199,6 +200,11 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                     session: std::env::var("VALK_SESSION")
                         .ok()
                         .and_then(|s| s.parse().ok()),
+                    scope: args["scope"].as_array().map(|list| {
+                        list.iter()
+                            .filter_map(|g| g.as_str().map(str::to_owned))
+                            .collect()
+                    }),
                 })
                 .await?;
             Ok(format!(

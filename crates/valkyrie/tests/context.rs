@@ -1557,6 +1557,7 @@ fn a_prompt_gets_the_decisions_it_bears_on_once_a_session() {
             supersedes: None,
             review_every: None,
             session: None,
+            scope: None,
         };
         store.decide(&new, human.clone(), 1).unwrap();
     }
@@ -1603,5 +1604,152 @@ fn a_prompt_gets_the_decisions_it_bears_on_once_a_session() {
     assert!(hook("b", ask).contains("Run shellcheck"));
     // Without the agent's session id there's no telling what it had: nothing.
     assert_eq!(hook("", ask).trim(), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-0014 §2: the first `Read`, `Edit` or `Write` of a file in a decision's
+/// scope adds its body, once a session; the start block's bodies count as had.
+#[test]
+fn a_file_gets_the_decisions_scoped_to_it_once_a_session() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(repo.join("web/src")).unwrap();
+    std::fs::write(repo.join("web/src/proto.ts"), "").unwrap();
+    let repo = std::fs::canonicalize(&repo).unwrap();
+    let base = dir.join("context");
+    for d in [&dir, &base] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::set_permissions(d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let store = valkyrie_context::Store::new(&base);
+    let human = valkyrie_proto::Provenance {
+        by: "human".into(),
+        ..Default::default()
+    };
+    for (title, body, kind, scope) in [
+        (
+            "Update the TS types with every wire change",
+            "Hand-copied, nothing checks them.",
+            valkyrie_proto::DecisionKind::Gotcha,
+            vec!["web/src/*.ts"],
+        ),
+        (
+            "Alt chords for one-step keys",
+            "Not a prefix key.",
+            valkyrie_proto::DecisionKind::Decision,
+            vec!["crates/valkyrie-tui/**"],
+        ),
+        (
+            "Never hand-edit web/dist",
+            "It's built.",
+            valkyrie_proto::DecisionKind::Constraint,
+            vec!["web/**"],
+        ),
+    ] {
+        let new = valkyrie_proto::NewDecision {
+            cwd: repo.clone(),
+            title: title.into(),
+            body: body.into(),
+            kind,
+            propose: false,
+            supersedes: None,
+            review_every: None,
+            session: None,
+            scope: Some(scope.into_iter().map(String::from).collect()),
+        };
+        store.decide(&new, human.clone(), 1).unwrap();
+    }
+    let hook = |payload: serde_json::Value| -> String {
+        let mut c = Command::new(BIN);
+        c.args(["context-hook", "claude"])
+            .current_dir(&repo)
+            .env("VALK_SESSION", "1")
+            .env("VALK_CONTEXT", &base)
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env_remove("VALK_SOCKET")
+            .env_remove("VALK_SESSION_HOOKS")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+    let start = |session: &str| {
+        hook(
+            serde_json::json!({"hook_event_name":"SessionStart","session_id":session,
+                                "cwd":repo}),
+        )
+    };
+    let tool = |session: &str, tool: &str, file: &str| {
+        hook(
+            serde_json::json!({"hook_event_name":"PreToolUse","session_id":session,
+                                "tool_name":tool,"tool_input":{"file_path":file},"cwd":repo}),
+        )
+    };
+    let proto = repo.join("web/src/proto.ts");
+    let proto = proto.to_str().unwrap();
+    start("a");
+    let said = tool("a", "Read", proto);
+    let out: serde_json::Value = serde_json::from_str(said.trim()).expect("one JSON object");
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    let added = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        added.starts_with("Decisions about `web/src/proto.ts`")
+            && added.contains("Update the TS types")
+            && added.contains("Hand-copied"),
+        "{added}"
+    );
+    // The constraint's body was in the start block already, and the TUI's
+    // decision is about other files.
+    assert!(
+        !added.contains("hand-edit") && !added.contains("Alt chords"),
+        "{added}"
+    );
+    // Once a session, whichever tool touches it next.
+    assert_eq!(tool("a", "Edit", proto).trim(), "");
+    // Relative, and not written yet: placed by where it would go.
+    assert!(tool("a", "Write", "crates/valkyrie-tui/src/new.rs").contains("Alt chords"));
+    // A shell command never gets a scope's decisions, and a session without
+    // its start block (an agent that missed it) gets the constraint too.
+    assert_eq!(tool("b", "Bash", proto).trim(), "");
+    let b = tool("b", "Read", proto);
+    assert!(
+        b.contains("Update the TS types") && b.contains("hand-edit"),
+        "{b}"
+    );
+    // Logged as served per file.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let served = store.served(&repo, now);
+    assert!(
+        served
+            .iter()
+            .any(|s| s.session == "a" && s.layer == valkyrie_context::served::Layer::File),
+        "{served:?}"
+    );
+    // Outside the project, nothing.
+    assert_eq!(tool("a", "Read", "/etc/hostname").trim(), "");
+    // A subagent's read, under its parent's session id, gets nothing and
+    // doesn't use up the parent's serve.
+    let sub = hook(
+        serde_json::json!({"hook_event_name":"PreToolUse","session_id":"c",
+        "agent_id":"sub-1","tool_name":"Read","tool_input":{"file_path":proto},"cwd":repo}),
+    );
+    assert_eq!(sub.trim(), "");
+    assert!(tool("c", "Read", proto).contains("Update the TS types"));
     let _ = std::fs::remove_dir_all(&dir);
 }

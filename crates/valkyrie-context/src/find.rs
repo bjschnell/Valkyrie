@@ -152,7 +152,7 @@ pub fn prompt_section(found: &[&Decision], valk: &str) -> String {
 }
 
 /// `text` cut to `max` bytes at a word, saying where the rest is.
-fn clip(text: &str, max: usize, rest: &str) -> String {
+pub(crate) fn clip(text: &str, max: usize, rest: &str) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
@@ -181,6 +181,9 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             pinned: false,
+            scope: Vec::new(),
+            proposed_scope: None,
+            scope_asked: false,
             provenance: Default::default(),
             fresh: Default::default(),
         }

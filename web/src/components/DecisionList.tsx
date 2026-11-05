@@ -122,6 +122,7 @@ function DecisionRow({ d, onChange }: { d: Decision; onChange: () => Promise<voi
           {d.title}
         </button>
         {open && d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+        {d.scope?.length ? <div className="decision-scope">applies to {d.scope.join(", ")}</div> : null}
         {pinnable(d) && (
           <div className="card-actions">
             <button className={d.pinned ? "ghost" : "primary"} disabled={busy} onClick={() => void toggle()}>

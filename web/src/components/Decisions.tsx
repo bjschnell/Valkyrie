@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { DECISION_KINDS, type Decision, type DecisionKind, type ReviewAction } from "../proto";
 import { age } from "../lib/time";
-import { scopeName } from "../lib/scope";
+import { USER_SCOPE, scopeName } from "../lib/scope";
 import { review, useApp } from "../store";
+import { parseScope, scoping } from "../lib/decisions";
 
 /** The last part of a path: the project's name. */
 
@@ -42,6 +43,7 @@ function ProposalCard({ d }: { d: Decision }) {
     .join(" · ");
 
   if (d.fresh?.review) return <StaleCard d={d} />;
+  if (scoping(d)) return <ScopeCard d={d} />;
   return (
     <div className="card-slot">
       <article className="card decision-card">
@@ -57,6 +59,7 @@ function ProposalCard({ d }: { d: Decision }) {
           <>
             <p className="decision-title">{d.title}</p>
             {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+            {d.scope?.length ? <div className="decision-scope">applies to {d.scope.join(", ")}</div> : null}
             <div className="decision-by">
               proposed by {who}
               {d.supersedes !== undefined && <> · replaces #{d.supersedes}</>}
@@ -112,15 +115,57 @@ function StaleCard({ d }: { d: Decision }) {
   );
 }
 
+/** An active decision with a scope proposed for it (ADR-0014 §2): once you take
+ * it, agents get its body when they first open a file in it. Until then, and if
+ * you keep it everywhere, it stays a title in every session's block. */
+function ScopeCard({ d }: { d: Decision }) {
+  const [busy, setBusy] = useState(false);
+  const [text, setText] = useState((d.proposed_scope ?? []).join(" "));
+  const act = async (action: ReviewAction) => {
+    setBusy(true);
+    await review(d, action);
+    setBusy(false);
+  };
+  const scope = parseScope(text);
+  return (
+    <div className="card-slot">
+      <article className="card decision-card">
+        <div className="card-head">
+          <span className="kind-chip kind-pattern">scope?</span>
+          <span className="card-name">#{d.id}</span>
+          <span className="card-prog">{scopeName(d.project)}</span>
+        </div>
+        <p className="decision-title">{d.title}</p>
+        {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+        <label className="field">
+          <span className="field-label">Applies to</span>
+          <input value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
+        </label>
+        <div className="decision-by">agents get it the first time they open a file in these</div>
+        <div className="card-actions">
+          <button className="ghost no" disabled={busy} onClick={() => void act({ a: "decline_scope" })}>
+            Keep everywhere
+          </button>
+          <button className="primary" disabled={busy || scope.length === 0} onClick={() => void act({ a: "scope", scope })}>
+            Scope it
+          </button>
+        </div>
+      </article>
+    </div>
+  );
+}
+
 /** Rewords a proposal, then accepts it: the usual reason to edit one. */
 function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDone: () => void }) {
   const [title, setTitle] = useState(d.title);
   const [body, setBody] = useState(d.body);
   const [kind, setKind] = useState<DecisionKind>(d.kind);
+  const [scope, setScope] = useState((d.scope ?? []).join(" "));
   const [saving, setSaving] = useState(false);
+  const habit = d.project === USER_SCOPE;
   const save = async () => {
     setSaving(true);
-    const ok = await review(d, { a: "revise", title, body, kind });
+    const ok = await review(d, { a: "revise", title, body, kind, ...(habit ? {} : { scope: parseScope(scope) }) });
     setSaving(false);
     if (ok) onDone();
   };
@@ -147,6 +192,12 @@ function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDon
         <span className="field-label">Why</span>
         <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={kind === "skill" ? 12 : 4} maxLength={kind === "skill" ? 12000 : 4000} />
       </label>
+      {!habit && (
+        <label className="field">
+          <span className="field-label">Applies to (globs; empty: everywhere)</span>
+          <input value={scope} onChange={(e) => setScope(e.target.value)} placeholder="crates/foo/** web/src/*.ts" spellCheck={false} />
+        </label>
+      )}
       <div className="card-actions">
         <button className="ghost" disabled={saving} onClick={onDone}>
           Cancel

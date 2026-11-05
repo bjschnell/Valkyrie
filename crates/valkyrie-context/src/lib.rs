@@ -16,6 +16,7 @@ pub mod policy;
 pub mod project;
 pub mod reply;
 pub mod retro;
+pub mod scope;
 pub mod served;
 pub mod skill;
 pub mod stale;
@@ -186,7 +187,10 @@ impl Store {
             .projects()
             .iter()
             .flat_map(|root| self.load(root))
-            .filter(|d| d.status == DecisionStatus::Proposed)
+            .filter(|d| {
+                d.status == DecisionStatus::Proposed
+                    || (d.status == DecisionStatus::Active && d.proposed_scope.is_some())
+            })
             .collect();
         all.sort_by_key(|d| (d.created, d.id));
         all
@@ -223,8 +227,21 @@ impl Store {
         let mut provenance = provenance;
         provenance.commit = provenance.commit.filter(|c| stale::valid_commit(c));
         let text = format!("{title}\n{body}");
+        let anchors = stale::anchors(&root, &new.cwd, &text);
+        // Habits act in every project, so they have no paths of their own.
+        let scope = match &new.scope {
+            _ if project::is_user(&root) => Vec::new(),
+            Some(scope) => scope::clean(scope)?,
+            // A rewrite applies where what it replaces did.
+            None => new
+                .supersedes
+                .and_then(|old| files.get(&old))
+                .map(|(_, old)| old.scope.clone())
+                .filter(|scope| !scope.is_empty())
+                .unwrap_or_else(|| scope::from_anchors(&anchors)),
+        };
         let fresh = valkyrie_proto::Freshness {
-            anchors: stale::anchors(&root, &new.cwd, &text),
+            anchors,
             review_every: new
                 .review_every
                 .or_else(|| stale::volatile(&text).then_some(stale::VOLATILE_DAYS)),
@@ -246,6 +263,9 @@ impl Store {
             supersedes: new.supersedes,
             superseded_by: None,
             pinned: false,
+            scope,
+            proposed_scope: None,
+            scope_asked: true,
             fresh,
             provenance,
         };
@@ -296,7 +316,29 @@ impl Store {
         let mut reworded = false;
         // A pin changes where it's shown, not what it says: it isn't a
         // confirmation, so `updated` (which stands in for one) stays.
-        let pinning = matches!(action, ReviewAction::Pin | ReviewAction::Unpin);
+        // Nor is where it applies (ADR-0014 §2).
+        let pinning = matches!(
+            action,
+            ReviewAction::Pin
+                | ReviewAction::Unpin
+                | ReviewAction::Scope { .. }
+                | ReviewAction::ProposeScope { .. }
+                | ReviewAction::DeclineScope
+        );
+        let scoping = match action {
+            ReviewAction::ProposeScope { .. } => true,
+            ReviewAction::Scope { scope }
+            | ReviewAction::Edit {
+                scope: Some(scope), ..
+            }
+            | ReviewAction::Revise {
+                scope: Some(scope), ..
+            } => !scope.is_empty(),
+            _ => false,
+        };
+        if scoping && project::is_user(root) {
+            bail!("#{id} is a habit: habits hold in every project, so they have no scope");
+        }
         match (action, d.status) {
             (ReviewAction::Accept, Proposed) => accepting = true,
             (ReviewAction::Reject, Proposed) => d.status = Rejected,
@@ -314,21 +356,60 @@ impl Store {
                 }
                 d.pinned = matches!(action, ReviewAction::Pin);
             }
-            (ReviewAction::Edit { title, body, kind }, Proposed | Active) => {
+            (
+                ReviewAction::Edit {
+                    title,
+                    body,
+                    kind,
+                    scope,
+                },
+                Proposed | Active,
+            ) => {
                 (d.title, d.body) = clean(title, body, *kind, root)?;
                 d.kind = *kind;
+                if let Some(scope) = scope {
+                    set_scope(&mut d, scope::clean(scope)?);
+                }
                 // Neither has a body for the block (see Pin below).
                 if matches!(d.kind, DecisionKind::Skill | DecisionKind::Policy) {
                     d.pinned = false;
                 }
                 reworded = true;
             }
-            (ReviewAction::Revise { title, body, kind }, Proposed) => {
+            (
+                ReviewAction::Revise {
+                    title,
+                    body,
+                    kind,
+                    scope,
+                },
+                Proposed,
+            ) => {
                 (d.title, d.body) = clean(title, body, *kind, root)?;
                 d.kind = *kind;
+                if let Some(scope) = scope {
+                    set_scope(&mut d, scope::clean(scope)?);
+                }
                 accepting = true;
                 reworded = true;
             }
+            (ReviewAction::Scope { scope }, Proposed | Active) => {
+                set_scope(&mut d, scope::clean(scope)?);
+            }
+            (ReviewAction::ProposeScope { scope }, Active) => {
+                if d.scope_asked || !d.scope.is_empty() || d.proposed_scope.is_some() {
+                    bail!(
+                        "#{id} has had its scope settled; set one with `valk decisions scope {id} GLOB…`"
+                    );
+                }
+                let scope = scope::clean(scope)?;
+                d.proposed_scope = (!scope.is_empty()).then_some(scope);
+                d.scope_asked = true;
+            }
+            (ReviewAction::DeclineScope, Active) if d.proposed_scope.is_some() => {
+                d.proposed_scope = None;
+            }
+            (ReviewAction::DeclineScope, Active) => bail!("#{id} has no proposed scope"),
             (action, status) => bail!(
                 "can't {} #{id}: it is {}",
                 match action {
@@ -340,6 +421,9 @@ impl Store {
                     ReviewAction::Unpin => "unpin",
                     ReviewAction::Edit { .. } => "edit",
                     ReviewAction::Revise { .. } => "revise",
+                    ReviewAction::Scope { .. } => "scope",
+                    ReviewAction::ProposeScope { .. } => "propose a scope for",
+                    ReviewAction::DeclineScope => "decline the scope of",
                 },
                 status.as_str()
             ),
@@ -950,6 +1034,12 @@ fn export_skills(all: &[Decision], checkout: &Path) -> Result<Vec<PathBuf>> {
 /// the body's line breaks) or bidi overrides: text a reviewer reads in a terminal
 /// must be the text agents get.
 /// A policy is read for the scope `root` is: the user's, or a project's.
+/// `scope` as the user set it, settling any proposal: the one-time ask is done.
+fn set_scope(d: &mut Decision, scope: Vec<String>) {
+    d.scope = scope;
+    d.proposed_scope = None;
+    d.scope_asked = true;
+}
 fn clean(title: &str, body: &str, kind: DecisionKind, root: &Path) -> Result<(String, String)> {
     let title = file::one_line(&shown(title, false));
     if title.is_empty() {
@@ -1034,6 +1124,7 @@ mod tests {
                 supersedes: None,
                 review_every: None,
                 session: None,
+                scope: None,
             }
         }
     }
@@ -1078,6 +1169,144 @@ mod tests {
         assert_eq!(
             f.store.failures(&f.repo, (FAILURE_DAYS + 3) * day),
             Failures::default()
+        );
+    }
+
+    #[test]
+    fn a_decision_is_scoped_as_asked_else_to_the_files_it_names_and_a_rewrite_keeps_it() {
+        let f = Fixture::new("scope-decide");
+        std::fs::create_dir_all(f.repo.join("web/src")).unwrap();
+        std::fs::write(f.repo.join("web/src/proto.ts"), "").unwrap();
+        let mut named = f.new_decision("Keep web/src/proto.ts in step");
+        named.body = "Hand-copied types.".into();
+        let named = f.store.decide(&named, by("human"), 1).unwrap();
+        assert_eq!(named.scope, ["web/src/proto.ts"]);
+        assert!(named.scope_asked);
+        let mut asked = f.new_decision("TUI keys use Alt chords");
+        asked.scope = Some(vec!["./crates/valkyrie-tui/".into()]);
+        let asked = f.store.decide(&asked, by("claude"), 2).unwrap();
+        assert_eq!(asked.scope, ["crates/valkyrie-tui/**"]);
+        // Read back from its file.
+        let back = f.store.load(&f.repo);
+        assert_eq!(
+            back.iter().find(|d| d.id == asked.id).unwrap().scope,
+            asked.scope
+        );
+        let mut bad = f.new_decision("Bad");
+        bad.scope = Some(vec!["../elsewhere/**".into()]);
+        assert!(f.store.decide(&bad, by("human"), 3).is_err());
+        // Nothing named and nothing asked: everywhere.
+        assert!(
+            f.store
+                .decide(&f.new_decision("Plain"), by("human"), 4)
+                .unwrap()
+                .scope
+                .is_empty()
+        );
+        // A rewrite with no scope of its own keeps the one it replaces.
+        let mut rewrite = f.new_decision("Keep the proto types in step");
+        rewrite.supersedes = Some(named.id);
+        let rewrite = f.store.decide(&rewrite, by("human"), 5).unwrap();
+        assert_eq!(rewrite.scope, ["web/src/proto.ts"]);
+        // Habits hold in every project.
+        let mut habit = f.new_decision("Ship as a PR");
+        habit.cwd = project::user();
+        habit.scope = Some(vec!["web/**".into()]);
+        assert!(
+            f.store
+                .decide(&habit, by("human"), 6)
+                .unwrap()
+                .scope
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_scope_is_proposed_once_and_waits_on_review() {
+        let f = Fixture::new("scope-review");
+        let a = f
+            .store
+            .decide(&f.new_decision("A"), by("human"), 1)
+            .unwrap();
+        let review =
+            |id, action: &ReviewAction, at| f.store.review(&f.repo, id, action, None, None, at);
+        let propose = |scope: &[&str]| ReviewAction::ProposeScope {
+            scope: scope.iter().map(|s| s.to_string()).collect(),
+        };
+        // Recorded since scopes exist, so already settled.
+        assert!(review(a.id, &propose(&["web/**"]), 2).is_err());
+        // One from before: no scope, never asked.
+        let mut old = f.store.load(&f.repo).remove(0);
+        old.scope_asked = false;
+        f.store.write(&f.repo, &old, None).unwrap();
+        let d = review(a.id, &propose(&["web/**"]), 3).unwrap();
+        assert_eq!(
+            d.proposed_scope.as_deref(),
+            Some(&["web/**".to_string()][..])
+        );
+        assert!(d.scope.is_empty() && d.scope_asked);
+        // Not a rewording: it's no fresher for it.
+        assert_eq!(d.updated, 1);
+        // In the review queue, as an active decision.
+        let queue = f.store.proposals();
+        assert_eq!((queue.len(), queue[0].status), (1, DecisionStatus::Active));
+        // Only once.
+        assert!(review(a.id, &propose(&["docs/**"]), 4).is_err());
+        let d = review(
+            a.id,
+            &ReviewAction::Scope {
+                scope: vec!["web/src/**".into()],
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(
+            (d.scope.as_slice(), d.proposed_scope.as_ref()),
+            (&["web/src/**".to_string()][..], None)
+        );
+        assert!(f.store.proposals().is_empty());
+        assert!(review(a.id, &ReviewAction::DeclineScope, 6).is_err());
+        // Declined: still everywhere, and not asked again.
+        let b = f
+            .store
+            .decide(&f.new_decision("B"), by("human"), 7)
+            .unwrap();
+        let mut old = f
+            .store
+            .load(&f.repo)
+            .into_iter()
+            .find(|d| d.id == b.id)
+            .unwrap();
+        old.scope_asked = false;
+        f.store.write(&f.repo, &old, None).unwrap();
+        review(b.id, &propose(&["docs/**"]), 8).unwrap();
+        let d = review(b.id, &ReviewAction::DeclineScope, 9).unwrap();
+        assert!(d.scope.is_empty() && d.proposed_scope.is_none() && d.scope_asked);
+        // The model said it holds everywhere: asked, with no card.
+        let c = f
+            .store
+            .decide(&f.new_decision("C"), by("human"), 10)
+            .unwrap();
+        let mut old = f
+            .store
+            .load(&f.repo)
+            .into_iter()
+            .find(|d| d.id == c.id)
+            .unwrap();
+        old.scope_asked = false;
+        f.store.write(&f.repo, &old, None).unwrap();
+        let d = review(c.id, &propose(&[]), 11).unwrap();
+        assert!(d.proposed_scope.is_none() && d.scope_asked);
+        assert!(f.store.proposals().is_empty());
+        // Habits have no scope to propose.
+        let mut habit = f.new_decision("Ship as a PR");
+        habit.cwd = project::user();
+        let h = f.store.decide(&habit, by("human"), 12).unwrap();
+        let user = project::user();
+        assert!(
+            f.store
+                .review(&user, h.id, &propose(&["web/**"]), None, None, 13)
+                .is_err()
         );
     }
 
@@ -1133,6 +1362,7 @@ mod tests {
             title: "Checks to run".into(),
             body: "template: ship\nuntil: pr".into(),
             kind: DecisionKind::Policy,
+            scope: None,
         };
         assert!(!review(b.id, &edit, 42 * day).unwrap().pinned);
     }
@@ -1243,6 +1473,7 @@ mod tests {
                 title: "Renamed".into(),
                 body: "New body".into(),
                 kind: DecisionKind::Gotcha,
+                scope: None,
             },
         )
         .unwrap();
@@ -1312,6 +1543,7 @@ mod tests {
             title: "Final".into(),
             body: "Better".into(),
             kind: DecisionKind::Constraint,
+            scope: None,
         };
         let d = f
             .store

@@ -36,6 +36,13 @@ pub fn render(d: &Decision) -> String {
     }
     field("review_every", &opt(d.fresh.review_every));
     field("anchors", &d.fresh.anchors.join(", "));
+    field("scope", &d.scope.join(", "));
+    if let Some(proposed) = &d.proposed_scope {
+        field("proposed_scope", &proposed.join(", "));
+    }
+    if d.scope_asked {
+        field("scope_asked", "true");
+    }
     out.push_str("---\n");
     out.push_str(&format!("# {}\n", one_line(&d.title)));
     let body = d.body.trim();
@@ -64,6 +71,9 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
         supersedes: None,
         superseded_by: None,
         pinned: false,
+        scope: Vec::new(),
+        proposed_scope: None,
+        scope_asked: false,
         provenance: Provenance::default(),
         fresh: Default::default(),
     };
@@ -89,14 +99,10 @@ pub fn parse(text: &str, project: PathBuf) -> Option<Decision> {
             "cwd" => d.provenance.cwd = text().map(PathBuf::from),
             "confirmed" => d.fresh.confirmed = v.parse().unwrap_or(0),
             "review_every" => d.fresh.review_every = v.parse().ok(),
-            "anchors" => {
-                d.fresh.anchors = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            }
+            "anchors" => d.fresh.anchors = list(v),
+            "scope" => d.scope = list(v),
+            "proposed_scope" => d.proposed_scope = Some(list(v)).filter(|s| !s.is_empty()),
+            "scope_asked" => d.scope_asked = v == "true",
             _ => {}
         }
     }
@@ -131,6 +137,14 @@ pub fn name(d: &Decision) -> String {
     }
 }
 
+fn list(v: &str) -> Vec<String> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn opt(v: Option<u32>) -> String {
     v.map(|v| v.to_string()).unwrap_or_default()
 }
@@ -156,6 +170,9 @@ mod tests {
             supersedes: Some(3),
             superseded_by: None,
             pinned: false,
+            scope: vec!["src/**".into(), "web/*.ts".into()],
+            proposed_scope: Some(vec!["docs/**".into()]),
+            scope_asked: true,
             provenance: Provenance {
                 by: "claude".into(),
                 session: Some("valkyrie".into()),

@@ -214,6 +214,9 @@ mod tests {
             supersedes: None,
             superseded_by: None,
             pinned: false,
+            scope: Vec::new(),
+            proposed_scope: None,
+            scope_asked: false,
             provenance: Provenance::default(),
             fresh: Default::default(),
         }];

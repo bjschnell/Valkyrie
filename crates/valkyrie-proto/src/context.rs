@@ -129,6 +129,18 @@ pub struct Decision {
     /// human sets it, as only a human accepts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// Path globs relative to the project root (`crates/valkyrie-tui/**`) it
+    /// applies to (ADR-0014 §2): its body reaches an agent when it first touches
+    /// a file in them. Empty: it holds everywhere, and has no file of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
+    /// A scope proposed for it once, waiting on the user (ADR-0014 §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_scope: Option<Vec<String>>,
+    /// Its scope is settled: it was recorded with one, or a scope was proposed
+    /// for it once, so `valk decisions scope --propose` passes it over.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scope_asked: bool,
     #[serde(default)]
     pub provenance: Provenance,
     #[serde(default)]
@@ -178,6 +190,9 @@ pub struct NewDecision {
     /// agent can only propose (ADR-0007 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<crate::SessionId>,
+    /// Path globs it applies to (ADR-0014 §2); `None`: the paths its text names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Vec<String>>,
 }
 
 /// Which sessions' corrections are read for decisions (DESIGN §6.3).
@@ -239,6 +254,9 @@ pub enum ReviewAction {
         #[serde(default)]
         body: String,
         kind: DecisionKind,
+        /// The paths it applies to; `None` leaves them as they are.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Vec<String>>,
     },
     /// Reword a proposal and accept it, in one step: refused once it isn't a
     /// proposal any more, so a stale card can't rewrite an active decision.
@@ -247,5 +265,21 @@ pub enum ReviewAction {
         #[serde(default)]
         body: String,
         kind: DecisionKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Vec<String>>,
     },
+    /// Set the paths it applies to (ADR-0014 §2), settling any proposed scope;
+    /// empty: everywhere.
+    Scope {
+        scope: Vec<String>,
+    },
+    /// Propose a scope for a decision that has none, once: the user accepts it
+    /// with `Scope` or turns it down with `DeclineScope`. Empty marks it asked
+    /// with nothing to propose. Anyone may propose; nothing changes until the
+    /// user says so.
+    ProposeScope {
+        scope: Vec<String>,
+    },
+    /// Turn a proposed scope down; it isn't proposed again.
+    DeclineScope,
 }

@@ -122,6 +122,7 @@ fn learn(
         supersedes: offer.supersedes,
         review_every: None,
         session: None,
+        scope: None,
     };
     let provenance = Provenance {
         by: "valkyrie".into(),

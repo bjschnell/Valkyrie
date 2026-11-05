@@ -146,6 +146,11 @@ enum Cmd {
         /// ship (`-k policy`, `template: ship` and `until: commit|push|pr`).
         #[arg(long)]
         user: bool,
+        /// A path glob it's about, relative to the project root
+        /// (`crates/valkyrie-tui/**`); repeat for more. Agents get its body the
+        /// first time they read or edit a file in it. Default: the files it names.
+        #[arg(long = "scope", value_name = "GLOB", conflicts_with = "user")]
+        scope: Vec<String>,
     },
     /// Hand a session's work to another agent: its goal and asks, where it left off
     /// (summarized by a small model), the files it changed, the project's decisions.
@@ -630,6 +635,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             supersedes,
             review_in,
             user,
+            scope,
         }) => {
             let client = connect(&socket).await?.0;
             let args = context::Decide {
@@ -640,6 +646,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 supersedes,
                 review_in,
                 user,
+                scope,
             };
             context::decide(&client, args).await
         }

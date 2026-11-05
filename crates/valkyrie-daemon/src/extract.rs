@@ -104,6 +104,14 @@ pub(crate) async fn run(registry: Arc<Registry>, mut turns: mpsc::UnboundedRecei
     }
 }
 
+/// The scope a model proposed, as far as it names places in `checkout`
+/// (ADR-0014 §2); `None` when nothing's left, so the paths its text names
+/// stand in.
+fn model_scope(proposed: &[String], checkout: &std::path::Path) -> Option<Vec<String>> {
+    let scope = valkyrie_context::scope::proposed(proposed, checkout);
+    (!scope.is_empty()).then_some(scope)
+}
+
 /// Looks at one session's last exchange; returns whether the model was asked.
 async fn look(
     registry: &Registry,
@@ -144,8 +152,11 @@ async fn look(
     let yours = exchange.1.to_owned();
     let dir = registry.host.context_dir.clone();
     let command = command.to_vec();
+    let checkout = valkyrie_context::project::checkout(&info.cwd);
+    let paths_in = checkout.clone();
     let asked = tokio::task::spawn_blocking(move || {
         valkyrie_proto::ensure_private_dir(&dir)?;
+        let prompt = prompt + &valkyrie_context::scope::paths(&paths_in);
         valkyrie_context::model::ask(&command, &prompt, &dir, MODEL_TIMEOUT)
     })
     .await;
@@ -182,6 +193,7 @@ async fn look(
             supersedes: None,
             review_every: None,
             session: Some(id),
+            scope: model_scope(&f.scope, &checkout),
         };
         let provenance = Provenance {
             by: "valkyrie".into(),
@@ -285,8 +297,11 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
     let (prompt, shown) = retro::prompt(&name, &known, &moments, &followed);
     let dir = registry.host.context_dir.clone();
     let command = command.to_vec();
+    let checkout = valkyrie_context::project::checkout(&info.cwd);
+    let paths_in = checkout.clone();
     let asked = tokio::task::spawn_blocking(move || {
         valkyrie_proto::ensure_private_dir(&dir)?;
+        let prompt = prompt + &valkyrie_context::scope::paths(&paths_in);
         valkyrie_context::model::ask(&command, &prompt, &dir, MODEL_TIMEOUT)
     })
     .await;
@@ -341,6 +356,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
             supersedes: patch,
             review_every: None,
             session: Some(id),
+            scope: model_scope(&f.scope, &checkout),
         };
         let provenance = Provenance {
             by: "valkyrie".into(),
@@ -505,6 +521,7 @@ async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[St
         supersedes: patch,
         review_every: None,
         session: Some(id),
+        scope: None,
     };
     let provenance = Provenance {
         by: "valkyrie".into(),

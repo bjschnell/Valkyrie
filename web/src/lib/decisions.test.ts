@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Decision, DecisionKind } from "../proto";
-import { byProject, inFull, pinnable } from "./decisions";
+import { byProject, inFull, parseScope, pinnable, scoping } from "./decisions";
 import { USER_SCOPE } from "./scope";
 
 const d = (id: number, kind: DecisionKind, more: Partial<Decision> = {}): Decision => ({
@@ -46,5 +46,19 @@ describe("pinnable", () => {
     expect(pinnable(d(1, "policy"))).toBe(false);
     expect(pinnable(d(1, "decision", { project: USER_SCOPE }))).toBe(false);
     expect(inFull(d(1, "pattern", { pinned: true }))).toBe(true);
+  });
+});
+
+describe("scopes", () => {
+  it("splits what you type into globs", () => {
+    expect(parseScope(" crates/a/**, web/src/*.ts\n docs/x.md ")).toEqual(["crates/a/**", "web/src/*.ts", "docs/x.md"]);
+    expect(parseScope("  ")).toEqual([]);
+  });
+
+  it("asks about a proposed scope only on an active decision that isn't out of date", () => {
+    expect(scoping(d(1, "decision", { proposed_scope: ["web/**"] }))).toBe(true);
+    expect(scoping(d(2, "decision"))).toBe(false);
+    expect(scoping(d(3, "decision", { proposed_scope: ["web/**"], status: "proposed" }))).toBe(false);
+    expect(scoping(d(4, "decision", { proposed_scope: ["web/**"], fresh: { review: "churn" } }))).toBe(false);
   });
 });
