@@ -1,14 +1,15 @@
 //! Where an agent left its work when its turn ended (ADR-0013 §1): read from git
-//! (and `gh` for the pull request) in the directory the agent ran in, so a stop
-//! that leaves work short of shipping is seen whatever the agent's reply says.
+//! (and `gh` for the pull request) where the agent's work is, the directory it
+//! ran in or its backlog item's worktree (`state_for`), so a stop that leaves work
+//! short of shipping is seen whatever the agent's reply says.
 
 use crate::worktree::{default_branch, git_out};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 pub use valkyrie_context::policy::Check;
-use valkyrie_proto::NoWindow;
+use valkyrie_proto::{Item, NoWindow};
 
 /// Longest a `gh` lookup may take; the answer is only for the record, so a slow
 /// network loses it rather than holding anything up.
@@ -84,9 +85,10 @@ pub fn current_branch(dir: &Path) -> Option<String> {
     git_out(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
 }
 
-/// The work at a stop in `cwd`. `None` outside a git repository.
-pub fn at(cwd: &Path) -> Option<Value> {
-    let (state, branch, pr) = state(cwd, &|dir, branch| gh_pr(dir, branch, GH_TIMEOUT))?;
+/// The work at a stop in `cwd` of a session on `item` (see `state_for`). `None`
+/// outside a git repository.
+pub fn at(cwd: &Path, item: Option<&Item>) -> Option<Value> {
+    let (state, branch, pr, _) = state_for(cwd, item, &|dir, which| gh_pr(dir, which, GH_TIMEOUT))?;
     Some(json!({"state": state.as_str(), "branch": branch, "pr": pr}))
 }
 
@@ -147,6 +149,64 @@ pub fn state(
         Pr::Unknown => (State::Clean, None),
     };
     Some((state, Some(branch), url))
+}
+
+/// The work at a stop of a session on `item` (ADR-0013 §1), with the directory it
+/// was read in. A session that took another item and works it in a worktree of
+/// its own stops with its cwd where it began, so the item says where to look:
+/// its launch's checkout, or the worktree its branch is checked out in, and its
+/// pull request (by URL, which `gh` finds whatever the branch is called) when the
+/// branch read is the item's. Its branch checked out nowhere, or no item: `cwd`.
+pub fn state_for(
+    cwd: &Path,
+    item: Option<&Item>,
+    pr: &dyn Fn(&Path, &str) -> Pr,
+) -> Option<(State, Option<String>, Option<String>, PathBuf)> {
+    let dir = dir(cwd, item);
+    let lookup = |dir: &Path, branch: &str| match item {
+        Some(Item {
+            branch: Some(b),
+            pr: Some(url),
+            ..
+        }) if b == branch => pr(dir, url),
+        _ => pr(dir, branch),
+    };
+    let (state, branch, url) = state(&dir, &lookup)?;
+    Some((state, branch, url, dir))
+}
+
+/// Where a session on `item` in `cwd` has its work (see `state_for`).
+pub fn dir(cwd: &Path, item: Option<&Item>) -> PathBuf {
+    item.and_then(|item| item_dir(cwd, item))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// Where `item`'s branch is checked out, when that's not `cwd`.
+fn item_dir(cwd: &Path, item: &Item) -> Option<PathBuf> {
+    let branch = item.branch.as_deref()?;
+    if current_branch(cwd).as_deref() == Some(branch) {
+        return None;
+    }
+    if let Some(checkout) = item.checkout.as_ref().filter(|c| c.is_dir())
+        && current_branch(checkout).as_deref() == Some(branch)
+    {
+        return Some(checkout.clone());
+    }
+    let repo = item
+        .project
+        .as_deref()
+        .filter(|p| p.is_dir())
+        .unwrap_or(cwd);
+    let listed = git_out(repo, &["worktree", "list", "--porcelain", "-z"]).ok()?;
+    let want = format!("branch refs/heads/{branch}");
+    listed.split("\0\0").find_map(|block| {
+        let mut fields = block.split('\0');
+        let path = fields.next()?.strip_prefix("worktree ")?;
+        fields
+            .any(|f| f == want)
+            .then(|| PathBuf::from(path))
+            .filter(|p| p.is_dir())
+    })
 }
 
 /// Asks `gh` about a pull request, giving up after `timeout`: `which` is a
@@ -440,5 +500,84 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// An item with `branch` and `pr`, taken: the rest as a take leaves it.
+    fn taken(project: &Path, branch: &str, pr: &str) -> Item {
+        serde_json::from_value(json!({
+            "id": 65, "title": "t", "created": 0, "updated": 0, "taken": [1], "sessions": [1],
+            "project": project, "branch": branch, "branch_taken": true, "pr": pr,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_stop_reads_the_taken_items_worktree_and_pr_not_the_cwd() {
+        // The session's cwd: its first item's worktree, whose PR merged (#68).
+        let repo = Repo::new("taken");
+        let app = repo.app();
+        git(&app, &["checkout", "--quiet", "-b", "fix/38"]);
+        std::fs::write(app.join("a.txt"), "38").unwrap();
+        commit(&app, "38");
+        git(&app, &["push", "--quiet", "-u", "origin", "fix/38"]);
+        // The item it took next, worked in a second worktree, its PR red.
+        let other = repo.0.join("app-65");
+        git(
+            &app,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "fix/65",
+                other.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(other.join("a.txt"), "65").unwrap();
+        commit(&other, "65");
+        git(&other, &["push", "--quiet", "-u", "origin", "fix/65"]);
+        let (url38, url65) = ("https://example.com/pr/98", "https://example.com/pr/101");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let lookup = |dir: &Path, which: &str| {
+            asked.borrow_mut().push(which.to_owned());
+            match which {
+                w if w == "fix/38" || w == url38 => Pr::Merged { url: url38.into() },
+                // Only the item's own PR is red; by branch `gh` may not find it
+                // (a fork, a renamed branch), which is why the item's URL wins.
+                w if w == url65 => {
+                    assert_eq!(dir.canonicalize().unwrap(), other.canonicalize().unwrap());
+                    Pr::Open {
+                        url: url65.into(),
+                        failed: vec![Check {
+                            name: "ci".into(),
+                            url: String::new(),
+                            run: None,
+                        }],
+                    }
+                }
+                _ => Pr::None,
+            }
+        };
+        let item = taken(&app, "fix/65", url65);
+        let (state, branch, url, dir) = state_for(&app, Some(&item), &lookup).unwrap();
+        assert_eq!(state, State::PrRed);
+        assert_eq!(branch.as_deref(), Some("fix/65"));
+        assert_eq!(url.as_deref(), Some(url65));
+        assert_eq!(dir.canonicalize().unwrap(), other.canonicalize().unwrap());
+        assert_eq!(*asked.borrow(), [url65]);
+        // No item, or one on the cwd's own branch: the cwd, as before.
+        let (state, ..) = state_for(&app, None, &lookup).unwrap();
+        assert_eq!(state, State::Clean);
+        let here = taken(&app, "fix/38", url38);
+        let (state, branch, url, _) = state_for(&app, Some(&here), &lookup).unwrap();
+        assert_eq!(
+            (state, branch.as_deref(), url.as_deref()),
+            (State::Clean, Some("fix/38"), Some(url38))
+        );
+        // Its branch checked out nowhere: nothing to read there, so the cwd.
+        let gone = taken(&app, "fix/99", "https://example.com/pr/9");
+        let (_, branch, ..) = state_for(&app, Some(&gone), &lookup).unwrap();
+        assert_eq!(branch.as_deref(), Some("fix/38"));
     }
 }
