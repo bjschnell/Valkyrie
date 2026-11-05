@@ -353,6 +353,39 @@ pub fn ci_fix(
     {
         sources.push(*from);
     }
+    let by = format!("Valkyrie policy {}, accepted by the user", names(&sources));
+    ci_fix_text(
+        &by,
+        checks.map(|(c, _)| c.as_str()),
+        pr,
+        branch,
+        failed,
+        block,
+    )
+}
+
+/// `ci-fix` as a supervisor step the user took on a red pull request after its
+/// session's last stop (ADR-0019 §2): the same text, counted against the same
+/// [`CI_FIX_LIMIT`].
+pub fn ci_fix_step(
+    checks: Option<&str>,
+    pr: &str,
+    branch: &str,
+    failed: &[Check],
+    block: u32,
+) -> String {
+    let by = "Valkyrie supervisor step ci-fix, taken by the user";
+    ci_fix_text(by, checks, pr, branch, failed, block)
+}
+
+fn ci_fix_text(
+    by: &str,
+    checks: Option<&str>,
+    pr: &str,
+    branch: &str,
+    failed: &[Check],
+    block: u32,
+) -> String {
     let number = pr
         .rsplit_once("/pull/")
         .map(|(_, n)| format!("#{}", n.trim_end_matches('/')))
@@ -374,13 +407,17 @@ pub fn ci_fix(
     if failed.len() > MAX_CHECKS {
         list.push_str(&format!("\n- and {} more", failed.len() - MAX_CHECKS));
     }
+    let on = match branch {
+        "" => String::new(),
+        b => format!(" (branch `{b}`)"),
+    };
     let run = match checks {
-        Some((checks, _)) => format!("run `{checks}`"),
+        Some(checks) => format!("run `{checks}`"),
         None => "run the project's checks".to_owned(),
     };
     format!(
-        "Valkyrie policy {names}, accepted by the user: a pull request isn't done while \
-         its CI is red. PR {number} (branch `{branch}`) has failed checks:{list}\n\
+        "{by}: a pull request isn't done while \
+         its CI is red. PR {number}{on} has failed checks:{list}\n\
          Read the failing logs, fix the cause, {run}, push, and wait for the checks \
          (`gh pr checks --watch`). For a check outside GitHub Actions, reach its logs \
          through the link (or its CI's API), or run the same check locally if you \
@@ -389,8 +426,7 @@ pub fn ci_fix(
          bug` if it's new, then rerun the failed jobs once (`gh run rerun <run> \
          --failed`) and wait. If you can't make it pass, stop and say why. Never merge, \
          and never push to the default branch. This is block {block} of {CI_FIX_LIMIT} \
-         for this PR; after that your stops go to the user.",
-        names = names(&sources),
+         for this PR; after that your stops go to the user."
     )
 }
 
@@ -585,6 +621,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("PR #93 (branch `fix/x`)"), "{text}");
+        let unnamed = ci_fix_step(None, "https://github.com/o/r/pull/93", "", &[], 1);
+        assert!(unnamed.contains("PR #93 has failed checks"), "{unnamed}");
         assert!(
             text.contains("- `CI / test`: `gh run view 7 --log-failed`"),
             "{text}"

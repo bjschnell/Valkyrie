@@ -617,7 +617,9 @@ impl Registry {
             } = &pr
                 && let Some(summary) = pr_summary(&url, failed, conflicts.as_deref())
             {
-                self.flag_pr(&item, &url, &summary);
+                for (session, seq) in self.flag_pr(&item, &url, &summary) {
+                    self.offer_step(&item, session, seq, &summary, &pr).await;
+                }
             }
             let closed = match pr {
                 Pr::Merged { .. } => None,
@@ -668,13 +670,15 @@ impl Registry {
     /// (#69), which comes when other work merges, long after the agent's last
     /// stop. Seen once, the same flag isn't raised again; it's raised anew when the
     /// session goes idle again or `summary` changes (`Session::flag_blocked`).
-    fn flag_pr(&self, item: &Item, url: &str, summary: &str) {
+    /// Returns the sessions it flagged, each with the transition it raised.
+    fn flag_pr(&self, item: &Item, url: &str, summary: &str) -> Vec<(SessionId, u64)> {
         if item.boot != self.boot {
-            return;
+            return Vec::new();
         }
+        let mut flagged = Vec::new();
         for &id in &item.sessions {
             if let Ok(session) = self.get(id)
-                && session.flag_blocked(summary)
+                && let Some(seq) = session.flag_blocked(summary)
             {
                 tracing::info!(
                     item = item.id,
@@ -683,8 +687,10 @@ impl Registry {
                     summary,
                     "flagged a PR"
                 );
+                flagged.push((id, seq));
             }
         }
+        flagged
     }
 
     /// Deletes item `id`, for the user only, since it can't be undone (drop is the
@@ -1183,6 +1189,7 @@ mod tests {
             url: pr.to_owned(),
             failed: vec![],
             conflicts: None,
+            head: String::new(),
         });
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);
@@ -1268,6 +1275,7 @@ mod tests {
                     vec![check("windows"), check("lint")]
                 },
                 conflicts: behind.then(|| "main".to_owned()),
+                head: String::new(),
             }
         });
         let state = |s: &Arc<crate::session::Session>| s.info().status;
@@ -1287,6 +1295,79 @@ mod tests {
             conflicted.summary.as_deref(),
             Some("PR #4 conflicts with main")
         );
+        // Each flag offers its step (ADR-0019 §2): red outside Actions can only be
+        // fixed, a conflict merges the base in; nothing on a busy session.
+        {
+            use crate::context::{AS_CALLER, Caller};
+            use valkyrie_proto::StepAction;
+            let flag = |s: &Arc<crate::session::Session>| registry.flag_of(s, s.info().id);
+            let red_flag = flag(&idle).unwrap();
+            let red_step = red_flag.step.clone().unwrap();
+            assert_eq!(red_step.action, StepAction::CiFix);
+            assert!(
+                red_step.why.contains("isn't GitHub Actions"),
+                "{}",
+                red_step.why
+            );
+            assert_eq!(red_flag.pr, url(1));
+            let conflict = flag(&behind).unwrap();
+            assert_eq!(
+                conflict.step.as_ref().unwrap().action,
+                StepAction::MergeBase
+            );
+            assert!(flag(&busy).is_none() && flag(&old).is_none());
+            let queued = registry.compute_queue();
+            let row = queued
+                .iter()
+                .find(|q| q.session == behind.info().id)
+                .unwrap();
+            assert_eq!(row.flag.as_ref(), Some(&conflict));
+            let as_caller = |agent: Option<&str>| {
+                let agent = agent.map(str::to_owned);
+                AS_CALLER.with(|c| {
+                    *c.borrow_mut() = Some(Box::new(move || Caller {
+                        agent: agent.clone(),
+                        session: None,
+                        bridge: false,
+                    }))
+                });
+            };
+            let behind_id = behind.info().id;
+            as_caller(Some("claude"));
+            let refused = registry
+                .take_step(behind_id, conflict.seq, StepAction::MergeBase, None)
+                .await;
+            assert!(refused.is_err_and(|e| e.to_string().contains("is for the user")));
+            as_caller(None);
+            let stale = registry
+                .take_step(behind_id, conflict.seq + 1, StepAction::MergeBase, None)
+                .await;
+            assert!(stale.is_err_and(|e| e.to_string().contains("moved on")));
+            let other = registry
+                .take_step(behind_id, conflict.seq, StepAction::Rerun, None)
+                .await;
+            assert!(other.is_err_and(|e| e.to_string().contains("isn't offered")));
+            let Reply::StepTaken { said } = registry
+                .take_step(behind_id, conflict.seq, StepAction::MergeBase, None)
+                .await
+                .unwrap()
+            else {
+                panic!("no StepTaken");
+            };
+            assert_eq!(said, format!("asked session {behind_id} to merge main in"));
+            // Taken, it isn't offered again; the flag stays until the agent starts.
+            let taken = flag(&behind).unwrap();
+            assert!(taken.step.is_none() && !taken.working);
+            // Left: the flag stays, the offer goes.
+            registry
+                .take_step(idle.info().id, red_flag.seq, StepAction::Leave, None)
+                .await
+                .unwrap();
+            let left = flag(&idle).unwrap();
+            assert_eq!(left.reason, red_flag.reason);
+            assert!(left.step.is_none());
+            AS_CALLER.with(|c| *c.borrow_mut() = None);
+        }
         // Looked at, it isn't raised again while the PR stays red.
         idle.mark_seen(flagged.seq);
         assert_eq!(registry.ship_merged_prs(red).await, 0);
@@ -1297,6 +1378,7 @@ mod tests {
             url: pr.to_owned(),
             failed: vec![],
             conflicts: None,
+            head: String::new(),
         });
         registry.ship_merged_prs(green).await;
         assert_eq!(state(&busy).state, AgentState::Working);
@@ -1307,6 +1389,7 @@ mod tests {
             url: pr.to_owned(),
             failed: vec![check("windows")],
             conflicts: Some("main".to_owned()),
+            head: String::new(),
         });
         registry.ship_merged_prs(conflicting.clone()).await;
         let both = state(&idle);

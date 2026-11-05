@@ -5,6 +5,9 @@
 //! - no web app is on screen (an app on screen shows the inbox itself, and anything
 //!   it showed counts as seen);
 //! - the item has been waiting `GRACE` (a desk that answers at once never pushes).
+//!
+//! A supervisor's flag (ADR-0019 §5) names its reason, and one still unseen an
+//! hour after its push pushes once more.
 
 use crate::App;
 use crate::auth::Subscription;
@@ -21,6 +24,8 @@ use valkyrie_proto::{AgentState, AskKind, ClientBuild, Decision, QueueItem, Serv
 const AWAY_MS: u64 = 90_000;
 /// How long an item waits before it may push.
 const GRACE_MS: u64 = 20_000;
+/// How long a pushed flag may go unseen before it pushes once more.
+const REMIND_MS: u64 = 3_600_000;
 /// How often pending items are checked against the above.
 const TICK: Duration = Duration::from_secs(5);
 /// How long a push service keeps an undelivered message: a prompt still matters
@@ -79,6 +84,8 @@ pub struct Watch {
     decisions_new: Vec<((std::path::PathBuf, u32, u64), String)>,
     decisions_since: u64,
     decisions_started: bool,
+    /// Flags pushed and not seen yet, with when they push again: once each.
+    reminders: HashMap<SessionId, (QueueItem, u64)>,
 }
 
 impl Watch {
@@ -91,9 +98,25 @@ impl Watch {
                 .iter()
                 .any(|i| i.session == *id && i.status.seq == p.item.status.seq)
         });
+        // Seen, moved on or gone: no reminder.
+        self.reminders.retain(|id, (r, _)| {
+            items.iter().any(|i| {
+                i.session == *id
+                    && i.status.seq == r.status.seq
+                    && !i.status.seen
+                    && i.flag.is_some()
+            })
+        });
         for item in items {
             let seq = item.status.seq;
             if self.handled.insert(item.session, seq) == Some(seq) {
+                // The same transition, filled in since (a flag's step): push that.
+                if let Some(p) = self.pending.get_mut(&item.session) {
+                    p.item = item.clone();
+                }
+                if let Some((r, _)) = self.reminders.get_mut(&item.session) {
+                    *r = item.clone();
+                }
                 continue;
             }
             // What was already waiting when the server started isn't news.
@@ -136,7 +159,7 @@ impl Watch {
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() || !self.decisions_new.is_empty()
+        !self.pending.is_empty() || !self.decisions_new.is_empty() || !self.reminders.is_empty()
     }
 
     /// What to push now. `last_input_ms`: the latest keypress into any session.
@@ -156,11 +179,28 @@ impl Watch {
             .filter(|(_, p)| now_ms.saturating_sub(p.since_ms) >= GRACE_MS)
             .map(|(id, _)| *id)
             .collect();
-        let mut notes: Vec<Note> = ready
+        let mut notes: Vec<Note> = Vec::new();
+        for p in ready.iter().filter_map(|id| self.pending.remove(id)) {
+            if p.item.flag.is_some() {
+                self.reminders
+                    .insert(p.item.session, (p.item.clone(), now_ms + REMIND_MS));
+            }
+            notes.push(note(&p.item, self.queue_len));
+        }
+        // Flags pushed an hour ago and still unseen: once more, then not again.
+        let again: Vec<SessionId> = self
+            .reminders
             .iter()
-            .filter_map(|id| self.pending.remove(id))
-            .map(|p| note(&p.item, self.queue_len))
+            .filter(|(_, (_, at))| now_ms >= *at)
+            .map(|(id, _)| *id)
             .collect();
+        for id in again {
+            if let Some((item, _)) = self.reminders.remove(&id) {
+                let mut n = note(&item, self.queue_len);
+                n.title = format!("Still waiting: {}", n.title);
+                notes.push(n);
+            }
+        }
         notes.sort_by_key(|n| n.session);
         if !self.decisions_new.is_empty() && now_ms.saturating_sub(self.decisions_since) >= GRACE_MS
         {
@@ -210,6 +250,23 @@ fn note(item: &QueueItem, badge: usize) -> Note {
         "codex" => "Codex",
         _ => "",
     };
+    // A supervisor's flag names its reason, and what it offers to do about it.
+    if let Some(flag) = &item.flag {
+        let body = match &flag.step {
+            Some(step) => format!("Offers: {} ({})", step.action.label(), step.why),
+            None => String::new(),
+        };
+        return Note {
+            title: format!("{} · {}", item.name, flag.reason),
+            body,
+            session: Some(item.session),
+            seq: s.seq,
+            tag: format!("s{}", item.session),
+            badge,
+            urgency: Urgency::Normal,
+            from_screen: false,
+        };
+    }
     Note {
         title: if agent.is_empty() {
             format!("{} · {what}", item.name)
@@ -394,6 +451,7 @@ mod tests {
                 seen,
                 ..AgentStatus::default()
             },
+            flag: None,
         }
     }
 
@@ -474,6 +532,59 @@ mod tests {
         assert!(!w.has_pending());
         w.queue(&[item(1, AgentState::ReviewReady, 6, false)], false, AWAY);
         assert!(w.has_pending());
+    }
+
+    #[test]
+    fn a_flag_names_its_reason_and_reminds_once_an_hour_on() {
+        use valkyrie_proto::{Flag, Step, StepAction};
+        let flagged = |step: bool, seen: bool| {
+            let mut i = item(1, AgentState::Blocked, 7, seen);
+            i.flag = Some(Flag {
+                reason: "PR #98 conflicts with main".into(),
+                pr: "https://github.com/o/r/pull/98".into(),
+                seq: 7,
+                step: step.then(|| Step {
+                    action: StepAction::MergeBase,
+                    why: "the branch conflicts with its base".into(),
+                    alt: None,
+                }),
+                working: !step,
+            });
+            i
+        };
+        let mut w = Watch::default();
+        w.queue(&[], false, 0);
+        w.queue(&[flagged(false, false)], false, AWAY);
+        // Its step is worked out within the grace: the push says it.
+        w.queue(&[flagged(true, false)], false, AWAY + 1);
+        let notes = w.due(AWAY + GRACE_MS, 0, false);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "proj1 · PR #98 conflicts with main");
+        assert_eq!(
+            notes[0].body,
+            "Offers: merge the base in (the branch conflicts with its base)"
+        );
+        assert!(w.has_pending(), "a reminder waits");
+        assert!(w.due(AWAY + GRACE_MS + REMIND_MS - 1, 0, false).is_empty());
+        let again = w.due(AWAY + GRACE_MS + REMIND_MS, 0, false);
+        assert_eq!(again.len(), 1);
+        assert!(
+            again[0].title.starts_with("Still waiting: proj1 · PR #98"),
+            "{}",
+            again[0].title
+        );
+        assert!(
+            w.due(AWAY + GRACE_MS + 3 * REMIND_MS, 0, false).is_empty(),
+            "once"
+        );
+        // Seen meanwhile: no reminder.
+        let mut w = Watch::default();
+        w.queue(&[], false, 0);
+        w.queue(&[flagged(true, false)], false, AWAY);
+        assert_eq!(w.due(AWAY + GRACE_MS, 0, false).len(), 1);
+        w.queue(&[flagged(true, true)], false, AWAY + GRACE_MS + 1);
+        assert!(!w.has_pending());
+        assert!(w.due(AWAY + GRACE_MS + REMIND_MS, 0, false).is_empty());
     }
 
     #[test]

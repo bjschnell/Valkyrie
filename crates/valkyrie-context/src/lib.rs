@@ -7,6 +7,7 @@ pub mod extract;
 pub mod facts;
 mod file;
 pub mod find;
+pub mod flake;
 pub mod handoff;
 pub mod inject;
 pub mod mine;

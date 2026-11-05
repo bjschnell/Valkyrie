@@ -56,6 +56,8 @@ pub enum Pr {
         /// The branch it targets, when GitHub says it conflicts with it. `None`
         /// when it merges cleanly or GitHub hasn't worked that out yet.
         conflicts: Option<String>,
+        /// The commit it's at (`headRefOid`); empty when `gh` didn't say.
+        head: String,
     },
     Merged {
         url: String,
@@ -222,7 +224,7 @@ pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
             "view",
             which,
             "--json",
-            "state,url,statusCheckRollup,mergeable,baseRefName",
+            "state,url,statusCheckRollup,mergeable,baseRefName,headRefOid",
         ])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -260,7 +262,8 @@ pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
     serde_json::from_slice::<Value>(&out.stdout).map_or(Pr::Unknown, |v| parse_pr(&v))
 }
 
-/// `gh pr view --json state,url,statusCheckRollup,mergeable,baseRefName`, read.
+/// `gh pr view --json state,url,statusCheckRollup,mergeable,baseRefName,headRefOid`,
+/// read.
 fn parse_pr(v: &Value) -> Pr {
     let url = v["url"].as_str().unwrap_or("").to_owned();
     match v["state"].as_str() {
@@ -317,6 +320,7 @@ fn parse_pr(v: &Value) -> Pr {
         url,
         failed,
         conflicts,
+        head: v["headRefOid"].as_str().unwrap_or("").to_owned(),
     }
 }
 
@@ -425,6 +429,7 @@ mod tests {
                 vec![]
             },
             conflicts: None,
+            head: String::new(),
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
@@ -599,6 +604,7 @@ mod tests {
                             run: None,
                         }],
                         conflicts: None,
+                        head: String::new(),
                     }
                 }
                 _ => Pr::None,

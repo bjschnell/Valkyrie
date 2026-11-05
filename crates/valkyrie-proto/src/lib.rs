@@ -17,7 +17,7 @@ pub mod screen;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub use agent::{AgentState, AgentStatus, AskKind, QueueItem};
+pub use agent::{AgentState, AgentStatus, AskKind, Flag, QueueItem, Step, StepAction};
 pub use backlog::{
     Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, NewItem,
     OrderApplied, OrderProposal, OrderStep, Priority, ShippedItem, order,
@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 24;
+pub const PROTOCOL: u32 = 25;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -427,6 +427,16 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<Vec<u32>>,
     },
+    /// Takes a step on a flagged session (ADR-0019 §2, protocol 25): the user
+    /// only, and only while the session still shows the flag raised at `seq`.
+    /// `action` is the one offered, its `alt`, or `leave`, which drops the offer
+    /// and keeps the flag. Replies `StepTaken`.
+    TakeStep {
+        req: ReqId,
+        session: SessionId,
+        seq: u64,
+        action: StepAction,
+    },
     /// Claims an accepted item for the caller's session, as a launch would link it,
     /// so its lane follows that session; and records its branch and pull request,
     /// when given. From inside a valk session only, agent or user. Refused while
@@ -623,6 +633,10 @@ pub enum Reply {
     },
     OrderApplied {
         applied: OrderApplied,
+    },
+    /// What a step did, in a line: "typed merge-base into session 4".
+    StepTaken {
+        said: String,
     },
     /// `None`: no checkout of its own to look at (not launched, shipped, or
     /// started in the repository itself).

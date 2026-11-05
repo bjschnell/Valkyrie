@@ -4,13 +4,33 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
-import type { Decision, Item, ItemChange, ItemFacts, Modes, NewItem, OrderProposal, QueueItem, ReviewAction, ServerMsg, SessionId, SessionInfo } from "./proto";
+import type {
+  Decision,
+  Item,
+  ItemChange,
+  ItemFacts,
+  Modes,
+  NewItem,
+  OrderProposal,
+  QueueItem,
+  ReviewAction,
+  ServerMsg,
+  SessionId,
+  SessionInfo,
+  StepAction,
+} from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
 import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
-import { keyBytes, messageBytes, pathBytes, textBytes, type Key } from "./lib/keys";
+import {
+  keyBytes,
+  messageBytes,
+  pathBytes,
+  textBytes,
+  type Key,
+} from "./lib/keys";
 import { apply, screenText, type Screen } from "./lib/screen";
 import {
   clearNotifications,
@@ -120,7 +140,8 @@ export function forgetToken(): void {
 function reloadWhenSafe(): void {
   const tryNow = () => {
     const el = document.activeElement;
-    const editing = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+    const editing =
+      el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
     if (!editing || document.visibilityState === "hidden") location.reload();
   };
   tryNow();
@@ -176,10 +197,12 @@ function onPush(msg: ServerMsg): void {
       set({ items: msg.items, orders: msg.orders ?? [] });
       break;
     case "screen":
-      if (msg.session === get().openId) set({ screen: apply(get().screen, msg.update) });
+      if (msg.session === get().openId)
+        set({ screen: apply(get().screen, msg.update) });
       break;
     case "chat":
-      if (msg.session === get().openId) set({ chat: applyChat(get().chat, msg) });
+      if (msg.session === get().openId)
+        set({ chat: applyChat(get().chat, msg) });
       break;
     case "exited":
       if (msg.session === get().openId) set({ exited: { code: msg.code } });
@@ -202,7 +225,8 @@ function reportVisible(): void {
 
 export async function checkPush(): Promise<void> {
   const token = get().token;
-  if (token) set({ push: await pushState(token).catch(() => "unsupported" as const) });
+  if (token)
+    set({ push: await pushState(token).catch(() => "unsupported" as const) });
 }
 
 export async function turnOnPush(): Promise<void> {
@@ -211,7 +235,9 @@ export async function turnOnPush(): Promise<void> {
   set({ pushBusy: true });
   try {
     const on = await enablePush(token);
-    set({ push: on ? "on" : Notification.permission === "denied" ? "denied" : "off" });
+    set({
+      push: on ? "on" : Notification.permission === "denied" ? "denied" : "off",
+    });
     if (on) toast("Notifications on");
   } catch (e) {
     toast(`Couldn't turn on notifications: ${(e as Error).message}`);
@@ -282,7 +308,11 @@ async function refreshPrompts(items: QueueItem[]): Promise<void> {
       const reply = await conn?.request({ t: "dump", session: item.session });
       if (reply?.t !== "text") continue;
       const lines = reply.text.split("\n");
-      prompts[item.session] = { seq: item.status.seq, choices: findChoices(lines), context: promptContext(lines) };
+      prompts[item.session] = {
+        seq: item.status.seq,
+        choices: findChoices(lines),
+        context: promptContext(lines),
+      };
     } catch {
       /* shown without buttons */
     }
@@ -332,13 +362,20 @@ export function sendKey(key: Key): void {
  * go first, each path on its own, which Claude Code and Codex attach as an image
  * when it is one; other files they read by path.
  */
-function message(session: SessionId, text: string, modes?: Modes, paths: string[] = []): boolean {
+function message(
+  session: SessionId,
+  text: string,
+  modes?: Modes,
+  paths: string[] = [],
+): boolean {
   const parts = paths.flatMap((p) => [pathBytes(p, modes), textBytes(" ")]);
   if (text.trim()) parts.push(messageBytes(text, modes));
   parts.push(keyBytes("enter", modes));
   const [first, ...rest] = parts;
   if (!input(session, first)) return false;
-  rest.forEach((part, i) => setTimeout(() => input(session, part), ENTER_GAP_MS * (i + 1)));
+  rest.forEach((part, i) =>
+    setTimeout(() => input(session, part), ENTER_GAP_MS * (i + 1)),
+  );
   return true;
 }
 
@@ -359,17 +396,26 @@ export async function sendFile(file: File): Promise<string> {
 }
 
 /** Picks a choice: moves the program's cursor to it, then Enter. */
-export async function answer(session: SessionId, choices: Choice[], choice: Choice): Promise<void> {
+export async function answer(
+  session: SessionId,
+  choices: Choice[],
+  choice: Choice,
+): Promise<void> {
   const from = choices.findIndex((c) => c.selected);
   const to = choices.indexOf(choice);
   const moves = choice.moves ?? (from >= 0 ? to - from : null);
   const modes = get().openId === session ? get().screen?.modes : undefined;
   const keys: Key[] =
-    moves === null ? [] : [...Array(Math.abs(moves)).fill(moves < 0 ? "up" : "down"), "enter"];
+    moves === null
+      ? []
+      : [...Array(Math.abs(moves)).fill(moves < 0 ? "up" : "down"), "enter"];
   navigator.vibrate?.(10);
   if (moves === null) {
     // No cursor to move: the number picks it.
-    if (!input(session, [...new TextEncoder().encode(String(choice.n ?? to + 1))])) return;
+    if (
+      !input(session, [...new TextEncoder().encode(String(choice.n ?? to + 1))])
+    )
+      return;
   } else {
     for (const [i, key] of keys.entries()) {
       if (i) await new Promise((r) => setTimeout(r, KEY_GAP_MS));
@@ -394,16 +440,25 @@ export async function answer(session: SessionId, choices: Choice[], choice: Choi
 }
 
 export async function markSeen(item: QueueItem): Promise<void> {
-  await conn?.request({ t: "mark_seen", session: item.session, seq: item.status.seq }).catch(() => {});
+  await conn
+    ?.request({ t: "mark_seen", session: item.session, seq: item.status.seq })
+    .catch(() => {});
 }
 
-export async function rename(id: SessionId, name: string | null): Promise<void> {
-  await conn?.request({ t: "rename", session: id, name }).catch((e) => toast(String(e.message)));
+export async function rename(
+  id: SessionId,
+  name: string | null,
+): Promise<void> {
+  await conn
+    ?.request({ t: "rename", session: id, name })
+    .catch((e) => toast(String(e.message)));
   void refresh();
 }
 
 export async function kill(id: SessionId): Promise<void> {
-  await conn?.request({ t: "kill", session: id }).catch((e) => toast(String(e.message)));
+  await conn
+    ?.request({ t: "kill", session: id })
+    .catch((e) => toast(String(e.message)));
   void refresh();
 }
 
@@ -422,10 +477,19 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
 };
 
 /** Accepts, rejects or rewords a proposed decision; the daemon pushes the new list. */
-export async function review(d: Decision, action: ReviewAction): Promise<boolean> {
+export async function review(
+  d: Decision,
+  action: ReviewAction,
+): Promise<boolean> {
   try {
     if (!conn) throw new Error("not connected");
-    await conn.request({ t: "review", project: d.project, id: d.id, action, seen: d.updated });
+    await conn.request({
+      t: "review",
+      project: d.project,
+      id: d.id,
+      action,
+      seen: d.updated,
+    });
     navigator.vibrate?.(10);
     toast(`${REVIEWED[action.a]} #${d.id} ✓`);
     return true;
@@ -479,7 +543,10 @@ export async function addItem(item: NewItem): Promise<number> {
 }
 
 /** Changes a backlog item, saying what else happened (a worktree taken away). */
-export async function changeItem(id: number, change: ItemChange): Promise<boolean> {
+export async function changeItem(
+  id: number,
+  change: ItemChange,
+): Promise<boolean> {
   if (!conn) return false;
   try {
     const reply = await conn.request({ t: "change_item", id, change });
@@ -518,15 +585,23 @@ export async function noteItem(id: number, text: string): Promise<boolean> {
 
 /** The ids of the open items whose branch is merged, as the daemon last fetched (it
  * doesn't fetch, nor does `valk web`); with none, says why and returns none. */
-export async function checkMerged(shown: (id: number) => boolean = () => true): Promise<number[]> {
+export async function checkMerged(
+  shown: (id: number) => boolean = () => true,
+): Promise<number[]> {
   if (!conn) return [];
   try {
-    const reply = await conn.request({ t: "ship_merged", dry_run: true, only: null });
+    const reply = await conn.request({
+      t: "ship_merged",
+      dry_run: true,
+      only: null,
+    });
     if (reply.t !== "shipped") return [];
     // Only the items the board shows, so a filtered board never ships another repository's.
     const shipped = reply.shipped.filter((s) => shown(s.id));
     const kept = reply.kept.filter((k) => shown(k.id));
-    toast(shipped.length ? wouldShip(shipped, kept) : shippedSummary(shipped, kept));
+    toast(
+      shipped.length ? wouldShip(shipped, kept) : shippedSummary(shipped, kept),
+    );
     return shipped.map((s) => s.id);
   } catch (e) {
     toast((e as Error).message);
@@ -538,7 +613,11 @@ export async function checkMerged(shown: (id: number) => boolean = () => true): 
 export async function shipMerged(only: number[]): Promise<void> {
   if (!conn) return;
   try {
-    const reply = await conn.request({ t: "ship_merged", dry_run: false, only });
+    const reply = await conn.request({
+      t: "ship_merged",
+      dry_run: false,
+      only,
+    });
     if (reply.t === "shipped") toast(shippedSummary(reply.shipped, reply.kept));
   } catch (e) {
     toast((e as Error).message);
@@ -551,7 +630,8 @@ export async function planOrder(cwd: string): Promise<boolean> {
   if (!conn) return false;
   try {
     const reply = await conn.request({ t: "plan_order", cwd });
-    if (reply.t === "order") toast(`Build order ready: ${reply.order.steps.length} items`);
+    if (reply.t === "order")
+      toast(`Build order ready: ${reply.order.steps.length} items`);
     return true;
   } catch (e) {
     toast((e as Error).message);
@@ -560,11 +640,39 @@ export async function planOrder(cwd: string): Promise<boolean> {
 }
 
 /** Accepts (only `items`' changes, or all) or declines a build order, toasting what changed. */
-export async function answerOrder(order: OrderProposal, accept: boolean, items?: number[]): Promise<boolean> {
+export async function answerOrder(
+  order: OrderProposal,
+  accept: boolean,
+  items?: number[],
+): Promise<boolean> {
   if (!conn) return false;
   try {
-    const reply = await conn.request({ t: "answer_order", project: order.project, id: order.id, accept, items });
-    if (reply.t === "order_applied") toast(appliedSummary(accept, reply.applied));
+    const reply = await conn.request({
+      t: "answer_order",
+      project: order.project,
+      id: order.id,
+      accept,
+      items,
+    });
+    if (reply.t === "order_applied")
+      toast(appliedSummary(accept, reply.applied));
+    return true;
+  } catch (e) {
+    toast((e as Error).message);
+    return false;
+  }
+}
+
+/** Takes a step on a flagged session (ADR-0019 §2): the one offered, its alternative, or leave. */
+export async function takeStep(
+  session: SessionId,
+  seq: number,
+  action: StepAction,
+): Promise<boolean> {
+  if (!conn) return false;
+  try {
+    const reply = await conn.request({ t: "take_step", session, seq, action });
+    if (reply.t === "step_taken") toast(reply.said);
     return true;
   } catch (e) {
     toast((e as Error).message);
@@ -580,9 +688,20 @@ export async function itemFacts(id: number): Promise<ItemFacts | null> {
 }
 
 /** Starts an agent on a backlog item, in a worktree of its own; the session's id. */
-export async function launchItem(id: number, agent: "claude" | "codex", worktree = true): Promise<SessionId> {
+export async function launchItem(
+  id: number,
+  agent: "claude" | "codex",
+  worktree = true,
+): Promise<SessionId> {
   if (!conn) throw new Error("not connected");
-  const reply = await conn.request({ t: "launch_item", id, agent, worktree, size: SPAWN_SIZE, env: [] });
+  const reply = await conn.request({
+    t: "launch_item",
+    id,
+    agent,
+    worktree,
+    size: SPAWN_SIZE,
+    env: [],
+  });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
   return reply.info.id;
@@ -596,7 +715,9 @@ export function sendTo(session: SessionId, text: string): boolean {
 }
 
 /** Answers several prompts, one after another, each with its own choice. */
-export async function answerAll(answers: { session: SessionId; choices: Choice[]; choice: Choice }[]): Promise<void> {
+export async function answerAll(
+  answers: { session: SessionId; choices: Choice[]; choice: Choice }[],
+): Promise<void> {
   for (const a of answers) await answer(a.session, a.choices, a.choice);
   if (answers.length > 1) toast(`Answered ${answers.length} prompts ✓`);
 }

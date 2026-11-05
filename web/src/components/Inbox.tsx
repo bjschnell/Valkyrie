@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { STATE_LABEL, program, type QueueItem, type SessionId, type SessionInfo } from "../proto";
+import {
+  STATE_LABEL,
+  program,
+  type QueueItem,
+  type SessionId,
+  type SessionInfo,
+} from "../proto";
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
-import { answer, answerAll, kill, useApp } from "../store";
+import { answer, answerAll, kill, takeStep, useApp } from "../store";
+import { stepChoices } from "../lib/step";
 import { useLook } from "../lib/theme";
 import { Chevron, Gear, List, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
@@ -19,9 +26,13 @@ const go = (id: number) => {
 export function Inbox() {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
-  const openItems = useApp((s) => s.items.filter((i) => i.status === "open").length);
+  const openItems = useApp(
+    (s) => s.items.filter((i) => i.status === "open").length,
+  );
   const look = useLook();
-  const working = sessions.filter((s) => s.exited === null && s.status.state === "working").length;
+  const working = sessions.filter(
+    (s) => s.exited === null && s.status.state === "working",
+  ).length;
   const [sel, setSel] = useState(-1);
   // The one row swiped open to show its Close button.
   const [swiped, setSwiped] = useState<SessionId | null>(null);
@@ -33,11 +44,19 @@ export function Inbox() {
   // changes, b opens the backlog, d the decisions, `,` opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (
+        (e.target as HTMLElement).closest("textarea, input") ||
+        e.ctrlKey ||
+        e.metaKey ||
+        e.altKey
+      )
+        return;
       const pick = (i: number) => {
         const next = Math.max(0, Math.min(order.length - 1, i));
         setSel(next);
-        document.querySelectorAll<HTMLElement>("[data-pick]")[next]?.scrollIntoView({ block: "nearest" });
+        document
+          .querySelectorAll<HTMLElement>("[data-pick]")
+          [next]?.scrollIntoView({ block: "nearest" });
       };
       const actions: Record<string, () => void> = {
         n: () => (location.hash = "#/new"),
@@ -48,7 +67,8 @@ export function Inbox() {
         k: () => pick(sel - 1),
         Enter: () => selected !== null && go(selected),
         o: () => selected !== null && go(selected),
-        r: () => selected !== null && (location.hash = `#/s/${selected}/review`),
+        r: () =>
+          selected !== null && (location.hash = `#/s/${selected}/review`),
       };
       const action = actions[e.key];
       if (action) {
@@ -69,17 +89,36 @@ export function Inbox() {
           <Wordmark />
         </div>
         <ConnectionPill />
-        <button className="icon-btn" aria-label="Backlog" title="Backlog" onClick={() => (location.hash = "#/backlog")}>
+        <button
+          className="icon-btn"
+          aria-label="Backlog"
+          title="Backlog"
+          onClick={() => (location.hash = "#/backlog")}
+        >
           <List />
           {openItems > 0 && <span className="icon-badge">{openItems}</span>}
         </button>
-        <button className="icon-btn" aria-label="Decisions" title="Decisions" onClick={() => (location.hash = "#/decisions")}>
+        <button
+          className="icon-btn"
+          aria-label="Decisions"
+          title="Decisions"
+          onClick={() => (location.hash = "#/decisions")}
+        >
           <Pin />
         </button>
-        <button className="icon-btn" aria-label="Settings" title="Settings" onClick={() => (location.hash = "#/settings")}>
+        <button
+          className="icon-btn"
+          aria-label="Settings"
+          title="Settings"
+          onClick={() => (location.hash = "#/settings")}
+        >
           <Gear />
         </button>
-        <button className="icon-btn" aria-label="New session" onClick={() => (location.hash = "#/new")}>
+        <button
+          className="icon-btn"
+          aria-label="New session"
+          onClick={() => (location.hash = "#/new")}
+        >
           <Plus />
         </button>
       </header>
@@ -97,7 +136,9 @@ export function Inbox() {
               <div className="calm-mark">✓</div>
               <div className="calm-title">All clear</div>
               <div className="calm-sub">
-                {working ? `${working} working · nothing needs you` : "Nothing needs you"}
+                {working
+                  ? `${working} working · nothing needs you`
+                  : "Nothing needs you"}
               </div>
             </div>
           ) : (
@@ -126,10 +167,14 @@ export function Inbox() {
                 n={i + 1}
                 picked={sel === queue.length + i}
                 swiped={swiped === s.id}
-                onSwipe={(open) => setSwiped((was) => (open ? s.id : was === s.id ? null : was))}
+                onSwipe={(open) =>
+                  setSwiped((was) => (open ? s.id : was === s.id ? null : was))
+                }
               />
             ))}
-            {sessions.length === 0 && <div className="empty">No sessions yet.</div>}
+            {sessions.length === 0 && (
+              <div className="empty">No sessions yet.</div>
+            )}
           </div>
         </section>
       </main>
@@ -151,10 +196,21 @@ function AllowAll() {
     .filter((q) => q.status.state === "needs_input")
     .map((q) => {
       const choices = prompts[q.session]?.choices ?? [];
-      const about = weakSummary(q.status.summary) ? (prompts[q.session]?.context ?? q.status.summary) : q.status.summary;
+      const about = weakSummary(q.status.summary)
+        ? (prompts[q.session]?.context ?? q.status.summary)
+        : q.status.summary;
       return { item: q, choices, yes: plainYes(choices), about };
     })
-    .filter((x): x is { item: QueueItem; choices: Choice[]; yes: Choice; about: string | null } => x.yes !== null);
+    .filter(
+      (
+        x,
+      ): x is {
+        item: QueueItem;
+        choices: Choice[];
+        yes: Choice;
+        about: string | null;
+      } => x.yes !== null,
+    );
   if (ready.length < 2) return null;
   const chosen = ready.filter((x) => !skip.has(x.item.session));
 
@@ -201,7 +257,13 @@ function AllowAll() {
           disabled={chosen.length === 0}
           onClick={() => {
             setOpen(false);
-            void answerAll(chosen.map((x) => ({ session: x.item.session, choices: x.choices, choice: x.yes })));
+            void answerAll(
+              chosen.map((x) => ({
+                session: x.item.session,
+                choices: x.choices,
+                choice: x.yes,
+              })),
+            );
           }}
         >
           Allow {chosen.length}
@@ -211,7 +273,15 @@ function AllowAll() {
   );
 }
 
-function QueueCard({ item, info, picked }: { item: QueueItem; info?: SessionInfo; picked: boolean }) {
+function QueueCard({
+  item,
+  info,
+  picked,
+}: {
+  item: QueueItem;
+  info?: SessionInfo;
+  picked: boolean;
+}) {
   const now = useApp((s) => s.now);
   const prompt = useApp((s) => s.prompts[item.session]);
   const s = item.status;
@@ -231,6 +301,7 @@ function QueueCard({ item, info, picked }: { item: QueueItem; info?: SessionInfo
         ) : (
           s.summary && <p className="card-summary">{s.summary}</p>
         )}
+        {item.flag && <StepOffer item={item} />}
         {choices.length > 0 && (
           <div className="choices">
             {choices.map((c, i) => (
@@ -250,12 +321,52 @@ function QueueCard({ item, info, picked }: { item: QueueItem; info?: SessionInfo
             Open
           </button>
           {s.state === "review_ready" && (
-            <button className="ghost" onClick={() => (location.hash = `#/s/${item.session}/review`)}>
+            <button
+              className="ghost"
+              onClick={() => (location.hash = `#/s/${item.session}/review`)}
+            >
               Review changes
             </button>
           )}
         </div>
       </article>
+    </div>
+  );
+}
+
+/**
+ * The supervisor's offer on a flagged session (ADR-0019 §2): why it picked its
+ * step, and one tap to take it, the other that would fit, or leave the flag.
+ */
+function StepOffer({ item }: { item: QueueItem }) {
+  const [busy, setBusy] = useState(false);
+  const flag = item.flag!;
+  const choices = stepChoices(flag);
+  if (choices.length === 0)
+    return flag.working ? (
+      <p className="step-why">Working out what to offer…</p>
+    ) : null;
+  return (
+    <div className="step-offer">
+      <p className="step-why">
+        <span className="step-label">Supervisor:</span> {flag.step!.why}
+      </p>
+      <div className="step-actions">
+        {choices.map((c) => (
+          <button
+            key={c.action}
+            className={c.primary ? "primary" : "ghost"}
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await takeStep(item.session, flag.seq, c.action);
+              setBusy(false);
+            }}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -286,7 +397,11 @@ function SessionRow({
   // Where the row is while a finger drags it; null when it rests.
   const [drag, setDrag] = useState<number | null>(null);
   // Null until the finger has moved far enough to tell a swipe from a scroll.
-  const gesture = useRef<{ x: number; y: number; sideways: boolean | null } | null>(null);
+  const gesture = useRef<{
+    x: number;
+    y: number;
+    sideways: boolean | null;
+  } | null>(null);
   // A swipe ends in a click on some browsers, which must not open the session.
   const swallow = useRef(false);
   const rest = swiped ? -REVEAL : 0;
@@ -305,7 +420,12 @@ function SessionRow({
 
   return (
     <div className="row-slot" data-pick>
-      <button className="row-close" tabIndex={swiped ? 0 : -1} aria-hidden={!swiped} onClick={() => void kill(s.id)}>
+      <button
+        className="row-close"
+        tabIndex={swiped ? 0 : -1}
+        aria-hidden={!swiped}
+        onClick={() => void kill(s.id)}
+      >
         {state === "exited" ? "Remove" : "Close"}
       </button>
       <button
@@ -313,7 +433,8 @@ function SessionRow({
         style={x ? { transform: `translateX(${x}px)` } : undefined}
         onPointerDown={(e) => {
           swallow.current = false;
-          if (e.pointerType !== "mouse") gesture.current = { x: e.clientX, y: e.clientY, sideways: null };
+          if (e.pointerType !== "mouse")
+            gesture.current = { x: e.clientX, y: e.clientY, sideways: null };
         }}
         onPointerMove={(e) => {
           const g = gesture.current;
@@ -343,9 +464,16 @@ function SessionRow({
         <span className="row-n">{n}</span>
         <StateIcon state={state} />
         <span className="row-main">
-          <span className={`row-name state-text-${queued ? state : "plain"}${s.auto_name ? " auto-name" : ""}`}>{s.name}</span>
+          <span
+            className={`row-name state-text-${queued ? state : "plain"}${s.auto_name ? " auto-name" : ""}`}
+          >
+            {s.name}
+          </span>
           <span className="row-sub">
-            {program(s)} · {state === "exited" ? `exited ${s.exited ?? ""}` : STATE_LABEL[state]}
+            {program(s)} ·{" "}
+            {state === "exited"
+              ? `exited ${s.exited ?? ""}`
+              : STATE_LABEL[state]}
             {s.status.summary ? ` · ${s.status.summary}` : ""}
           </span>
         </span>

@@ -50,12 +50,53 @@ export interface QueueItem {
   auto_name?: boolean;
   cwd: string;
   status: AgentStatus;
+  /** The supervisor's flag on this session's PR, and the step it offers (protocol 25). */
+  flag?: Flag;
+}
+
+/** What the supervisor can do for a flagged session (ADR-0019 §2). */
+export type StepAction = "merge-base" | "ci-fix" | "rerun" | "leave";
+
+export const STEP_LABEL: Record<StepAction, string> = {
+  "merge-base": "Merge the base in",
+  "ci-fix": "Fix CI",
+  rerun: "Rerun failed jobs",
+  leave: "Leave it",
+};
+
+export interface Step {
+  action: StepAction;
+  /** Why it was picked, in a line. */
+  why: string;
+  /** The other action that would fit. */
+  alt?: StepAction;
+}
+
+/** A watcher's flag on an idle session: its reason and the step offered. */
+export interface Flag {
+  reason: string;
+  pr: string;
+  /** The transition it raised; `take_step` names it. */
+  seq: number;
+  /** Absent while the supervisor works out its step (`working`), and once one was taken or left. */
+  step?: Step;
+  working?: boolean;
 }
 
 /** A project decision (ADR-0007). */
-export type DecisionKind = "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
-export const DECISION_KINDS: DecisionKind[] = ["decision", "constraint", "pattern", "gotcha", "fix", "skill", "policy"];
-export type DecisionStatus = "proposed" | "active" | "rejected" | "superseded" | "retired";
+export type DecisionKind =
+  "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
+export const DECISION_KINDS: DecisionKind[] = [
+  "decision",
+  "constraint",
+  "pattern",
+  "gotcha",
+  "fix",
+  "skill",
+  "policy",
+];
+export type DecisionStatus =
+  "proposed" | "active" | "rejected" | "superseded" | "retired";
 
 export interface Decision {
   id: number;
@@ -106,9 +147,21 @@ export type ReviewAction =
   | { a: "pin" }
   | { a: "unpin" }
   /** `scope` absent leaves it as it is. */
-  | { a: "edit"; title: string; body: string; kind: DecisionKind; scope?: string[] }
+  | {
+      a: "edit";
+      title: string;
+      body: string;
+      kind: DecisionKind;
+      scope?: string[];
+    }
   /** Reword a proposal and accept it; refused once it isn't a proposal any more. */
-  | { a: "revise"; title: string; body: string; kind: DecisionKind; scope?: string[] }
+  | {
+      a: "revise";
+      title: string;
+      body: string;
+      kind: DecisionKind;
+      scope?: string[];
+    }
   /** Set where it applies, settling any proposed scope; empty: everywhere. */
   | { a: "scope"; scope: string[] }
   /** Propose a scope for an active decision that has none, once. */
@@ -116,7 +169,8 @@ export type ReviewAction =
   /** Turn a proposed scope down; it isn't proposed again. */
   | { a: "decline_scope" };
 
-export type Color = "default" | { indexed: number } | { rgb: [number, number, number] };
+export type Color =
+  "default" | { indexed: number } | { rgb: [number, number, number] };
 
 export interface Style {
   fg?: Color;
@@ -323,7 +377,13 @@ export type Request =
   | { t: "rename"; session: SessionId; name: string | null }
   | { t: "move"; session: SessionId; to: number }
   | { t: "spawn"; spec: SpawnSpec }
-  | { t: "review"; project: string; id: number; action: ReviewAction; seen: number }
+  | {
+      t: "review";
+      project: string;
+      id: number;
+      action: ReviewAction;
+      seen: number;
+    }
   | { t: "decisions"; cwd: string | null }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
@@ -334,7 +394,14 @@ export type Request =
   /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
   | { t: "plan_order"; cwd: string }
   /** The user only: `items` accepts only those items' changes, absent all of them. */
-  | { t: "answer_order"; project: string; id: number; accept: boolean; items?: number[] }
+  | {
+      t: "answer_order";
+      project: string;
+      id: number;
+      accept: boolean;
+      items?: number[];
+    }
+  | { t: "take_step"; session: SessionId; seq: number; action: StepAction }
   /** Ships every open item whose branch is merged, as last fetched; `dry_run` only
    * says what would ship, `only` ships just those (each checked again). */
   | { t: "ship_merged"; dry_run: boolean; only: number[] | null }
@@ -362,7 +429,14 @@ export type Reply =
   | { t: "done" }
   /** `web`: the build of the app `valk web` serves (see lib/build.ts); `app_protocol`:
    * the protocol that build speaks (see lib/protocol.ts). Both added by `valk web`. */
-  | { t: "hello"; protocol: number; generation: number; boot: number; web?: string; app_protocol?: number }
+  | {
+      t: "hello";
+      protocol: number;
+      generation: number;
+      boot: number;
+      web?: string;
+      app_protocol?: number;
+    }
   | { t: "session"; info: SessionInfo }
   | { t: "sessions"; sessions: SessionInfo[] }
   | { t: "text"; text: string }
@@ -374,6 +448,7 @@ export type Reply =
   | { t: "item_facts"; facts: ItemFacts | null }
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
+  | { t: "step_taken"; said: string }
   | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] };
 
 export type ServerMsg =
@@ -394,7 +469,14 @@ export type ServerMsg =
 export type ChatItem =
   | { k: "user"; id: string; text: string; at?: string }
   | { k: "say"; id: string; text: string; at?: string }
-  | { k: "tool"; id: string; tool: string; summary: string; status: ToolStatus; detail: ToolDetail }
+  | {
+      k: "tool";
+      id: string;
+      tool: string;
+      summary: string;
+      status: ToolStatus;
+      detail: ToolDetail;
+    }
   | { k: "mark"; id: string; text: string; at?: string };
 export type ToolStatus = "running" | "ok" | "error" | "denied";
 export interface ToolDetail {
