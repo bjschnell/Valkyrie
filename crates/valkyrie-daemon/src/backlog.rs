@@ -2,7 +2,7 @@
 //! an agent on itself in a worktree of its own.
 
 use crate::context::Peer;
-use crate::work::{Pr, PrLookup};
+use crate::work::{Check, Pr, PrLookup};
 use crate::{Registry, worktree};
 use anyhow::{Result, bail};
 use std::path::PathBuf;
@@ -603,6 +603,11 @@ impl Registry {
                 .await
                 .unwrap_or(Pr::Unknown);
             let id = item.id;
+            if let Pr::Open { failed, .. } = &pr
+                && !failed.is_empty()
+            {
+                self.flag_red(&item, &url, failed);
+            }
             let closed = match pr {
                 Pr::Merged { .. } => None,
                 Pr::Closed { .. } => Some(true),
@@ -644,6 +649,24 @@ impl Registry {
             self.refresh_items();
         }
         shipped
+    }
+
+    /// Shows an item's idle sessions as blocked on its red pull request (backlog
+    /// #67): ci-fix only sees CI that finished before the agent stopped, and CI
+    /// usually fails minutes after. Seen once, the same flag isn't raised again;
+    /// it's raised anew when the session goes idle again or other checks fail.
+    fn flag_red(&self, item: &Item, url: &str, failed: &[Check]) {
+        if item.boot != self.boot {
+            return;
+        }
+        let summary = red_summary(url, failed);
+        for &id in &item.sessions {
+            if let Ok(session) = self.get(id)
+                && session.flag_blocked(&summary)
+            {
+                tracing::info!(item = item.id, session = id, pr = url, "flagged a red PR");
+            }
+        }
     }
 
     /// Deletes item `id`, for the user only, since it can't be undone (drop is the
@@ -866,6 +889,19 @@ impl Registry {
 }
 
 /// An item's title from what its session was last asked: one line, kept short.
+/// "CI red on PR #N: <the checks that failed>", short enough for the queue.
+fn red_summary(url: &str, failed: &[Check]) -> String {
+    const SHOWN: usize = 3;
+    let pr = url
+        .rsplit_once("/pull/")
+        .map_or("its pull request".to_owned(), |(_, n)| format!("PR #{n}"));
+    let mut names: Vec<&str> = failed.iter().take(SHOWN).map(|c| c.name.as_str()).collect();
+    let more = failed.len().saturating_sub(SHOWN);
+    let more = (more > 0).then(|| format!("{more} more"));
+    names.extend(more.as_deref());
+    format!("CI red on {pr}: {}", names.join(", "))
+}
+
 fn short_title(prompt: &str) -> String {
     const MAX: usize = 80;
     let prompt = backlog::one_line(prompt);
@@ -1117,6 +1153,124 @@ mod tests {
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A PR that goes red after its session's last stop shows that session as
+    /// blocked (backlog #67), once; a busy session, or another boot's, is left be.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_red_pr_flags_its_idle_session() {
+        use valkyrie_proto::AgentState;
+        let dir = std::env::temp_dir().join(format!("valkyrie-red-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let spawn = || {
+            let spec = SpawnSpec {
+                command: vec!["sleep".into(), "30".into()],
+                cwd: Some(dir.clone()),
+                name: None,
+                size: Size { cols: 40, rows: 10 },
+                env: Vec::new(),
+                worktree: None,
+                hidden: false,
+            };
+            let Reply::Session { info } = crate::spawn(&registry, spec).unwrap() else {
+                panic!("no session");
+            };
+            registry.get(info.id).unwrap()
+        };
+        let (idle, busy, old) = (spawn(), spawn(), spawn());
+        let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
+        let with_pr = |session: &Arc<crate::session::Session>, n: u32, boot: u64| {
+            let b = registry.backlog.lock().unwrap();
+            let new = NewItem {
+                title: format!("item {n}"),
+                ..Default::default()
+            };
+            let item = b.add(&new, "human", 1).unwrap();
+            let open = ItemChange::Status {
+                status: ItemStatus::Open,
+            };
+            b.change(item.id, &open, 1).unwrap();
+            let id = session.info().id;
+            b.taken(item.id, id, boot, &[], None, Some(&url(n)), None, 1)
+                .unwrap()
+                .id
+        };
+        with_pr(&idle, 1, registry.boot);
+        with_pr(&busy, 2, registry.boot);
+        with_pr(&old, 3, registry.boot + 1);
+        // A turn under way: news of its PR waits for it to stop.
+        busy.hook(
+            "claude",
+            1,
+            serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": "fix it"}),
+        );
+        let check = |name: &str| Check {
+            name: name.into(),
+            url: String::new(),
+            run: None,
+        };
+        let red: PrLookup = Arc::new(move |_, pr| Pr::Open {
+            url: pr.to_owned(),
+            failed: vec![check("windows"), check("lint")],
+        });
+        let state = |s: &Arc<crate::session::Session>| s.info().status;
+        assert_eq!(registry.ship_merged_prs(red.clone()).await, 0);
+        let flagged = state(&idle);
+        assert_eq!(flagged.state, AgentState::Blocked);
+        assert_eq!(
+            flagged.summary.as_deref(),
+            Some("CI red on PR #1: windows, lint")
+        );
+        assert!(!flagged.seen);
+        assert_eq!(state(&busy).state, AgentState::Working);
+        assert_eq!(state(&old).state, AgentState::Idle);
+        // Looked at, it isn't raised again while the PR stays red.
+        idle.mark_seen(flagged.seq);
+        assert_eq!(registry.ship_merged_prs(red).await, 0);
+        assert_eq!(state(&idle).seq, flagged.seq);
+        assert!(state(&idle).seen);
+        // Green, or still running, says nothing.
+        let green: PrLookup = Arc::new(|_, pr| Pr::Open {
+            url: pr.to_owned(),
+            failed: vec![],
+        });
+        registry.ship_merged_prs(green).await;
+        assert_eq!(state(&busy).state, AgentState::Working);
+        for s in [idle, busy, old] {
+            s.kill();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_red_summary_names_the_pr_and_a_few_checks() {
+        let check = |name: &str| Check {
+            name: name.into(),
+            url: String::new(),
+            run: None,
+        };
+        let one = [check("windows")];
+        assert_eq!(
+            red_summary("https://github.com/o/r/pull/101", &one),
+            "CI red on PR #101: windows"
+        );
+        let five: Vec<Check> = ["a", "b", "c", "d", "e"].map(check).to_vec();
+        assert_eq!(
+            red_summary("https://example.com/x", &five),
+            "CI red on its pull request: a, b, c, 2 more"
+        );
     }
 
     /// The user accepts an agent's proposal while the daemon works out that the

@@ -1165,6 +1165,31 @@ impl Session {
         }
     }
 
+    /// Shows the session as blocked with `summary` if its agent is sitting idle
+    /// (`Idle` or `ReviewReady`), for news that arrives after its last stop, such as
+    /// its pull request's CI going red (backlog #67). A session at work, waiting on
+    /// the human, or already blocked keeps what it shows. Says whether it changed.
+    pub fn flag_blocked(self: &Arc<Self>, summary: &str) -> bool {
+        let now = now_ms();
+        let mut state = self.state.lock().unwrap();
+        let idle = matches!(
+            state.tracker.status().state,
+            AgentState::Idle | AgentState::ReviewReady
+        );
+        if state.exited.is_some() || !idle {
+            return false;
+        }
+        let failed = AgentEvent::TurnFailed {
+            summary: summary.to_owned(),
+        };
+        state.log(now, "flag", json!({"summary": summary}));
+        if !state.tracker.apply(&failed, now, self.watching()) {
+            return false;
+        }
+        self.after_change(&mut state, now);
+        true
+    }
+
     pub fn detach(&self) {
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
