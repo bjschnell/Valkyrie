@@ -365,9 +365,12 @@ fn main() -> Result<()> {
         Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
         Err(e) => e.exit(),
     };
-    let socket = valkyrie_proto::daemon_socket(cli.socket);
-    // Hooks run on every agent event: skip the async runtime and never fail.
+    // Hooks report to the daemon that owns VALK_SESSION, which VALK_SOCKET names,
+    // even from an elevated agent in an ordinary tab.
     if let Some(Cmd::Hook { agent, ambient }) = &cli.cmd {
+        let socket = cli
+            .socket
+            .unwrap_or_else(valkyrie_proto::default_socket_path);
         hook::run(agent, &socket, *ambient);
         return Ok(());
     }
@@ -375,6 +378,7 @@ fn main() -> Result<()> {
         context::hook(agent, *ambient);
         return Ok(());
     }
+    let socket = valkyrie_proto::daemon_socket(cli.socket);
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
 }
 
