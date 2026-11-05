@@ -289,7 +289,10 @@ pub fn locate(file: &Path, cwd: &Path) -> Option<(PathBuf, String)> {
     if !crate::project::in_git(start) {
         return None;
     }
+    // `checkout` canonicalizes the std way, which on Windows keeps the `\\?\`
+    // prefix that `real` lost; bring it to the same form before comparing.
     let checkout = crate::project::checkout(start);
+    let checkout = valkyrie_proto::canonical(&checkout).unwrap_or(checkout);
     let rel = real.strip_prefix(&checkout).ok()?;
     let rel: Vec<String> = rel
         .components()
@@ -494,14 +497,16 @@ mod tests {
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(repo.join("src/a.rs"), "").unwrap();
         let repo = valkyrie_proto::canonical(&repo).unwrap();
+        // The project is keyed as `project::root` has it, like every other hook.
+        let root = crate::project::root(&repo);
         assert_eq!(
             locate(Path::new("src/a.rs"), &repo),
-            Some((repo.clone(), "src/a.rs".into()))
+            Some((root.clone(), "src/a.rs".into()))
         );
         // Not written yet, in a directory that isn't there yet either.
         assert_eq!(
             locate(&repo.join("new/dir/b.rs"), Path::new("/")),
-            Some((repo.clone(), "new/dir/b.rs".into()))
+            Some((root.clone(), "new/dir/b.rs".into()))
         );
         assert_eq!(locate(&dir.join("outside.rs"), &dir), None);
         let _ = std::fs::remove_dir_all(&dir);
