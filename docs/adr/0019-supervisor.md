@@ -24,24 +24,31 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
    - **`merge-base`** (on *conflicting*): types skill #25's instructions into the idle session: "PR #N conflicts with `<base>`. Merge `<base>` into your branch, resolve the conflicts, run `<checks>`, push, and say what you kept from each side. Never rebase a pushed branch."
    - **`ci-fix`** (on *red*): types ci-fix's existing text into the idle session (ADR-0013 §3). Its twice-per-PR limit is shared with the Stop policy's.
    - **`rerun`** (on *red*, when every failed check matches a known flake): `gh run rerun <run> --failed`, once per PR head, without waking the agent. ci-fix's own text already reruns a flake once when the agent is awake. This is the same rerun for an agent that's done, and the two share the once-per-head limit.
-   - **`launch`** (on *item ready*): starts the item's last agent and model on it, as the board's Launch does.
+   - **`launch`** (on *item ready*): starts the item on the agent and model it was last launched with (`Item.launch`), so the work picks up the way it was set up. The board's Launch already does this. An item never launched gets the project's default.
    - **`leave`**: does nothing and keeps the flag, for the user.
 
-   The rule that picks the action is code where code can decide: *conflicting* gets `merge-base`, and *ready* gets `launch` in `valk todo next` order. A model is asked only for two calls code can't make:
-   - **Flake or real:** whether a failed check matches an open bug in the backlog (by name and log excerpt), which picks `rerun` over `ci-fix`.
-   - **Needs its blocker:** whether a ready item that lists a blocker really needs it (DESIGN §8.12 makes waiting advisory).
+   The rule that picks the action is code where code can decide: *conflicting* gets `merge-base`, and *ready* gets `launch` in `valk todo next` order. Two calls need judgement, and they don't get the same kind of model (decided 2026-11-04):
+   - **Flake or real: rules, then a learned decision model; an LLM only for what's left.** This call picks `rerun` over `ci-fix`, and its signals can be read:
+     - did the same check fail and then pass on a rerun of the same commit before (`gh run view --attempt`)?
+     - does the failing test touch anything the PR changed?
+     - which runner failed?
+     - do the check's name and panic text match an open bug in the backlog (#17 lists exact `file:line` panics)?
 
-   It's the extractor's locked-down model, under the same consent (`valk decisions auto`) and hourly limits. With `auto off`, red picks `ci-fix` and the blocker question isn't asked.
+     Hand-written rules over those signals decide first. Every proposal the user accepts or declines is a labelled example in `supervisor.jsonl`. Once there are enough of them (dozens, not a handful), a small fitted model (a decision tree) replaces the hand rules: it's deterministic, it explains itself, and it's cheap to run on every poll. An LLM is asked only when the rules can't decide, which in practice means matching a log to a bug filed in different words.
+   - **Needs its blocker: an LLM.** Whether a ready item that lists a blocker really needs it (DESIGN §8.12 makes waiting advisory) means reading two cards and maybe a diff. There's nothing there to turn into signals for a classical model.
+
+   The LLM calls are short, one-shot runs of the extractor's locked-down model, not a standing session, under the same consent (`valk decisions auto`) and hourly limits. With `auto off`, rules alone decide flakes (a red PR they can't place picks `ci-fix`), and the blocker question isn't asked.
 3. **Ask, then learn.** At first, every step is a proposal: the flagged session's row in the queue offers the chosen action, and one tap runs it. Declining leaves the flag. Each answer is recorded (`supervisor.jsonl` in the project's state dir, 90 days: trigger, action, accepted or not). After the user has accepted the same action on the same trigger in two different sessions, the supervisor proposes a `policy` for it (the ADR-0013 §4 kind, e.g. `template: merge-base, on: conflicting`), and the user accepts it in the review queue like any proposal. From then on that action runs without asking. Retiring the policy stops it, and `valk decisions health` measures it (ADR-0013 §6). Handled means the next state the watcher reads is clean. Overridden means the user prompted the session differently before it got there.
-4. **What it never does.** It doesn't merge, ship, accept, reopen or drop: those stay the user's (ADR-0007, ADR-0015). The merge guard applies to everything it starts. It acts only on a session that is idle (it never interrupts a turn). It launches only accepted items. A proposed item a session filed and took itself (ADR-0018) is flagged and offered steps like any other, since that session is already on it. It doesn't launch more than `max_launched` sessions (default 1) of its own at once.
-5. **Every step is logged and can be stopped.** Each step taken, asked or automatic, is a line in the target session's event log (`supervisor`: trigger, action, policy if any) and in `supervisor.jsonl`. `valk pings` counts the steps the supervisor took. Turning off the Context setting stops every automatic step, as it stops policies, and `valk supervise off` stops the supervisor alone.
-6. **Sessions without a backlog item stay uncovered for now.** The watchers read PRs from items (`Item.pr`). A session with a PR but no item gets no flag, as ADR-0013 §7 already notes. ADR-0012 already asks ad-hoc work to be filed with `valk todo add --take`. Covering those sessions by reading their branch's PR is phase 5, once phases 1–4 show the work is worth the extra `gh` calls.
+4. **What it never does.** It doesn't merge, ship, accept, reopen or drop: those stay the user's (ADR-0007, ADR-0015). The merge guard applies to everything it starts. It acts only on a session that is idle (it never interrupts a turn). It launches only accepted items. A proposed item a session filed and took itself (ADR-0018) is flagged and offered steps like any other, since that session is already on it. It doesn't launch while `max_running` (default 3) or more agent sessions are already running in the repository, its own and the user's alike. Counting every session gives the supervisor the whole picture of the repository, not just the part it started.
+5. **Flags reach you, and remind you.** A flag is a new `blocked` state, so it already pings the TUI and, when you're away, sends a web push like any stop (DESIGN §5.4). Two things are added. The push names the reason ("PR #98 conflicts with main") instead of "stopped". And a flag still unseen an hour later pushes once more. Taking the reason over from an earlier flag (red, then conflicting) counts as new and pushes again.
+6. **Every step is logged and can be stopped.** Each step taken, asked or automatic, is a line in the target session's event log (`supervisor`: trigger, action, policy if any) and in `supervisor.jsonl`. `valk pings` counts the steps the supervisor took. Turning off the Context setting stops every automatic step, as it stops policies, and `valk supervise off` stops the supervisor alone.
+7. **Sessions without a backlog item stay uncovered for now.** The watchers read PRs from items (`Item.pr`). A session with a PR but no item gets no flag, as ADR-0013 §7 already notes. ADR-0012 already asks ad-hoc work to be filed with `valk todo add --take`. Covering those sessions by reading their branch's PR is phase 5, once phases 1–4 show the work is worth the extra `gh` calls.
 
 ## Phases
 1. **The conflict watcher** (backlog #69): `gh pr view` also reads `mergeable,baseRefName`, and the poll flags *conflicting* next to *red*.
-2. **Proposals in the queue:** a flagged session offers its action (TUI, web). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
+2. **Proposals in the queue:** a flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
 3. **Learning:** `supervisor.jsonl`, policy proposals from accepted steps, automatic steps, health.
-4. **Dispatch:** the *item ready* watcher, `launch`, `max_launched`, and the blocker call.
+4. **Dispatch:** the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
 5. **Sessions with a PR and no item**, if the numbers ask for it.
 
 ## Consequences
@@ -50,7 +57,3 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 - **Typing into an idle session resumes it**, even when that's only after the user taps. For an agent that already ended its work, that's what the user would have typed. For one the user left idle on purpose, the step stays a proposal until they've accepted it twice.
 - **The model's two calls can be wrong.** A wrong flake call reruns a real failure once, and the next poll flags it red again, with `ci-fix` next. A wrong blocker call starts an item too early, and its brief still names the unfinished blocker.
 
-## Open questions
-- Should `launch` reuse the item's last agent and model, or the project's default? (Proposed: the last, as the board's Launch does.)
-- Should `max_launched` count only the supervisor's launches, or every session in the repository?
-- Should a flag that sits unseen for long enough also push a notification (DESIGN §5.4)?
