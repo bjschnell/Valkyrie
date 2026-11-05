@@ -255,6 +255,9 @@ struct State {
     /// The reason the PR poll last showed this session blocked with, so a new
     /// reason replaces its own flag but nothing else's (`flag_blocked`).
     flagged: Option<String>,
+    /// Prompts the agent's hooks have reported, the supervisor's own included:
+    /// how a policy's step sees the user prompting first (ADR-0019 §3).
+    prompts: u64,
 }
 
 /// What a hook told the daemon to do next.
@@ -401,6 +404,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             flagged: None,
+            prompts: 0,
             topic: None,
             guard: Default::default(),
             watch: Default::default(),
@@ -492,6 +496,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             flagged: None,
+            prompts: 0,
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
             guard: Default::default(),
@@ -967,6 +972,9 @@ impl Session {
             state.chat = Some(path);
             self.changed.notify_one();
         }
+        if ours && events.contains(&AgentEvent::PromptSubmitted) {
+            state.prompts += 1;
+        }
         if ours && state.tracker.hook(&events, sent_us, now, self.watching()) {
             self.after_change(&mut state, now);
         }
@@ -1212,6 +1220,23 @@ impl Session {
             && status.summary.is_some()
             && status.summary == state.flagged;
         shows.then(|| (status.seq, status.summary.clone().unwrap_or_default()))
+    }
+
+    /// Prompts the agent has reported since the session started.
+    pub fn prompts(&self) -> u64 {
+        self.state.lock().unwrap().prompts
+    }
+
+    /// Whether the agent is sitting between turns: idle, finished, or showing a
+    /// flag, not working or waiting on the human.
+    pub fn resting(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        let status = state.tracker.status();
+        state.exited.is_none()
+            && (matches!(status.state, AgentState::Idle | AgentState::ReviewReady)
+                || (status.state == AgentState::Blocked
+                    && status.summary.is_some()
+                    && status.summary == state.flagged))
     }
 
     /// Types `text` into the agent as a prompt and submits it: pasted whole when

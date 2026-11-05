@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 25;
+pub const PROTOCOL: u32 = 26;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -426,6 +426,14 @@ pub enum ClientMsg {
         accept: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<Vec<u32>>,
+    },
+    /// Whether the supervisor runs (ADR-0019 §6, protocol 26): off, it offers no
+    /// steps and takes none on its own, though the PR poll still flags sessions.
+    /// `None` only asks; setting it is for the user only. Replies `Text`, `on` or
+    /// `off`.
+    Supervise {
+        req: ReqId,
+        on: Option<bool>,
     },
     /// Takes a step on a flagged session (ADR-0019 §2, protocol 25): the user
     /// only, and only while the session still shows the flag raised at `seq`.

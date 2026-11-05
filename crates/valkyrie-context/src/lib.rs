@@ -22,6 +22,7 @@ pub mod scope;
 pub mod served;
 pub mod skill;
 pub mod stale;
+pub mod steps;
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -790,6 +791,46 @@ impl Store {
 
     fn outcomes_file(&self, root: &Path) -> PathBuf {
         self.base.join(project::key(root)).join("policy.jsonl")
+    }
+
+    /// Records a supervisor step offered in `root` and how it was answered, or
+    /// taken by a policy (ADR-0019 §3). Past [`FAILURES_COMPACT`] bytes, what no
+    /// longer counts is dropped first.
+    pub fn record_step(&self, root: &Path, record: &steps::Record, now: u64) -> Result<()> {
+        use std::io::Write;
+        self.mark_project(root)?;
+        let path = self.steps_file(root);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .steps(root, now)
+                .iter()
+                .map(|r| format!("{}\n", r.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", record.to_json())?;
+        Ok(())
+    }
+
+    /// The supervisor steps recorded in `root` over the last
+    /// [`steps::STEP_DAYS`] days, oldest first.
+    pub fn steps(&self, root: &Path, now: u64) -> Vec<steps::Record> {
+        std::fs::read_to_string(self.steps_file(root))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| steps::Record::from_json(&v))
+            .filter(|r| now.saturating_sub(r.at) <= steps::STEP_DAYS * 86_400)
+            .collect()
+    }
+
+    fn steps_file(&self, root: &Path) -> PathBuf {
+        self.base.join(project::key(root)).join("supervisor.jsonl")
     }
 
     /// Records decisions served to a session in `root` (ADR-0014 §5). Written

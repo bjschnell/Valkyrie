@@ -240,6 +240,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Whether the supervisor offers and takes steps on flagged sessions
+    /// (ADR-0019): on (the default) or off. Off, the PR poll still flags them.
+    /// Without one, shows which.
+    Supervise {
+        #[arg(value_parser = ["on", "off"])]
+        mode: Option<String>,
+    },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
 }
@@ -784,6 +791,20 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             } else {
                 print!("{}", pings::report(&pings, days, since, now)?);
             }
+            Ok(())
+        }
+        Some(Cmd::Supervise { mode }) => {
+            let client = connect(&socket).await?.0;
+            let on = client.supervise(mode.map(|m| m == "on")).await?;
+            println!(
+                "{on}: {}",
+                if on == "on" {
+                    "a flagged session offers a step; steps you've made a policy run on their own \
+                     while the Context setting is on"
+                } else {
+                    "flagged sessions show their flag and offer nothing; no step runs on its own"
+                }
+            );
             Ok(())
         }
         Some(Cmd::Bench(cmd)) => bench::run(cmd, &socket).await,

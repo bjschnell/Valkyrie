@@ -612,6 +612,8 @@ impl Registry {
                 .await
                 .unwrap_or(Pr::Unknown);
             let id = item.id;
+            // How the steps policies took turned out, before a new flag can follow.
+            self.judge_steps(&url, &pr);
             if let Pr::Open {
                 failed, conflicts, ..
             } = &pr
@@ -1190,6 +1192,7 @@ mod tests {
             failed: vec![],
             conflicts: None,
             head: String::new(),
+            settled: true,
         });
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);
@@ -1276,6 +1279,7 @@ mod tests {
                 },
                 conflicts: behind.then(|| "main".to_owned()),
                 head: String::new(),
+                settled: true,
             }
         });
         let state = |s: &Arc<crate::session::Session>| s.info().status;
@@ -1379,6 +1383,7 @@ mod tests {
             failed: vec![],
             conflicts: None,
             head: String::new(),
+            settled: true,
         });
         registry.ship_merged_prs(green).await;
         assert_eq!(state(&busy).state, AgentState::Working);
@@ -1390,6 +1395,7 @@ mod tests {
             failed: vec![check("windows")],
             conflicts: Some("main".to_owned()),
             head: String::new(),
+            settled: true,
         });
         registry.ship_merged_prs(conflicting.clone()).await;
         let both = state(&idle);
