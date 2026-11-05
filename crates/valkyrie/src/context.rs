@@ -785,7 +785,14 @@ pub fn hook(agent: &str, ambient: bool) {
             }
             // Decisions the prompt bears on (ADR-0014 §3), each once a session:
             // without the agent's session id there's no telling what it had.
-            if let Some(session) = payload["session_id"].as_str().filter(|s| !s.is_empty()) {
+            // The log is read only when something matches, since this runs on
+            // every prompt, and a match is added only once it's logged, else
+            // every prompt after would get it again.
+            let session = payload["session_id"].as_str().filter(|s| !s.is_empty());
+            let none = std::collections::BTreeSet::new();
+            if let Some(session) = session
+                && !valkyrie_context::find::for_prompt(prompt, &known, &none).is_empty()
+            {
                 use valkyrie_context::served::{self, Layer};
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -793,17 +800,16 @@ pub fn hook(agent: &str, ambient: bool) {
                     .as_secs();
                 let had = served::had(&store.served(&root, now), session, reader().as_deref());
                 let found = valkyrie_context::find::for_prompt(prompt, &known, &had);
-                if !found.is_empty() {
+                if record_served(
+                    &store,
+                    &root,
+                    session,
+                    found.iter().map(|d| (d.id, Layer::Prompt)),
+                ) {
                     if !text.is_empty() {
                         text.push('\n');
                     }
                     text.push_str(&valkyrie_context::find::prompt_section(&found, &valk));
-                    record_served(
-                        &store,
-                        &root,
-                        session,
-                        found.iter().map(|d| (d.id, Layer::Prompt)),
-                    );
                 }
             }
             if text.is_empty() {
@@ -816,14 +822,15 @@ pub fn hook(agent: &str, ambient: bool) {
     println!("{}", valkyrie_context::inject::hook_output(event, &text));
 }
 
-/// Logs decisions served to `session` in `root` (ADR-0014 §5). Measuring only:
-/// a failure to write is dropped, never shown to the agent.
+/// Logs decisions served to `session` in `root` (ADR-0014 §5), and says whether
+/// it did. A failure to write is never shown to the agent; the prompt hook
+/// holds back what it couldn't log, since the log is what stops repeats.
 pub(crate) fn record_served(
     store: &valkyrie_context::Store,
     root: &Path,
     session: &str,
     serves: impl IntoIterator<Item = (u32, valkyrie_context::served::Layer)>,
-) {
+) -> bool {
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -837,7 +844,7 @@ pub(crate) fn record_served(
             at,
         })
         .collect();
-    let _ = store.record_served(root, &serves, at);
+    !serves.is_empty() && store.record_served(root, &serves, at).is_ok()
 }
 
 /// The session a read from inside a Valkyrie session is served to, for the

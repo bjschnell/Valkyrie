@@ -24,13 +24,16 @@ pub fn words(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The active decisions `prompt` bears on, most shared words first, at most
-/// [`MAX_PROMPT`], leaving out the ones in `had` (served whole this session
-/// already). Skills have their own match ([`crate::skill::about`]) and a
-/// policy's hook does its work, so neither is added. A decision must share two
-/// words with the prompt, one of them in its title; a word most decisions have
-/// (this project's name, "agent") says nothing about which one is meant, so it
-/// doesn't count.
+/// The active decisions `prompt` bears on, best first, at most [`MAX_PROMPT`],
+/// leaving out the ones in `had` (served whole this session already). Skills
+/// have their own match ([`crate::skill::about`]) and a policy's hook does its
+/// work, so neither is added.
+///
+/// A decision must share two words with the prompt, one of them in its title.
+/// A shared word weighs one over how many decisions have it, so "shellcheck",
+/// in one, says more than "server", in three, and the shared words must weigh
+/// one in all: two everyday words aren't enough. A word more than a quarter of
+/// the decisions have (this project's name, "agent") doesn't count at all.
 pub fn for_prompt<'a>(
     prompt: &str,
     known: &'a [Decision],
@@ -53,22 +56,26 @@ pub fn for_prompt<'a>(
     let common = (candidates.len() / 4).max(2);
     let said: BTreeSet<String> = words(prompt)
         .into_iter()
-        .filter(|w| have.get(w.as_str()).is_none_or(|n| *n <= common))
+        .filter(|w| have.get(w.as_str()).is_some_and(|n| *n <= common))
         .collect();
-    let mut scored: Vec<(usize, usize, &Decision)> = candidates
+    if said.len() < 2 {
+        return Vec::new();
+    }
+    let mut scored: Vec<(f64, &Decision)> = candidates
         .iter()
         .filter(|(d, ..)| !had.contains(&d.id))
         .filter_map(|(d, title, body)| {
-            let in_title = title.intersection(&said).count();
-            let shared = title.union(body).filter(|w| said.contains(*w)).count();
-            (in_title >= 1 && shared >= 2).then_some((shared, in_title, *d))
+            let shared: Vec<&String> = title.union(body).filter(|w| said.contains(*w)).collect();
+            let weight: f64 = shared.iter().map(|w| 1.0 / have[w.as_str()] as f64).sum();
+            let in_title = title.iter().any(|w| said.contains(w));
+            (in_title && shared.len() >= 2 && weight >= 1.0).then_some((weight, *d))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.id.cmp(&a.2.id)));
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
     scored
         .into_iter()
         .take(MAX_PROMPT)
-        .map(|(.., d)| d)
+        .map(|(_, d)| d)
         .collect()
 }
 
@@ -235,6 +242,41 @@ mod tests {
     }
 
     #[test]
+    fn two_everyday_words_arent_enough() {
+        let mut known = filler();
+        known.extend(filler_from(200));
+        known.push(d(
+            1,
+            DecisionKind::Fix,
+            "Open the PR with gh api on a server error",
+            "",
+        ));
+        known.push(d(
+            2,
+            DecisionKind::Gotcha,
+            "The web server holds the phone's session",
+            "",
+        ));
+        known.push(d(
+            3,
+            DecisionKind::Decision,
+            "Open files from the server pane",
+            "",
+        ));
+        // "open" and "server" are in two and three decisions: 1/2 + 1/3 < 1.
+        assert!(for_prompt("open the server", &known, &BTreeSet::new()).is_empty());
+        // "phone", in one, carries it.
+        assert_eq!(
+            ids(&for_prompt(
+                "the server drops the phone",
+                &known,
+                &BTreeSet::new()
+            )),
+            [2]
+        );
+    }
+
+    #[test]
     fn what_the_session_had_skills_and_policies_and_proposals_are_left_out() {
         let mut known = filler();
         known.push(d(1, DecisionKind::Gotcha, "Run shellcheck on scripts", ""));
@@ -269,12 +311,13 @@ mod tests {
         ));
         let prompt = "the daemon restarts on a long socket path";
         assert_eq!(ids(&for_prompt(prompt, &known, &BTreeSet::new())), [9]);
+        // Four words, each in four decisions, weigh one: all four match.
         let many: Vec<Decision> = (1..=4)
             .map(|i| {
                 d(
                     i,
                     DecisionKind::Decision,
-                    &format!("Socket path rule{i}"),
+                    &format!("Alpha beta gamma delta {i}"),
                     "",
                 )
             })
@@ -282,7 +325,7 @@ mod tests {
             .chain(filler_from(200))
             .collect();
         assert_eq!(
-            for_prompt("socket path", &many, &BTreeSet::new()).len(),
+            for_prompt("alpha beta gamma delta", &many, &BTreeSet::new()).len(),
             MAX_PROMPT
         );
     }

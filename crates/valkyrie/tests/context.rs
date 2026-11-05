@@ -1513,3 +1513,95 @@ fn what_runs_before_pushes_in_two_sessions_proposes_the_repositorys_facts() {
     );
     drop(daemon);
 }
+
+/// A prompt gets the decisions it bears on, once a session (ADR-0014 §3): the
+/// hook reads the store and the serving log itself, no daemon.
+#[test]
+fn a_prompt_gets_the_decisions_it_bears_on_once_a_session() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-prompt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let base = dir.join("context");
+    for d in [&dir, &base] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::set_permissions(d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let store = valkyrie_context::Store::new(&base);
+    let human = valkyrie_proto::Provenance {
+        by: "human".into(),
+        ..Default::default()
+    };
+    for (title, body) in [
+        (
+            "Run shellcheck on shell scripts before pushing",
+            "CI fails on SC2015.",
+        ),
+        (
+            "Pair devices with a one-time code",
+            "Never a request endpoint.",
+        ),
+        (
+            "Rain animates under reduced motion",
+            "It's ambient, not motion.",
+        ),
+        ("Tags never move once published", "Edge is the rolling one."),
+    ] {
+        let new = valkyrie_proto::NewDecision {
+            cwd: repo.clone(),
+            title: title.into(),
+            body: body.into(),
+            kind: valkyrie_proto::DecisionKind::Gotcha,
+            propose: false,
+            supersedes: None,
+            review_every: None,
+            session: None,
+        };
+        store.decide(&new, human.clone(), 1).unwrap();
+    }
+    let hook = |session: &str, prompt: &str| -> String {
+        let mut c = Command::new(BIN);
+        c.args(["context-hook", "claude"])
+            .current_dir(&repo)
+            .env("VALK_SESSION", "1")
+            .env("VALK_CONTEXT", &base)
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env_remove("VALK_SOCKET")
+            .env_remove("VALK_SESSION_HOOKS")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                serde_json::json!({"hook_event_name":"UserPromptSubmit","session_id":session,
+                                   "prompt":prompt,"cwd":repo})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+    let ask = "shellcheck fails on the install scripts";
+    let said = hook("a", ask);
+    let out: serde_json::Value = serde_json::from_str(said.trim()).expect("one JSON object");
+    let added = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        added.contains("Run shellcheck on shell scripts") && added.contains("SC2015"),
+        "{added}"
+    );
+    assert!(!added.contains("Pair devices"), "{added}");
+    // Once a session: asked again, nothing; another session gets it.
+    assert_eq!(hook("a", ask).trim(), "");
+    assert!(hook("b", ask).contains("Run shellcheck"));
+    // Without the agent's session id there's no telling what it had: nothing.
+    assert_eq!(hook("", ask).trim(), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
