@@ -189,6 +189,10 @@ struct App {
     proposals: Vec<Decision>,
     /// Every backlog item, as last pushed (DESIGN §8.12).
     items: Vec<Item>,
+    /// Build orders waiting on the user, as last pushed with the items.
+    orders: Vec<valkyrie_proto::OrderProposal>,
+    /// Where a background task (`P`'s model call) reports a line to say.
+    said: Option<mpsc::UnboundedSender<String>>,
     /// The backlog page is open (`b`).
     backlog: Option<backlog::Page>,
     /// A flagged decision `d` was pressed on once: retiring has no undo, so it
@@ -380,6 +384,8 @@ impl App {
             newer_rx: None,
             shipping: None,
             ship_busy: false,
+            orders: Vec::new(),
+            said: None,
             settings_cursor: None,
             keys_page: None,
             preview: None,
@@ -433,6 +439,8 @@ impl App {
         self.look_for_updates();
         let (shipping_tx, mut shipping) = mpsc::unbounded_channel();
         self.shipping = Some(shipping_tx);
+        let (said_tx, mut said) = mpsc::unbounded_channel();
+        self.said = Some(said_tx);
 
         while !self.quit {
             self.draw(terminal)?;
@@ -496,6 +504,7 @@ impl App {
                     }
                 }
                 Some(done) = shipping.recv() => self.on_shipping(done),
+                Some(line) = said.recv() => self.say(line),
                 _ = anim.tick(), if self.animating() => {}
                 _ = sleep_until(self.pinger.next_due()), if self.pinger.next_due().is_some() => {
                     self.fire_pings();
@@ -2331,7 +2340,9 @@ impl App {
     }
 
     async fn open_backlog(&mut self) {
-        self.backlog = Some(backlog::Page::default());
+        let mut page = backlog::Page::default();
+        page.orders = self.orders.clone();
+        self.backlog = Some(page);
         self.backlog_facts().await;
     }
 
@@ -2529,6 +2540,45 @@ impl App {
                     });
                 });
             }
+            Do::Plan(project) => {
+                let Some(tx) = self.said.clone() else {
+                    anyhow::bail!("not ready to ask yet");
+                };
+                let client = self.client.clone();
+                self.say("asking the model for a build order…".into());
+                // Off the event loop: the model can take a minute. The order itself
+                // arrives with the items; only the outcome is said here.
+                tokio::spawn(async move {
+                    let line = match client.plan_order(project).await {
+                        Ok(o) => format!("build order ready ({} items): O opens it", o.steps.len()),
+                        Err(e) => format!("no build order: {e:#}"),
+                    };
+                    let _ = tx.send(line);
+                });
+            }
+            Do::AnswerOrder {
+                project,
+                id,
+                accept,
+                items,
+            } => {
+                let applied = self.client.answer_order(project, id, accept, items).await?;
+                let mut said = match (accept, applied.changed.as_slice()) {
+                    (false, _) => "build order declined: nothing changed".to_owned(),
+                    (true, []) => "nothing changed".to_owned(),
+                    (true, ids) => format!(
+                        "changed {}",
+                        ids.iter()
+                            .map(|i| format!("#{i}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                };
+                for (id, why) in &applied.skipped {
+                    said += &format!("; #{id} left: {why}");
+                }
+                self.say(said);
+            }
             Do::NextRepo => {
                 if let Some(page) = &mut self.backlog {
                     page.repo = page.repo.next(&self.items);
@@ -2591,8 +2641,12 @@ impl App {
             self.reviewing = self.reviewing.zip(last).map(|(i, last)| i.min(last));
             return Ok(true);
         }
-        if let ServerMsg::Items { items } = msg {
+        if let ServerMsg::Items { items, orders } = msg {
             self.items = items;
+            if let Some(page) = &mut self.backlog {
+                page.orders = orders.clone();
+            }
+            self.orders = orders;
             return Ok(true);
         }
         if let ServerMsg::Queue { items } = msg {
@@ -6249,6 +6303,7 @@ mod tests {
         app.view = Some(Attached::new(2, "two".into(), None));
         // An open item, selected when the page opens.
         app.on_push(ServerMsg::Items {
+            orders: Vec::new(),
             items: vec![Item {
                 priority: Default::default(),
                 blocked_by: Vec::new(),
@@ -6448,6 +6503,7 @@ mod tests {
         };
         use valkyrie_proto::ItemStatus::{Open, Proposed};
         app.on_push(ServerMsg::Items {
+            orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
                 item(2, "Flaky exit test", Proposed),
@@ -6509,6 +6565,7 @@ mod tests {
         // `r` shows one repository's items, named in the title; a check then offers
         // only those to ship.
         app.on_push(ServerMsg::Items {
+            orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
                 item(2, "Flaky exit test", Proposed),

@@ -1,7 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
-import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, Priority, SessionInfo, ShippedItem } from "../proto";
+import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, OrderApplied, OrderProposal, OrderStep, Priority, SessionInfo, ShippedItem } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -229,4 +229,39 @@ export function editChange(
     return { clash: `#${was.id}'s ${what} changed elsewhere since you opened it: save again to replace it`, was: seen };
   }
   return Object.keys(change).length > 1 ? change : null;
+}
+
+/** The repository a build order is asked for from the board: the one it shows, else
+ * the only one its open items are in; null when that's no one or several. */
+export function planScope(repo: RepoFilter, items: Item[]): string | null {
+  if (repo !== null) return repo || null;
+  const roots = new Set(items.filter((i) => i.status === "open" && i.project).map((i) => i.project as string));
+  return roots.size === 1 ? [...roots][0] : null;
+}
+
+/** The build orders the board shows: the shown repository's, or every one. */
+export const ordersShown = (orders: OrderProposal[], repo: RepoFilter) =>
+  orders.filter((o) => repo === null || o.project === repo);
+
+/** What accepting `step` changes on `item`: `p2→p1, after #37`; empty for nothing. */
+export function stepChanges(step: OrderStep, item: Item | undefined): string {
+  const parts: string[] = [];
+  if (step.priority) parts.push(item ? `${priority(item)}→${step.priority}` : step.priority);
+  if (step.blocked_by) {
+    const had = item?.blocked_by ?? [];
+    const added = step.blocked_by.filter((b) => !had.includes(b));
+    if (added.length) parts.push(`after ${added.map((b) => `#${b}`).join(", ")}`);
+  }
+  return parts.join(", ");
+}
+
+/** Whether accepting `step` changes anything. */
+export const changesSomething = (step: OrderStep) => step.priority !== undefined || step.blocked_by !== undefined;
+
+/** The toast after answering a build order. */
+export function appliedSummary(accept: boolean, applied: OrderApplied): string {
+  if (!accept) return "Build order declined: nothing changed";
+  const changed = applied.changed.length ? `Changed ${applied.changed.map((i) => `#${i}`).join(" ")}` : "Nothing changed";
+  const left = (applied.skipped ?? []).map(([id, why]) => `#${id} left: ${why}`);
+  return [changed, ...left].join("; ");
 }

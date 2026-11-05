@@ -282,6 +282,34 @@ export type ItemChange =
     }
   | { do: "status"; status: ItemStatus };
 
+/** One item's place in a build order: why, and what accepting it changes
+ * (`priority` and the whole `blocked_by` list; absent keeps what it has). */
+export interface OrderStep {
+  item: number;
+  reason: string;
+  priority?: Priority;
+  blocked_by?: number[];
+}
+
+/** A build order for one repository's open items (ADR-0019 §2), waiting on the
+ * user: accept all, some (`items`) or none. Never applied on its own. */
+export interface OrderProposal {
+  /** Changes when the repository's proposal is replaced. */
+  id: number;
+  project: string;
+  /** Seconds since the epoch; an item edited after it keeps its edit. */
+  made: number;
+  /** What asked for it: `you asked`, `3+ items added within a day`, … */
+  trigger: string;
+  steps: OrderStep[];
+}
+
+/** What accepting a build order did: items changed, and those left as they were. */
+export interface OrderApplied {
+  changed: number[];
+  skipped?: [number, string][];
+}
+
 /** Requests, without the `req` id the client adds. */
 export type Request =
   | { t: "hello" }
@@ -303,6 +331,10 @@ export type Request =
   | { t: "delete_item"; id: number }
   | { t: "note_item"; id: number; text: string }
   | { t: "item_facts"; id: number }
+  /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
+  | { t: "plan_order"; cwd: string }
+  /** The user only: `items` accepts only those items' changes, absent all of them. */
+  | { t: "answer_order"; project: string; id: number; accept: boolean; items?: number[] }
   /** Ships every open item whose branch is merged, as last fetched; `dry_run` only
    * says what would ship, `only` ships just those (each checked again). */
   | { t: "ship_merged"; dry_run: boolean; only: number[] | null }
@@ -338,8 +370,10 @@ export type Reply =
   | { t: "decisions"; decisions: Decision[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
-  | { t: "items"; items: Item[] }
+  | { t: "items"; items: Item[]; orders?: OrderProposal[] }
   | { t: "item_facts"; facts: ItemFacts | null }
+  | { t: "order"; order: OrderProposal }
+  | { t: "order_applied"; applied: OrderApplied }
   | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] };
 
 export type ServerMsg =
@@ -350,8 +384,8 @@ export type ServerMsg =
   | { t: "queue"; items: QueueItem[] }
   /** Every project's decisions waiting on review, oldest first. */
   | { t: "proposals"; items: Decision[] }
-  /** Every backlog item. */
-  | { t: "items"; items: Item[] }
+  /** Every backlog item, and the build orders waiting on the user. */
+  | { t: "items"; items: Item[]; orders?: OrderProposal[] }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

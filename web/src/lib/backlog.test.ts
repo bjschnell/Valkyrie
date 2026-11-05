@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, byColumn, inRepo, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, takenOnly, waitingOn, wouldShip } from "./backlog";
-import type { AgentState, Item, SessionInfo } from "../proto";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import type { AgentState, Item, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
   id: 1,
@@ -305,5 +305,29 @@ describe("repo filter", () => {
   it("names repositories that share a name by their path", () => {
     const other = item({ id: 5, project: "/work/valkyrie" });
     expect(repoChoices([a, other]).map((c) => c.label)).toEqual(["/home/u/valkyrie", "/work/valkyrie"]);
+  });
+});
+
+describe("build order", () => {
+  const order = (project: string): OrderProposal => ({ id: 1, project, made: 0, trigger: "you asked", steps: [] });
+
+  it("is asked for the shown repository, else the only one with open items", () => {
+    const items = [item({ id: 1, project: "/a" }), item({ id: 2, project: "/a" }), item({ id: 3, project: "/b", status: "shipped" })];
+    expect(planScope("/b", items)).toBe("/b");
+    expect(planScope("", items)).toBeNull();
+    expect(planScope(null, items)).toBe("/a");
+    expect(planScope(null, [...items, item({ id: 4, project: "/c" })])).toBeNull();
+    expect(ordersShown([order("/a"), order("/b")], "/b").map((o) => o.project)).toEqual(["/b"]);
+    expect(ordersShown([order("/a"), order("/b")], null)).toHaveLength(2);
+  });
+
+  it("says what each step changes and what accepting did", () => {
+    const it1 = item({ id: 1, priority: "p2", blocked_by: [5] });
+    expect(stepChanges({ item: 1, reason: "", priority: "p1", blocked_by: [2, 5] }, it1)).toBe("p2→p1, after #2");
+    expect(stepChanges({ item: 1, reason: "" }, it1)).toBe("");
+    expect(changesSomething({ item: 1, reason: "" })).toBe(false);
+    expect(changesSomething({ item: 1, reason: "", blocked_by: [] })).toBe(true);
+    expect(appliedSummary(true, { changed: [3, 2], skipped: [[1, "edited since"]] })).toBe("Changed #3 #2; #1 left: edited since");
+    expect(appliedSummary(false, { changed: [] })).toBe("Build order declined: nothing changed");
   });
 });

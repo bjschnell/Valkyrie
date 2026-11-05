@@ -2500,6 +2500,90 @@ button.title-name {
   margin-bottom: 12px;
 }
 
+/* A build order waiting on the user (ADR-0019 §2), above the board. */
+.order-card {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.order-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 8px;
+}
+
+.order-title {
+  font-weight: 600;
+}
+
+.order-why,
+.order-reason {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.order-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.order-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.order-nobox {
+  display: inline-block;
+  width: 13px;
+}
+
+.order-id {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.order-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-change {
+  color: var(--accent);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.order-reason {
+  margin-left: 21px;
+}
+
+.order-skipped .order-name,
+.order-skipped .order-change {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.order-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .backlog-filter select,
 .launch select,
 .launcher select {
