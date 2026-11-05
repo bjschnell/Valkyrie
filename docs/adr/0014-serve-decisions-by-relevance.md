@@ -1,6 +1,6 @@
 # ADR-0014: Decisions are served by relevance in layers, not dumped into every session
 
-Status: proposed (2026-11-01)
+Status: accepted (2026-11-04); all four phases shipped, phase 4 in PR #108
 Date: 2026-11-01
 Amends: [ADR-0007](0007-context-store.md) §6 (injection), [ADR-0011](0011-learning-loops.md) §4–5 (serving and triggering, extended from skills to decisions)
 
@@ -54,7 +54,7 @@ A decision reaches an agent in one of four layers. Each one is served at most on
 
 ## Consequences
 - **Context arrives as it's needed, not up front.** An agent that never touches the TUI never hears about its keys. One that does hears about them at the moment it opens the file, which is when the rule matters.
-- **More hook work per tool call.** The `PreToolUse` hook matches a path against the project's scopes. That's a glob match against a few dozen patterns, well within ADR-0005's 50 ms. The daemon caches the decisions, so the hook doesn't parse the store each time.
+- **More hook work per tool call.** The `PreToolUse` hook matches a path against the project's scopes. That's a glob match against a few dozen patterns, well within ADR-0005's 50 ms. The hook reads the store itself, as the other hooks do, with no daemon cache: measured on 2026-11-04 with this repo's 43 decisions all scoped, a release build answers a `Read` in about 1 ms, matched or not. Only a file tool starts it (a hook matcher), so shell calls cost nothing.
 - **Codex** gets the block, search and per-prompt serving (it reads `additionalContext` on `UserPromptSubmit`). Per-file serving depends on its hooks supporting added context on `PreToolUse`, which hasn't been verified.
 - **Word matching misses synonyms.** A prompt about "releases" won't match a decision about "tags". The index in the block covers that: every title is still there, and the agent can read any one of them.
 - **The store stays as ADR-0007 made it:** reviewed, local and human-gated. Nothing here writes a decision. It changes only when and where one is shown.
