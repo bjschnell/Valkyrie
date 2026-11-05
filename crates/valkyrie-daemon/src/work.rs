@@ -58,6 +58,9 @@ pub enum Pr {
         conflicts: Option<String>,
         /// The commit it's at (`headRefOid`); empty when `gh` didn't say.
         head: String,
+        /// Every check has finished and GitHub knows whether it merges: what the
+        /// read says about red and conflicting is final for this head.
+        settled: bool,
     },
     Merged {
         url: String,
@@ -309,6 +312,17 @@ fn parse_pr(v: &Value) -> Pr {
             }
         })
         .collect();
+    // A check run is done once it's COMPLETED; a commit status while PENDING or
+    // EXPECTED isn't.
+    let running = v["statusCheckRollup"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|c| {
+            c["status"].as_str().is_some_and(|s| s != "COMPLETED")
+                || matches!(c["state"].as_str(), Some("PENDING" | "EXPECTED"))
+        });
+    let settled = !running && matches!(v["mergeable"].as_str(), Some("MERGEABLE" | "CONFLICTING"));
     let conflicts = (v["mergeable"].as_str() == Some("CONFLICTING")).then(|| {
         v["baseRefName"]
             .as_str()
@@ -321,6 +335,7 @@ fn parse_pr(v: &Value) -> Pr {
         failed,
         conflicts,
         head: v["headRefOid"].as_str().unwrap_or("").to_owned(),
+        settled,
     }
 }
 
@@ -430,6 +445,7 @@ mod tests {
             },
             conflicts: None,
             head: String::new(),
+            settled: true,
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
@@ -551,6 +567,31 @@ mod tests {
         assert_eq!(conflicts(json!({"state": "OPEN", "url": "u"})), None);
     }
 
+    /// A read is settled once every check finished and GitHub knows whether it
+    /// merges (ADR-0019 §3): only then does it judge a step a policy took.
+    #[test]
+    fn an_open_pr_is_settled_once_its_checks_ran_and_mergeability_is_known() {
+        let settled = |mergeable: &str, checks: Value| match parse_pr(&json!({
+            "state": "OPEN", "url": "u", "mergeable": mergeable, "statusCheckRollup": checks
+        })) {
+            Pr::Open { settled, .. } => settled,
+            other => panic!("{other:?}"),
+        };
+        let done = json!([{"status": "COMPLETED", "conclusion": "SUCCESS"},
+                          {"state": "SUCCESS", "context": "bamboo"}]);
+        assert!(settled("MERGEABLE", done.clone()));
+        assert!(settled("CONFLICTING", json!([])));
+        assert!(!settled("UNKNOWN", done));
+        assert!(!settled(
+            "MERGEABLE",
+            json!([{"status": "IN_PROGRESS", "conclusion": ""}])
+        ));
+        assert!(!settled(
+            "MERGEABLE",
+            json!([{"state": "PENDING", "context": "bamboo"}])
+        ));
+    }
+
     /// An item with `branch` and `pr`, taken: the rest as a take leaves it.
     fn taken(project: &Path, branch: &str, pr: &str) -> Item {
         serde_json::from_value(json!({
@@ -605,6 +646,7 @@ mod tests {
                         }],
                         conflicts: None,
                         head: String::new(),
+                        settled: true,
                     }
                 }
                 _ => Pr::None,

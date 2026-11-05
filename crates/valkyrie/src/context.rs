@@ -226,7 +226,15 @@ pub async fn decisions(
                     [(d.id, valkyrie_context::served::Layer::Show)],
                 );
             }
-            if d.kind == DecisionKind::Policy {
+            if let Some(Ok(step)) = valkyrie_context::policy::step(&d.body) {
+                println!(
+                    "\nA supervisor step (ADR-0019 §3): active, it runs {} on a {} pull request's \
+                     idle session without asking, while the Context setting and `valk \
+                     supervise` are on. Retire it to be asked again.",
+                    step.action.as_str(),
+                    step.on.as_str()
+                );
+            } else if d.kind == DecisionKind::Policy {
                 print_policy(client, &here).await?;
             }
             Ok(())

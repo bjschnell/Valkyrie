@@ -415,6 +415,14 @@ impl Client {
         }
     }
 
+    /// Whether the supervisor runs; with `on`, sets it first.
+    pub async fn supervise(&self, on: Option<bool>) -> Result<String> {
+        match self.request(|req| ClientMsg::Supervise { req, on }).await? {
+            Reply::Text { text } => Ok(text),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Fails unless this process is a human's (see `ClientMsg::Vouch`).
     pub async fn vouch(&self, what: &str) -> Result<()> {
         let what = what.to_owned();

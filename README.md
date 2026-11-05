@@ -388,6 +388,16 @@ How it works:
    body as prose, and only once a turn. The queue doesn't show *finished* for a
    turn a policy kept going, and `valk pings` counts those stops apart. Retire the
    policy, or turn Context off, to stop it.
+
+   The supervisor learns the same way. When a PR goes red or conflicts with its
+   base after its agent stopped, the session's queue row offers one step
+   (`merge-base`, `ci-fix` or `rerun`). Take the same step on the same kind of
+   flag in two sessions, with no decline of it since, and a policy such as
+   `template: merge-base` / `on: conflicting` is proposed. Once you accept it, that
+   step runs without asking, and `valk decisions health` flags it if you keep
+   prompting those sessions differently before the PR comes back clean. `valk
+   pings` counts the steps it took. Turning Context off stops the automatic steps,
+   and `valk supervise off` stops the supervisor altogether. The flags still show.
 8. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently

@@ -5,7 +5,7 @@
 //! user's habits, kept once for every project, and each project's own, laid over
 //! them.
 
-use valkyrie_proto::{Decision, DecisionKind, DecisionStatus};
+use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, StepAction};
 
 /// How far `ship` takes work before an agent may stop: each step includes those
 /// before it.
@@ -132,15 +132,28 @@ pub fn parse(body: &str) -> Result<Settings, String> {
         Some("ship") if out == Settings::default() => Err(format!("no settings; {FORMAT}")),
         Some("ship") => Ok(out),
         Some(other) => Err(format!(
-            "unknown template {other:?}; only `ship` exists so far"
+            "unknown template {other:?}; a policy's template is ship, or a supervisor \
+             step: merge-base, ci-fix or rerun"
         )),
         None => Err(format!("no `template`; {FORMAT}")),
     }
 }
 
 /// Reads a policy's body for the scope it's recorded in: the user's habits are
-/// how far they ship, never a repository's facts (ADR-0016 §1).
+/// how far they ship, never a repository's facts (ADR-0016 §1). A supervisor
+/// step (ADR-0019 §3) is a repository's, and has no `ship` settings.
 pub fn check(body: &str, user: bool) -> Result<Settings, String> {
+    if let Some(step) = step(body) {
+        step?;
+        if user {
+            return Err(
+                "a supervisor step is learned in a repository: record it there, not in \
+                 your habits"
+                    .into(),
+            );
+        }
+        return Ok(Settings::default());
+    }
     let settings = parse(body)?;
     if user && (settings.checks.is_some() || settings.ci.is_some()) {
         return Err(
@@ -153,6 +166,110 @@ pub fn check(body: &str, user: bool) -> Result<Settings, String> {
         return Err("a habit says how far you ship: `until: commit|push|pr`".into());
     }
     Ok(settings)
+}
+
+/// The watcher's flag a supervisor step answers (ADR-0019 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Trigger {
+    /// The item's pull request conflicts with its base.
+    Conflicting,
+    /// The item's pull request has failed checks.
+    Red,
+}
+
+impl Trigger {
+    pub fn parse(s: &str) -> Option<Trigger> {
+        match s {
+            "conflicting" => Some(Trigger::Conflicting),
+            "red" => Some(Trigger::Red),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Trigger::Conflicting => "conflicting",
+            Trigger::Red => "red",
+        }
+    }
+}
+
+/// A supervisor step the user let run without asking (ADR-0019 §3): `template:
+/// <action>` and `on: <trigger>`, nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepPolicy {
+    pub action: StepAction,
+    pub on: Trigger,
+}
+
+/// The steps that can become a policy, each with the one trigger it answers.
+/// `leave` does nothing to learn, and a build order (`order`) is the user's call
+/// every time (decision #47), so neither is here.
+pub const LEARNABLE: &[(StepAction, Trigger)] = &[
+    (StepAction::MergeBase, Trigger::Conflicting),
+    (StepAction::CiFix, Trigger::Red),
+    (StepAction::Rerun, Trigger::Red),
+];
+
+const STEP_FORMAT: &str = "a supervisor step's body is `template: merge-base` with \
+     `on: conflicting`, or `template: ci-fix|rerun` with `on: red`, one a line";
+
+/// Reads a supervisor step's body; `None` when its template isn't one (a `ship`
+/// policy, say). Lines starting `>` are evidence, as in [`parse`].
+pub fn step(body: &str) -> Option<Result<StepPolicy, String>> {
+    let lines: Vec<(&str, &str)> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('>'))
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect();
+    let template = lines.iter().find(|(k, _)| *k == "template")?.1;
+    let action = [StepAction::MergeBase, StepAction::CiFix, StepAction::Rerun]
+        .into_iter()
+        .find(|a| a.as_str() == template)?;
+    Some((|| {
+        let mut on = None;
+        for line in body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('>'))
+        {
+            let Some((key, value)) = line.split_once(':') else {
+                return Err(format!("{line:?} isn't `key: value`; {STEP_FORMAT}"));
+            };
+            let value = value.trim();
+            match key.trim() {
+                "template" => {}
+                "on" => {
+                    on = Some(Trigger::parse(value).ok_or_else(|| {
+                        format!("on is {value:?}, not conflicting or red; {STEP_FORMAT}")
+                    })?)
+                }
+                other => return Err(format!("unknown setting {other:?}; {STEP_FORMAT}")),
+            }
+        }
+        let on = on.ok_or_else(|| format!("no `on`; {STEP_FORMAT}"))?;
+        if !LEARNABLE.contains(&(action, on)) {
+            return Err(format!(
+                "{} doesn't answer {}; {STEP_FORMAT}",
+                action.as_str(),
+                on.as_str()
+            ));
+        }
+        Ok(StepPolicy { action, on })
+    })())
+}
+
+/// The active step policy among a project's decisions that runs `action` on
+/// `on` without asking, by its id.
+pub fn step_policy(project: &[Decision], action: StepAction, on: Trigger) -> Option<u32> {
+    project
+        .iter()
+        .filter(|d| d.kind == DecisionKind::Policy && d.status == DecisionStatus::Active)
+        .filter(|d| step(&d.body).and_then(Result::ok) == Some(StepPolicy { action, on }))
+        .map(|d| d.id)
+        .max()
 }
 
 /// Which decision a setting came from.

@@ -112,6 +112,11 @@ pub struct Ping {
 /// so it never reached you. Not one of [`KINDS`].
 pub const KEPT_GOING: &str = "kept going";
 
+/// A step the supervisor took on a flagged session (ADR-0019 §6): `source` is
+/// `policy` when it took it without asking, `you` when you tapped it. Not one of
+/// [`KINDS`].
+pub const SUPERVISED: &str = "supervisor step";
+
 /// Work states that leave the next step to you, whatever the reply says.
 const SHORT: &[&str] = &["uncommitted", "unpushed", "no-pr", "pr-red"];
 
@@ -246,6 +251,24 @@ fn read_log(
                         transcript: p["transcript_path"].as_str().map(PathBuf::from),
                     });
                 }
+            }
+            // `leave` does nothing, so it's no step taken.
+            "supervisor" if t >= since_ms && line["action"] != "leave" => {
+                out.push(Ping {
+                    kind: SUPERVISED,
+                    session: stem.to_owned(),
+                    t,
+                    seen: true,
+                    summary: line["action"].as_str().unwrap_or("").to_owned(),
+                    ask: None,
+                    source: Some(if line["auto"] == true {
+                        "policy"
+                    } else {
+                        "you"
+                    }),
+                    work: None,
+                    cwd: cwd.clone(),
+                });
             }
             "state" => {
                 let s = &line["status"];
@@ -474,6 +497,16 @@ pub fn report(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Result<S
         writeln!(
             s,
             "  kept going by a policy      {kept} (not counted above)"
+        )?;
+    }
+    let steps: Vec<&Ping> = pings.iter().filter(|p| p.kind == SUPERVISED).collect();
+    if !steps.is_empty() {
+        let auto = steps.iter().filter(|p| p.source == Some("policy")).count();
+        writeln!(
+            s,
+            "  steps the supervisor took   {} ({auto} on its own by a policy, {} you tapped)",
+            steps.len(),
+            steps.len() - auto
         )?;
     }
     let recorded: Vec<&&Ping> = ends.iter().filter(|p| p.work.is_some()).collect();
@@ -750,6 +783,35 @@ mod tests {
         let text = report(&none, 30, 0, 86_400_000).unwrap();
         assert!(text.contains("in 0 sessions"), "{text}");
         assert!(text.contains("Questions: 0"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_supervisors_steps_are_counted_apart_asked_or_not() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-pings-sup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let step = |t: u64, action: &str, auto: bool| {
+            json!({"k": "supervisor", "t": t, "trigger": "conflicting",
+                   "action": action, "offered": action, "auto": auto})
+        };
+        write_log(
+            &dir,
+            "3-1",
+            &[
+                step(1000, "merge-base", false),
+                step(2000, "leave", false),
+                step(3000, "merge-base", true),
+                step(4000, "rerun", true),
+            ],
+        );
+        let pings = collect(&dir, 0, None).unwrap();
+        let steps: Vec<_> = pings.iter().filter(|p| p.kind == SUPERVISED).collect();
+        assert_eq!(steps.len(), 3);
+        let text = report(&pings, 30, 0, 86_400_000).unwrap();
+        assert!(
+            text.contains("steps the supervisor took   3 (2 on its own by a policy, 1 you tapped)"),
+            "{text}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
