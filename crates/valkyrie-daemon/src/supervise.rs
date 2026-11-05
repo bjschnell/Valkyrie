@@ -967,6 +967,49 @@ pub(crate) fn gather(dir: &Path, url: &str, head: &str, failed: &[Check]) -> Sig
 mod tests {
     use super::*;
 
+    /// Two daemons on one state dir each keep the heads they reran at, so a
+    /// restart doesn't rerun a pull request again because the other one saved.
+    #[test]
+    fn two_daemons_keep_their_own_reruns() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-reruns2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let open = |socket: &str| {
+            crate::new_registry(
+                dir.join(socket),
+                &dir.join("state"),
+                Path::new("/bin/true"),
+                1,
+                0,
+                7,
+                false,
+            )
+            .unwrap()
+            .0
+        };
+        let (user, admin) = (open("u.sock"), open("a.sock"));
+        {
+            let mut sup = user.supervisor.lock().unwrap();
+            sup.reruns.insert("pr/1".into(), "abc".into());
+            sup.save();
+        }
+        {
+            let mut sup = admin.supervisor.lock().unwrap();
+            sup.reruns.insert("pr/2".into(), "def".into());
+            sup.save();
+        }
+        drop(user);
+        assert!(
+            open("u.sock")
+                .supervisor
+                .lock()
+                .unwrap()
+                .rerun_spent("pr/1", "abc"),
+            "the other daemon's save forgot this one's rerun"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn conflicting_merges_the_base_first_and_red_follows_the_rules() {
         let step = |c, v: Verdict, spent| pick(c, &v, spent).map(|s| (s.action, s.alt));
