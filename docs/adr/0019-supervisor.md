@@ -49,10 +49,10 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 
 ## Phases
 1. **The conflict watcher** (backlog #69): `gh pr view` also reads `mergeable,baseRefName`, and the poll flags *conflicting* next to *red*.
-2. **Build order and proposals:** the *unordered work* watcher, `valk todo plan` and `order`, which is the case the user hits most. A flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
-3. **Learning:** `supervisor.jsonl`, policy proposals from accepted steps, automatic steps, health.
-4. **Dispatch:** the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
-5. **Sessions with a PR and no item**, if the numbers ask for it.
+2. **Build order and proposals** (backlog #75, #76): the *unordered work* watcher, `valk todo plan` and `order`, which is the case the user hits most. A flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
+3. **Learning** (#77): `supervisor.jsonl`, policy proposals from accepted steps, automatic steps, health.
+4. **Dispatch** (#78): the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
+5. **Sessions with a PR and no item**, if the numbers ask for it. Not filed yet.
 
 ## Consequences
 - **No standing supervisor session.** No agent sits in a loop reading the queue. It's watchers and a picker in the daemon, plus a few model calls on flags. That's cheaper, can be audited, and can't drift, at the price of DESIGN §7's open-ended "dispatch tasks" being only what the action list names. A case that needs more joins the list as a new template, as policies do.
