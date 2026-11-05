@@ -605,10 +605,12 @@ impl Registry {
                 .await
                 .unwrap_or(Pr::Unknown);
             let id = item.id;
-            if let Pr::Open { failed, .. } = &pr
-                && !failed.is_empty()
+            if let Pr::Open {
+                failed, conflicts, ..
+            } = &pr
+                && let Some(summary) = pr_summary(&url, failed, conflicts.as_deref())
             {
-                self.flag_red(&item, &url, failed);
+                self.flag_pr(&item, &url, &summary);
             }
             let closed = match pr {
                 Pr::Merged { .. } => None,
@@ -653,20 +655,27 @@ impl Registry {
         shipped
     }
 
-    /// Shows an item's idle sessions as blocked on its red pull request (backlog
-    /// #67): ci-fix only sees CI that finished before the agent stopped, and CI
-    /// usually fails minutes after. Seen once, the same flag isn't raised again;
-    /// it's raised anew when the session goes idle again or other checks fail.
-    fn flag_red(&self, item: &Item, url: &str, failed: &[Check]) {
+    /// Shows an item's idle sessions as blocked on its pull request: red CI
+    /// (backlog #67), since ci-fix only sees CI that finished before the agent
+    /// stopped and CI usually fails minutes after; or a conflict with its base
+    /// (#69), which comes when other work merges, long after the agent's last
+    /// stop. Seen once, the same flag isn't raised again; it's raised anew when the
+    /// session goes idle again or `summary` changes (`Session::flag_blocked`).
+    fn flag_pr(&self, item: &Item, url: &str, summary: &str) {
         if item.boot != self.boot {
             return;
         }
-        let summary = red_summary(url, failed);
         for &id in &item.sessions {
             if let Ok(session) = self.get(id)
-                && session.flag_blocked(&summary)
+                && session.flag_blocked(summary)
             {
-                tracing::info!(item = item.id, session = id, pr = url, "flagged a red PR");
+                tracing::info!(
+                    item = item.id,
+                    session = id,
+                    pr = url,
+                    summary,
+                    "flagged a PR"
+                );
             }
         }
     }
@@ -891,17 +900,27 @@ impl Registry {
 }
 
 /// An item's title from what its session was last asked: one line, kept short.
-/// "CI red on PR #N: <the checks that failed>", short enough for the queue.
-fn red_summary(url: &str, failed: &[Check]) -> String {
+/// What's wrong with an open pull request, short enough for the queue: "CI red
+/// on PR #N: <the checks that failed>", "PR #N conflicts with <base>", or both.
+/// `None` when it's neither.
+fn pr_summary(url: &str, failed: &[Check], conflicts: Option<&str>) -> Option<String> {
     const SHOWN: usize = 3;
     let pr = url
         .rsplit_once("/pull/")
         .map_or("its pull request".to_owned(), |(_, n)| format!("PR #{n}"));
-    let mut names: Vec<&str> = failed.iter().take(SHOWN).map(|c| c.name.as_str()).collect();
-    let more = failed.len().saturating_sub(SHOWN);
-    let more = (more > 0).then(|| format!("{more} more"));
-    names.extend(more.as_deref());
-    format!("CI red on {pr}: {}", names.join(", "))
+    let red = (!failed.is_empty()).then(|| {
+        let mut names: Vec<&str> = failed.iter().take(SHOWN).map(|c| c.name.as_str()).collect();
+        let more = failed.len().saturating_sub(SHOWN);
+        let more = (more > 0).then(|| format!("{more} more"));
+        names.extend(more.as_deref());
+        names.join(", ")
+    });
+    Some(match (conflicts, red) {
+        (None, None) => return None,
+        (None, Some(red)) => format!("CI red on {pr}: {red}"),
+        (Some(base), None) => format!("{pr} conflicts with {base}"),
+        (Some(base), Some(red)) => format!("{pr} conflicts with {base}; CI red: {red}"),
+    })
 }
 
 fn short_title(prompt: &str) -> String {
@@ -1151,6 +1170,7 @@ mod tests {
         let reopened: PrLookup = Arc::new(|_, pr| Pr::Open {
             url: pr.to_owned(),
             failed: vec![],
+            conflicts: None,
         });
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);
@@ -1158,10 +1178,11 @@ mod tests {
     }
 
     /// A PR that goes red after its session's last stop shows that session as
-    /// blocked (backlog #67), once; a busy session, or another boot's, is left be.
+    /// blocked (backlog #67), once, and so does one that conflicts with its base
+    /// after main moved (#69); a busy session, or another boot's, is left be.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_red_pr_flags_its_idle_session() {
+    async fn a_red_or_conflicting_pr_flags_its_idle_session() {
         use valkyrie_proto::AgentState;
         let dir = std::env::temp_dir().join(format!("valkyrie-red-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1191,7 +1212,7 @@ mod tests {
             };
             registry.get(info.id).unwrap()
         };
-        let (idle, busy, old) = (spawn(), spawn(), spawn());
+        let (idle, busy, old, behind) = (spawn(), spawn(), spawn(), spawn());
         let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
         let with_pr = |session: &Arc<crate::session::Session>, n: u32, boot: u64| {
             let b = registry.backlog.lock().unwrap();
@@ -1212,6 +1233,7 @@ mod tests {
         with_pr(&idle, 1, registry.boot);
         with_pr(&busy, 2, registry.boot);
         with_pr(&old, 3, registry.boot + 1);
+        with_pr(&behind, 4, registry.boot);
         // A turn under way: news of its PR waits for it to stop.
         busy.hook(
             "claude",
@@ -1223,9 +1245,18 @@ mod tests {
             url: String::new(),
             run: None,
         };
-        let red: PrLookup = Arc::new(move |_, pr| Pr::Open {
-            url: pr.to_owned(),
-            failed: vec![check("windows"), check("lint")],
+        // PR #4 is green but six merges landed on main since it was pushed.
+        let red: PrLookup = Arc::new(move |_, pr| {
+            let behind = pr.ends_with("/4");
+            Pr::Open {
+                url: pr.to_owned(),
+                failed: if behind {
+                    vec![]
+                } else {
+                    vec![check("windows"), check("lint")]
+                },
+                conflicts: behind.then(|| "main".to_owned()),
+            }
         });
         let state = |s: &Arc<crate::session::Session>| s.info().status;
         assert_eq!(registry.ship_merged_prs(red.clone()).await, 0);
@@ -1238,6 +1269,12 @@ mod tests {
         assert!(!flagged.seen);
         assert_eq!(state(&busy).state, AgentState::Working);
         assert_eq!(state(&old).state, AgentState::Idle);
+        let conflicted = state(&behind);
+        assert_eq!(conflicted.state, AgentState::Blocked);
+        assert_eq!(
+            conflicted.summary.as_deref(),
+            Some("PR #4 conflicts with main")
+        );
         // Looked at, it isn't raised again while the PR stays red.
         idle.mark_seen(flagged.seq);
         assert_eq!(registry.ship_merged_prs(red).await, 0);
@@ -1247,32 +1284,62 @@ mod tests {
         let green: PrLookup = Arc::new(|_, pr| Pr::Open {
             url: pr.to_owned(),
             failed: vec![],
+            conflicts: None,
         });
         registry.ship_merged_prs(green).await;
         assert_eq!(state(&busy).state, AgentState::Working);
-        for s in [idle, busy, old] {
+        assert_eq!(state(&idle).seq, flagged.seq);
+        // Still blocked on its red CI when main moves: the new reason replaces the
+        // old flag, and shows as news again.
+        let conflicting: PrLookup = Arc::new(move |_, pr| Pr::Open {
+            url: pr.to_owned(),
+            failed: vec![check("windows")],
+            conflicts: Some("main".to_owned()),
+        });
+        registry.ship_merged_prs(conflicting.clone()).await;
+        let both = state(&idle);
+        assert_eq!(
+            both.summary.as_deref(),
+            Some("PR #1 conflicts with main; CI red: windows")
+        );
+        assert!(both.seq > flagged.seq && !both.seen);
+        idle.mark_seen(both.seq);
+        registry.ship_merged_prs(conflicting).await;
+        assert_eq!(state(&idle).seq, both.seq);
+
+        for s in [idle, busy, old, behind] {
             s.kill();
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn a_red_summary_names_the_pr_and_a_few_checks() {
+    fn a_pr_summary_names_the_pr_its_conflict_and_a_few_checks() {
         let check = |name: &str| Check {
             name: name.into(),
             url: String::new(),
             run: None,
         };
+        let url = "https://github.com/o/r/pull/101";
         let one = [check("windows")];
-        assert_eq!(
-            red_summary("https://github.com/o/r/pull/101", &one),
-            "CI red on PR #101: windows"
-        );
+        let summary = |url, failed, conflicts| pr_summary(url, failed, conflicts).unwrap();
+        assert_eq!(summary(url, &one, None), "CI red on PR #101: windows");
         let five: Vec<Check> = ["a", "b", "c", "d", "e"].map(check).to_vec();
         assert_eq!(
-            red_summary("https://example.com/x", &five),
+            summary("https://example.com/x", &five, None),
             "CI red on its pull request: a, b, c, 2 more"
         );
+        // Conflicting with its base (backlog #69), alone or with red CI.
+        assert_eq!(
+            summary(url, &[], Some("main")),
+            "PR #101 conflicts with main"
+        );
+        assert_eq!(
+            summary(url, &one, Some("main")),
+            "PR #101 conflicts with main; CI red: windows"
+        );
+        // Green, or still running, and merging cleanly: nothing to say.
+        assert_eq!(pr_summary(url, &[], None), None);
     }
 
     /// The user accepts an agent's proposal while the daemon works out that the

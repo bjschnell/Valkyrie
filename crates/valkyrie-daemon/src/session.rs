@@ -252,6 +252,9 @@ struct State {
     pairing: crate::pairing::Pairing,
     /// What the agent ran, for the repository's facts (ADR-0016 §3).
     watch: crate::facts::Watch,
+    /// The reason the PR poll last showed this session blocked with, so a new
+    /// reason replaces its own flag but nothing else's (`flag_blocked`).
+    flagged: Option<String>,
 }
 
 /// What a hook told the daemon to do next.
@@ -397,6 +400,7 @@ impl Session {
             fg_group: None,
             fg_checked_ms: 0,
             live_cwd: None,
+            flagged: None,
             topic: None,
             guard: Default::default(),
             watch: Default::default(),
@@ -487,6 +491,7 @@ impl Session {
             fg_group: None,
             fg_checked_ms: 0,
             live_cwd: None,
+            flagged: None,
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
             guard: Default::default(),
@@ -1168,15 +1173,21 @@ impl Session {
     /// Shows the session as blocked with `summary` if its agent is sitting idle
     /// (`Idle` or `ReviewReady`), for news that arrives after its last stop, such as
     /// its pull request's CI going red (backlog #67). A session at work, waiting on
-    /// the human, or already blocked keeps what it shows. Says whether it changed.
+    /// the human, or blocked on something else keeps what it shows; one still
+    /// showing an earlier flag of this kind takes the new reason (#69). Says
+    /// whether it changed.
     pub fn flag_blocked(self: &Arc<Self>, summary: &str) -> bool {
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
-        let idle = matches!(
-            state.tracker.status().state,
-            AgentState::Idle | AgentState::ReviewReady
-        );
-        if state.exited.is_some() || !idle {
+        let status = state.tracker.status();
+        let idle = matches!(status.state, AgentState::Idle | AgentState::ReviewReady);
+        // Still showing the poll's own flag (nobody has prompted it since), now
+        // with another reason: CI went green and main moved, say.
+        let reflag = status.state == AgentState::Blocked
+            && status.summary.is_some()
+            && status.summary == state.flagged
+            && state.flagged.as_deref() != Some(summary);
+        if state.exited.is_some() || !(idle || reflag) {
             return false;
         }
         let failed = AgentEvent::TurnFailed {
@@ -1186,6 +1197,7 @@ impl Session {
         if !state.tracker.apply(&failed, now, self.watching()) {
             return false;
         }
+        state.flagged = Some(summary.to_owned());
         self.after_change(&mut state, now);
         true
     }

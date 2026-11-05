@@ -53,6 +53,9 @@ pub enum Pr {
         url: String,
         /// Its failed checks; none: green or still running.
         failed: Vec<Check>,
+        /// The branch it targets, when GitHub says it conflicts with it. `None`
+        /// when it merges cleanly or GitHub hasn't worked that out yet.
+        conflicts: Option<String>,
     },
     Merged {
         url: String,
@@ -144,7 +147,7 @@ pub fn state(
     }
     let (state, url) = match pr(cwd, &branch) {
         Pr::None => (State::NoPr, None),
-        Pr::Open { url, failed } if !failed.is_empty() => (State::PrRed, Some(url)),
+        Pr::Open { url, failed, .. } if !failed.is_empty() => (State::PrRed, Some(url)),
         Pr::Open { url, .. } | Pr::Merged { url } | Pr::Closed { url } => (State::Clean, Some(url)),
         Pr::Unknown => (State::Clean, None),
     };
@@ -214,7 +217,13 @@ fn item_dir(cwd: &Path, item: &Item) -> Option<PathBuf> {
 pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
     let child = Command::new("gh")
         .no_window()
-        .args(["pr", "view", which, "--json", "state,url,statusCheckRollup"])
+        .args([
+            "pr",
+            "view",
+            which,
+            "--json",
+            "state,url,statusCheckRollup,mergeable,baseRefName",
+        ])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -251,7 +260,7 @@ pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
     serde_json::from_slice::<Value>(&out.stdout).map_or(Pr::Unknown, |v| parse_pr(&v))
 }
 
-/// `gh pr view --json state,url,statusCheckRollup`, read.
+/// `gh pr view --json state,url,statusCheckRollup,mergeable,baseRefName`, read.
 fn parse_pr(v: &Value) -> Pr {
     let url = v["url"].as_str().unwrap_or("").to_owned();
     match v["state"].as_str() {
@@ -297,7 +306,18 @@ fn parse_pr(v: &Value) -> Pr {
             }
         })
         .collect();
-    Pr::Open { url, failed }
+    let conflicts = (v["mergeable"].as_str() == Some("CONFLICTING")).then(|| {
+        v["baseRefName"]
+            .as_str()
+            .filter(|b| !b.is_empty())
+            .unwrap_or("its base branch")
+            .to_owned()
+    });
+    Pr::Open {
+        url,
+        failed,
+        conflicts,
+    }
 }
 
 /// The run id in a GitHub Actions link (`…/actions/runs/<id>/job/<job>`), on
@@ -404,6 +424,7 @@ mod tests {
             } else {
                 vec![]
             },
+            conflicts: None,
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
@@ -502,6 +523,29 @@ mod tests {
         );
     }
 
+    /// GitHub says whether an open PR merges into its base (backlog #69); only a
+    /// sure conflict counts, since `UNKNOWN` means it hasn't worked that out yet.
+    #[test]
+    fn an_open_pr_says_when_it_conflicts_with_its_base() {
+        let conflicts = |v: Value| match parse_pr(&v) {
+            Pr::Open { conflicts, .. } => conflicts,
+            other => panic!("{other:?}"),
+        };
+        let pr = |mergeable: &str, base: &str| json!({"state": "OPEN", "url": "u", "mergeable": mergeable, "baseRefName": base});
+        assert_eq!(
+            conflicts(pr("CONFLICTING", "main")).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            conflicts(pr("CONFLICTING", "")).as_deref(),
+            Some("its base branch")
+        );
+        assert_eq!(conflicts(pr("MERGEABLE", "main")), None);
+        assert_eq!(conflicts(pr("UNKNOWN", "main")), None);
+        // An older `gh`, or a reply without the field.
+        assert_eq!(conflicts(json!({"state": "OPEN", "url": "u"})), None);
+    }
+
     /// An item with `branch` and `pr`, taken: the rest as a take leaves it.
     fn taken(project: &Path, branch: &str, pr: &str) -> Item {
         serde_json::from_value(json!({
@@ -554,6 +598,7 @@ mod tests {
                             url: String::new(),
                             run: None,
                         }],
+                        conflicts: None,
                     }
                 }
                 _ => Pr::None,
