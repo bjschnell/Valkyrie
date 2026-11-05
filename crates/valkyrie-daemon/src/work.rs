@@ -140,12 +140,17 @@ pub fn state(
                 .find(|r| git_out(cwd, &["rev-parse", "--verify", "--quiet", r.as_str()]).is_ok())
         });
         let work = base.and_then(|b| ahead(&format!("{b}..HEAD")));
-        let state = if work.unwrap_or(0) > 0 {
-            State::Unpushed
-        } else {
-            State::Clean
-        };
-        return Some((state, Some(branch), None));
+        if work.unwrap_or(0) == 0 {
+            return Some((State::Clean, Some(branch), None));
+        }
+        // Pushed once and its remote branch since deleted, as the forge does after
+        // a merge: a squash merge leaves these commits off the default branch, so
+        // its pull request says whether they're done with (#82).
+        let tracked = git_out(cwd, &["config", &format!("branch.{branch}.merge")]).is_ok();
+        if tracked && let Pr::Merged { url } | Pr::Closed { url } = pr(cwd, &branch) {
+            return Some((State::Clean, Some(branch), Some(url)));
+        }
+        return Some((State::Unpushed, Some(branch), None));
     }
     if ahead("@{upstream}..HEAD").unwrap_or(0) > 0 {
         return Some((State::Unpushed, Some(branch), None));
@@ -459,6 +464,36 @@ mod tests {
         assert_eq!(of(&app, open(false)), State::Unpushed);
         let (_, branch, _) = state(&app, &|_, _| Pr::None).unwrap();
         assert_eq!(branch.as_deref(), Some("fix"));
+    }
+
+    /// A squash merge leaves the branch's commits off the default branch, and the
+    /// forge deletes the branch: its upstream is gone, not never pushed (#82).
+    #[test]
+    fn a_squash_merged_branch_whose_remote_is_gone_is_clean() {
+        let repo = Repo::new("squash");
+        let app = repo.app();
+        git(&app, &["checkout", "--quiet", "-b", "fix"]);
+        std::fs::write(app.join("a.txt"), "fix").unwrap();
+        commit(&app, "fix");
+        git(&app, &["push", "--quiet", "-u", "origin", "fix"]);
+        // The merge, done on the forge: one new commit on main, the branch deleted.
+        git(&app, &["push", "--quiet", "origin", "--delete", "fix"]);
+        git(&app, &["fetch", "--quiet", "--prune", "origin"]);
+        let url = "https://example.com/pr/1".to_owned();
+        let merged = Pr::Merged { url: url.clone() };
+        let (got, branch, pr) = state(&app, &|_, _| merged.clone()).unwrap();
+        assert_eq!(got, State::Clean);
+        assert_eq!(
+            (branch.as_deref(), pr.as_deref()),
+            (Some("fix"), Some(url.as_str()))
+        );
+        assert_eq!(of(&app, Pr::Closed { url: url.clone() }), State::Clean);
+        // No PR, or none that's done with: the commits are only here now.
+        assert_eq!(of(&app, Pr::None), State::Unpushed);
+        assert_eq!(of(&app, Pr::Unknown), State::Unpushed);
+        // A branch never pushed isn't asked about, whatever a PR of its name says.
+        git(&app, &["checkout", "--quiet", "-b", "fresh"]);
+        assert_eq!(of(&app, merged), State::Unpushed);
     }
 
     #[test]
