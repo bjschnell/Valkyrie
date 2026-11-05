@@ -15,6 +15,7 @@ mod pairing;
 mod pty;
 mod restore;
 mod session;
+mod supervise;
 pub mod work;
 mod worktree;
 
@@ -165,6 +166,8 @@ struct Registry {
     /// What the build-order watcher should look at.
     order_tx: mpsc::UnboundedSender<order::Trigger>,
     order_rx: Mutex<Option<mpsc::UnboundedReceiver<order::Trigger>>>,
+    /// The steps offered on flagged sessions (ADR-0019 §2).
+    supervisor: Mutex<supervise::Supervisor>,
     /// Items a launch is starting a session on, not yet recorded on the item: a
     /// second launch or a take meanwhile would put two sessions on one.
     launching: Mutex<HashSet<u32>>,
@@ -288,9 +291,10 @@ impl Registry {
         let mut items: Vec<QueueItem> = self
             .listed()
             .iter()
-            .map(|s| s.info())
-            .filter(|info| valkyrie_agents::queued(&info.status))
-            .map(|info| QueueItem {
+            .map(|s| (s.info(), s))
+            .filter(|(info, _)| valkyrie_agents::queued(&info.status))
+            .map(|(info, s)| QueueItem {
+                flag: self.flag_of(s, info.id),
                 session: info.id,
                 name: info.name,
                 auto_name: info.auto_name,
@@ -493,6 +497,7 @@ fn new_registry(
         items: watch::Sender::new(Arc::default()),
         orders: watch::Sender::new(Arc::default()),
         order_book: Mutex::new(order::Book::load(state_dir.join("orders.json"))),
+        supervisor: Mutex::new(supervise::Supervisor::load(state_dir.join("reruns.json"))),
         order_tx,
         order_rx: Mutex::new(Some(order_rx)),
         launching: Mutex::default(),
@@ -899,7 +904,13 @@ const PRS_EVERY: Duration = Duration::from_secs(300);
 /// none open this costs nothing.
 async fn watch_prs(registry: Arc<Registry>) {
     let lookup: work::PrLookup = Arc::new(|dir, url| work::gh_pr(dir, url, work::GH_TIMEOUT));
-    let mut interval = tokio::time::interval(PRS_EVERY);
+    // In a debug build, `$VALK_PRS_EVERY_MS` for trying the watchers out.
+    let every = std::env::var("VALK_PRS_EVERY_MS")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .and_then(|ms| ms.parse().ok())
+        .map_or(PRS_EVERY, Duration::from_millis);
+    let mut interval = tokio::time::interval(every);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
@@ -1169,6 +1180,12 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::NoteItem { req, id, text } => (req, registry.note_item(id, &text, peer)),
             ClientMsg::ItemFacts { req, id } => (req, registry.item_facts(id).await),
             ClientMsg::PlanOrder { req, cwd } => (req, registry.plan_order(cwd, peer).await),
+            ClientMsg::TakeStep {
+                req,
+                session,
+                seq,
+                action,
+            } => (req, registry.take_step(session, seq, action, peer).await),
             ClientMsg::AnswerOrder {
                 req,
                 project,

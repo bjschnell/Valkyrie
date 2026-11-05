@@ -516,6 +516,27 @@ impl Client {
         }
     }
 
+    /// Takes a step on a flagged session (ADR-0019 §2); says what it did.
+    pub async fn take_step(
+        &self,
+        session: crate::SessionId,
+        seq: u64,
+        action: crate::StepAction,
+    ) -> Result<String> {
+        match self
+            .request(|req| ClientMsg::TakeStep {
+                req,
+                session,
+                seq,
+                action,
+            })
+            .await?
+        {
+            Reply::StepTaken { said } => Ok(said),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Changes an item; also returns what else happened (a worktree taken away).
     pub async fn change_item(
         &self,

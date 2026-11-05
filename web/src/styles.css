@@ -388,6 +388,37 @@ code {
   margin-top: 6px;
 }
 
+/* A flagged session's offered step (ADR-0019 §2). */
+.step-offer {
+  margin: 8px 0 2px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.step-why {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--soft);
+  word-break: break-word;
+}
+
+.step-label {
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.step-actions button {
+  white-space: nowrap;
+}
+
 .ghost {
   padding: 7px 12px;
   border-radius: 10px;

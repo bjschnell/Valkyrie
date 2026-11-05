@@ -2264,8 +2264,12 @@ impl App {
                     self.status = proposal_text(d);
                 }
             }
+            HomeKey::Accept | HomeKey::Reject | HomeKey::Other if self.offered().is_some() => {
+                self.take_step(key).await
+            }
             HomeKey::Accept => self.review(true).await,
             HomeKey::Reject => self.review(false).await,
+            HomeKey::Other => {}
             HomeKey::PageDown => self.scroll_proposal(1),
             HomeKey::PageUp => self.scroll_proposal(-1),
             HomeKey::Kill => {
@@ -2283,6 +2287,36 @@ impl App {
             HomeKey::Backlog => self.open_backlog().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
+    }
+
+    /// The selected queue row's flag and the step the supervisor offers on it
+    /// (ADR-0019 §2).
+    fn offered(&self) -> Option<(SessionId, u64, valkyrie_proto::Step)> {
+        let q = self.queue.get(self.queue_index()?)?;
+        let flag = q.flag.as_ref()?;
+        Some((q.session, flag.seq, flag.step.clone()?))
+    }
+
+    /// `a` takes the step offered on the selected flagged session, `o` the other
+    /// one, `d` leaves the flag for later.
+    async fn take_step(&mut self, key: HomeKey) {
+        use valkyrie_proto::StepAction;
+        let Some((session, seq, step)) = self.offered() else {
+            return;
+        };
+        let action = match key {
+            HomeKey::Accept => step.action,
+            HomeKey::Reject => StepAction::Leave,
+            _ => match step.alt {
+                Some(alt) => alt,
+                None => return,
+            },
+        };
+        self.status = match self.client.take_step(session, seq, action).await {
+            Ok(said) => said,
+            Err(e) => format!("{} failed: {e:#}", action.as_str()),
+        };
+        self.refresh().await;
     }
 
     /// Whether `A` can adopt the selected session into the backlog: a live claude
@@ -3083,6 +3117,7 @@ impl App {
             Some((id, typed)) => rename_line(*id, typed, t),
             None => footer_line(
                 &self.status,
+                self.offered().map(|(_, _, step)| step).as_ref(),
                 in_proposals,
                 self.proposal().is_some_and(|d| d.fresh.review.is_some()),
                 self.proposal().and_then(scoping).is_some(),
@@ -4527,11 +4562,17 @@ fn proposal_text(d: &Decision) -> String {
 
 fn queue_row(q: &QueueItem, now: u64, spin: usize, t: &Theme) -> TableRow<'static> {
     let s = &q.status;
+    let mut summary = vec![s.summary.clone().unwrap_or_default().fg(t.fg)];
+    // The supervisor's offer on a flag (ADR-0019 §2): `a` takes it.
+    if let Some(step) = q.flag.as_ref().and_then(|f| f.step.as_ref()) {
+        summary.push("  → ".fg(t.muted));
+        summary.push(step.action.label().fg(t.accent2).bold());
+    }
     TableRow::new([
         badge(s.state, s.state.label().into(), spin, t),
         name_cell(q.session, &q.name, q.auto_name, t),
         Cell::from(age(s.since_ms, now).fg(t.muted)),
-        Cell::from(s.summary.clone().unwrap_or_default().fg(t.fg)),
+        Cell::from(Line::from(summary)),
         Cell::from(short_path(&q.cwd).fg(t.muted)),
     ])
 }
@@ -4624,6 +4665,7 @@ fn rename_line(id: SessionId, typed: &edit::LineEdit, t: &Theme) -> Line<'static
 /// cursor is on one.
 fn footer_line(
     status: &str,
+    step: Option<&valkyrie_proto::Step>,
     proposal: bool,
     flagged: bool,
     scope: bool,
@@ -4634,8 +4676,21 @@ fn footer_line(
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
         spans.push("│".fg(t.border));
+    } else if let Some(step) = step {
+        // Why the supervisor picked it, beside the keys that take it.
+        spans.push(format!(" {} ", step.why).fg(t.muted).italic());
+        spans.push("│".fg(t.border));
     }
-    let context: &[(&str, &str)] = if flagged {
+    let offered: Vec<(&str, &str)>;
+    let context: &[(&str, &str)] = if let Some(step) = step {
+        offered = [Some(("a", step.action.label()))]
+            .into_iter()
+            .chain([step.alt.map(|alt| ("o", alt.label()))])
+            .flatten()
+            .chain([("d", "leave it"), ("↩", "open")])
+            .collect();
+        &offered
+    } else if flagged {
         &[("a", "still holds"), ("d", "retire"), ("↩", "why")]
     } else if scope {
         &[("a", "scope it"), ("d", "keep everywhere"), ("↩", "read")]
@@ -5210,6 +5265,8 @@ enum HomeKey {
     Backlog,
     /// Write the selected agent session down as a backlog item.
     Adopt,
+    /// Take the other step offered on the selected flagged session.
+    Other,
     Quit,
 }
 
@@ -5269,6 +5326,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
             b'A' => Some(HomeKey::Adopt),
+            b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
             _ => None,
         };
@@ -5467,6 +5525,7 @@ mod tests {
             auto_name: false,
             cwd: "/".into(),
             status: AgentStatus::default(),
+            flag: None,
         }
     }
 
@@ -5763,6 +5822,7 @@ mod tests {
                     auto_name: false,
                     cwd: s.cwd.clone(),
                     status: s.status.clone(),
+                    flag: None,
                 }
             })
             .collect();
@@ -5800,6 +5860,79 @@ mod tests {
             }
             snapshot(buffer, theme.name);
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A flagged session's row says what the supervisor offers, and with it
+    /// selected the footer names the keys that take it (ADR-0019 §2).
+    #[tokio::test]
+    async fn a_flagged_row_offers_its_step_on_a_key() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use valkyrie_proto::{Flag, Step, StepAction};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-flag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        let mut s = info(4);
+        s.name = "item-98".into();
+        s.status = AgentStatus {
+            agent: "claude".into(),
+            state: AgentState::Blocked,
+            summary: Some("CI red on PR #98: windows".into()),
+            seq: 3,
+            ..AgentStatus::default()
+        };
+        let mut row = queued(4);
+        row.name = s.name.clone();
+        row.status = s.status.clone();
+        row.flag = Some(Flag {
+            reason: "CI red on PR #98: windows".into(),
+            pr: "https://github.com/o/r/pull/98".into(),
+            seq: 3,
+            step: Some(Step {
+                action: StepAction::Rerun,
+                why: "ci / windows matches #17".into(),
+                alt: Some(StepAction::CiFix),
+            }),
+            working: false,
+        });
+        app.sessions = vec![s];
+        app.queue = vec![row];
+        app.selected = 0;
+        let (session, seq, step) = app.offered().unwrap();
+        assert_eq!((session, seq, step.action), (4, 3, StepAction::Rerun));
+        let mut terminal = Terminal::new(TestBackend::new(160, 14)).unwrap();
+        terminal
+            .draw(|frame| {
+                let [body, bar] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                    .areas(frame.area());
+                app.draw_home(frame, body, bar);
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        for want in [
+            "→ rerun",
+            " a  rerun failed jobs",
+            " o  fix CI",
+            " d  leave it",
+            "ci / windows matches #17",
+        ] {
+            assert!(text.contains(want), "lacks {want:?}");
+        }
+        // Without a step yet, nothing to take.
+        app.queue[0].flag.as_mut().unwrap().step = None;
+        assert!(app.offered().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -5852,6 +5985,7 @@ mod tests {
                         auto_name: false,
                         cwd: s.cwd.clone(),
                         status: s.status.clone(),
+                        flag: None,
                     }
                 })
                 .collect();

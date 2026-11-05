@@ -1175,8 +1175,8 @@ impl Session {
     /// its pull request's CI going red (backlog #67). A session at work, waiting on
     /// the human, or blocked on something else keeps what it shows; one still
     /// showing an earlier flag of this kind takes the new reason (#69). Says
-    /// whether it changed.
-    pub fn flag_blocked(self: &Arc<Self>, summary: &str) -> bool {
+    /// the transition it raised, when it changed.
+    pub fn flag_blocked(self: &Arc<Self>, summary: &str) -> Option<u64> {
         let now = now_ms();
         let mut state = self.state.lock().unwrap();
         let status = state.tracker.status();
@@ -1188,18 +1188,63 @@ impl Session {
             && status.summary == state.flagged
             && state.flagged.as_deref() != Some(summary);
         if state.exited.is_some() || !(idle || reflag) {
-            return false;
+            return None;
         }
         let failed = AgentEvent::TurnFailed {
             summary: summary.to_owned(),
         };
         state.log(now, "flag", json!({"summary": summary}));
         if !state.tracker.apply(&failed, now, self.watching()) {
-            return false;
+            return None;
         }
         state.flagged = Some(summary.to_owned());
         self.after_change(&mut state, now);
-        true
+        Some(state.tracker.status().seq)
+    }
+
+    /// The flag the session still shows, with the transition that raised it: the
+    /// PR poll's own, and nobody has prompted the session since.
+    pub fn flag(&self) -> Option<(u64, String)> {
+        let state = self.state.lock().unwrap();
+        let status = state.tracker.status();
+        let shows = state.exited.is_none()
+            && status.state == AgentState::Blocked
+            && status.summary.is_some()
+            && status.summary == state.flagged;
+        shows.then(|| (status.seq, status.summary.clone().unwrap_or_default()))
+    }
+
+    /// Types `text` into the agent as a prompt and submits it: pasted whole when
+    /// the program takes bracketed paste (else on one line), then Enter after a
+    /// moment, so the agent reads the paste as typed text and not as the submit.
+    pub fn prompt(&self, text: &str) {
+        let bracketed = self
+            .state
+            .lock()
+            .unwrap()
+            .screen
+            .snapshot()
+            .modes
+            .bracketed_paste;
+        let paste = if bracketed {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        self.write_input(paste.into_bytes());
+        let input = self.input.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            input.push(b"\r".to_vec());
+        });
+    }
+
+    /// Writes a supervisor step into the session's event log (ADR-0019 §6).
+    pub fn log_step(&self, fields: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .log(now_ms(), "supervisor", fields);
     }
 
     pub fn detach(&self) {

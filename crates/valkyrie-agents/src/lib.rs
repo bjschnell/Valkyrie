@@ -188,6 +188,7 @@ mod tests {
             auto_name: false,
             cwd: "/".into(),
             status,
+            flag: None,
         }
     }
 
