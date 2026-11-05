@@ -365,9 +365,7 @@ fn main() -> Result<()> {
         Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
         Err(e) => e.exit(),
     };
-    let socket = cli
-        .socket
-        .unwrap_or_else(valkyrie_proto::default_socket_path);
+    let socket = valkyrie_proto::daemon_socket(cli.socket);
     // Hooks run on every agent event: skip the async runtime and never fail.
     if let Some(Cmd::Hook { agent, ambient }) = &cli.cmd {
         hook::run(agent, &socket, *ambient);
