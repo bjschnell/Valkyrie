@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use valkyrie_context::served::Layer;
 use valkyrie_proto::client::Client;
-use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, NewDecision};
+use valkyrie_proto::{DecisionKind, DecisionStatus, NewDecision};
 
 const PROTOCOL: &str = "2025-06-18";
 
@@ -112,7 +112,7 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
             let query = args["query"].as_str().unwrap_or("");
             let inactive = args["include_inactive"].as_bool().unwrap_or(false);
             let list = all().await?;
-            let found = search(&list, query, inactive);
+            let found = valkyrie_context::find::search(&list, query, inactive);
             if !found.is_empty() {
                 // The fallback below lists everything for the agent to judge, so
                 // only a hit counts as served.
@@ -124,14 +124,18 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                         .take(valkyrie_context::served::MAX_SEARCH_SERVED)
                         .map(|d| (d.id, Layer::Search)),
                 );
-                return Ok(found.iter().map(|d| line(d)).collect::<Vec<_>>().join("\n"));
+                return Ok(found
+                    .iter()
+                    .map(|d| valkyrie_context::find::line(d))
+                    .collect::<Vec<_>>()
+                    .join("\n"));
             }
             // Words miss synonyms ("package manager" vs "pnpm"); a project has tens
             // of decisions, so the agent can judge them all.
             let rest: Vec<String> = list
                 .iter()
-                .filter(|d| shown(d, inactive))
-                .map(line)
+                .filter(|d| valkyrie_context::find::listed(d, inactive))
+                .map(valkyrie_context::find::line)
                 .collect();
             Ok(if rest.is_empty() {
                 "This project has no decisions yet.".into()
@@ -148,7 +152,7 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                 .await?
                 .iter()
                 .filter(|d| d.status == DecisionStatus::Active)
-                .map(line)
+                .map(valkyrie_context::find::line)
                 .collect();
             Ok(if list.is_empty() {
                 "No active decisions yet.".into()
@@ -259,86 +263,4 @@ fn served(cwd: &std::path::Path, serves: impl IntoIterator<Item = (u32, Layer)>)
     let root = valkyrie_context::project::root(cwd);
     let store = valkyrie_context::Store::new(crate::context::store_base());
     crate::context::record_served(&store, &root, &session, serves);
-}
-
-fn line(d: &Decision) -> String {
-    let mut text = format!("#{} [{}] {}", d.id, d.kind.as_str(), d.title);
-    if d.status != DecisionStatus::Active {
-        text.push_str(&format!(" ({})", d.status.as_str()));
-    }
-    let body = d.body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if !body.is_empty() {
-        text.push_str(&format!(": {body}"));
-    }
-    text
-}
-
-/// Active decisions, and with `inactive` the ones that ended (rejected, retired,
-/// superseded); never proposals, which nobody has reviewed.
-fn shown(d: &Decision, inactive: bool) -> bool {
-    d.status == DecisionStatus::Active || (inactive && d.status != DecisionStatus::Proposed)
-}
-
-/// Decisions with any of `query`'s words, most words matched first.
-fn search<'a>(list: &'a [Decision], query: &str, inactive: bool) -> Vec<&'a Decision> {
-    let words: Vec<String> = query
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 1)
-        .map(str::to_owned)
-        .collect();
-    let mut scored: Vec<(usize, &Decision)> = list
-        .iter()
-        .filter(|d| shown(d, inactive))
-        .filter_map(|d| {
-            let text = format!("{} {} {}", d.title, d.body, d.kind.as_str()).to_lowercase();
-            let score = words.iter().filter(|w| text.contains(w.as_str())).count();
-            (score > 0).then_some((score, d))
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
-    scored.into_iter().map(|(_, d)| d).take(20).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn d(id: u32, title: &str, status: DecisionStatus) -> Decision {
-        Decision {
-            id,
-            project: "/r".into(),
-            title: title.into(),
-            body: String::new(),
-            kind: DecisionKind::Decision,
-            status,
-            created: 0,
-            updated: 0,
-            supersedes: None,
-            superseded_by: None,
-            pinned: false,
-            provenance: Default::default(),
-            fresh: Default::default(),
-        }
-    }
-
-    #[test]
-    fn search_ranks_by_words_matched_and_skips_inactive_unless_asked() {
-        let list = [
-            d(1, "Use pnpm for installs", DecisionStatus::Active),
-            d(
-                2,
-                "Use pnpm workspaces for installs of tools",
-                DecisionStatus::Active,
-            ),
-            d(3, "Use npm", DecisionStatus::Retired),
-        ];
-        let ids = |v: Vec<&Decision>| v.iter().map(|d| d.id).collect::<Vec<_>>();
-        assert_eq!(ids(search(&list, "pnpm installs tools", false)), [2, 1]);
-        assert_eq!(ids(search(&list, "npm", false)), [2, 1]);
-        assert_eq!(ids(search(&list, "npm", true)), [3, 2, 1]);
-        let proposed = [d(4, "Use npm everywhere", DecisionStatus::Proposed)];
-        assert!(search(&proposed, "npm", true).is_empty());
-        assert!(search(&list, "kubernetes", true).is_empty());
-    }
 }

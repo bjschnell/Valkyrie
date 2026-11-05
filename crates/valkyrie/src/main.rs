@@ -169,7 +169,7 @@ enum Cmd {
     /// List this project's decisions, or review one.
     Decisions {
         /// Include rejected, superseded and retired ones.
-        #[arg(long)]
+        #[arg(long, global = true)]
         all: bool,
         /// Your habits, which hold in every project, instead of this project's.
         #[arg(long, global = true)]

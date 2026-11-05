@@ -139,6 +139,29 @@ pub fn unserved(decisions: &[Decision], serves: &[Serve], now: u64) -> Vec<(u32,
         .collect()
 }
 
+/// The decisions `session` already got whole since it last started, so a hook
+/// doesn't serve them again. A start (the block's serve) is also a compaction,
+/// which summarizes away what came before, so only what came since counts.
+/// The read commands log under Valkyrie's session (`valk`), which spans the
+/// agent's `/clear`s, so theirs count from that start too.
+pub fn had(serves: &[Serve], session: &str, valk: Option<&str>) -> BTreeSet<u32> {
+    let mine = || serves.iter().filter(|s| s.session == session);
+    let start = mine()
+        .filter(|s| matches!(s.layer, Layer::Block | Layer::Title))
+        .map(|s| s.at)
+        .max()
+        .or_else(|| mine().map(|s| s.at).min());
+    let Some(start) = start else {
+        return BTreeSet::new();
+    };
+    serves
+        .iter()
+        .filter(|s| s.layer.whole() && s.at >= start)
+        .filter(|s| s.session == session || valk == Some(s.session.as_str()))
+        .map(|s| s.id)
+        .collect()
+}
+
 /// Why a decision no session got for `days` needs you.
 pub fn says(days: u64) -> String {
     format!(
@@ -244,6 +267,39 @@ mod tests {
         let mut confirmed = d(2, DecisionKind::Decision);
         confirmed.fresh.confirmed = 30 * DAY;
         assert!(unserved(&[confirmed], &sessions(12, 0, 10 * DAY), 60 * DAY).is_empty());
+    }
+
+    #[test]
+    fn a_session_had_what_it_got_whole_and_what_valk_read_it_since_it_began() {
+        let valk = |id, at| Serve {
+            session: "valk:7".into(),
+            id,
+            layer: Layer::Show,
+            at,
+        };
+        let log = [
+            valk(9, 1),
+            serve(1, 1, Layer::Block, 5),
+            serve(1, 2, Layer::Title, 5),
+            serve(1, 3, Layer::Prompt, 6),
+            serve(2, 4, Layer::Block, 6),
+            valk(5, 7),
+        ];
+        let had = |valk_id| had(&log, "s1", valk_id).into_iter().collect::<Vec<_>>();
+        assert_eq!(had(None), [1, 3]);
+        // #9 was read before this agent session began (a `/clear` ago).
+        assert_eq!(had(Some("valk:7")), [1, 3, 5]);
+        assert!(super::had(&log, "s9", Some("valk:7")).is_empty());
+        // Compacted at 8: what it got before was summarized away.
+        let mut log = log.to_vec();
+        log.push(serve(1, 1, Layer::Block, 8));
+        log.push(serve(1, 2, Layer::Title, 8));
+        assert_eq!(
+            super::had(&log, "s1", Some("valk:7"))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [1]
+        );
     }
 
     #[test]

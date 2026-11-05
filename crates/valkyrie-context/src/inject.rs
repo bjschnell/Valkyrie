@@ -106,8 +106,8 @@ pub fn laid_out(root: &Path, decisions: &[Decision], budget: usize, valk: &str) 
              Follow them. If one looks wrong or out of date, say so instead of quietly \
              working around it. Constraints and the ones the user pinned are in full; the \
              rest are titles. Before you start, read the ones that bear on your task with \
-             `{valk} decisions show <id>` (MCP `get_decision`), or search them all with MCP \
-             `search_decisions`.\n\n"
+             `{valk} decisions show <id>` (MCP `get_decision`), or search them all with \
+             `{valk} decisions search <words>` (MCP `search_decisions`).\n\n"
         ));
         let footer_room = propose.len() + 120;
         // An index (ADR-0014 §1): every decision gets its title, and only what
