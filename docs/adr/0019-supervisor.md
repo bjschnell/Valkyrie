@@ -7,7 +7,7 @@ Amends: DESIGN §7 (what the supervisor is), [ADR-0013](0013-learned-policies.md
 ## Context
 ADR-0013 moved the routine part of an agent's stop into the hooks: a `ship` or `ci-fix` policy keeps the agent going while its turn is still open. It left to a supervisor what a hook can't see: work after its session's last stop, work across sessions, and anything that needs judgement rather than a template. Backlog #69 kept a tally of cases as they came up:
 
-1. **Build order (2026-11-03).** Items filed in a burst depend on each other (#60). Something has to choose what runs next and start it. `valk todo next` now names the first ready item, but nothing acts on it.
+1. **Build order (2026-11-03).** Items filed in a burst depend on each other (#60). Something has to choose what runs next and start it. `valk todo next` now names the first ready item, but nothing acts on it. The bigger gap is that the order is rarely in the fields `next` reads. Agents recommended build orders as prose: #49's body says "Build queue, in order: #46 → #37 → #47 → #40 → #41 → #38/#48 → #42". Priority and `after #N` on an accepted item are the user's to set (ADR-0018), so none of those orders reached the board. On 2026-11-03 and 11-04 the user looked at the backlog and couldn't tell what to do next.
 2. **CI red after the last stop (2026-11-04).** PR #101's Windows job failed (flake #17) after its session's last stop, and nothing flagged it. #67 fixed the detection: the daemon's 5-minute PR poll (ADR-0015 §2) shows the item's idle session as blocked, "CI red on PR #N". What to do about it is still left to the user. They choose between waking the agent with ci-fix's text, rerunning a known flake, or looking at it themselves.
 3. **A pushed PR conflicting after main moved (2026-11-04).** Six merges landed on main in one night, and #98 conflicted until the user noticed. What fixes it is known: send the session to merge main in (skill #25).
 
@@ -17,6 +17,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 1. **Watchers detect, in code, and only flag.** Each watcher is daemon code that turns a state it can read into a flag on the session it concerns. A flag shows in the queue as *blocked* with a one-line reason. It never types anything into an agent.
    - **PR red** (#67): failed checks on an item's open PR.
    - **PR conflicting** (this ADR's phase 1): GitHub reports the item's open PR `CONFLICTING` with its base. The flag reads "PR #N conflicts with main", or "PR #N conflicts with main; CI red: <checks>" when both are true. `UNKNOWN` counts as nothing yet, because GitHub works mergeability out lazily after the base moves, so the next poll picks it up.
+   - **Unordered work** (phase 2): three or more items land in one repository within a day, or a note on an item names a build order (several `#N` in sequence). The user can also ask at any time with `valk todo plan [-C DIR]` (and a board button).
    - **Item ready** (phase 4): an open item nobody's on whose blockers have all shipped or been dropped.
 
    Both PR watchers ride the existing 5-minute poll, which already makes one `gh pr view` call per item. They share its rules: only sessions of this daemon boot, only `idle` or `done`, and a flag that was seen isn't raised again until the session goes idle again or the reason changes. A session still showing the poll's own flag takes the new reason (red CI, then main moves), and it shows as news again. A session blocked by anything else keeps what it shows.
@@ -25,6 +26,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
    - **`ci-fix`** (on *red*): types ci-fix's existing text into the idle session (ADR-0013 §3). Its twice-per-PR limit is shared with the Stop policy's.
    - **`rerun`** (on *red*, when every failed check matches a known flake): `gh run rerun <run> --failed`, once per PR head, without waking the agent. ci-fix's own text already reruns a flake once when the agent is awake. This is the same rerun for an agent that's done, and the two share the once-per-head limit.
    - **`launch`** (on *item ready*): starts the item on the agent and model it was last launched with (`Item.launch`), so the work picks up the way it was set up. The board's Launch already does this. An item never launched gets the project's default.
+   - **`order`** (on *unordered work*): one proposal for the repository's open items. It gives the order, one line of reason per item, and the field changes that make the board show that order: priorities and `after #N` links (`ItemChange::Edit`). Accepting applies every change as the user's own edit. Declining changes nothing. The user can also apply part of it, so one wrong link doesn't sink the rest. The proposal reads each item's title, body and notes, any build order an agent wrote, and what each one's PR or branch touches, so it can spot two items that edit the same files.
    - **`leave`**: does nothing and keeps the flag, for the user.
 
    The rule that picks the action is code where code can decide: *conflicting* gets `merge-base`, and *ready* gets `launch` in `valk todo next` order. Two calls need judgement, and they don't get the same kind of model (decided 2026-11-04):
@@ -35,6 +37,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
      - do the check's name and panic text match an open bug in the backlog (#17 lists exact `file:line` panics)?
 
      Hand-written rules over those signals decide first. Every proposal the user accepts or declines is a labelled example in `supervisor.jsonl`. Once there are enough of them (dozens, not a handful), a small fitted model (a decision tree) replaces the hand rules: it's deterministic, it explains itself, and it's cheap to run on every poll. An LLM is asked only when the rules can't decide, which in practice means matching a log to a bug filed in different words.
+   - **The order itself (`order`): an LLM.** Working out what depends on what means reading the items' text and an agent's prose plan. It's a one-shot call that returns structured changes, and the proposal shows its reasons. It never applies anything on its own: a reorder is never learned into a policy, because priority is the user's call each time.
    - **Needs its blocker: an LLM.** Whether a ready item that lists a blocker really needs it (DESIGN §8.12 makes waiting advisory) means reading two cards and maybe a diff. There's nothing there to turn into signals for a classical model.
 
    The LLM calls are short, one-shot runs of the extractor's locked-down model, not a standing session, under the same consent (`valk decisions auto`) and hourly limits. With `auto off`, rules alone decide flakes (a red PR they can't place picks `ci-fix`), and the blocker question isn't asked.
@@ -46,7 +49,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 
 ## Phases
 1. **The conflict watcher** (backlog #69): `gh pr view` also reads `mergeable,baseRefName`, and the poll flags *conflicting* next to *red*.
-2. **Proposals in the queue:** a flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
+2. **Build order and proposals:** the *unordered work* watcher, `valk todo plan` and `order`, which is the case the user hits most. A flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
 3. **Learning:** `supervisor.jsonl`, policy proposals from accepted steps, automatic steps, health.
 4. **Dispatch:** the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
 5. **Sessions with a PR and no item**, if the numbers ask for it.
