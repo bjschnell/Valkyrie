@@ -191,6 +191,11 @@ mod windows {
         Ok(Stream::Client(client))
     }
 
+    /// Whether a daemon this process may use answers on `path`.
+    pub fn serves(path: &Path, timeout: Duration) -> bool {
+        connect_blocking(path, timeout).is_ok()
+    }
+
     pub(super) fn connect_blocking(path: &Path, timeout: Duration) -> io::Result<std::fs::File> {
         let name = pipe_name(path);
         let deadline = Instant::now() + timeout;
@@ -244,8 +249,18 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         let theirs = token_user(process);
+        let theirs_elevated = process_elevated(process);
         // SAFETY: we opened it.
         unsafe { CloseHandle(process) };
+        // Sessions run with the daemon's token: an elevated client on an
+        // unelevated daemon (or one squatting the admin pipe's name) would get
+        // unelevated sessions.
+        if token_elevated() && !theirs_elevated {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the daemon's pipe is served by a process that isn't elevated",
+            ));
+        }
         let (theirs, ours) = (theirs?, token_user(current_process())?);
         // SAFETY: both buffers hold a TOKEN_USER whose SID points into them.
         let same = unsafe {
@@ -298,9 +313,13 @@ mod windows {
     /// Whether this process's token is elevated (Run as administrator). False when
     /// it can't tell: the user's daemon is the safe one to land on.
     pub fn token_elevated() -> bool {
+        process_elevated(current_process())
+    }
+
+    fn process_elevated(process: HANDLE) -> bool {
         let mut token: HANDLE = std::ptr::null_mut();
-        // SAFETY: a pseudo process handle and an out pointer.
-        if unsafe { OpenProcessToken(current_process(), TOKEN_QUERY, &mut token) } == 0 {
+        // SAFETY: a valid process handle and an out pointer.
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
             return false;
         }
         let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };

@@ -698,18 +698,40 @@ pub fn default_socket_path() -> PathBuf {
 /// admin terminal sharing the user's daemon would start unelevated sessions, and a
 /// user's terminal sharing an admin daemon would start elevated ones.
 pub fn daemon_socket(chosen: Option<PathBuf>) -> PathBuf {
-    pick_socket(chosen, elevated(), default_socket_path())
+    let user_default = default_socket_path();
+    let elevated = elevated();
+    #[cfg(windows)]
+    if elevated && chosen.is_none() && always_elevated(&user_default) {
+        return user_default;
+    }
+    pick_socket(chosen, elevated, user_default)
 }
 
 fn pick_socket(chosen: Option<PathBuf>, elevated: bool, user_default: PathBuf) -> PathBuf {
+    let admin = admin_socket(&user_default);
     match chosen {
         // The user's daemon handed down in VALK_SOCKET (Windows `sudo` keeps the
         // environment): not this process's.
-        Some(socket) if elevated && socket == user_default => admin_socket(&user_default),
+        Some(socket) if elevated && socket == user_default => admin,
+        // The admin daemon handed to an unelevated process (a scheduled task set up
+        // from an admin terminal): it would start an unelevated daemon there, which
+        // admin terminals would then use.
+        Some(socket) if !elevated && socket == admin => user_default,
         Some(socket) => socket,
-        None if elevated => admin_socket(&user_default),
+        None if elevated => admin,
         None => user_default,
     }
+}
+
+/// A user whose every terminal is elevated (UAC off, or the built-in
+/// Administrator) already runs an elevated daemon on the default socket, with
+/// their tabs to restore: keep it rather than start an empty admin one beside it.
+/// The connection check refuses a daemon that isn't elevated, so the user's
+/// ordinary daemon never qualifies.
+#[cfg(windows)]
+fn always_elevated(user_default: &Path) -> bool {
+    let short = std::time::Duration::from_millis(200);
+    !ipc::serves(&admin_socket(user_default), short) && ipc::serves(user_default, short)
 }
 
 /// `<host>.sock` → `<host>-admin.sock`, beside it.
@@ -1075,6 +1097,12 @@ mod tests {
         assert_eq!(
             super::pick_socket(Some(other.clone()), true, user.clone()),
             other
+        );
+        // The admin socket handed to an unelevated process (a scheduled task set up
+        // from an admin terminal): it would start an unelevated daemon there.
+        assert_eq!(
+            super::pick_socket(Some(admin.clone()), false, user.clone()),
+            user
         );
         // Not elevated: as before.
         assert_eq!(super::pick_socket(None, false, user.clone()), user);
