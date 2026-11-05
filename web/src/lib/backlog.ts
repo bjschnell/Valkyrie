@@ -265,3 +265,11 @@ export function appliedSummary(accept: boolean, applied: OrderApplied): string {
   const left = (applied.skipped ?? []).map(([id, why]) => `#${id} left: ${why}`);
   return [changed, ...left].join("; ");
 }
+
+/** The agent `item` starts on: the one it was last launched with (decision #46),
+ * else `fallback` (the agent last picked on this device), else claude. */
+export function startAgent(item: Item | null | undefined, fallback: string | null): "claude" | "codex" {
+  const last = item?.launch?.agent;
+  if (last === "claude" || last === "codex") return last;
+  return fallback === "codex" ? "codex" : "claude";
+}
