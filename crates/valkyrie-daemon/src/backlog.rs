@@ -116,7 +116,7 @@ impl Registry {
     ) -> Result<Reply> {
         let caller = self.caller(peer);
         let session = caller.session.as_ref().map(|s| (self.boot, s.info().id));
-        let item = {
+        let (item, was) = {
             let backlog = self.backlog.lock().unwrap();
             let current = backlog.get(id)?;
             let own = caller.agent.is_some() && session.is_some() && current.filed_by == session;
@@ -138,14 +138,48 @@ impl Registry {
                     _ => "reopening a backlog item",
                 })?,
             }
-            backlog.change(id, &change, now_secs())?
+            (backlog.change(id, &change, now_secs())?, current.status)
         };
+        if was == ItemStatus::Proposed && item.status == ItemStatus::Open {
+            self.tell_filer(&item);
+        }
         let (item, note) = self.after_change(item).await?;
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
             note,
         })
+    }
+
+    /// Tells the session that filed `item`, if it's still running, that the user
+    /// accepted it, on its next prompt, so the loop ADR-0018 starts closes without
+    /// the user relaying it by hand (backlog #53).
+    fn tell_filer(&self, item: &Item) {
+        let Some((boot, id)) = item.filed_by else {
+            return;
+        };
+        if boot != self.boot {
+            return;
+        }
+        if let Some(session) = self.get(id).ok().filter(|s| !s.exited()) {
+            session.filed_accepted(item.id);
+        }
+    }
+
+    /// What `session`'s agent is told of the items it filed that the user
+    /// accepted since its last prompt: one line each, for those still open and
+    /// nobody's on (it may have taken one already, or another session did).
+    pub(crate) fn accepted_for(&self, session: &crate::session::Session) -> Vec<String> {
+        let ids = session.take_accepted();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let backlog = self.backlog.lock().unwrap();
+        ids.into_iter()
+            .filter_map(|id| backlog.get(id).ok())
+            .filter(|item| item.status == ItemStatus::Open && self.holders(item, None).is_empty())
+            .map(|item| backlog::accepted(&item))
+            .collect()
     }
 
     /// Takes the worktree of an item just shipped away, if it has one; returns the
@@ -1181,6 +1215,128 @@ mod tests {
         assert_eq!(get(reworded).status, ItemStatus::Open);
         assert_eq!(get(dropped).status, ItemStatus::Shipped);
         session.kill();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_session_that_filed_an_item_hears_once_when_the_user_accepts_it() {
+        use crate::context::{AS_CALLER, Caller};
+        let dir = std::env::temp_dir().join(format!("valkyrie-accepted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let spawn = || {
+            let spec = SpawnSpec {
+                command: vec!["sleep".into(), "30".into()],
+                cwd: Some(dir.clone()),
+                name: None,
+                size: Size { cols: 40, rows: 10 },
+                env: Vec::new(),
+                worktree: None,
+                hidden: false,
+            };
+            let Reply::Session { info } = crate::spawn(&registry, spec).unwrap() else {
+                panic!("no session");
+            };
+            registry.get(info.id).unwrap()
+        };
+        let (filer, gone) = (spawn(), spawn());
+        let file = |title: &str, by: Option<SessionId>| {
+            let new = NewItem {
+                title: title.into(),
+                ..Default::default()
+            };
+            let filed_by = by.map(|s| (registry.boot, s));
+            let who = if by.is_some() { "claude" } else { "human" };
+            registry
+                .backlog
+                .lock()
+                .unwrap()
+                .add_filed(&new, who, filed_by, 1)
+                .unwrap()
+                .id
+        };
+        let mine = file("Mine", Some(filer.info().id));
+        let taken = file("Taken", Some(filer.info().id));
+        let users = file("The user's", None);
+        let orphan = file("Orphan", Some(gone.info().id));
+        gone.kill();
+        while !gone.exited() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // The user, at the board.
+        AS_CALLER.with(|c| {
+            *c.borrow_mut() = Some(Box::new(|| Caller {
+                agent: None,
+                session: None,
+                bridge: false,
+            }))
+        });
+        let accept = || ItemChange::Status {
+            status: ItemStatus::Open,
+        };
+        for id in [mine, taken, users, orphan] {
+            registry.change_item(id, accept(), None).await.unwrap();
+        }
+        // An edit to an accepted item isn't an accept: no second notice.
+        registry
+            .change_item(
+                mine,
+                ItemChange::Edit {
+                    priority: None,
+                    blocked_by: None,
+                    title: Some("Mine".into()),
+                    body: None,
+                    kind: None,
+                    cwd: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            gone.take_accepted().is_empty(),
+            "told a session that's gone"
+        );
+        // Taken by the filer before its next prompt: nothing to tell about that one.
+        registry
+            .backlog
+            .lock()
+            .unwrap()
+            .taken(
+                taken,
+                filer.info().id,
+                registry.boot,
+                &[],
+                None,
+                None,
+                None,
+                2,
+            )
+            .unwrap();
+        let said = registry.accepted_for(&filer);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains(&format!("accepted #{mine} “Mine” you filed")),
+            "{}",
+            said[0]
+        );
+        assert!(
+            said[0].contains(&format!("valk todo take {mine}")),
+            "{}",
+            said[0]
+        );
+        assert!(registry.accepted_for(&filer).is_empty(), "said twice");
+        filer.kill();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

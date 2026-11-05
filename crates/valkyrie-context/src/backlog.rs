@@ -638,6 +638,17 @@ pub fn adopted(item: &Item) -> String {
     )
 }
 
+/// What the agent in the session that filed `item` is told on its next prompt
+/// once the user accepts it (backlog #53, ADR-0018 §5).
+pub fn accepted(item: &Item) -> String {
+    format!(
+        "The user accepted #{} “{}” you filed; take it with `valk todo take {} --branch <branch>` once your current task is delivered, and fix it on its own branch and pull request.",
+        item.id,
+        one_line(&item.title),
+        item.id
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

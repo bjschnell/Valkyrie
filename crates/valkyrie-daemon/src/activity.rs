@@ -34,6 +34,9 @@ pub struct Activity {
     /// The backlog item the user just adopted this session into, until its agent
     /// is told on its next prompt: it has no `VALK_ITEM` to find it by.
     adopted: Option<u32>,
+    /// Items this session filed that the user has accepted since, until its agent
+    /// is told on its next prompt, so it can take them (backlog #53).
+    accepted: Vec<u32>,
 }
 
 impl Activity {
@@ -111,6 +114,18 @@ impl Activity {
     /// The item to tell the agent it was adopted into, once.
     pub fn take_adopted(&mut self) -> Option<u32> {
         self.adopted.take()
+    }
+
+    /// Remembers to tell the agent the user accepted item `id`, which it filed.
+    pub fn accepted(&mut self, id: u32) {
+        if !self.accepted.contains(&id) {
+            self.accepted.push(id);
+        }
+    }
+
+    /// The items to tell the agent the user accepted, once, oldest first.
+    pub fn take_accepted(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.accepted)
     }
 
     /// Whether `text` is news to this agent; remembers it either way.

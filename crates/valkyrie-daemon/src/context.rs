@@ -320,17 +320,21 @@ impl Registry {
         let mut text = tell(&root, &my_checkout, &me.activity(), &siblings, now)
             .filter(|text| me.tell(text))
             .unwrap_or_default();
-        // Adopted into the backlog since its last prompt: said once, first.
+        // Adopted into the backlog, or its finds accepted, since its last prompt:
+        // said once, first.
         let adopted = me
             .take_adopted()
             .and_then(|item| self.backlog.lock().unwrap().get(item).ok());
-        if let Some(item) = adopted {
-            let said = valkyrie_context::backlog::adopted(&item);
-            text = if text.is_empty() {
-                said
-            } else {
-                format!("{said}\n{text}")
-            };
+        let mut said: Vec<String> = adopted
+            .map(|item| valkyrie_context::backlog::adopted(&item))
+            .into_iter()
+            .collect();
+        said.extend(self.accepted_for(&me));
+        if !said.is_empty() {
+            if !text.is_empty() {
+                said.push(text);
+            }
+            text = said.join("\n");
         }
         Ok(Reply::Text { text })
     }

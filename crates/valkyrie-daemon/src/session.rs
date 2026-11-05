@@ -1354,6 +1354,16 @@ impl Session {
         self.state.lock().unwrap().activity.take_adopted()
     }
 
+    /// See `Activity::accepted`.
+    pub fn filed_accepted(&self, item: u32) {
+        self.state.lock().unwrap().activity.accepted(item)
+    }
+
+    /// See `Activity::take_accepted`.
+    pub fn take_accepted(&self) -> Vec<u32> {
+        self.state.lock().unwrap().activity.take_accepted()
+    }
+
     /// The name the user gave it, if they did.
     pub fn own_name(&self) -> Option<String> {
         self.name.lock().unwrap().clone()
