@@ -196,6 +196,9 @@ export interface Item {
   boot: number;
   /** Those of `sessions` that took it rather than being launched on it. */
   taken?: SessionId[];
+  /** When each of `sessions` last took or was launched on it, as [session, seconds
+   * since the epoch]: the item a session is on is the one it joined last. */
+  joined?: [SessionId, number][];
   branch?: string;
   /** `branch` was set by `valk todo take`, not a launch. */
   branch_taken?: boolean;

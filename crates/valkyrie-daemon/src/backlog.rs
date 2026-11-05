@@ -425,7 +425,8 @@ impl Registry {
         })
     }
 
-    /// The item live session `id` is on, the newest when several.
+    /// The item live session `id` is on: the one it took or was launched on last,
+    /// when several.
     fn item_of(&self, id: SessionId) -> Option<Item> {
         let items = self.backlog.lock().unwrap().load();
         self.item_of_in(&items, id)
@@ -436,7 +437,8 @@ impl Registry {
             .iter()
             .filter(|i| i.boot == self.boot && i.sessions.contains(&id))
             .filter(|i| matches!(i.status, ItemStatus::Open | ItemStatus::Proposed))
-            .max_by_key(|i| i.updated)
+            // Written before `joined` was: when it was last touched, as it was.
+            .max_by_key(|i| (i.joined_at(id).unwrap_or(i.updated), i.updated))
             .cloned()
     }
 
@@ -1491,6 +1493,70 @@ mod tests {
         );
         assert!(registry.accepted_for(&filer).is_empty(), "said twice");
         filer.kill();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_is_on_the_item_it_took_last_not_the_one_it_last_noted() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-item-of-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let session = 5;
+        let (first, second) = {
+            let backlog = registry.backlog.lock().unwrap();
+            let add = |title: &str| {
+                let new = NewItem {
+                    title: title.into(),
+                    ..Default::default()
+                };
+                backlog.add(&new, "human", 1).unwrap().id
+            };
+            let (first, second) = (add("First"), add("Second"));
+            let boot = registry.boot;
+            backlog
+                .taken(first, session, boot, &[], Some("fix/a"), None, None, 10)
+                .unwrap();
+            backlog
+                .taken(second, session, boot, &[], Some("fix/b"), None, None, 20)
+                .unwrap();
+            (first, second)
+        };
+        assert_eq!(registry.item_of(session).map(|i| i.id), Some(second));
+        // A handoff left on the first, still open, after moving on (backlog #74).
+        registry
+            .backlog
+            .lock()
+            .unwrap()
+            .note(first, "claude", "done here", true, 30)
+            .unwrap();
+        assert_eq!(registry.item_of(session).map(|i| i.id), Some(second));
+        // Taking the first again, say to record its PR, is moving back to it.
+        registry
+            .backlog
+            .lock()
+            .unwrap()
+            .taken(
+                first,
+                session,
+                registry.boot,
+                &[],
+                None,
+                Some("https://github.com/o/r/pull/1"),
+                None,
+                40,
+            )
+            .unwrap();
+        assert_eq!(registry.item_of(session).map(|i| i.id), Some(first));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

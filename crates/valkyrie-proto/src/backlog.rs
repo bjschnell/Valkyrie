@@ -133,6 +133,12 @@ pub struct Item {
     /// launched on it: open to any agent, so their notes stay out of the brief.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taken: Vec<SessionId>,
+    /// When each of `sessions` last took or was launched on it, in seconds: the
+    /// item a session is on is the one it joined last, which a note on an older
+    /// one doesn't change (`updated` does). Pairs, not a map: a map's number keys
+    /// are strings in JSON, which a tagged message can't read back as numbers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joined: Vec<(SessionId, u64)>,
     /// The branch and checkout its first launch made, reused by later ones; or
     /// the branch a take recorded (`branch_taken`), with no checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +180,19 @@ pub struct Item {
 }
 
 impl Item {
+    /// When `session` last took or was launched on it (`joined`).
+    pub fn joined_at(&self, session: SessionId) -> Option<u64> {
+        self.joined
+            .iter()
+            .find_map(|&(s, at)| (s == session).then_some(at))
+    }
+
+    /// Records `session` taking or being launched on it `now`.
+    pub fn join(&mut self, session: SessionId, now: u64) {
+        self.joined.retain(|&(s, _)| s != session);
+        self.joined.push((session, now));
+    }
+
     /// Written down and taken by an agent for its own work, and not accepted yet:
     /// it follows its session like an open item, and shipping it accepts it.
     /// Filed but not taken, it waits in Proposed like any other proposal.
@@ -410,5 +429,30 @@ mod tests {
                 None
             ]
         );
+    }
+
+    /// An item crosses the wire inside tagged messages (`Reply::Item`), which
+    /// can't read a JSON map's string keys back as numbers: `joined` must survive.
+    #[test]
+    fn joined_survives_a_tagged_reply() {
+        let mut item: Item = serde_json::from_value(serde_json::json!({
+            "id": 1, "title": "t", "created": 0, "updated": 0, "sessions": [2, 3],
+        }))
+        .unwrap();
+        item.join(2, 10);
+        item.join(3, 20);
+        item.join(2, 30);
+        let reply = crate::ServerMsg::Ok {
+            req: 1,
+            reply: crate::Reply::Item {
+                item: Box::new(item.clone()),
+                note: None,
+            },
+        };
+        let back: crate::ServerMsg =
+            serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        assert_eq!(back, reply);
+        assert_eq!((item.joined_at(2), item.joined_at(3)), (Some(30), Some(20)));
+        assert_eq!(item.joined_at(4), None);
     }
 }

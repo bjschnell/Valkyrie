@@ -124,6 +124,7 @@ impl Backlog {
             filed_by,
             unaccepted: false,
             pr_closed: false,
+            joined: Default::default(),
             notes: Vec::new(),
             launch: None,
             created: now,
@@ -321,10 +322,12 @@ impl Backlog {
         if item.boot != boot {
             item.sessions.clear();
             item.taken.clear();
+            item.joined.clear();
             item.boot = boot;
         }
         leave(&mut item, from);
         item.sessions.push(session);
+        item.join(session, now);
         if let Some((branch, path)) = checkout {
             item.branch = Some(branch);
             item.branch_taken = false;
@@ -383,6 +386,7 @@ impl Backlog {
         if item.boot != boot {
             item.sessions.clear();
             item.taken.clear();
+            item.joined.clear();
             item.boot = boot;
         }
         if !from.is_empty() {
@@ -398,6 +402,7 @@ impl Backlog {
             item.sessions.push(session);
             item.taken.push(session);
         }
+        item.join(session, now);
         if let Some(branch) = branch.filter(|b| item.branch.as_deref() != Some(*b)) {
             item.branch = Some(branch.to_owned());
             item.branch_taken = true;
@@ -492,6 +497,7 @@ pub fn pr_url(pr: &str) -> Result<()> {
 fn leave(item: &mut Item, from: &[SessionId]) {
     item.sessions.retain(|s| !from.contains(s));
     item.taken.retain(|s| !from.contains(s));
+    item.joined.retain(|(s, _)| !from.contains(s));
 }
 
 /// `text` on one line without control or bidi characters, as a title is kept: for
@@ -1127,6 +1133,7 @@ mod tests {
             filed_by: None,
             unaccepted: false,
             pr_closed: false,
+            joined: Default::default(),
             notes: Vec::new(),
             launch: None,
             created: 0,
