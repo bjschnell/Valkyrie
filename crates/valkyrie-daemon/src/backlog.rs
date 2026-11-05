@@ -660,7 +660,7 @@ impl Registry {
     /// stopped and CI usually fails minutes after; or a conflict with its base
     /// (#69), which comes when other work merges, long after the agent's last
     /// stop. Seen once, the same flag isn't raised again; it's raised anew when the
-    /// session goes idle again or `summary` changes.
+    /// session goes idle again or `summary` changes (`Session::flag_blocked`).
     fn flag_pr(&self, item: &Item, url: &str, summary: &str) {
         if item.boot != self.boot {
             return;
@@ -1182,7 +1182,7 @@ mod tests {
     /// after main moved (#69); a busy session, or another boot's, is left be.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_red_pr_flags_its_idle_session() {
+    async fn a_red_or_conflicting_pr_flags_its_idle_session() {
         use valkyrie_proto::AgentState;
         let dir = std::env::temp_dir().join(format!("valkyrie-red-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1288,6 +1288,25 @@ mod tests {
         });
         registry.ship_merged_prs(green).await;
         assert_eq!(state(&busy).state, AgentState::Working);
+        assert_eq!(state(&idle).seq, flagged.seq);
+        // Still blocked on its red CI when main moves: the new reason replaces the
+        // old flag, and shows as news again.
+        let conflicting: PrLookup = Arc::new(move |_, pr| Pr::Open {
+            url: pr.to_owned(),
+            failed: vec![check("windows")],
+            conflicts: Some("main".to_owned()),
+        });
+        registry.ship_merged_prs(conflicting.clone()).await;
+        let both = state(&idle);
+        assert_eq!(
+            both.summary.as_deref(),
+            Some("PR #1 conflicts with main; CI red: windows")
+        );
+        assert!(both.seq > flagged.seq && !both.seen);
+        idle.mark_seen(both.seq);
+        registry.ship_merged_prs(conflicting).await;
+        assert_eq!(state(&idle).seq, both.seq);
+
         for s in [idle, busy, old, behind] {
             s.kill();
         }
