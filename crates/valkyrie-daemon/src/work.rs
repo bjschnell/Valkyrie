@@ -289,29 +289,43 @@ fn parse_pr(v: &Value) -> Pr {
         "ACTION_REQUIRED",
         "STARTUP_FAILURE",
     ];
-    let failed = v["statusCheckRollup"]
+    let rollup: Vec<&Value> = v["statusCheckRollup"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|c| {
-            ["conclusion", "state"]
-                .iter()
-                .filter_map(|k| c[*k].as_str())
-                .any(|s| FAILED.contains(&s))
-        })
+        .collect();
+    let text = |c: &Value, keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| c[*k].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("")
+            .to_owned()
+    };
+    let name = |c: &Value| match (text(c, &["workflowName"]), text(c, &["name", "context"])) {
+        (w, n) if w.is_empty() || n.is_empty() => format!("{w}{n}"),
+        (w, n) => format!("{w} / {n}"),
+    };
+    let is = |c: &Value, which: &[&str]| {
+        ["conclusion", "state"]
+            .iter()
+            .filter_map(|k| c[*k].as_str())
+            .any(|s| which.contains(&s))
+    };
+    // A cancel says nothing of the code, and a push and its pull request each run
+    // CI on the same commit: one cancelled (a job that never got a runner, say)
+    // while the other passed it isn't red (#83).
+    let passed: Vec<String> = rollup
+        .iter()
+        .filter(|c| is(c, &["SUCCESS"]))
+        .map(|c| name(c))
+        .collect();
+    let failed = rollup
+        .iter()
+        .filter(|c| is(c, FAILED))
+        .filter(|c| !(is(c, &["CANCELLED"]) && passed.contains(&name(c))))
         .map(|c| {
-            let text = |keys: &[&str]| {
-                keys.iter()
-                    .find_map(|k| c[*k].as_str().filter(|s| !s.is_empty()))
-                    .unwrap_or("")
-                    .to_owned()
-            };
-            let url = text(&["detailsUrl", "targetUrl"]);
+            let url = text(c, &["detailsUrl", "targetUrl"]);
             Check {
-                name: match (text(&["workflowName"]), text(&["name", "context"])) {
-                    (w, n) if w.is_empty() || n.is_empty() => format!("{w}{n}"),
-                    (w, n) => format!("{w} / {n}"),
-                },
+                name: name(c),
                 run: actions_run(&url),
                 url,
             }
@@ -600,6 +614,41 @@ mod tests {
         assert_eq!(conflicts(pr("UNKNOWN", "main")), None);
         // An older `gh`, or a reply without the field.
         assert_eq!(conflicts(json!({"state": "OPEN", "url": "u"})), None);
+    }
+
+    /// A check cancelled in one run and passed in another on the same commit isn't
+    /// red; a failure is, whatever passed beside it (#83).
+    #[test]
+    fn a_check_cancelled_in_one_run_and_passed_in_another_isnt_red() {
+        let failed = |checks: Value| match parse_pr(&json!({
+            "state": "OPEN", "url": "u", "statusCheckRollup": checks
+        })) {
+            Pr::Open { failed, .. } => failed.into_iter().map(|c| c.name).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        let run = |conclusion: &str| {
+            json!({"__typename": "CheckRun", "workflowName": "test",
+                   "name": "rust (macos-latest)", "status": "COMPLETED", "conclusion": conclusion})
+        };
+        assert!(failed(json!([run("CANCELLED"), run("SUCCESS")])).is_empty());
+        assert!(failed(json!([run("SUCCESS"), run("CANCELLED")])).is_empty());
+        // Cancelled and nothing passed it: still red.
+        assert_eq!(
+            failed(json!([run("CANCELLED")])),
+            ["test / rust (macos-latest)"]
+        );
+        // A failure stays red, though the other run passed.
+        assert_eq!(
+            failed(json!([run("FAILURE"), run("SUCCESS")])),
+            ["test / rust (macos-latest)"]
+        );
+        // Another check passing doesn't count.
+        let lint = json!({"__typename": "CheckRun", "workflowName": "test",
+                          "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"});
+        assert_eq!(
+            failed(json!([run("CANCELLED"), lint])),
+            ["test / rust (macos-latest)"]
+        );
     }
 
     /// A read is settled once every check finished and GitHub knows whether it
