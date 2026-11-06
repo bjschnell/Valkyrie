@@ -12,7 +12,7 @@
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust)](https://www.rust-lang.org)
 ![Platforms](https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20WSL2-50fa7b)
 
-[Quick start](#quick-start) · [Screenshots](#screenshots) · [Usage](#usage) · [Phone app](#on-your-phone) · [Project decisions](#project-decisions) · [Install guide](docs/install.md)
+[Why Valkyrie](#why-valkyrie) · [What you get](#what-you-get) · [A day with it](#a-day-with-valkyrie) · [Quick start](#quick-start) · [Reference](#reference) · [Install guide](docs/install.md)
 
 <br>
 
@@ -22,12 +22,156 @@
 
 ---
 
-## What is this?
+## Why Valkyrie
 
-Run several coding agents at once and it turns into a game of hide and seek:
-which one is waiting on you? Valkyrie runs all of them in one place and points
-you to where you're needed, in your terminal or on your phone. No more
-searching.
+One coding agent is a tool. Five of them is a juggling act. You flip through
+terminal tabs looking for the one that's been sitting on a permission prompt for
+twenty minutes. You tell the third agent today that the project uses pnpm. You
+come back to a pull request that went red an hour after its agent stopped, and
+nobody noticed.
+
+Valkyrie runs Claude Code, Codex and plain shells side by side and does the
+watching for you:
+
+- **It tells you who needs you.** Every agent that's waiting goes to the top of
+  one queue, with what it asked. One key jumps to the next one.
+- **It goes where you go.** The same queue is an app on your phone. Answer a
+  prompt with a tap from the couch.
+- **It remembers so you don't repeat yourself.** Say a rule once and every agent
+  in the repo starts with it. Correct an agent and Valkyrie offers to make the
+  correction a rule.
+- **It keeps work moving after the agent stops.** A PR that goes red or
+  conflicts with main gets flagged with the fix ready to send. Steps you take
+  every time can run on their own.
+
+It's one binary, it runs on your machine, and your agents keep running when you
+close the terminal.
+
+## What you get
+
+### Never miss a prompt
+
+The home screen ranks every session by who needs you: *needs input*, then
+*blocked*, then *done*. When one changes, it chimes and shows what the agent
+asked or finished. `Alt-n` jumps to the next agent waiting on you from anywhere;
+keep pressing to work through them and it brings you back where you started.
+Sessions name themselves after what their agent is working on, so the tab says
+"fix login redirect", not "claude (4)".
+
+### Your agents on your phone
+
+`valk web` turns the queue into an app for your phone or any browser. The inbox
+lists who needs you, with a prompt's answers as buttons, and **Allow all** clears
+a run of plain yes prompts. Each agent's work reads as a chat, with the live
+terminal a tab away. When one finishes, **Review changes** shows its diff, and a
+tap asks it to commit, run the tests or explain. Start new agents, dictate
+messages, send screenshots, and get a push notification when one needs you.
+
+<p align="center">
+  <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
+</p>
+
+### Agents that learn your project
+
+Tell Valkyrie a rule once ("never pkill by pattern") and every agent in the repo
+starts with it, in every worktree, without touching your CLAUDE.md. Better: you
+mostly don't have to write them.
+
+- **Corrections become rules.** "No, we use pnpm" turns into a proposed decision.
+- **What you keep repeating becomes rules.** Valkyrie reads the last month of
+  sessions, finds what you said three times ("did you push?"), and proposes the
+  rule that would make saying it again unnecessary.
+- **Failures become gotchas.** When a tool call fails and the agent finds the way
+  around it, the lesson is proposed so the next agent skips the detour.
+- **Long jobs become skills.** Approve a 15-step job with "perfect, ship it" and
+  the procedure is proposed as a skill the next agent can follow.
+
+Nothing applies until you accept it. Agents propose, you decide, and no agent
+can accept its own. Rules can be scoped to paths, so an agent only hears about
+the TUI's quirks when it opens a TUI file.
+
+### Work that finishes itself
+
+Agents love to stop at "the changes are ready" with nothing committed.
+
+- **Ship policies.** Tell Valkyrie how far you take finished work (commit, push
+  or pull request) and which checks run first. When a Claude agent stops short,
+  it's sent on to run the checks and ship. You rarely set this up by hand: answer
+  "ship it" a couple of times and the habit is proposed for you.
+- **A supervisor for the work after the agent stops.** A PR that goes red, or
+  conflicts with main after six other merges, gets flagged on its session with
+  one step ready: fix the CI, merge main in, or rerun a known flake. Take the
+  same step twice and it's offered as a policy that runs without asking.
+- **A merge guard.** An agent never merges a pull request or pushes to your
+  default branch without you saying yes at your own keyboard. Other agents can't
+  answer that prompt for you.
+
+### A backlog that starts agents
+
+Write a bug or an idea down the moment it comes up: `Alt-a` from anywhere in the
+TUI, or the board on your phone. Attach a screenshot. Later, one tap starts an
+agent on it in its own git worktree and branch, with a brief that tells it to
+reproduce a bug first or plan a feature before writing code.
+
+Cards move on their own: *In progress* while an agent works, *Review* once its
+PR is open, *Done* when the PR merges. Agents that trip over something unrelated
+file it instead of wandering off. `valk todo plan` reads the open items and
+proposes a build order. When a blocker ships and there's room, the board offers
+to start what it was holding up.
+
+### Agents that know about each other
+
+With each prompt, an agent hears what the other agents in the same repo are
+doing: what you asked them and which files they're editing. Two agents don't end
+up silently rewriting the same file. Give each agent its own worktree with one
+flag (`-w`) and they never share a checkout at all.
+
+### Sessions that don't die
+
+A background daemon owns every terminal, so agents keep running when you close
+the TUI or your SSH connection drops. Claude and Codex conversations resume
+after a reboot. `valk upgrade` swaps in a new release and hands the running
+sessions to it, so updating never costs you a session.
+
+### And the rest
+
+- **Hand off between agents.** `valk handoff 3 --to codex` starts Codex on
+  session 3's work, with its goal, where it left off and the files it changed.
+  Handy when one agent hits its rate limit mid-task.
+- **See where you get interrupted.** `valk pings` reports where agents stopped
+  and waited on you over the last 30 days, so you know which prompts to
+  allowlist and which rules to write.
+- **A mini terminal over anything.** `Alt-m` pops a small shell over the screen
+  for a quick `git status`, and puts it away again.
+- **Splits, mouse and themes.** Any tab splits into panes. Click, drag and
+  right-click tabs. Eleven themes, five with digital rain on the home screen.
+- **Runs everywhere.** Linux, macOS, native Windows and WSL2. No tmux: Valkyrie
+  hosts the terminals itself.
+
+## A day with Valkyrie
+
+**Morning, four agents at once.** You start Claude on the login bug, Codex on
+the flaky test, Claude on a refactor in its own worktree, and a shell for
+yourself. You work in the shell. The tab strip shows each agent's state, and the
+bar counts how many need you. When two are waiting, `Alt-n`, answer, `Alt-n`,
+answer, and you're back in your shell.
+
+**Lunch, away from the desk.** Your phone buzzes: the refactor wants to run a
+migration. You read what it's about to do in the chat view and tap *Yes*. Another
+finished; you open **Review changes**, skim the diff, and tap *Commit*.
+
+**Afternoon, the same correction again.** The third agent today reaches for npm.
+You tell it "we use pnpm". A minute later the home screen holds a proposal:
+*Use pnpm, not npm*. Accept it, and tomorrow's agents never ask.
+
+**Evening, main moved.** Five PRs merged and yours now conflicts. Its session,
+long finished, comes back to the top of the queue: "PR #142 conflicts with main",
+with *merge-base* offered. One key, and the agent merges main in, runs the
+checks and pushes.
+
+**On the train, an idea.** You add "dark mode for the settings page" to the
+backlog from your phone. Tomorrow you tap *Launch*, and an agent starts on it in
+a fresh worktree while you're still making coffee.
 
 ## Quick start
 
@@ -53,6 +197,12 @@ valk
 
 Claude Code needs no setup, since Valkyrie adds its hooks per session. If you use
 Codex, run `valk setup codex` once.
+
+**3. Put it on your phone** (optional).
+
+```sh
+valk setup web    # keep valk web running as a service, and pair with a QR code
+```
 
 <details>
 <summary><b>Updating, Windows notes, and building from source</b></summary>
@@ -81,72 +231,6 @@ cd ~/repos/valkyrie && ./install.sh
 
 </details>
 
-## Highlights
-
-- **Many agents, side by side.** Every Claude Code, Codex or shell session is a
-  tab, and any tab splits into panes. A background daemon owns them, so they keep
-  running when you close the TUI or your SSH connection drops. Claude and Codex
-  conversations resume after a reboot.
-- **Know where you're needed.** The home screen ranks sessions by who needs you:
-  `needs input`, then `blocked`, then `done`. When one changes, it chimes and
-  shows what the agent asked or finished. Inside a session, each tab shows its
-  agent's state, and Home shows how many need you.
-- **`Alt-n` for the next one.** From anywhere, `Alt-n` jumps to the next agent
-  waiting on you. Keep pressing to work through them; it brings you back where
-  you started.
-- **[Your agents on your phone](#on-your-phone).** Answer prompts with a tap,
-  follow an agent's work as a chat, and get notified when one needs you.
-- **Project memory.** Tell Valkyrie a rule once ("we use pnpm"), and every agent
-  in the repo starts with it.
-- **No tmux.** Valkyrie hosts the terminals itself (with alacritty's VT engine), so
-  it can read state reliably and redraw the screen for a phone.
-
-## On your phone
-
-`valk web` serves Valkyrie as an app for your phone or any browser. Instead of a
-terminal squeezed onto a small screen, you get an app made for keeping up with
-agents:
-
-- The inbox shows who needs you, with a prompt's answers as buttons. One tap
-  answers it, and **Allow all** clears a run of plain yes prompts.
-- Each agent's work reads as a chat, built from its transcript, with the live
-  terminal a tab away.
-- When an agent finishes, **Review changes** shows its diff, and one tap asks it
-  to commit, run the tests or explain.
-- Start Claude Code, Codex or a shell in any folder, dictate messages, and send
-  files and screenshots to an agent.
-- Push notifications tell you when an agent needs you, finishes or stops while
-  you're away.
-
-<p align="center">
-  <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
-</p>
-
-```sh
-valk setup web    # keep valk web running as a service, and pair with a QR code
-```
-
-`valk web` listens only on localhost, and the daemon never listens on a network.
-How your devices reach it is up to you: Tailscale, a reverse proxy or a tunnel.
-If Tailscale is installed, `valk setup web` puts it behind `tailscale serve`;
-otherwise pass `--url` with the address your devices open. The app installs and
-sends notifications only over HTTPS.
-
-Scan the QR code it prints. The code works once, for ten minutes; the device
-stays paired until you revoke it.
-
-To add another device, such as the app installed on your Home Screen (on iPhone
-it can't open the QR link) or a laptop, open **Settings → Add a device** (the gear)
-in an app that's already paired, or press `p` in `valk`. Type the short code it shows into the
-new device's pairing screen.
-
-```sh
-valk web pair             # print another QR code and short code
-valk web open             # open it in this computer's browser, paired
-valk web devices          # list paired devices
-valk web revoke <name>    # unpair one
-```
-
 ## Screenshots
 
 <sub>Made-up sessions, rendered from the app's own test fixtures.</sub>
@@ -161,6 +245,21 @@ Cyberpunk, Matrix, Violet, Valkyrie and Netrunner, whose home screens have
 digital rain.
 
 <img src="docs/images/themes.png" alt="The home screen in the tokyonight, matrix, cyberpunk and gruvbox themes" width="100%">
+
+## Your machine, your logins
+
+Valkyrie runs locally. The daemon never listens on a network, and `valk web`
+listens only on localhost; how your phone reaches it (Tailscale, a reverse proxy,
+a tunnel) is up to you. The small model that reads corrections and failures is
+Haiku on your own Claude login, with no tools, and `valk decisions auto off`
+turns it off. Nothing is written into your repo unless you export it.
+
+---
+
+# Reference
+
+Everything below is the manual: commands, keys, settings, and how the pieces
+work.
 
 ## Usage
 
@@ -282,7 +381,34 @@ Settings are kept in `~/.config/valkyrie/settings.toml`
 
 </details>
 
-### Project decisions
+## Phone app
+
+```sh
+valk setup web    # keep valk web running as a service, and pair with a QR code
+```
+
+`valk web` listens only on localhost, and the daemon never listens on a network.
+How your devices reach it is up to you: Tailscale, a reverse proxy or a tunnel.
+If Tailscale is installed, `valk setup web` puts it behind `tailscale serve`;
+otherwise pass `--url` with the address your devices open. The app installs and
+sends notifications only over HTTPS.
+
+Scan the QR code it prints. The code works once, for ten minutes; the device
+stays paired until you revoke it.
+
+To add another device, such as the app installed on your Home Screen (on iPhone
+it can't open the QR link) or a laptop, open **Settings → Add a device** (the gear)
+in an app that's already paired, or press `p` in `valk`. Type the short code it shows into the
+new device's pairing screen.
+
+```sh
+valk web pair             # print another QR code and short code
+valk web open             # open it in this computer's browser, paired
+valk web devices          # list paired devices
+valk web revoke <name>    # unpair one
+```
+
+## Project decisions
 
 Tell Valkyrie something once, and every agent in the repo starts with it.
 
@@ -437,7 +563,7 @@ Every worktree of a repo shares its decisions, which are kept in
 
 </details>
 
-### Backlog
+## Backlog
 
 Write a bug or an idea down when it comes up, on your phone or in a terminal, and
 start an agent on it later with one tap. In the TUI, `Alt-a` writes one down from
