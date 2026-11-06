@@ -6,6 +6,10 @@
 
 **Run all your coding agents in one place, and know which one needs you next.**
 
+Claude Code, Codex and your shells side by side, with one queue of who's
+waiting, on your terminal and your phone. It learns your project's rules and
+catches pull requests that break after their agent is done.
+
 [![CI](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml/badge.svg)](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/bjschnell/Valkyrie?label=release&color=bd93f9)](https://github.com/bjschnell/Valkyrie/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-ff79c6)](LICENSE)
@@ -24,7 +28,7 @@
 curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 ```
 
-<sub>Linux, macOS and WSL2. Windows and the rest are in the [quick start](#quick-start).</sub>
+<sub>Free and open source. One binary in `~/.local/bin`, no sudo. Linux, macOS and WSL2; Windows is in the [quick start](#quick-start).</sub>
 
 </div>
 
@@ -84,9 +88,9 @@ own worktree.
 
 ## The phone app
 
-`valk web` is a full app for your phone, not a terminal squeezed onto a small
-screen. The inbox shows prompts with their answers as buttons, and each agent's
-work reads as a chat, with the live terminal one tab away.
+`valk web` turns the queue into an app built for a phone screen. The inbox
+shows prompts with their answers as buttons, and each agent's work reads as a
+chat, with the live terminal one tab away.
 
 <p align="center">
   <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons and a decision to review, and the chat view of a session" width="640">
@@ -151,8 +155,16 @@ No. That always waits for you.
 **Does it run on Windows?**
 Yes, natively, as well as on macOS, Linux and WSL2.
 
+**How is it different from running agents in tmux?**
+tmux shows you terminals; it doesn't know what's in them. Valkyrie reads each
+agent's state, so it can rank who's waiting, chime, show the prompt on your
+phone and give every agent your project's rules. It also keeps sessions alive
+on its own, without tmux.
+
 **What does it cost?**
-Nothing. It's open source under the AGPL-3.0.
+Valkyrie is free and open source under the AGPL-3.0. The features that draft
+rules and write summaries make small Haiku calls on your own Claude login, which
+count toward your usage. `valk decisions auto off` stops the automatic ones.
 
 ## Quick start
 
