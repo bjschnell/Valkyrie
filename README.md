@@ -128,6 +128,7 @@ Run `valk`, press `n` for a shell, and start `claude` or `codex`. Start a few.
 [Install](docs/install.md) · [Using Valkyrie](docs/usage.md) ·
 [Keys](docs/keys.md) · [Settings](docs/settings.md) ·
 [Phone app](docs/phone.md) · [Project decisions](docs/decisions.md) ·
+[Policies](docs/policies.md) · [Supervisor](docs/supervisor.md) ·
 [Backlog](docs/backlog.md) · [Contributing](docs/contributing.md)
 
 ## License

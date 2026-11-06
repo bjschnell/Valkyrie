@@ -7,7 +7,6 @@ valk decide -k constraint "Never pkill by pattern" "It killed tool shells; kill 
 valk decisions            # this repo's decisions (--all: retired ones too)
 valk decisions preview    # what an agent gets at session start
 valk decisions export     # copy them into .valkyrie/decisions/ (skills: .claude/skills/) for git
-valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk decisions health     # what waits on you; decisions that may be out of date or not working
 valk decisions mine       # propose decisions from what you keep telling agents
 valk decisions learn 3    # propose a skill from what session 3 did
@@ -62,72 +61,10 @@ How it works:
    retired at 90. `valk decisions export` writes active skills to `.claude/skills/`
    where Claude Code loads them. In the TUI, PgUp/PgDn scrolls a long proposal;
    a skill is accepted once you've read it to the end.
-7. **Policies finish routine work without asking you.** A policy is a decision of
-   kind `policy` that picks a template Valkyrie's hooks enforce (ADR-0013). The
-   first is `ship`: when a Claude agent is about to end its turn with work short of
-   where you ship it, the hook keeps it going instead, with fixed text that has it
-   run your checks and then commit, push, or open a pull request. It never merges
-   and never pushes the default branch. Its settings live in two places
-   (ADR-0016). How far you ship is your habit, recorded once for every project
-   with `--user`. Each repository's checks are its own:
-
-   ```sh
-   printf '%s\n' 'template: ship' 'until: pr' |
-     valk decide --user -k policy "Ship finished work as a pull request" -
-   printf '%s\n' 'template: ship' 'ci: gh' \
-     'checks: cargo fmt --check && cargo clippy && cargo test' |
-     valk decide -k policy "Checks to run before shipping" -
-   ```
-
-   (The body comes on stdin with `-`, which works the same in bash, zsh and fish.)
-
-   You rarely need to write the habit yourself. When an agent stops short of
-   shipping and you answer with a routine "commit it" or "ship it", a small model
-   (under `valk decisions auto`, short replies only) notes how far you sent the
-   work, as the next stop shows it got there. After that happens in two
-   sessions, in any repositories, the habit is proposed for you to accept, with
-   your replies quoted. Reject it and it isn't offered again for 30 days.
-
-   A repository's facts are learned the same way, from what runs in it. The
-   check commands an agent runs before a push that goes through (a known test or
-   lint tool, or a script, package script or make target the repository has) are
-   proposed as its `checks` once two sessions ran them. CI looked up with the
-   agent's own tools after a push (an MCP tool or a request about builds), or
-   you asking "is CI green?" after a clean stop with a PR, in two sessions,
-   proposes `ci: agent`. Nothing here asks a model: it's counting.
-
-   `until` is `commit`, `push` or `pr`; `checks` and `ci` (`gh`, `agent` or
-   `none`) are optional. A repository's settings lie over your habit, and one that
-   sets `until` itself wins there. `valk decisions show <id>` on a policy prints
-   what's in effect in the project and where each setting came from; `valk
-   decisions --user` lists your habits. The agent gets the template, never your
-   body as prose, and only once a turn. The queue doesn't show *finished* for a
-   turn a policy kept going, and `valk pings` counts those stops apart. Retire the
-   policy, or turn Context off, to stop it.
-
-   The supervisor learns the same way. When a PR goes red or conflicts with its
-   base after its agent stopped, the session's queue row offers one step
-   (`merge-base`, `ci-fix` or `rerun`). Take the same step on the same kind of
-   flag in two sessions, with no decline of it since, and a policy such as
-   `template: merge-base` / `on: conflicting` is proposed. Once you accept it, that
-   step runs without asking, and `valk decisions health` flags it if you keep
-   prompting those sessions differently before the PR comes back clean. `valk
-   pings` counts the steps it took. Turning Context off stops the automatic steps,
-   and `valk supervise off` stops the supervisor altogether. The flags still show.
-   It watches sessions with no backlog item too: an agent session whose branch has
-   an open PR you opened is flagged the same way (someone else's PR, checked out
-   to review, never is). `valk decisions health` compares how often you leave
-   those flags, and override the steps on them, with flags on backlog items, so
-   you can tell whether it reaches too far.
-
-   It also keeps the backlog moving. When an accepted item nobody's on has every
-   blocker shipped or dropped, and fewer than `max_running` agent sessions run in
-   its repository (3 unless `settings.toml` says `max_running = N`; yours count
-   too), the board offers to start it on its last agent and model: `R` starts it
-   and `X` leaves it in the TUI, or Start and Leave on the web board. When nothing
-   is ready, a model is asked once whether the first waiting item really needs its
-   unfinished blocker. Start two items this way and a `template: launch` / `on:
-   ready` policy is proposed, and once accepted it starts them on its own.
+7. **Policies and the supervisor finish routine work.** A decision of kind
+   `policy` has the hooks keep an agent going until its work is shipped, and lets
+   the supervisor take steps you always take. See [Policies](policies.md) and
+   [The supervisor](supervisor.md).
 8. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently

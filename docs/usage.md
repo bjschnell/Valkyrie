@@ -6,6 +6,7 @@ valk new -a -- claude      # start Claude Code in a new session and attach
 valk new -- codex          # start Codex in the background
 valk new -w --name "fix login" -a -- claude   # in its own git worktree and branch
 valk ls                    # list sessions, with their state
+valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk pings                 # where agents stopped and waited on you, last 30 days
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v
