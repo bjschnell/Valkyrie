@@ -64,34 +64,24 @@ it brings the session back with the fix ready to send.
 
 ## The phone app
 
-`valk web` turns the queue into an app built for a phone screen. The inbox
-shows prompts with their answers as buttons, and each agent's work reads as a
-chat, with the live terminal one tab away.
+Your whole queue, built for a phone. Run `valk setup web` and scan one QR code.
 
 <p align="center">
   <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons and a decision to review, and the chat view of a session" width="640">
+  <br><sub>Answer prompts with a tap, and follow each agent's work as a chat.</sub>
 </p>
-
-When an agent finishes, open its diff and send "Commit it" or "Run the tests"
-with one tap. The backlog board lives here too, including the supervisor's
-offer to start whatever is ready next.
 
 <p align="center">
   <img src="docs/images/phone-work.png" alt="A finished agent's changes as a diff with Commit it, Run the tests and Explain buttons, and the backlog board with a ready item offered to start" width="640">
+  <br><sub>Review a diff and send "Commit it" in one tap. Run the backlog from the couch.</sub>
 </p>
 
-<img align="right" src="docs/images/phone-flag.png" alt="A session flagged because its pull request conflicts with main, with the supervisor offering Merge the base in" width="220">
+<p align="center">
+  <img src="docs/images/phone-flag.png" alt="A session flagged because its pull request conflicts with main, with the supervisor offering Merge the base in" width="260">
+  <br><sub>A PR broke while you were out? The fix is already offered.</sub>
+</p>
 
-If a pull request breaks while you're out, its session shows up in the inbox
-with the reason and the step the supervisor suggests. In this case main moved
-and the PR conflicts, so it offers **Merge the base in**. One tap sends the
-agent to merge main, resolve the conflicts, run the checks and push.
-
-You can also start new agents in any folder, dictate messages, attach
-screenshots, and get a push notification when an agent needs you. Pairing a
-phone takes one QR code.
-
-<br clear="right">
+Plus push notifications, dictation, screenshots to agents, and new agents in any folder.
 
 ## Under the hood
 
