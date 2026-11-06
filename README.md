@@ -12,7 +12,7 @@
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust)](https://www.rust-lang.org)
 ![Platforms](https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20WSL2-50fa7b)
 
-[Why Valkyrie](#why-valkyrie) · [What you get](#what-you-get) · [A day with it](#a-day-with-valkyrie) · [Quick start](#quick-start) · [Reference](#reference) · [Install guide](docs/install.md)
+[Why](#why-valkyrie) · [Features](#features) · [Use cases](#use-cases) · [Quick start](#quick-start) · [Reference](#reference) · [Install guide](docs/install.md)
 
 <br>
 
@@ -24,606 +24,249 @@
 
 ## Why Valkyrie
 
-One coding agent is a tool. Five of them is a juggling act. You flip through
-terminal tabs looking for the one that's been sitting on a permission prompt for
-twenty minutes. You tell the third agent today that the project uses pnpm. You
-come back to a pull request that went red an hour after its agent stopped, and
-nobody noticed.
+Five agents means five tabs to check. One has sat on a permission prompt for
+twenty minutes. You tell another, again, that the project uses pnpm. A PR went
+red after its agent stopped, and nobody noticed.
 
-Valkyrie runs Claude Code, Codex and plain shells side by side and does the
-watching for you:
+Valkyrie runs Claude Code, Codex and shells side by side and does the watching:
 
-- **It tells you who needs you.** Every agent that's waiting goes to the top of
-  one queue, with what it asked. One key jumps to the next one.
-- **It goes where you go.** The same queue is an app on your phone. Answer a
-  prompt with a tap from the couch.
-- **It remembers so you don't repeat yourself.** Say a rule once and every agent
-  in the repo starts with it. Correct an agent and Valkyrie offers to make the
-  correction a rule.
-- **It keeps work moving after the agent stops.** A PR that goes red or
-  conflicts with main gets flagged with the fix ready to send. Steps you take
-  every time can run on their own.
+- **It shows who needs you**, in one queue. One key jumps to the next.
+- **It goes with you.** The queue is also a phone app.
+- **It remembers.** Say a rule once and every agent in the repo gets it.
+- **It finishes the job.** Red or conflicting PRs come back with the fix ready.
 
-It's one binary, it runs on your machine, and your agents keep running when you
-close the terminal.
+One binary, running on your machine. Agents keep running when you close the
+terminal.
 
-## What you get
+## Features
 
-### Never miss a prompt
+**Never miss a prompt.** Sessions rank by *needs input*, *blocked*, *done*, with
+a chime and what the agent asked. `Alt-n` jumps to the next one waiting.
+Sessions name themselves after their task.
 
-The home screen ranks every session by who needs you: *needs input*, then
-*blocked*, then *done*. When one changes, it chimes and shows what the agent
-asked or finished. `Alt-n` jumps to the next agent waiting on you from anywhere;
-keep pressing to work through them and it brings you back where you started.
-Sessions name themselves after what their agent is working on, so the tab says
-"fix login redirect", not "claude (4)".
-
-### Your agents on your phone
-
-`valk web` turns the queue into an app for your phone or any browser. The inbox
-lists who needs you, with a prompt's answers as buttons, and **Allow all** clears
-a run of plain yes prompts. Each agent's work reads as a chat, with the live
-terminal a tab away. When one finishes, **Review changes** shows its diff, and a
-tap asks it to commit, run the tests or explain. Start new agents, dictate
-messages, send screenshots, and get a push notification when one needs you.
+**Agents on your phone.** Answer prompts with a tap, read each agent's work as a
+chat, review its diff, start new agents, and get push notifications.
 
 <p align="center">
   <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
 </p>
 
-### Agents that learn your project
+**Agents that learn your project.** Rules you set reach every agent in the repo.
+Valkyrie also proposes them from your corrections, from what you keep
+repeating, from failures agents worked around, and from long jobs you approved.
+Nothing applies until you accept it.
 
-Tell Valkyrie a rule once ("never pkill by pattern") and every agent in the repo
-starts with it, in every worktree, without touching your CLAUDE.md. Better: you
-mostly don't have to write them.
+**Work that finishes itself.**
+- *Ship policies*: when a Claude agent stops short, it runs your checks and
+  commits, pushes or opens the PR.
+- *Supervisor*: a PR that goes red or conflicts gets one step offered: fix CI,
+  merge main in, or rerun a flake. Take it twice and it becomes automatic.
+- *Merge guard*: no agent merges a PR or pushes to main without your yes.
 
-- **Corrections become rules.** "No, we use pnpm" turns into a proposed decision.
-- **What you keep repeating becomes rules.** Valkyrie reads the last month of
-  sessions, finds what you said three times ("did you push?"), and proposes the
-  rule that would make saying it again unnecessary.
-- **Failures become gotchas.** When a tool call fails and the agent finds the way
-  around it, the lesson is proposed so the next agent skips the detour.
-- **Long jobs become skills.** Approve a 15-step job with "perfect, ship it" and
-  the procedure is proposed as a skill the next agent can follow.
+**A backlog that starts agents.** Jot a bug with `Alt-a` or from your phone.
+Later, one tap starts an agent on it in its own worktree. Cards move as the
+agent works and ship when the PR merges.
 
-Nothing applies until you accept it. Agents propose, you decide, and no agent
-can accept its own. Rules can be scoped to paths, so an agent only hears about
-the TUI's quirks when it opens a TUI file.
+**Agents that know about each other.** Each agent hears what the others in the
+repo are editing. `-w` gives each its own worktree.
 
-### Work that finishes itself
+**Sessions that don't die.** A daemon owns the terminals. They survive closed
+terminals, dropped SSH, upgrades, and (for Claude and Codex) reboots.
 
-Agents love to stop at "the changes are ready" with nothing committed.
+**Also:** `valk handoff` moves a task from Claude to Codex. `valk pings` shows
+where you get interrupted. `Alt-m` pops a shell over anything. Splits, mouse
+support, eleven themes. Linux, macOS, Windows and WSL2, no tmux.
 
-- **Ship policies.** Tell Valkyrie how far you take finished work (commit, push
-  or pull request) and which checks run first. When a Claude agent stops short,
-  it's sent on to run the checks and ship. You rarely set this up by hand: answer
-  "ship it" a couple of times and the habit is proposed for you.
-- **A supervisor for the work after the agent stops.** A PR that goes red, or
-  conflicts with main after six other merges, gets flagged on its session with
-  one step ready: fix the CI, merge main in, or rerun a known flake. Take the
-  same step twice and it's offered as a policy that runs without asking.
-- **A merge guard.** An agent never merges a pull request or pushes to your
-  default branch without you saying yes at your own keyboard. Other agents can't
-  answer that prompt for you.
+## Use cases
 
-### A backlog that starts agents
-
-Write a bug or an idea down the moment it comes up: `Alt-a` from anywhere in the
-TUI, or the board on your phone. Attach a screenshot. Later, one tap starts an
-agent on it in its own git worktree and branch, with a brief that tells it to
-reproduce a bug first or plan a feature before writing code.
-
-Cards move on their own: *In progress* while an agent works, *Review* once its
-PR is open, *Done* when the PR merges. Agents that trip over something unrelated
-file it instead of wandering off. `valk todo plan` reads the open items and
-proposes a build order. When a blocker ships and there's room, the board offers
-to start what it was holding up.
-
-### Agents that know about each other
-
-With each prompt, an agent hears what the other agents in the same repo are
-doing: what you asked them and which files they're editing. Two agents don't end
-up silently rewriting the same file. Give each agent its own worktree with one
-flag (`-w`) and they never share a checkout at all.
-
-### Sessions that don't die
-
-A background daemon owns every terminal, so agents keep running when you close
-the TUI or your SSH connection drops. Claude and Codex conversations resume
-after a reboot. `valk upgrade` swaps in a new release and hands the running
-sessions to it, so updating never costs you a session.
-
-### And the rest
-
-- **Hand off between agents.** `valk handoff 3 --to codex` starts Codex on
-  session 3's work, with its goal, where it left off and the files it changed.
-  Handy when one agent hits its rate limit mid-task.
-- **See where you get interrupted.** `valk pings` reports where agents stopped
-  and waited on you over the last 30 days, so you know which prompts to
-  allowlist and which rules to write.
-- **A mini terminal over anything.** `Alt-m` pops a small shell over the screen
-  for a quick `git status`, and puts it away again.
-- **Splits, mouse and themes.** Any tab splits into panes. Click, drag and
-  right-click tabs. Eleven themes, five with digital rain on the home screen.
-- **Runs everywhere.** Linux, macOS, native Windows and WSL2. No tmux: Valkyrie
-  hosts the terminals itself.
-
-## A day with Valkyrie
-
-**Morning, four agents at once.** You start Claude on the login bug, Codex on
-the flaky test, Claude on a refactor in its own worktree, and a shell for
-yourself. You work in the shell. The tab strip shows each agent's state, and the
-bar counts how many need you. When two are waiting, `Alt-n`, answer, `Alt-n`,
-answer, and you're back in your shell.
-
-**Lunch, away from the desk.** Your phone buzzes: the refactor wants to run a
-migration. You read what it's about to do in the chat view and tap *Yes*. Another
-finished; you open **Review changes**, skim the diff, and tap *Commit*.
-
-**Afternoon, the same correction again.** The third agent today reaches for npm.
-You tell it "we use pnpm". A minute later the home screen holds a proposal:
-*Use pnpm, not npm*. Accept it, and tomorrow's agents never ask.
-
-**Evening, main moved.** Five PRs merged and yours now conflicts. Its session,
-long finished, comes back to the top of the queue: "PR #142 conflicts with main",
-with *merge-base* offered. One key, and the agent merges main in, runs the
-checks and pushes.
-
-**On the train, an idea.** You add "dark mode for the settings page" to the
-backlog from your phone. Tomorrow you tap *Launch*, and an agent starts on it in
-a fresh worktree while you're still making coffee.
+- **Four agents, one person.** Work in your own shell; `Alt-n` through whoever
+  is waiting, then you're back.
+- **Away from the desk.** Your phone buzzes, you read the request, tap *Yes*.
+- **The same correction again.** "We use pnpm" becomes a proposed rule. Accept
+  it once.
+- **Main moved.** Your finished PR now conflicts. Its session comes back with
+  *merge-base* offered. One key.
+- **Idea on the train.** Add it to the backlog from your phone; launch it
+  tomorrow.
 
 ## Quick start
 
-**1. Install.** Pick the line for your system.
-
 ```sh
-# Linux, WSL2, macOS (Apple silicon): one static binary, installed to ~/.local/bin
+# Linux, WSL2, macOS (Apple silicon)
 curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-release.sh | bash
 ```
 
 ```powershell
-# Windows x64 (Windows 10 version 1809 or newer), in PowerShell
+# Windows 10 1809+ x64, in PowerShell
 irm https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install.ps1 | iex
 ```
 
-**2. Run `valk`.** Press `n` for a new shell and start `claude` or `codex` in it.
-Start as many as you like. `Alt-n` takes you to the next one that needs you, and
-`^]` or `Alt-h` takes you home.
+Run `valk`, press `n` for a shell, start `claude` or `codex`. `Alt-n` goes to the
+next agent that needs you, `Alt-h` home. Codex users run `valk setup codex`
+once. For the phone, run `valk setup web`.
 
-```sh
-valk
-```
-
-Claude Code needs no setup, since Valkyrie adds its hooks per session. If you use
-Codex, run `valk setup codex` once.
-
-**3. Put it on your phone** (optional).
-
-```sh
-valk setup web    # keep valk web running as a service, and pair with a QR code
-```
-
-<details>
-<summary><b>Updating, Windows notes, and building from source</b></summary>
-
-<br>
-
-**Updating.** Run `valk upgrade`. It downloads the latest release, swaps it in,
-and hands the running daemon to it, so every session keeps running (Windows
-restarts them). An open TUI, `valk web` and the web app switch to the new version
-by themselves. The home screen says when a newer release is out. From v0.0.1,
-rerun the install line once to get `valk upgrade`.
-
-**Windows.** The PowerShell installer puts a native `valk` on your user PATH and
-adds a Windows Terminal profile. Use agents installed on Windows and your Windows
-repos. WSL2 is still available through `install-wsl.ps1`.
-
-**From source.** This needs a C toolchain. `install.sh` installs Rust with rustup
-if you don't have it.
-
-```sh
-git clone https://github.com/bjschnell/Valkyrie.git ~/repos/valkyrie
-cd ~/repos/valkyrie && ./install.sh
-```
-
-[docs/install.md](docs/install.md) covers each platform in detail.
-
-</details>
+Update with `valk upgrade`; sessions keep running. Building from source and
+per-platform notes: [docs/install.md](docs/install.md).
 
 ## Screenshots
 
-<sub>Made-up sessions, rendered from the app's own test fixtures.</sub>
-
-**Inside a session.** Every session is a tab that shows its program and state. The
-bar at the bottom has the keys, and the number of decisions waiting for you.
-
 <img src="docs/images/session.svg" alt="An attached Claude Code session under a tab strip showing four sessions and their states" width="100%">
-
-**Themes.** Dracula, Blackout, Catppuccin, Nord, Gruvbox and Tokyo Night, plus
-Cyberpunk, Matrix, Violet, Valkyrie and Netrunner, whose home screens have
-digital rain.
 
 <img src="docs/images/themes.png" alt="The home screen in the tokyonight, matrix, cyberpunk and gruvbox themes" width="100%">
 
-## Your machine, your logins
+<sub>Made-up sessions, rendered from the app's test fixtures.</sub>
 
-Valkyrie runs locally. The daemon never listens on a network, and `valk web`
-listens only on localhost; how your phone reaches it (Tailscale, a reverse proxy,
-a tunnel) is up to you. The small model that reads corrections and failures is
-Haiku on your own Claude login, with no tools, and `valk decisions auto off`
-turns it off. Nothing is written into your repo unless you export it.
+## Privacy
+
+Everything runs locally. The daemon never listens on a network; `valk web` binds
+localhost and you choose how devices reach it. The small model that proposes
+rules is Haiku on your own Claude login, with no tools, and
+`valk decisions auto off` turns it off.
 
 ---
 
 # Reference
 
-Everything below is the manual: commands, keys, settings, and how the pieces
-work.
-
-## Usage
+## Commands
 
 ```sh
-valk                       # open the TUI
-valk new -a -- claude      # start Claude Code in a new session and attach
-valk new -- codex          # start Codex in the background
-valk new -w --name "fix login" -a -- claude   # in its own git worktree and branch
-valk ls                    # list sessions, with their state
-valk pings                 # where agents stopped and waited on you, last 30 days
-valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
-valk setup alias           # optional: type v instead of valk, if nothing else is called v
+valk                          # open the TUI
+valk new -a -- claude         # start Claude Code and attach
+valk new -- codex             # start Codex in the background
+valk new -w --name "fix login" -a -- claude   # in its own worktree and branch
+valk ls                       # sessions and their state
+valk handoff 3 --to codex -a  # start Codex on session 3's work
+valk pings                    # where agents waited on you, last 30 days
+valk worktree prune [--yes]   # remove worktrees whose branch is merged
+valk supervise on|off         # the supervisor's steps
+valk setup codex              # once, if you use Codex
+valk setup alias              # type v instead of valk
 ```
 
-### One worktree per agent
+**Worktrees.** `-w [BRANCH]` puts a session in `<repo>-<branch>` beside the main
+checkout, on a new branch from `HEAD` (named after `--name` if BRANCH is
+omitted). Uncommitted and ignored files don't come along. `prune` keeps any
+worktree with a session, a backlog item, changes or no commits of its own.
 
-`-w`/`--worktree [BRANCH]` starts a session in a new git worktree, so agents in the
-same repo never edit one checkout. The worktree goes beside the main checkout as
-`<repo>-<branch>` (for example `~/repos/app-fix-login`).
-
-- The branch is new, made from the current `HEAD`, unless BRANCH already exists.
-  Without BRANCH, it's named after `--name`.
-- Uncommitted changes and ignored files (`node_modules`, `.env`) don't come along.
-- Every worktree shares the repo's decisions. The phone's New session screen has
-  the same option.
-- Once the work is merged, `valk worktree prune` lists which worktrees could go
-  and why the others stay; `valk worktree prune --yes` takes away those whose
-  branch is in `origin`'s default branch, with the branch, unless a session runs
-  there, a backlog item owns it, it has no commits of its own, or it has changes.
-  It lists the ignored files (`.env`, `target/`) that go with each.
-
-### Keybinds
-
-A few keys get you started: `↩` on the home screen opens a session, `^]`
-or `Alt-h` takes you home, and `Alt-n` steps through each session that needs you.
-Rest the mouse on a tab for a peek at its agent's state, summary and screen.
-In a session, `^\` is actions, for what the Alt keys don't do: split, rename,
-decisions. The bar under a session lists these keys, and you can click them.
-
-<details>
-<summary><b>All default keys, remapping, and the mouse</b></summary>
-
-<br>
+## Keys
 
 | Where | Key | Does |
 |---|---|---|
-| Home | `↩` | open the selected session |
-| | `n` · `x` · `r` | new shell · kill · rename |
+| Home | `↩` · `n` · `x` · `r` | open · new shell · kill · rename |
 | | `,` · `.` | settings · keys |
-| Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
-| | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
-| | `Alt-n` | each session that needs you, then back where you started |
-| | `Alt-t` · `Alt-w` · `Alt-o` | new shell tab · close tab · next pane |
-| | `Alt-a` | add a bug or idea into the backlog (`↩` adds, `Esc` cancels), then back where you were |
-| | `Alt-m` | mini terminal: a small shell in a box over the screen, for a side command; `Alt-m` again puts it away, and it keeps running until you `exit` it |
-| Attached | `^\` | actions (below) |
-| | `^]` | back home |
-| Actions | `s` / `v` · `p` | split below / beside · the pane's menu |
-| | `r` · `,` | rename the tab · settings |
-| | `m` | minimal tabs: one row each; at the side, a rail of icons that opens under the mouse |
-| | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
+| Anywhere | `Alt-n` | next session that needs you |
+| | `Alt-h` / `^]` · `Alt-1`–`9` | home · jump to a tab |
+| | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · last tab |
+| | `Alt-t` · `Alt-w` · `Alt-o` | new tab · close tab · next pane |
+| | `Alt-a` · `Alt-m` | add to backlog · mini terminal |
+| Attached | `^\` | actions: `s`/`v` split, `r` rename, `m` minimal tabs, `d` decisions |
 
-**Remapping.** Press `.` on the home screen (or in the settings panel), then `↩`
-and the new key. `⌫` clears a key, `r` puts back its default, and `R` twice puts
-back every default. A key can be Alt and almost any key, or Ctrl and a letter,
-apart from the ones programs need (Ctrl-C, Ctrl-D, Ctrl-Z, …). `^]` always goes
-home, so a remap can't lock you out. Changes are kept in `settings.toml` as
-`keys.<action> = "<key>"`.
+Remap on the keys page (`.`); changes go to `settings.toml` as
+`keys.<action> = "<key>"`. `^]` always goes home. On a Mac, set your terminal to
+send Option as Meta (Terminal.app: Profiles → Keyboard; iTerm2: Left Option
+Esc+; Ghostty: `macos-option-as-alt = left`; kitty: `macos_option_as_alt left`;
+WezTerm: `send_composed_key_when_left_alt_is_pressed = false`).
 
-**On a Mac,** the Alt keys are Option, once your terminal sends Option as Meta.
-Until it does, Option types `˙` and friends, and the bar says where to change it.
-Setting only the left Option key keeps the right one for `é`, `€` and the like.
+Mouse: click, drag and right-click tabs; right-click a pane to split; drag
+dividers; hover a tab to peek; click links (Ctrl+click inside mouse apps).
 
-| Terminal | Setting |
-|---|---|
-| Terminal.app | Settings → Profiles → Keyboard → Use Option as Meta key |
-| iTerm2 | Settings → Profiles → Keys → Left Option key: Esc+ |
-| Ghostty | `macos-option-as-alt = left` |
-| kitty | `macos_option_as_alt left` |
-| WezTerm | `send_composed_key_when_left_alt_is_pressed = false` |
+## Settings
 
-**The mouse.** Rest the pointer on a tab to peek at it. Click a tab, drag it to reorder, right-click it for a menu, right-click a pane to split
-it, and drag a divider to resize. The key chips on the bar under a session, and
-`◇ N to review`, click like the keys. Click a link in a
-session to open it in your browser (Ctrl+click over a program that takes the mouse,
-such as vim). Over SSH, the link is copied to your clipboard instead.
-
-</details>
-
-### Settings
-
-Press `,` to open the settings panel. You can change:
-
-- the theme: `dracula`, `cyberpunk`, `blackout`, `catppuccin`, `nord`, `gruvbox`,
-  `tokyonight`, `matrix`, `violet`, `valkyrie` or `netrunner`
-- whether sessions take the theme's colors (`theme`) or your terminal's
-  (`terminal`)
-- the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
-  and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
-  and state icons that opens over the session under the mouse)
-- key hints (`on`/`off`): whether the bar under a session lists its keys.
-  Actions (`^\`) show their keys either way
-- the ping sound (`chime`, `pop`, `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`,
-  `1up`, or `none`), and project context
-
-With `theme` colors, a session's background, default text and 16 ANSI colors come
-from the theme. Colors a program picks exactly (256-color or RGB) stay as it drew
-them.
-
-<details>
-<summary><b>Where settings are kept</b></summary>
-
-<br>
-
-Settings are kept in `~/.config/valkyrie/settings.toml`
-(`%APPDATA%\Valkyrie\settings.toml` on Windows), which you can also edit by hand.
-`VALK_THEME`, `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_TAB_DETAIL`, `VALK_SOUND` and
-`VALK_PROJECT_CONTEXT` override it for one run.
-
-</details>
+Press `,`. Theme (`dracula`, `cyberpunk`, `blackout`, `catppuccin`, `nord`,
+`gruvbox`, `tokyonight`, `matrix`, `violet`, `valkyrie`, `netrunner`), session
+colors (`theme` or `terminal`), tab style, side and detail, key hints, ping
+sound, and project context. Stored in `~/.config/valkyrie/settings.toml`
+(`%APPDATA%\Valkyrie\settings.toml` on Windows); `VALK_*` env vars override it
+for one run.
 
 ## Phone app
 
-```sh
-valk setup web    # keep valk web running as a service, and pair with a QR code
-```
-
-`valk web` listens only on localhost, and the daemon never listens on a network.
-How your devices reach it is up to you: Tailscale, a reverse proxy or a tunnel.
-If Tailscale is installed, `valk setup web` puts it behind `tailscale serve`;
-otherwise pass `--url` with the address your devices open. The app installs and
-sends notifications only over HTTPS.
-
-Scan the QR code it prints. The code works once, for ten minutes; the device
-stays paired until you revoke it.
-
-To add another device, such as the app installed on your Home Screen (on iPhone
-it can't open the QR link) or a laptop, open **Settings → Add a device** (the gear)
-in an app that's already paired, or press `p` in `valk`. Type the short code it shows into the
-new device's pairing screen.
+`valk setup web` runs `valk web` as a service and prints a pairing QR code (one
+use, ten minutes). With Tailscale it uses `tailscale serve`; otherwise pass
+`--url`. Install and notifications need HTTPS. Add more devices from
+**Settings → Add a device** or `p` in `valk`.
 
 ```sh
-valk web pair             # print another QR code and short code
-valk web open             # open it in this computer's browser, paired
-valk web devices          # list paired devices
-valk web revoke <name>    # unpair one
+valk web pair            # another QR code and short code
+valk web open            # open it here, paired
+valk web devices         # list paired devices
+valk web revoke <name>   # unpair one
 ```
 
 ## Project decisions
 
-Tell Valkyrie something once, and every agent in the repo starts with it.
-
 ```sh
-valk decide -k constraint "Never pkill by pattern" "It killed tool shells; kill exact pids."
-valk decisions            # this repo's decisions (--all: retired ones too)
-valk decisions preview    # what an agent gets at session start
-valk decisions export     # copy them into .valkyrie/decisions/ (skills: .claude/skills/) for git
-valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
-valk decisions health     # what waits on you; decisions that may be out of date or not working
-valk decisions mine       # propose decisions from what you keep telling agents
-valk decisions learn 3    # propose a skill from what session 3 did
-valk decisions scope 7 'crates/valkyrie-tui/**'   # agents get #7 when they open a TUI file
-valk decisions scope --propose   # once: a small model proposes scopes for your decisions
-claude mcp add valkyrie -- valk mcp   # optional: let agents search decisions
+valk decide -k constraint "Never pkill by pattern" "Kill exact pids."
+valk decisions                # list (--all for retired)
+valk decisions preview        # what an agent gets at start
+valk decisions health         # what waits on you, what isn't working
+valk decisions mine           # propose rules from what you repeat
+valk decisions learn 3        # propose a skill from session 3
+valk decisions scope 7 'crates/valkyrie-tui/**'   # send #7 only for those files
+valk decisions export         # write to .valkyrie/decisions/ and .claude/skills/
+valk decisions auto all|off   # what the small model may read
+claude mcp add valkyrie -- valk mcp   # let agents search decisions
 ```
 
-A decision can have a *scope*: path globs it's about. Its body then reaches an
-agent the first time the agent reads or edits a file in them, instead of every
-session up front. Each proposal comes with one (else it's the files its text
-names); you change it on review or with `valk decisions scope`.
+- **Kinds:** constraint, decision, pattern, gotcha, fix, skill and policy.
+  Skills are procedures agents read on demand. Scoped decisions reach an agent
+  when it opens a matching file.
+- **Agents propose, you accept**, on the phone, the TUI home screen, or
+  `valk decisions accept <id>`. An agent can't accept its own.
+- **Policies** are templates the hooks enforce (ADR-0013, ADR-0016). Your habit
+  (`--user`) sets how far work ships; each repo sets its checks:
 
-How it works:
+  ```sh
+  printf '%s\n' 'template: ship' 'until: pr' |
+    valk decide --user -k policy "Ship finished work as a pull request" -
+  printf '%s\n' 'template: ship' 'ci: gh' 'checks: cargo test' |
+    valk decide -k policy "Checks to run before shipping" -
+  ```
 
-1. **Agents get the rules.** Claude sessions receive the active decisions when they
-   start, after `/clear`, and after compaction. Nothing is written to CLAUDE.md.
-2. **Agents propose, you decide.** Agents are told they can propose decisions with
-   `valk decide`, but a proposal applies only after you accept it: on the phone, on
-   the TUI home screen, or with `valk decisions accept <id>`. An agent can't accept
-   its own.
-3. **Corrections become proposals.** When you correct an agent ("no, we use pnpm"),
-   a small model (Haiku, on your own Claude login, with no tools) reads that
-   exchange and proposes the rule in it. This is on for Claude sessions by default;
-   `valk decisions auto all|off` changes it.
-4. **What you repeat becomes proposals.** `valk decisions mine` reads this repo's
-   transcripts from the last 30 days (`--days`), finds what you said three or more
-   times across sessions ("did you push?"), and has the same small model propose the
-   decisions that would make saying it again unnecessary. `--dry-run` only shows what
-   you repeat. Codex transcripts are read only with `valk decisions auto all`, and
-   with `auto off` nothing is sent. Transcripts from worktrees you've since removed
-   can't be traced to the repo, so they're skipped.
-5. **What goes wrong becomes proposals.** When an agent's turn ends after a tool
-   failed, the same small model reads the failed call, a few lines of its error,
-   and what worked next, and proposes the gotcha or fix in it, quoting the failure.
-   Most failures teach nothing and are skipped. Each failure is remembered by a
-   signature, so the ones that keep coming back are asked about first, and
-   `valk decisions health` says when a decision's failure kept happening after you
-   accepted it. Same consent as corrections: `valk decisions auto`.
-6. **Procedures become skills.** A skill is a decision of kind `skill`: its title
-   says when to use it, its body holds the steps. Agents get a one-line index of
-   the project's skills and read one in full with `valk decisions show <id>` (or
-   the MCP `get_decision`), so a long procedure costs a session one line until it's
-   needed. Skills come from you (`valk decide -k skill "Cut a release" -` with the
-   steps on stdin), from agents, from `valk decisions mine` when what you repeat is
-   a procedure, and from `valk decisions learn <session>`, which reads what a
-   session did. The daemon does that by itself when you approve a long job ("perfect,
-   ship it" after 15+ tool calls). When a prompt asks for what a skill covers, the
-   agent is told to read it first. When a session that followed a skill hits a
-   failure, the retro may propose the skill rewritten; accepting it replaces the old
-   one. A skill no agent has read in 45 days asks whether it's still needed, and is
-   retired at 90. `valk decisions export` writes active skills to `.claude/skills/`
-   where Claude Code loads them. In the TUI, PgUp/PgDn scrolls a long proposal;
-   a skill is accepted once you've read it to the end.
-7. **Policies finish routine work without asking you.** A policy is a decision of
-   kind `policy` that picks a template Valkyrie's hooks enforce (ADR-0013). The
-   first is `ship`: when a Claude agent is about to end its turn with work short of
-   where you ship it, the hook keeps it going instead, with fixed text that has it
-   run your checks and then commit, push, or open a pull request. It never merges
-   and never pushes the default branch. Its settings live in two places
-   (ADR-0016). How far you ship is your habit, recorded once for every project
-   with `--user`. Each repository's checks are its own:
-
-   ```sh
-   printf '%s\n' 'template: ship' 'until: pr' |
-     valk decide --user -k policy "Ship finished work as a pull request" -
-   printf '%s\n' 'template: ship' 'ci: gh' \
-     'checks: cargo fmt --check && cargo clippy && cargo test' |
-     valk decide -k policy "Checks to run before shipping" -
-   ```
-
-   (The body comes on stdin with `-`, which works the same in bash, zsh and fish.)
-
-   You rarely need to write the habit yourself. When an agent stops short of
-   shipping and you answer with a routine "commit it" or "ship it", a small model
-   (under `valk decisions auto`, short replies only) notes how far you sent the
-   work, as the next stop shows it got there. After that happens in two
-   sessions, in any repositories, the habit is proposed for you to accept, with
-   your replies quoted. Reject it and it isn't offered again for 30 days.
-
-   A repository's facts are learned the same way, from what runs in it. The
-   check commands an agent runs before a push that goes through (a known test or
-   lint tool, or a script, package script or make target the repository has) are
-   proposed as its `checks` once two sessions ran them. CI looked up with the
-   agent's own tools after a push (an MCP tool or a request about builds), or
-   you asking "is CI green?" after a clean stop with a PR, in two sessions,
-   proposes `ci: agent`. Nothing here asks a model: it's counting.
-
-   `until` is `commit`, `push` or `pr`; `checks` and `ci` (`gh`, `agent` or
-   `none`) are optional. A repository's settings lie over your habit, and one that
-   sets `until` itself wins there. `valk decisions show <id>` on a policy prints
-   what's in effect in the project and where each setting came from; `valk
-   decisions --user` lists your habits. The agent gets the template, never your
-   body as prose, and only once a turn. The queue doesn't show *finished* for a
-   turn a policy kept going, and `valk pings` counts those stops apart. Retire the
-   policy, or turn Context off, to stop it.
-
-   The supervisor learns the same way. When a PR goes red or conflicts with its
-   base after its agent stopped, the session's queue row offers one step
-   (`merge-base`, `ci-fix` or `rerun`). Take the same step on the same kind of
-   flag in two sessions, with no decline of it since, and a policy such as
-   `template: merge-base` / `on: conflicting` is proposed. Once you accept it, that
-   step runs without asking, and `valk decisions health` flags it if you keep
-   prompting those sessions differently before the PR comes back clean. `valk
-   pings` counts the steps it took. Turning Context off stops the automatic steps,
-   and `valk supervise off` stops the supervisor altogether. The flags still show.
-   It watches sessions with no backlog item too: an agent session whose branch has
-   an open PR you opened is flagged the same way (someone else's PR, checked out
-   to review, never is). `valk decisions health` compares how often you leave
-   those flags, and override the steps on them, with flags on backlog items, so
-   you can tell whether it reaches too far.
-
-   It also keeps the backlog moving. When an accepted item nobody's on has every
-   blocker shipped or dropped, and fewer than `max_running` agent sessions run in
-   its repository (3 unless `settings.toml` says `max_running = N`; yours count
-   too), the board offers to start it on its last agent and model: `R` starts it
-   and `X` leaves it in the TUI, or Start and Leave on the web board. When nothing
-   is ready, a model is asked once whether the first waiting item really needs its
-   unfinished blocker. Start two items this way and a `template: launch` / `on:
-   ready` policy is proposed, and once accepted it starts them on its own.
-8. **Agents know about each other.** With each prompt, an agent also hears what the
-   other agents in the same repo are doing: what you asked them, the files they're
-   editing, and any file you've both touched. Two agents don't end up silently
-   editing the same file.
-
-<details>
-<summary><b>Hooks, turning it off, and where decisions are kept</b></summary>
-
-<br>
-
-This also works for a `claude` you type into a Valkyrie shell. `valk` keeps its
-hooks in Claude Code's own settings (`~/.claude/settings.json`). They do nothing
-outside a Valkyrie session, and they give a typed `claude` the same state tracking,
-correction reading and sibling notes as a session Valkyrie started.
-
-To switch context off, use the **Context** row in the settings (`,`), set
-`context = off` in `settings.toml`, or set `VALK_PROJECT_CONTEXT=off`.
-`valk setup claude --remove` takes the hooks out of Claude's settings, and
-`valk setup claude` puts them back.
-
-Every worktree of a repo shares its decisions, which are kept in
-`~/.local/state/valkyrie/context` (ADR-0007 in [docs/adr](docs/adr)).
-
-</details>
+  Both are also learned from what you say and run. Supervisor steps
+  (`merge-base`, `ci-fix`, `rerun`, `launch`) become policies the same way
+  (ADR-0019).
+- **Hooks** live in `~/.claude/settings.json` and do nothing outside Valkyrie.
+  `valk setup claude --remove` takes them out. Turn context off in settings or
+  with `VALK_PROJECT_CONTEXT=off`. Decisions are kept in
+  `~/.local/state/valkyrie/context` (ADR-0007).
 
 ## Backlog
 
-Write a bug or an idea down when it comes up, on your phone or in a terminal, and
-start an agent on it later with one tap. In the TUI, `Alt-a` writes one down from
-anywhere, a session included, and takes you back.
-
 ```sh
 valk todo add -k bug -f shot.png "Tab rename eats the last letter"
-valk todo                  # what's open, and where each one is
-valk todo launch 1         # claude in a worktree on fix/1-tab-rename-…, with a brief
-valk todo edit 1 -k chore  # reword it (-t, -b), change its kind or repository
-valk todo ship 1           # done: the worktree goes if it's clean, the branch if merged
-valk todo take 4 -b fix/x  # an agent says it's on #4 (and --pr URL once it's open)
-valk todo take 4 --steal   # one session per item: hand #4 to your session anyway
-valk todo adopt 12         # a claude session you started by hand becomes an item (or A at home)
-valk todo add --take -k bug "Off-by-one in resize" --branch fix/resize  # an agent tracks a fix nobody planned
-valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
-valk todo note -i 4 "left: X"   # a handoff, kept for the item's next launch
-valk todo accept 5         # also: show, drop, reopen, rm
+valk todo                     # what's open
+valk todo launch 1            # agent in a worktree, with a brief
+valk todo plan                # propose a build order
+valk todo take 4 -b fix/x     # an agent claims #4 (--pr URL later)
+valk todo adopt 12            # turn a hand-started session into an item
+valk todo note -i 4 "left: X" # handoff for the next launch
+valk todo ship --merged       # ship items whose branch merged
 ```
 
-On the phone, the list icon in the inbox opens the board: Backlog, In progress,
-Review, Done. Cards move on their own as their agent works, waits on you or
-finishes; one with a pull request open waits in Review unless its agent needs
-you. Edit a card there, with `e` on the TUI's backlog page (`b`), or with
-`valk todo edit`. A bug's brief tells the agent to reproduce it first; a feature's, to plan
-and ask before writing code. Agents can add items too, as proposals you accept
-before anything can start them. An agent that fixes something along the way files
-and takes it in one go (`--take`), so its card follows the work; `ship --merged`
-lists it as agent-filed, and shipping it accepts it.
+Also `edit`, `accept`, `show`, `drop`, `reopen` and `rm`.
+
+The board (phone, or `b` in the TUI) has Backlog, In progress, Review and Done.
+Agent-filed items are proposals until you accept them.
 
 ## How it's built
 
-Valkyrie is a Rust workspace:
-
-| Crate | Role |
-|---|---|
-| `valkyrie` | the `valk` binary and CLI |
-| `valkyrie-daemon` | PTY host, session manager, socket server, upgrade handoff |
-| `valkyrie-term` | per-session screen model on `alacritty_terminal` |
-| `valkyrie-agents` | agent adapters, state tracking, queue ranking (pure logic) |
-| `valkyrie-proto` | wire protocol: messages, framing, async client |
-| `valkyrie-context` | project decisions: store, project roots, the injected block |
-| `valkyrie-tui` | the terminal client (ratatui) |
-| `valkyrie-web` | serves the web app and bridges it to the daemon |
-
-The web app (`web/`, React + Vite) is built into `web/dist`, which is committed and
-embedded in the binary, so building `valk` needs no Node.
+A Rust workspace: `valkyrie` (CLI), `valkyrie-daemon` (PTY host, sessions,
+upgrade handoff), `valkyrie-term` (screen model on `alacritty_terminal`),
+`valkyrie-agents` (state tracking, queue), `valkyrie-proto` (wire protocol),
+`valkyrie-context` (decisions), `valkyrie-tui` (ratatui) and `valkyrie-web`. The
+React web app is prebuilt into `web/dist` and embedded, so building needs no
+Node.
 
 ## Contributing
 
-Issues and pull requests are welcome. To run the tests:
-
 ```sh
-cargo test --workspace             # Rust tests
-cd web && npm ci && npm test       # web tests; `npm run build` refreshes web/dist
+cargo test --workspace
+cd web && npm ci && npm test      # npm run build refreshes web/dist
 ```
 
-To try the web app against a throwaway daemon, give it its own state and socket and
-start it with `--dev`; its `valk web` then takes `dev-token` at the pairing screen
-([ADR-0010](docs/adr/0010-dev-token.md)). Never use `--dev` for the daemon you use.
+For a throwaway daemon, give it its own state and socket and use `--dev`; its web
+app takes `dev-token` ([ADR-0010](docs/adr/0010-dev-token.md)):
 
 ```sh
 S=$(mktemp -d); chmod 700 $S
@@ -632,17 +275,15 @@ valk daemon --dev &
 valk web --listen 127.0.0.1:8833 --url http://127.0.0.1:8833
 ```
 
-[DESIGN.md](DESIGN.md) is the design and its history, and [docs/adr](docs/adr)
-holds the architecture decisions. Commits follow Conventional Commits, and versions
-follow semver; [docs/releasing.md](docs/releasing.md) says how both work and how a
-release is cut.
+See [DESIGN.md](DESIGN.md), [docs/adr](docs/adr), and
+[docs/releasing.md](docs/releasing.md) (Conventional Commits, semver).
 
 ## License
 
-[AGPL-3.0](LICENSE). You can use, change and share Valkyrie freely. If you run a
-modified version as a service for others, you must offer them its source.
+[AGPL-3.0](LICENSE). Use, change and share freely. If you run a modified version
+as a service, offer its source.
 
 <div align="center">
 <br>
-<sub>If Valkyrie catches a prompt you would have missed, a ⭐ helps other people find it.</sub>
+<sub>If Valkyrie catches a prompt you would have missed, a ⭐ helps others find it.</sub>
 </div>
