@@ -623,7 +623,14 @@ impl Registry {
                 && let Some(summary) = pr_summary(&url, failed, conflicts.as_deref())
             {
                 for (session, seq) in self.flag_pr(&item, &url, &summary) {
-                    self.offer_step(&item, session, seq, &summary, &pr).await;
+                    self.offer_step(
+                        &crate::supervise::Watched::of_item(&item),
+                        session,
+                        seq,
+                        &summary,
+                        &pr,
+                    )
+                    .await;
                 }
             }
             let closed = match pr {
@@ -926,7 +933,7 @@ impl Registry {
 /// What's wrong with an open pull request, short enough for the queue: "CI red
 /// on PR #N: <the checks that failed>", "PR #N conflicts with <base>", or both.
 /// `None` when it's neither.
-fn pr_summary(url: &str, failed: &[Check], conflicts: Option<&str>) -> Option<String> {
+pub(crate) fn pr_summary(url: &str, failed: &[Check], conflicts: Option<&str>) -> Option<String> {
     const SHOWN: usize = 3;
     let pr = url
         .rsplit_once("/pull/")
@@ -1205,6 +1212,7 @@ mod tests {
             conflicts: None,
             head: String::new(),
             settled: true,
+            author: String::new(),
         });
         assert_eq!(registry.ship_merged_prs(reopened).await, 0);
         assert!(!get(closed).pr_closed);
@@ -1292,6 +1300,7 @@ mod tests {
                 conflicts: behind.then(|| "main".to_owned()),
                 head: String::new(),
                 settled: true,
+                author: String::new(),
             }
         });
         let state = |s: &Arc<crate::session::Session>| s.info().status;
@@ -1396,6 +1405,7 @@ mod tests {
             conflicts: None,
             head: String::new(),
             settled: true,
+            author: String::new(),
         });
         registry.ship_merged_prs(green).await;
         assert_eq!(state(&busy).state, AgentState::Working);
@@ -1408,6 +1418,7 @@ mod tests {
             conflicts: Some("main".to_owned()),
             head: String::new(),
             settled: true,
+            author: String::new(),
         });
         registry.ship_merged_prs(conflicting.clone()).await;
         let both = state(&idle);

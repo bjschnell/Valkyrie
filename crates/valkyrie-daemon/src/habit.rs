@@ -187,6 +187,7 @@ fn record_outcome(
         project: repo.display().to_string(),
         overridden,
         how: how.to_owned(),
+        via: None,
     };
     let store = registry.context.lock().unwrap();
     if let Err(e) = store.record_outcome(&scope, &record, now) {

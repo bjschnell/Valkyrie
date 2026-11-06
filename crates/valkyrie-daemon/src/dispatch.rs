@@ -546,6 +546,7 @@ impl Registry {
             pr: String::new(),
             policy: by,
             features: None,
+            via: steps::Via::Item,
         };
         if let Err(e) = self
             .context

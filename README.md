@@ -398,6 +398,11 @@ How it works:
    prompting those sessions differently before the PR comes back clean. `valk
    pings` counts the steps it took. Turning Context off stops the automatic steps,
    and `valk supervise off` stops the supervisor altogether. The flags still show.
+   It watches sessions with no backlog item too: an agent session whose branch has
+   an open PR you opened is flagged the same way (someone else's PR, checked out
+   to review, never is). `valk decisions health` compares how often you leave
+   those flags, and override the steps on them, with flags on backlog items, so
+   you can tell whether it reaches too far.
 
    It also keeps the backlog moving. When an accepted item nobody's on has every
    blocker shipped or dropped, and fewer than `max_running` agent sessions run in

@@ -1682,6 +1682,7 @@ mod tests {
             project: f.repo.display().to_string(),
             overridden,
             how: "interrupted".into(),
+            via: None,
         };
         for (s, at) in [("a", 20), ("b", 30)] {
             f.store
