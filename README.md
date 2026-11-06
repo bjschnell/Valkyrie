@@ -4,11 +4,11 @@
 
 # Valkyrie
 
-**Run all your coding agents in one place, and know which one needs you next.**
+**Many agents, one focus.**
 
-Claude Code, Codex and your shells side by side, with one queue of who's
-waiting, on your terminal and your phone. It learns your project's rules and
-catches pull requests that break after their agent is done.
+An agent manager that learns how you work, so you ship faster and get
+interrupted less. Claude Code, Codex and your shells run side by side, with one
+queue of who's waiting, on your terminal and your phone.
 
 [![CI](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml/badge.svg)](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/bjschnell/Valkyrie?label=release&color=bd93f9)](https://github.com/bjschnell/Valkyrie/releases)
