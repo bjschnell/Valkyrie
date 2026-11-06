@@ -113,12 +113,6 @@ phone takes one QR code.
 
 <br clear="right">
 
-## Built with itself
-
-Valkyrie is developed in Valkyrie. Of this repository's 112 merged pull
-requests, 76 came from items on its own backlog, and 35 active project
-decisions steer the agents that work on it (November 2026).
-
 ## Under the hood
 
 - Valkyrie is one static Rust binary with the web app built in, so there's
