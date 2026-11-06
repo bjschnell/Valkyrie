@@ -191,6 +191,8 @@ struct App {
     items: Vec<Item>,
     /// Build orders waiting on the user, as last pushed with the items.
     orders: Vec<valkyrie_proto::OrderProposal>,
+    /// Ready items the supervisor offers to start, as last pushed with the items.
+    launches: Vec<valkyrie_proto::LaunchOffer>,
     /// Where a background task (`P`'s model call) reports a line to say.
     said: Option<mpsc::UnboundedSender<String>>,
     /// The backlog page is open (`b`).
@@ -385,6 +387,7 @@ impl App {
             shipping: None,
             ship_busy: false,
             orders: Vec::new(),
+            launches: Vec::new(),
             said: None,
             settings_cursor: None,
             keys_page: None,
@@ -2376,6 +2379,7 @@ impl App {
     async fn open_backlog(&mut self) {
         let mut page = backlog::Page::default();
         page.orders = self.orders.clone();
+        page.launches = self.launches.clone();
         self.backlog = Some(page);
         self.backlog_facts().await;
     }
@@ -2590,6 +2594,19 @@ impl App {
                     let _ = tx.send(line);
                 });
             }
+            Do::AnswerLaunch {
+                project,
+                id,
+                item,
+                launch,
+            } => match self.client.answer_launch(project, id, launch).await? {
+                Some(info) => {
+                    self.backlog = None;
+                    self.refresh().await;
+                    self.switch_to(info.id).await;
+                }
+                None => self.say(format!("left #{item}: it's offered again once it changes")),
+            },
             Do::AnswerOrder {
                 project,
                 id,
@@ -2675,12 +2692,19 @@ impl App {
             self.reviewing = self.reviewing.zip(last).map(|(i, last)| i.min(last));
             return Ok(true);
         }
-        if let ServerMsg::Items { items, orders } = msg {
+        if let ServerMsg::Items {
+            items,
+            orders,
+            launches,
+        } = msg
+        {
             self.items = items;
             if let Some(page) = &mut self.backlog {
                 page.orders = orders.clone();
+                page.launches = launches.clone();
             }
             self.orders = orders;
+            self.launches = launches;
             return Ok(true);
         }
         if let ServerMsg::Queue { items } = msg {
@@ -6437,6 +6461,7 @@ mod tests {
         app.view = Some(Attached::new(2, "two".into(), None));
         // An open item, selected when the page opens.
         app.on_push(ServerMsg::Items {
+            launches: Vec::new(),
             orders: Vec::new(),
             items: vec![Item {
                 priority: Default::default(),
@@ -6637,6 +6662,7 @@ mod tests {
         };
         use valkyrie_proto::ItemStatus::{Open, Proposed};
         app.on_push(ServerMsg::Items {
+            launches: Vec::new(),
             orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
@@ -6699,6 +6725,7 @@ mod tests {
         // `r` shows one repository's items, named in the title; a check then offers
         // only those to ship.
         app.on_push(ServerMsg::Items {
+            launches: Vec::new(),
             orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),

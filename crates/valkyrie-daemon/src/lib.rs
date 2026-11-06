@@ -5,6 +5,7 @@ mod activity;
 mod backlog;
 mod chat;
 mod context;
+mod dispatch;
 mod extract;
 mod facts;
 mod foreground;
@@ -163,6 +164,12 @@ struct Registry {
     /// Build orders waiting on the user (ADR-0019 §2), pushed with the items.
     orders: watch::Sender<order::Orders>,
     order_book: Mutex<order::Book>,
+    /// Ready items the supervisor offers to start (ADR-0019 §2 `launch`), pushed
+    /// with the items.
+    launches: watch::Sender<dispatch::Launches>,
+    dispatch: Mutex<dispatch::Book>,
+    /// Wakes the dispatch watcher: an item changed, or a blocker call came back.
+    dispatch_kick: Notify,
     /// What the build-order watcher should look at.
     order_tx: mpsc::UnboundedSender<order::Trigger>,
     order_rx: Mutex<Option<mpsc::UnboundedReceiver<order::Trigger>>>,
@@ -501,6 +508,13 @@ fn new_registry(
             &own_socket,
             "orders",
         ))),
+        launches: watch::Sender::new(Arc::default()),
+        dispatch: Mutex::new(dispatch::Book::load(restore::per_daemon(
+            state_dir,
+            &own_socket,
+            "dispatch",
+        ))),
+        dispatch_kick: Notify::new(),
         supervisor: Mutex::new(supervise::Supervisor::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -517,6 +531,7 @@ fn new_registry(
     registry.refresh_proposals();
     registry.refresh_items();
     registry.refresh_orders();
+    registry.refresh_launches();
     Ok((registry, rx))
 }
 
@@ -544,6 +559,7 @@ async fn serve_forever(
     }
     tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(watch_prs(registry.clone()));
+    tokio::spawn(dispatch::run(registry.clone()));
     tokio::spawn(tick(registry.clone()));
     tokio::spawn(restore::keep(
         registry.clone(),
@@ -1090,6 +1106,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                     let proposals = registry.proposals.subscribe();
                     let items = registry.items.subscribe();
                     let orders = registry.orders.subscribe();
+                    let launches = registry.launches.subscribe();
                     // Proposals as `Decisions` gives them: an agent sees their titles.
                     let agent = registry.caller(peer).agent.is_some();
                     queue_watch = Some(tokio::spawn(forward_queue(
@@ -1097,6 +1114,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                         proposals,
                         items,
                         orders,
+                        launches,
                         agent,
                         out.clone(),
                     )));
@@ -1194,6 +1212,12 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 seq,
                 action,
             } => (req, registry.take_step(session, seq, action, peer).await),
+            ClientMsg::AnswerLaunch {
+                req,
+                project,
+                id,
+                launch,
+            } => (req, registry.answer_launch(project, id, launch, peer).await),
             ClientMsg::AnswerOrder {
                 req,
                 project,
@@ -1520,6 +1544,7 @@ async fn forward_queue(
     mut proposals: watch::Receiver<Proposals>,
     mut backlog: watch::Receiver<backlog::Items>,
     mut orders: watch::Receiver<order::Orders>,
+    mut launches: watch::Receiver<dispatch::Launches>,
     agent: bool,
     out: Out,
 ) {
@@ -1538,13 +1563,16 @@ async fn forward_queue(
     if !send(ServerMsg::Proposals { items }).await {
         return;
     }
-    // Items and orders go together: a card's proposal names its items.
-    let both = |backlog: &mut watch::Receiver<backlog::Items>,
-                orders: &mut watch::Receiver<order::Orders>| ServerMsg::Items {
-        items: (**backlog.borrow_and_update()).clone(),
-        orders: (**orders.borrow_and_update()).clone(),
-    };
-    if !send(both(&mut backlog, &mut orders)).await {
+    // Items, orders and launch offers go together: a proposal names its items.
+    let both =
+        |backlog: &mut watch::Receiver<backlog::Items>,
+         orders: &mut watch::Receiver<order::Orders>,
+         launches: &mut watch::Receiver<dispatch::Launches>| ServerMsg::Items {
+            items: (**backlog.borrow_and_update()).clone(),
+            orders: (**orders.borrow_and_update()).clone(),
+            launches: (**launches.borrow_and_update()).clone(),
+        };
+    if !send(both(&mut backlog, &mut orders, &mut launches)).await {
         return;
     }
     loop {
@@ -1558,11 +1586,15 @@ async fn forward_queue(
                 Err(_) => return,
             },
             changed = backlog.changed() => match changed {
-                Ok(()) => both(&mut backlog, &mut orders),
+                Ok(()) => both(&mut backlog, &mut orders, &mut launches),
                 Err(_) => return,
             },
             changed = orders.changed() => match changed {
-                Ok(()) => both(&mut backlog, &mut orders),
+                Ok(()) => both(&mut backlog, &mut orders, &mut launches),
+                Err(_) => return,
+            },
+            changed = launches.changed() => match changed {
+                Ok(()) => both(&mut backlog, &mut orders, &mut launches),
                 Err(_) => return,
             },
         };

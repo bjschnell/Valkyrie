@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 pub use agent::{AgentState, AgentStatus, AskKind, Flag, QueueItem, Step, StepAction};
 pub use backlog::{
-    Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, NewItem,
-    OrderApplied, OrderProposal, OrderStep, Priority, ShippedItem, order,
+    Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, LaunchOffer,
+    NewItem, OrderApplied, OrderProposal, OrderStep, Priority, ShippedItem, order,
 };
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 26;
+pub const PROTOCOL: u32 = 27;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -427,6 +427,17 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         items: Option<Vec<u32>>,
     },
+    /// Starts or leaves the repository's ready item the supervisor offers
+    /// (ADR-0019 §2 `launch`, protocol 27): the user only, and only the offer
+    /// waiting (`id`). `launch` starts it as the board's Launch would; false leaves
+    /// it, and the next ready item is offered instead. Replies `Session` when
+    /// started, `Text` when left.
+    AnswerLaunch {
+        req: ReqId,
+        project: PathBuf,
+        id: u64,
+        launch: bool,
+    },
     /// Whether the supervisor runs (ADR-0019 §6, protocol 26): off, it offers no
     /// steps and takes none on its own, though the PR poll still flags sessions.
     /// `None` only asks; setting it is for the user only. Replies `Text`, `on` or
@@ -561,6 +572,11 @@ pub enum ServerMsg {
         /// (protocol 24).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         orders: Vec<OrderProposal>,
+
+        /// Ready items the supervisor offers to start, one per repository at most
+        /// (protocol 27).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        launches: Vec<LaunchOffer>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.
@@ -635,6 +651,10 @@ pub enum Reply {
         /// Build orders waiting on the user (protocol 24).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         orders: Vec<OrderProposal>,
+
+        /// Ready items the supervisor offers to start (protocol 27).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        launches: Vec<LaunchOffer>,
     },
     Order {
         order: Box<OrderProposal>,

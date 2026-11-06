@@ -1,7 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
-import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, OrderApplied, OrderProposal, OrderStep, Priority, SessionInfo, ShippedItem } from "../proto";
+import type { Item, ItemChange, ItemFacts, ItemKind, KeptItem, LaunchOffer, OrderApplied, OrderProposal, OrderStep, Priority, SessionInfo, ShippedItem } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -238,6 +238,13 @@ export function planScope(repo: RepoFilter, items: Item[]): string | null {
   const roots = new Set(items.filter((i) => i.status === "open" && i.project).map((i) => i.project as string));
   return roots.size === 1 ? [...roots][0] : null;
 }
+
+/** The launch offers the board shows: the shown repository's, or every one. */
+export const launchesShown = (offers: LaunchOffer[], repo: RepoFilter) =>
+  offers.filter((o) => repo === null || o.project === repo);
+
+/** What a launch offer starts: `claude`, `codex · gpt-5`. */
+export const launchesOn = (o: LaunchOffer) => (o.model ? `${o.agent} · ${o.model}` : o.agent);
 
 /** The build orders the board shows: the shown repository's, or every one. */
 export const ordersShown = (orders: OrderProposal[], repo: RepoFilter) =>

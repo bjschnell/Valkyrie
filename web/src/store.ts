@@ -12,6 +12,7 @@ import type {
   Modes,
   NewItem,
   OrderProposal,
+  LaunchOffer,
   QueueItem,
   ReviewAction,
   ServerMsg,
@@ -70,6 +71,8 @@ interface State {
   items: Item[];
   /** Build orders waiting on the user (ADR-0019 §2), pushed with the items. */
   orders: OrderProposal[];
+  /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
+  launches: LaunchOffer[];
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -98,6 +101,7 @@ export const useApp = create<State>(() => ({
   proposals: [],
   items: [],
   orders: [],
+  launches: [],
   boot: 0,
   openId: null,
   screen: null,
@@ -194,7 +198,7 @@ function onPush(msg: ServerMsg): void {
       set({ proposals: msg.items });
       break;
     case "items":
-      set({ items: msg.items, orders: msg.orders ?? [] });
+      set({ items: msg.items, orders: msg.orders ?? [], launches: msg.launches ?? [] });
       break;
     case "screen":
       if (msg.session === get().openId)
@@ -660,6 +664,20 @@ export async function answerOrder(
   } catch (e) {
     toast((e as Error).message);
     return false;
+  }
+}
+
+/** Starts or leaves the ready item the supervisor offers. Started, the new session's id. */
+export async function answerLaunch(offer: LaunchOffer, launch: boolean): Promise<SessionId | null> {
+  if (!conn) return null;
+  try {
+    const reply = await conn.request({ t: "answer_launch", project: offer.project, id: offer.id, launch });
+    if (reply.t === "session") return reply.info.id;
+    if (reply.t === "text") toast(reply.text);
+    return null;
+  } catch (e) {
+    toast((e as Error).message);
+    return null;
   }
 }
 

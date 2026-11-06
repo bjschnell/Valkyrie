@@ -485,7 +485,7 @@ impl Client {
     /// Every backlog item, and the build orders waiting on the user.
     pub async fn backlog(&self) -> Result<(Vec<crate::Item>, Vec<crate::OrderProposal>)> {
         match self.request(|req| ClientMsg::Items { req }).await? {
-            Reply::Items { items, orders } => Ok((items, orders)),
+            Reply::Items { items, orders, .. } => Ok((items, orders)),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -520,6 +520,37 @@ impl Client {
             .await?
         {
             Reply::OrderApplied { applied } => Ok(applied),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The ready items the supervisor offers to start (ADR-0019 §2 `launch`).
+    pub async fn launch_offers(&self) -> Result<Vec<crate::LaunchOffer>> {
+        match self.request(|req| ClientMsg::Items { req }).await? {
+            Reply::Items { launches, .. } => Ok(launches),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Starts (`launch`) or leaves a repository's ready item
+    /// (`ClientMsg::AnswerLaunch`). Started, the new session; left, `None`.
+    pub async fn answer_launch(
+        &self,
+        project: std::path::PathBuf,
+        id: u64,
+        launch: bool,
+    ) -> Result<Option<crate::SessionInfo>> {
+        match self
+            .request(|req| ClientMsg::AnswerLaunch {
+                req,
+                project,
+                id,
+                launch,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(Some(info)),
+            Reply::Text { .. } => Ok(None),
             other => bail!("unexpected reply: {other:?}"),
         }
     }

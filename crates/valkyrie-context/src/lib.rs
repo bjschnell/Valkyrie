@@ -3,11 +3,13 @@
 //! into agents.
 
 pub mod backlog;
+pub mod blocker;
 pub mod extract;
 pub mod facts;
 mod file;
 pub mod find;
 pub mod flake;
+pub mod flaketree;
 pub mod handoff;
 pub mod inject;
 pub mod mine;

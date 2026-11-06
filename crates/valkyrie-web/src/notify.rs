@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use valkyrie_proto::client::{Client, DaemonInfo};
-use valkyrie_proto::{AgentState, AskKind, ClientBuild, Decision, QueueItem, ServerMsg, SessionId};
+use valkyrie_proto::{
+    AgentState, AskKind, ClientBuild, Decision, LaunchOffer, QueueItem, ServerMsg, SessionId,
+};
 
 /// How long without a keypress before you count as away.
 const AWAY_MS: u64 = 90_000;
@@ -86,6 +88,11 @@ pub struct Watch {
     decisions_started: bool,
     /// Flags pushed and not seen yet, with when they push again: once each.
     reminders: HashMap<SessionId, (QueueItem, u64)>,
+    /// Launch offers seen, by id: each is news once.
+    launches_known: std::collections::HashSet<u64>,
+    /// New ones not pushed yet, and when each arrived.
+    launches_new: Vec<(LaunchOffer, u64)>,
+    launches_started: bool,
 }
 
 impl Watch {
@@ -158,8 +165,27 @@ impl Watch {
         self.decisions_started = true;
     }
 
+    /// The ready items the supervisor offers to start (ADR-0019 §2): a new one is
+    /// news once, after the same grace, so one you start or leave at once, or that
+    /// the next look replaces, stays quiet.
+    pub fn launches(&mut self, offers: &[LaunchOffer], visible: bool, now_ms: u64) {
+        let ids: std::collections::HashSet<u64> = offers.iter().map(|o| o.id).collect();
+        self.launches_new.retain(|(o, _)| ids.contains(&o.id));
+        for o in offers {
+            if self.launches_known.contains(&o.id) || !self.launches_started || visible {
+                continue;
+            }
+            self.launches_new.push((o.clone(), now_ms));
+        }
+        self.launches_known = ids;
+        self.launches_started = true;
+    }
+
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() || !self.decisions_new.is_empty() || !self.reminders.is_empty()
+        !self.pending.is_empty()
+            || !self.decisions_new.is_empty()
+            || !self.reminders.is_empty()
+            || !self.launches_new.is_empty()
     }
 
     /// What to push now. `last_input_ms`: the latest keypress into any session.
@@ -168,6 +194,7 @@ impl Watch {
             // On screen in the app's inbox: seen.
             self.pending.clear();
             self.decisions_new.clear();
+            self.launches_new.clear();
             return Vec::new();
         }
         if now_ms.saturating_sub(last_input_ms) < AWAY_MS {
@@ -202,6 +229,22 @@ impl Watch {
             }
         }
         notes.sort_by_key(|n| n.session);
+        let (ripe, young): (Vec<_>, Vec<_>) = std::mem::take(&mut self.launches_new)
+            .into_iter()
+            .partition(|(_, at)| now_ms.saturating_sub(*at) >= GRACE_MS);
+        self.launches_new = young;
+        for (o, _) in ripe {
+            notes.push(Note {
+                title: format!("Ready to start: #{} {}", o.item, o.title),
+                body: o.why.clone(),
+                session: None,
+                seq: 0,
+                tag: format!("launch-{}", o.item),
+                badge: self.queue_len,
+                urgency: Urgency::Normal,
+                from_screen: false,
+            });
+        }
         if !self.decisions_new.is_empty() && now_ms.saturating_sub(self.decisions_since) >= GRACE_MS
         {
             let titles: Vec<String> = std::mem::take(&mut self.decisions_new)
@@ -343,6 +386,9 @@ async fn watch_daemon(
                 Some(ServerMsg::Queue { items }) => watch.queue(&items, app.visible(), now_ms()),
                 Some(ServerMsg::Proposals { items }) => {
                     watch.proposals(&items, app.visible(), now_ms())
+                }
+                Some(ServerMsg::Items { launches, .. }) => {
+                    watch.launches(&launches, app.visible(), now_ms())
                 }
                 Some(_) => {}
                 None => anyhow::bail!("daemon connection closed"),
@@ -513,6 +559,35 @@ mod tests {
         w.proposals(&[decision(6, "Gone")], false, AWAY);
         w.proposals(&[], false, AWAY + 1);
         assert!(w.due(AWAY + GRACE_MS * 3, 0, false).is_empty());
+    }
+
+    #[test]
+    fn a_ready_item_pushes_once_after_the_grace_unless_answered() {
+        let offer = |id: u64, item: u32| LaunchOffer {
+            id,
+            project: "/r".into(),
+            item,
+            title: format!("item {item}"),
+            agent: "claude".into(),
+            model: String::new(),
+            why: "next in the backlog; 1 of 3 agent sessions running".into(),
+            waived: Vec::new(),
+            made: 0,
+        };
+        let mut w = Watch::default();
+        // Waiting when the server started: not news.
+        w.launches(&[offer(1, 4)], false, 0);
+        w.launches(&[offer(1, 4), offer(2, 5)], false, AWAY);
+        assert!(w.due(AWAY + 1_000, 0, false).is_empty(), "within the grace");
+        let notes = w.due(AWAY + GRACE_MS, 0, false);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Ready to start: #5 item 5");
+        assert!(notes[0].body.contains("1 of 3"));
+        assert!(w.due(AWAY + 2 * GRACE_MS, 0, false).is_empty(), "once");
+        // Started or left before the push: nothing to say.
+        w.launches(&[offer(3, 6)], false, AWAY);
+        w.launches(&[], false, AWAY + 1);
+        assert!(!w.has_pending());
     }
 
     #[test]
