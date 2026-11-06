@@ -204,6 +204,8 @@ pub(crate) struct Supervisor {
     taken: HashMap<SessionId, Taken>,
     /// Reads the Context setting; tests set their own.
     pub(crate) context_on: Option<fn() -> bool>,
+    /// Reads a run's attempt number (`run_attempt`); tests set their own.
+    pub(crate) attempt: Option<fn(&Path, u64) -> u32>,
     /// Branches `gh` found no pull request for, by repository and branch: the
     /// commit they were at and when, so an idle session's branch isn't asked
     /// about every poll (`branches`).
@@ -378,7 +380,7 @@ impl Registry {
             sup.offers.insert(session, offer.clone());
         }
         self.host.changed.notify_one();
-        let spent = self.supervisor.lock().unwrap().rerun_spent(url, head);
+        let spent = self.rerun_used(url, head, &project, failed).await;
         let verdict = if conflicts.is_some() {
             Verdict::Unsure
         } else if !rerunnable(failed) {
@@ -549,6 +551,36 @@ impl Registry {
         })
     }
 
+    /// Whether `pr`'s rerun at `head` is spent (ADR-0019 §2): the supervisor reran
+    /// it, or a failed check's run is past its first attempt, so someone already
+    /// did (an agent following ci-fix's text, or the user). The latter is kept as
+    /// spent too, so `gh` isn't asked again for this head.
+    async fn rerun_used(&self, pr: &str, head: &str, dir: &Path, failed: &[Check]) -> bool {
+        let attempt = {
+            let sup = self.supervisor.lock().unwrap();
+            if sup.rerun_spent(pr, head) {
+                return true;
+            }
+            sup.attempt.unwrap_or(run_attempt)
+        };
+        let mut runs: Vec<u64> = failed.iter().filter_map(|c| c.run).collect();
+        runs.sort_unstable();
+        runs.dedup();
+        if runs.is_empty() || head.is_empty() {
+            return false;
+        }
+        let dir = dir.to_owned();
+        let rerun = tokio::task::spawn_blocking(move || runs.iter().any(|&r| attempt(&dir, r) > 1))
+            .await
+            .unwrap_or(false);
+        if rerun {
+            let mut sup = self.supervisor.lock().unwrap();
+            sup.reruns.insert(pr.to_owned(), head.to_owned());
+            sup.save();
+        }
+        rerun
+    }
+
     /// `ClientMsg::TakeStep`: the user only, on a session still showing the flag
     /// the step was offered for.
     pub(crate) async fn take_step(
@@ -658,10 +690,8 @@ impl Registry {
             }
             StepAction::Rerun => {
                 if self
-                    .supervisor
-                    .lock()
-                    .unwrap()
-                    .rerun_spent(&offer.pr, &offer.head)
+                    .rerun_used(&offer.pr, &offer.head, &offer.project, &offer.failed)
+                    .await
                 {
                     bail!("this commit was rerun once already");
                 }
@@ -955,6 +985,27 @@ fn job(check: &str) -> &str {
     check.rsplit_once(" / ").map_or(check, |(_, j)| j)
 }
 
+/// Run `run`'s attempt number (`gh run view --json attempt`); 1 when `gh` can't
+/// say, so an unreadable run never blocks a rerun on its own.
+fn run_attempt(dir: &Path, run: u64) -> u32 {
+    gh(
+        dir,
+        &[
+            "run",
+            "view",
+            &run.to_string(),
+            "--json",
+            "attempt",
+            "--jq",
+            ".attempt",
+        ],
+        GH_TIMEOUT,
+    )
+    .ok()
+    .and_then(|s| s.trim().parse().ok())
+    .unwrap_or(1)
+}
+
 /// Reads what the flake call needs about a red pull request from GitHub: the files
 /// it changes, each failed job's log, and whether the same check passed on another
 /// run of its head commit. What can't be read is left out.
@@ -1201,6 +1252,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A rerun is spent once a failed run is past its first attempt, whoever
+    /// reran it (an agent under ci-fix, say), and that's kept for the head; a
+    /// check with no Actions run asks nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_someone_already_reran_spends_the_rerun() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-attempt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let check = |run| Check {
+            name: "test / rust".into(),
+            url: String::new(),
+            run,
+        };
+        let pr = "https://github.com/o/r/pull/1";
+        registry.supervisor.lock().unwrap().attempt = Some(|_, run| if run == 7 { 2 } else { 1 });
+        assert!(!registry.rerun_used(pr, "h1", &dir, &[check(Some(5))]).await);
+        assert!(!registry.rerun_used(pr, "h1", &dir, &[check(None)]).await);
+        assert!(
+            registry
+                .rerun_used(pr, "h1", &dir, &[check(Some(5)), check(Some(7))])
+                .await
+        );
+        // Kept: asked again, `gh` isn't, and a new head starts fresh.
+        registry.supervisor.lock().unwrap().attempt = Some(|_, _| panic!("asked again"));
+        assert!(registry.rerun_used(pr, "h1", &dir, &[check(Some(7))]).await);
+        registry.supervisor.lock().unwrap().attempt = Some(|_, _| 1);
+        assert!(!registry.rerun_used(pr, "h2", &dir, &[check(Some(7))]).await);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two sessions take merge-base; the policy proposed for it is accepted; the
