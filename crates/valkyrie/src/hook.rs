@@ -38,13 +38,13 @@ const ITEM_TIMEOUT: Duration = Duration::from_millis(300);
 pub fn run(agent: &str, socket: &Path, ambient: bool) {
     // The session was launched with this hook in its own arguments.
     if ambient && std::env::var_os("VALK_SESSION_HOOKS").is_some() {
-        let _ = std::io::copy(
-            &mut std::io::stdin().take(MAX_PAYLOAD),
-            &mut std::io::sink(),
-        );
+        drain();
         return;
     }
-    if let Err(e) = forward(agent, socket)
+    let forwarded = forward(agent, socket);
+    // Whatever `forward` left unread, before or after an error.
+    drain();
+    if let Err(e) = forwarded
         && let Some(path) = std::env::var_os("VALK_HOOK_LOG")
         && let Ok(mut log) = std::fs::OpenOptions::new()
             .create(true)
@@ -55,14 +55,18 @@ pub fn run(agent: &str, socket: &Path, ambient: bool) {
     }
 }
 
+/// Reads and drops what's left of the payload. The agent writes all of it before
+/// it waits on the hook, so a hook that exits with input unread can hand it EPIPE.
+pub fn drain() {
+    let _ = std::io::copy(
+        &mut std::io::stdin().take(MAX_PAYLOAD),
+        &mut std::io::sink(),
+    );
+}
+
 fn forward(agent: &str, socket: &Path) -> Result<()> {
     let Some(session) = std::env::var("VALK_SESSION").ok() else {
-        // Not under Valkyrie (Codex hooks are global). Drain stdin anyway so the
-        // agent never hits EPIPE writing the payload.
-        let _ = std::io::copy(
-            &mut std::io::stdin().take(MAX_PAYLOAD),
-            &mut std::io::sink(),
-        );
+        // Not under Valkyrie (Codex hooks are global); `run` drains stdin.
         return Ok(());
     };
     let session = session.parse().context("bad VALK_SESSION")?;

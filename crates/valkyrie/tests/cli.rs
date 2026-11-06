@@ -69,6 +69,43 @@ fn assert_silent_success(out: &Output) {
     assert!(out.stderr.is_empty(), "hook printed to stderr: {out:?}");
 }
 
+/// The agent writes the whole payload before it waits, so the hook reads all of
+/// its stdin on every path, even ones that do nothing: a payload larger than the
+/// pipe buffer would otherwise hit EPIPE in the agent.
+#[test]
+fn hook_reads_its_whole_input_even_when_it_does_nothing_with_it() {
+    let dir = temp("drain");
+    let socket = dir.join("run/none.sock");
+    let big = vec![b' '; 1 << 20];
+    let outside = valk(&socket, &dir);
+    // Arguments that don't parse (empty --socket from the environment).
+    let mut bad_args = valk(&socket, &dir);
+    bad_args.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
+    let mut bad_session = valk(&socket, &dir);
+    bad_session.env("VALK_SESSION", "not a number");
+    for (case, mut cmd) in [
+        ("outside a session", outside),
+        ("bad arguments", bad_args),
+        ("bad VALK_SESSION", bad_session),
+    ] {
+        let mut child = cmd
+            .args(["hook", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let written = child.stdin.take().unwrap().write_all(&big);
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            written.is_ok(),
+            "{case}: hook left its input unread: {written:?}"
+        );
+        assert_silent_success(&out);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
     let dir = temp("silent");
