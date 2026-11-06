@@ -110,3 +110,21 @@ jobs:
           git status --porcelain -- dist
           test -z "$(git status --porcelain -- dist)" \
             || { echo "::error::web/dist is stale: run 'npm run build' in web/ and commit it"; exit 1; }
+
+  # The one check the Mainline ruleset requires, so adding, renaming or splitting a
+  # job above never leaves pull requests waiting on a status nothing reports. It
+  # runs whatever the jobs above did (`always()`): a gate skipped with them would
+  # count as passing.
+  ci-pass:
+    name: CI Pass
+    if: always()
+    needs: [commits, rust, msrv, web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed (commits may skip outside pull requests)
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success"
+            or (.key == "commits" and .value.result == "skipped"))' > /dev/null
