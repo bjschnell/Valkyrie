@@ -50,33 +50,27 @@ it brings the session back with the fix ready to send.
 
 ## What it does
 
-### Stay on top of every agent
+### Agents that work together
 
-- **Never miss a waiting agent.** Whoever needs you jumps to the top of one
-  queue, and `Alt-n` takes you there.
-- **Main stays yours.** No agent merges or pushes to your default branch
-  without your yes.
+- **No stepping on toes.** Each agent sees what the others are editing.
+- **Hand off mid-task.** Move work from Claude to Codex with its context.
+- **They track their own work.** What they find lands on your backlog.
 
-### Agents that work as a team
+### Learns your project
 
-- **Teach one agent, teach them all.** Correct an agent once and Valkyrie
-  offers to make it a rule every agent in the repo follows.
-- **No stepping on toes.** Each agent knows which files the others are editing.
-- **Hand off mid-task.** Move a task from Claude to Codex with its goal,
-  progress and changed files.
-- **Agents track their own work.** What they find along the way lands on your
-  backlog as a proposal, and their cards follow them.
+- **Teach one, teach all.** Correct one agent and the rest learn the rule, once
+  you approve it.
+- **Learns your habits.** Say "ship it" twice and it offers to make that the
+  default.
 
-### Work that manages itself
+### So you move faster
 
-- **Finished work actually ships.** Agents get sent on to run your checks and
-  open the PR. If CI breaks or main moves later, the fix is one key away.
-- **From bug to agent in one tap.** Jot it down from anywhere, then start an
-  agent on it in its own worktree.
-- **A backlog that plans itself.** Valkyrie proposes a build order and offers
-  to start the next ready item when an agent frees up.
-- **It learns your habits.** Say "ship it" twice and it offers to make that the
-  default. `valk pings` shows where agents interrupt you most.
+- **Never miss a waiting agent.** `Alt-n` jumps to whoever needs you.
+- **A supervisor on every PR.** When CI breaks or main moves, the fix is one tap
+  away.
+- **A backlog that runs itself.** Jot a bug, tap to start an agent, and get the
+  build order proposed.
+- **Main stays yours.** Nothing merges without your yes.
 
 ## The phone app
 
