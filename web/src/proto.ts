@@ -55,13 +55,14 @@ export interface QueueItem {
 }
 
 /** What the supervisor can do for a flagged session (ADR-0019 §2). */
-export type StepAction = "merge-base" | "ci-fix" | "rerun" | "leave";
+export type StepAction = "merge-base" | "ci-fix" | "rerun" | "leave" | "launch";
 
 export const STEP_LABEL: Record<StepAction, string> = {
   "merge-base": "Merge the base in",
   "ci-fix": "Fix CI",
   rerun: "Rerun failed jobs",
   leave: "Leave it",
+  launch: "Start it",
 };
 
 export interface Step {
@@ -358,6 +359,26 @@ export interface OrderProposal {
   steps: OrderStep[];
 }
 
+/** A ready item the supervisor offers to start (ADR-0019 §2 `launch`, protocol 27):
+ * open, nobody on it, its blockers finished (or waived by the model), with room
+ * under the repository's `max_running`. One per repository at most. */
+export interface LaunchOffer {
+  /** Changes when the repository's offer is replaced. */
+  id: number;
+  project: string;
+  item: number;
+  title: string;
+  /** The agent and model it starts on: its last launch, else claude's default. */
+  agent: string;
+  model?: string;
+  /** Why this item, now, in a line. */
+  why: string;
+  /** Unfinished blockers the model judged it doesn't need first. */
+  waived?: number[];
+  /** Seconds since the epoch. */
+  made: number;
+}
+
 /** What accepting a build order did: items changed, and those left as they were. */
 export interface OrderApplied {
   changed: number[];
@@ -402,6 +423,9 @@ export type Request =
       items?: number[];
     }
   | { t: "take_step"; session: SessionId; seq: number; action: StepAction }
+  /** The user only: starts (`launch`) or leaves the repository's ready item;
+   * replies `session` when started, `text` when left (protocol 27). */
+  | { t: "answer_launch"; project: string; id: number; launch: boolean }
   /** Ships every open item whose branch is merged, as last fetched; `dry_run` only
    * says what would ship, `only` ships just those (each checked again). */
   | { t: "ship_merged"; dry_run: boolean; only: number[] | null }
@@ -444,7 +468,7 @@ export type Reply =
   | { t: "decisions"; decisions: Decision[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
-  | { t: "items"; items: Item[]; orders?: OrderProposal[] }
+  | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
   | { t: "item_facts"; facts: ItemFacts | null }
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
@@ -459,8 +483,8 @@ export type ServerMsg =
   | { t: "queue"; items: QueueItem[] }
   /** Every project's decisions waiting on review, oldest first. */
   | { t: "proposals"; items: Decision[] }
-  /** Every backlog item, and the build orders waiting on the user. */
-  | { t: "items"; items: Item[]; orders?: OrderProposal[] }
+  /** Every backlog item, and the build orders and launch offers waiting on the user. */
+  | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

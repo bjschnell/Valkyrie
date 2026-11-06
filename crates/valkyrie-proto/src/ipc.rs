@@ -105,8 +105,8 @@ mod windows {
         SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{
-        EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-        TOKEN_USER, TokenUser,
+        EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
+        TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
     };
     use windows_sys::Win32::System::Pipes::{
         GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
@@ -191,6 +191,11 @@ mod windows {
         Ok(Stream::Client(client))
     }
 
+    /// Whether a daemon this process may use answers on `path`.
+    pub fn serves(path: &Path, timeout: Duration) -> bool {
+        connect_blocking(path, timeout).is_ok()
+    }
+
     pub(super) fn connect_blocking(path: &Path, timeout: Duration) -> io::Result<std::fs::File> {
         let name = pipe_name(path);
         let deadline = Instant::now() + timeout;
@@ -244,8 +249,18 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         let theirs = token_user(process);
+        let theirs_elevated = process_elevated(process);
         // SAFETY: we opened it.
         unsafe { CloseHandle(process) };
+        // Sessions run with the daemon's token: an elevated client on an
+        // unelevated daemon (or one squatting the admin pipe's name) would get
+        // unelevated sessions.
+        if token_elevated() && !theirs_elevated {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the daemon's pipe is served by a process that isn't elevated",
+            ));
+        }
         let (theirs, ours) = (theirs?, token_user(current_process())?);
         // SAFETY: both buffers hold a TOKEN_USER whose SID points into them.
         let same = unsafe {
@@ -295,8 +310,40 @@ mod windows {
         Ok(buf)
     }
 
+    /// Whether this process's token is elevated (Run as administrator). False when
+    /// it can't tell: the user's daemon is the safe one to land on.
+    pub fn token_elevated() -> bool {
+        process_elevated(current_process())
+    }
+
+    fn process_elevated(process: HANDLE) -> bool {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: a valid process handle and an out pointer.
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0u32;
+        // SAFETY: the buffer is a TOKEN_ELEVATION of the size given.
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&raw mut elevation).cast(),
+                size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            )
+        };
+        // SAFETY: we opened it.
+        unsafe { CloseHandle(token) };
+        ok != 0 && elevation.TokenIsElevated != 0
+    }
+
     /// A security descriptor that lets only this user open the pipe (the default
-    /// one lets everyone read it). Made once and kept for the process.
+    /// one lets everyone read it). An elevated daemon's pipe also carries a high
+    /// mandatory label that refuses writes from below it, so an unelevated process
+    /// of the same user can't drive its admin sessions. Made once and kept for the
+    /// process.
     fn user_only() -> io::Result<PSECURITY_DESCRIPTOR> {
         static DESCRIPTOR: OnceLock<usize> = OnceLock::new();
         if let Some(&sd) = DESCRIPTOR.get() {
@@ -316,7 +363,12 @@ mod windows {
             sid
         };
         // Protected (no inherited entries), full access for this user alone.
-        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
+        let label = if token_elevated() {
+            "S:(ML;;NW;;;HI)"
+        } else {
+            ""
+        };
+        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid}){label}")
             .encode_utf16()
             .chain([0])
             .collect();

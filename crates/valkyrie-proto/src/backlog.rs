@@ -365,6 +365,35 @@ impl OrderStep {
     }
 }
 
+/// A ready item the supervisor offers to start (ADR-0019 §1, §2 `launch`): open,
+/// nobody on it, its blockers shipped or dropped (or the model judged it doesn't
+/// need the one left), with room under the repository's `max_running`. One per
+/// repository at most. The user starts it or leaves it (`ClientMsg::AnswerLaunch`);
+/// once they've started two this way, a policy can start them without asking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchOffer {
+    /// Changes whenever the repository's offer is replaced, so an answer meant for
+    /// an older one is refused.
+    pub id: u64,
+    /// The repository's root.
+    pub project: PathBuf,
+    pub item: u32,
+    /// The item's title, for a push or a banner.
+    pub title: String,
+    /// The agent and model it starts on: the item's last launch, else claude on
+    /// its own default model.
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// One line: why this item, now.
+    pub why: String,
+    /// Unfinished blockers the model judged it doesn't need first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waived: Vec<u32>,
+    /// Seconds since the epoch.
+    pub made: u64,
+}
+
 /// What accepting an `OrderProposal` did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct OrderApplied {

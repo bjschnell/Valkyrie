@@ -152,6 +152,8 @@ pub enum StepAction {
     Rerun,
     /// Does nothing; the flag stays for the user.
     Leave,
+    /// Starts a ready backlog item on its last agent and model (ADR-0019 §2).
+    Launch,
 }
 
 impl StepAction {
@@ -161,6 +163,7 @@ impl StepAction {
             StepAction::CiFix => "ci-fix",
             StepAction::Rerun => "rerun",
             StepAction::Leave => "leave",
+            StepAction::Launch => "launch",
         }
     }
 
@@ -171,6 +174,7 @@ impl StepAction {
             StepAction::CiFix => "fix CI",
             StepAction::Rerun => "rerun failed jobs",
             StepAction::Leave => "leave it",
+            StepAction::Launch => "start it",
         }
     }
 }

@@ -5,6 +5,7 @@
 //! (`template: merge-base`, `on: conflicting`). This is the pure part; the daemon
 //! records the answers and files the proposal.
 
+use crate::flaketree::Features;
 use crate::policy::{self, LEARNABLE, StepPolicy, Trigger};
 use std::collections::HashSet;
 use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, StepAction};
@@ -30,6 +31,9 @@ pub struct Record {
     pub pr: String,
     /// The policy that took it without asking, if one did.
     pub policy: Option<u32>,
+    /// What the flake call read, on a red pull request: with the answer, a
+    /// labelled example for the fitted tree (`flaketree`).
+    pub features: Option<Features>,
 }
 
 impl Record {
@@ -47,6 +51,9 @@ impl Record {
         if let Some(id) = self.policy {
             v["policy"] = id.into();
         }
+        if let Some(f) = &self.features {
+            v["features"] = f.to_json();
+        }
         v
     }
 
@@ -58,6 +65,7 @@ impl Record {
                 StepAction::CiFix,
                 StepAction::Rerun,
                 StepAction::Leave,
+                StepAction::Launch,
             ]
             .into_iter()
             .find(|a| a.as_str() == s)
@@ -70,8 +78,27 @@ impl Record {
             taken: action("taken")?,
             pr: v["pr"].as_str().unwrap_or_default().to_owned(),
             policy: v["policy"].as_u64().and_then(|n| u32::try_from(n).ok()),
+            features: Features::from_json(&v["features"]),
         })
     }
+}
+
+/// The flake call's labelled examples: each red pull request the user answered
+/// with a rerun (a flake) or ci-fix (real), with what the call read. Policies'
+/// steps aren't answers, and leaving it says nothing.
+pub fn examples(records: &[Record]) -> Vec<(Features, bool)> {
+    records
+        .iter()
+        .filter(|r| r.trigger == Trigger::Red && r.policy.is_none())
+        .filter_map(|r| {
+            let flake = match r.taken {
+                StepAction::Rerun => true,
+                StepAction::CiFix => false,
+                _ => return None,
+            };
+            Some((r.features?, flake))
+        })
+        .collect()
 }
 
 /// A step policy to propose, and the answers it's learned from.
@@ -137,6 +164,7 @@ pub fn proposal(offer: &Offer) -> (String, String) {
     let title = match offer.step.action {
         StepAction::MergeBase => "Merge the base into a PR that conflicts with it, without asking",
         StepAction::CiFix => "Send the agent to fix a PR whose CI went red, without asking",
+        StepAction::Launch => "Start the next ready backlog item when there's room, without asking",
         _ => "Rerun failed jobs the supervisor calls a flake, without asking",
     };
     let mut body = format!(
@@ -144,15 +172,29 @@ pub fn proposal(offer: &Offer) -> (String, String) {
         offer.step.action.as_str(),
         offer.step.on.as_str()
     );
-    body.push_str(&format!(
-        "> Learned from the supervisor's offers you took ({} on a {} PR):\n",
-        offer.step.action.as_str(),
-        offer.step.on.as_str()
-    ));
+    let launch = offer.step.action == StepAction::Launch;
+    body.push_str(&if launch {
+        "> Learned from the supervisor's offers you took (launch on a ready item):\n".to_owned()
+    } else {
+        format!(
+            "> Learned from the supervisor's offers you took ({} on a {} PR):\n",
+            offer.step.action.as_str(),
+            offer.step.on.as_str()
+        )
+    });
     for r in offer.taken.iter().rev().take(5) {
-        body.push_str(&format!("> {} ({})\n", r.pr, r.session));
+        if r.pr.is_empty() {
+            body.push_str(&format!("> {}\n", r.session));
+        } else {
+            body.push_str(&format!("> {} ({})\n", r.pr, r.session));
+        }
     }
-    body.push_str("> Accepted, it runs without asking on an idle session; retiring it stops it.\n");
+    body.push_str(if launch {
+        "> Accepted, it starts the next ready item while fewer than max_running agent \
+         sessions run in the repository; retiring it stops it.\n"
+    } else {
+        "> Accepted, it runs without asking on an idle session; retiring it stops it.\n"
+    });
     (title.into(), body)
 }
 
@@ -166,12 +208,14 @@ mod tests {
             session: session.into(),
             trigger: match offered {
                 StepAction::MergeBase => Trigger::Conflicting,
+                StepAction::Launch => Trigger::Ready,
                 _ => Trigger::Red,
             },
             offered,
             taken,
             pr: format!("https://github.com/o/r/pull/{at}"),
             policy: None,
+            features: None,
         }
     }
 
@@ -196,7 +240,7 @@ mod tests {
         }
     }
 
-    use StepAction::{CiFix, Leave, MergeBase, Rerun};
+    use StepAction::{CiFix, Launch, Leave, MergeBase, Rerun};
     const NOW: u64 = 100 * 86_400;
 
     fn learned(records: &[Record], decisions: &[Decision]) -> Vec<(StepAction, Trigger)> {
@@ -221,6 +265,57 @@ mod tests {
             rec(NOW - 5, "b", MergeBase, MergeBase),
         ];
         assert_eq!(learned(&two, &[]), vec![(MergeBase, Trigger::Conflicting)]);
+    }
+
+    #[test]
+    fn launches_taken_on_two_items_become_a_launch_policy() {
+        let mut first = rec(NOW - 10, "item #4", Launch, Launch);
+        first.pr = String::new();
+        let mut left = rec(NOW - 8, "item #5", Launch, Leave);
+        left.pr = String::new();
+        let mut second = rec(NOW - 5, "item #6", Launch, Launch);
+        second.pr = String::new();
+        // A leave starts the count over.
+        assert!(learned(&[first.clone(), left, second.clone()], &[]).is_empty());
+        let mut third = rec(NOW - 2, "item #7", Launch, Launch);
+        third.pr = String::new();
+        let records = [first, second, third];
+        assert_eq!(learned(&records, &[]), vec![(Launch, Trigger::Ready)]);
+        let (title, body) = proposal(&offers(&records, &[], NOW).remove(0));
+        assert!(title.starts_with("Start the next ready"), "{title}");
+        assert!(body.starts_with("template: launch\non: ready\n"), "{body}");
+        assert!(body.contains("> item #7\n"), "{body}");
+        assert!(policy::check(&body, false).is_ok(), "{body}");
+        // Each record survives the round trip through supervisor.jsonl.
+        for r in &records {
+            assert_eq!(Record::from_json(&r.to_json()).as_ref(), Some(r));
+        }
+    }
+
+    #[test]
+    fn answered_red_prs_with_their_signals_are_the_trees_examples() {
+        use crate::flaketree::Features;
+        let read = Features {
+            passed_before: true,
+            ..Features::default()
+        };
+        let mut rerun = rec(NOW - 9, "a", Rerun, Rerun);
+        rerun.features = Some(read);
+        let mut fix = rec(NOW - 8, "b", Rerun, CiFix);
+        fix.features = Some(Features::default());
+        let mut left = rec(NOW - 7, "c", Rerun, Leave);
+        left.features = Some(read);
+        let mut auto = rec(NOW - 6, "d", Rerun, Rerun);
+        auto.features = Some(read);
+        auto.policy = Some(3);
+        // From before the signals were kept.
+        let old = rec(NOW - 5, "e", CiFix, CiFix);
+        let all = [rerun.clone(), fix, left, auto, old];
+        assert_eq!(
+            examples(&all),
+            vec![(read, true), (Features::default(), false)]
+        );
+        assert_eq!(Record::from_json(&rerun.to_json()), Some(rerun));
     }
 
     #[test]

@@ -447,6 +447,62 @@ mod tests {
         assert!(!due(&added, &items, None, false, now));
     }
 
+    /// Two daemons on one state dir (an admin terminal's beside the user's, on
+    /// Windows) each keep their build orders: one's save doesn't wipe the other's.
+    #[test]
+    fn two_daemons_keep_their_own_orders() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-orders2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let open = |socket: &str| {
+            crate::new_registry(
+                dir.join(socket),
+                &dir.join("state"),
+                Path::new("/bin/true"),
+                1,
+                0,
+                7,
+                false,
+            )
+            .unwrap()
+            .0
+        };
+        let proposal = |id| OrderProposal {
+            id,
+            project: PathBuf::from("/repo"),
+            made: 0,
+            trigger: "you asked".into(),
+            steps: Vec::new(),
+        };
+        let (user, admin) = (open("u.sock"), open("a.sock"));
+        {
+            let mut book = user.order_book.lock().unwrap();
+            book.pending.push(proposal(1));
+            book.save();
+        }
+        {
+            let mut book = admin.order_book.lock().unwrap();
+            book.pending.push(proposal(2));
+            book.save();
+        }
+        // The user's daemon restarts.
+        drop(user);
+        let ids: Vec<u64> = open("u.sock")
+            .order_book
+            .lock()
+            .unwrap()
+            .pending
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [1],
+            "the other daemon's save replaced this one's orders"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Only the user answers a build order, only the one waiting, and only for
     /// items in it; an agent's try leaves it waiting.
     #[tokio::test]
@@ -522,7 +578,8 @@ mod tests {
         );
         assert!(registry.order_book.lock().unwrap().pending.is_empty());
         // Kept on disk too: a restart doesn't bring it back.
-        let saved = std::fs::read_to_string(dir.join("state/orders.json")).unwrap();
+        let file = registry.order_book.lock().unwrap().path.clone();
+        let saved = std::fs::read_to_string(file).unwrap();
         assert!(saved.contains("\"pending\": []"), "{saved}");
         AS_CALLER.with(|c| *c.borrow_mut() = None);
         std::fs::remove_dir_all(&dir).unwrap();

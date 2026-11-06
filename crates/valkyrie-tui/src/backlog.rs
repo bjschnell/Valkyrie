@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use std::path::PathBuf;
 use valkyrie_proto::{
-    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, OrderProposal,
-    Priority, SessionId, SessionInfo, ShippedItem,
+    AgentState, Item, ItemFacts, ItemKind, ItemLaunch, ItemStatus, KeptItem, LaunchOffer,
+    OrderProposal, Priority, SessionId, SessionInfo, ShippedItem,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +402,8 @@ pub(crate) struct Page {
     pub(crate) orders: Vec<OrderProposal>,
     /// The build order open over the page (`O`).
     pub(crate) order: Option<OrderView>,
+    /// Ready items the supervisor offers to start, as last pushed.
+    pub(crate) launches: Vec<LaunchOffer>,
 }
 
 /// A build order open over the page: which, where the cursor is, and the items
@@ -465,6 +467,13 @@ pub(crate) enum Do {
     NextRepo,
     /// Ask for a build order of this repository (`P`).
     Plan(PathBuf),
+    /// Start (`R`) or leave (`X`) the ready item the supervisor offers.
+    AnswerLaunch {
+        project: PathBuf,
+        id: u64,
+        item: u32,
+        launch: bool,
+    },
     /// Accept (only `items`' changes, or all with `None`) or decline a build order.
     AnswerOrder {
         project: PathBuf,
@@ -681,6 +690,15 @@ impl Page {
                         None => out.push(Do::Say("no build order waits: P asks for one".into())),
                     }
                 }
+                b"R" | b"X" => out.push(match self.waiting_launch(rows) {
+                    Some(o) => Do::AnswerLaunch {
+                        project: o.project.clone(),
+                        id: o.id,
+                        item: o.item,
+                        launch: key == b"R",
+                    },
+                    None => Do::Say("the supervisor offers nothing to start".into()),
+                }),
                 b"S" => out.push(match self.ship_armed.take() {
                     Some(ids) => Do::ShipMerged(ids),
                     None => Do::CheckMerged,
@@ -1010,6 +1028,14 @@ impl Page {
                     } else {
                         vec![]
                     },
+                    match self.waiting_launch(rows) {
+                        Some(o) => vec![
+                            format!(" #{} ready: R starts it, X leaves it ", o.item)
+                                .fg(t.accent)
+                                .bold(),
+                        ],
+                        None => vec![],
+                    },
                 ]
                 .concat(),
             ))
@@ -1094,6 +1120,20 @@ impl Page {
         }
         if let Some((view, order)) = self.open_order() {
             order_window(frame, rect, view, order, rows, t);
+        }
+    }
+
+    /// The launch offer for what the page shows: the repository's, or with every
+    /// repository shown, the selected item's repository's, else the first.
+    fn waiting_launch(&self, rows: &[(Lane, Item)]) -> Option<&LaunchOffer> {
+        let scope = self.scope(rows);
+        let here = self
+            .launches
+            .iter()
+            .find(|o| Some(&o.project) == scope.as_ref());
+        match &self.repo {
+            Repo::All => here.or(self.launches.first()),
+            _ => here,
         }
     }
 
@@ -1631,6 +1671,36 @@ mod tests {
             trigger: "you asked".into(),
             steps,
         }
+    }
+
+    #[test]
+    fn r_starts_the_offered_ready_item_and_x_leaves_it() {
+        let rows = rows(&[item(1, 1), item(2, 1)], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        assert!(matches!(&press(&mut page, b"R")[..], [Do::Say(s)] if s.contains("nothing")));
+        page.launches = vec![LaunchOffer {
+            id: 5,
+            project: "/r/app".into(),
+            item: 2,
+            title: "item 2".into(),
+            agent: "claude".into(),
+            model: String::new(),
+            why: "next in the backlog; 0 of 3 agent sessions running".into(),
+            waived: Vec::new(),
+            made: 0,
+        }];
+        let answer = |launch| Do::AnswerLaunch {
+            project: "/r/app".into(),
+            id: 5,
+            item: 2,
+            launch,
+        };
+        assert_eq!(press(&mut page, b"R"), [answer(true)]);
+        assert_eq!(press(&mut page, b"X"), [answer(false)]);
+        // Another repository's page has no offer of its own.
+        page.repo = Repo::In("/r/other".into());
+        assert!(matches!(&press(&mut page, b"R")[..], [Do::Say(_)]));
     }
 
     #[test]

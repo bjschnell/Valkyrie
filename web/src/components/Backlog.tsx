@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, liveSession, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
-import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type OrderProposal, type Priority } from "../proto";
-import { addItem, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
+import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
+import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
 
@@ -52,6 +52,7 @@ const EDGE: Record<Lane, string> = {
 export function Backlog() {
   const all = useApp((s) => s.items);
   const orders = useApp((s) => s.orders);
+  const launches = useApp((s) => s.launches);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [showDone, setShowDone] = useState(false);
@@ -108,6 +109,7 @@ export function Backlog() {
     }
   };
   const shownOrders = ordersShown(orders, repo);
+  const shownLaunches = launchesShown(launches, repo);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -174,6 +176,9 @@ export function Backlog() {
             </select>
           </div>
         )}
+        {shownLaunches.map((o) => (
+          <LaunchCard key={`${o.project}:${o.id}`} offer={o} />
+        ))}
         {shownOrders.map((o) => (
           <OrderCard key={`${o.project}:${o.id}`} order={o} items={all} />
         ))}
@@ -226,6 +231,46 @@ export function Backlog() {
         )}
       </main>
     </div>
+  );
+}
+
+/**
+ * A ready item the supervisor offers to start (ADR-0019 §2): Start launches it as
+ * the card's Launch would, on its last agent and model; Leave offers the next one.
+ */
+function LaunchCard({ offer }: { offer: LaunchOffer }) {
+  const [busy, setBusy] = useState(false);
+  const answer = async (launch: boolean) => {
+    setBusy(true);
+    try {
+      const id = await answerLaunch(offer, launch);
+      if (id !== null) {
+        navigator.vibrate?.(10);
+        location.hash = `#/s/${id}`;
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="order-card" aria-label={`Ready to start: #${offer.item}`}>
+      <div className="order-head">
+        <div className="order-title">
+          Ready to start in {base(offer.project)}: <span className="order-id">#{offer.item}</span> {offer.title}
+        </div>
+        <div className="order-why">
+          {offer.why} · on {launchesOn(offer)}
+        </div>
+      </div>
+      <div className="order-actions">
+        <button className="ghost" disabled={busy} onClick={() => void answer(false)}>
+          Leave
+        </button>
+        <button className="primary" disabled={busy} onClick={() => void answer(true)}>
+          Start
+        </button>
+      </div>
+    </section>
   );
 }
 

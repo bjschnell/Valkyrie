@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use valkyrie_context::flake::{self, Bug, Failure, Verdict};
+use valkyrie_context::flaketree::{self, Features};
 use valkyrie_context::policy::{self, Trigger};
 use valkyrie_context::{outcome, project, steps};
 use valkyrie_proto::{
@@ -52,6 +53,8 @@ pub(crate) struct Offer {
     base: Option<String>,
     failed: Vec<Check>,
     head: String,
+    /// What the flake call read, kept with the answer as a labelled example.
+    features: Option<Features>,
 }
 
 impl Offer {
@@ -126,6 +129,8 @@ pub(crate) fn judge(taken: &Taken, exited: bool, prompts: u64, resting: bool, pr
             let clean = match taken.trigger {
                 Trigger::Conflicting => conflicts.is_none(),
                 Trigger::Red => failed.is_empty(),
+                // A launch isn't judged by a pull request.
+                Trigger::Ready => true,
             };
             if clean {
                 Judged::Outcome {
@@ -153,7 +158,7 @@ pub(crate) struct Supervisor {
     /// Steps policies took, by session, until the poll judges them.
     taken: HashMap<SessionId, Taken>,
     /// Reads the Context setting; tests set their own.
-    context_on: Option<fn() -> bool>,
+    pub(crate) context_on: Option<fn() -> bool>,
 }
 
 impl Supervisor {
@@ -212,7 +217,7 @@ impl Supervisor {
     }
 
     /// Room for one more model call this hour; takes it.
-    fn room(&mut self) -> bool {
+    pub(crate) fn room(&mut self) -> bool {
         let hour = Duration::from_secs(3600);
         while self.calls.front().is_some_and(|t| t.elapsed() > hour) {
             self.calls.pop_front();
@@ -314,6 +319,7 @@ impl Registry {
             base: conflicts.clone(),
             failed: failed.clone(),
             head: head.clone(),
+            features: None,
         };
         // Offers on sessions that have moved on go; this one's shown at once, its
         // step to follow, since the flake call can take a while.
@@ -338,7 +344,9 @@ impl Registry {
             // Nothing to rerun outside Actions: no need to read anything.
             Verdict::CiFix("a failed check isn't GitHub Actions, so it can't be rerun".into())
         } else {
-            self.flake_call(item, url, head, failed, &project).await
+            let (verdict, features) = self.flake_call(item, url, head, failed, &project).await;
+            offer.features = Some(features);
+            verdict
         };
         let step = pick(conflicts.is_some(), &verdict, spent).unwrap_or_else(|| Step {
             action: StepAction::CiFix,
@@ -387,8 +395,9 @@ impl Registry {
         self.host.changed.notify_one();
     }
 
-    /// The rules over what can be read, then the model for what they can't place
-    /// (not with auto off, nor past its hourly limit).
+    /// The tree fitted to the user's answers once there are enough, else the
+    /// rules over what can be read; then the model for what neither can place
+    /// (not with auto off, nor past its hourly limit). With what it read.
     async fn flake_call(
         &self,
         item: &Item,
@@ -396,7 +405,7 @@ impl Registry {
         head: &str,
         failed: &[Check],
         project: &Path,
-    ) -> Verdict {
+    ) -> (Verdict, Features) {
         let bugs = self.open_bugs(item);
         let (url, head, failed, project) = (
             url.to_owned(),
@@ -409,6 +418,20 @@ impl Registry {
             tokio::task::spawn_blocking(move || gather(&project, &url, &head, &failed))
         };
         let signals = gathered.await.unwrap_or_default();
+        let features = Features::of(&signals.failures, &signals.changed, &bugs);
+        let root = project::root(&project);
+        let now = crate::session::now_ms() / 1000;
+        let answers = steps::examples(&self.context.lock().unwrap().steps(&root, now));
+        if let Some(tree) = flaketree::fit(&answers)
+            && let Some((is_flake, why)) = tree.predict(&features)
+        {
+            let verdict = if is_flake {
+                Verdict::Rerun(why)
+            } else {
+                Verdict::CiFix(why)
+            };
+            return (verdict, features);
+        }
         let calls: Vec<_> = signals
             .failures
             .iter()
@@ -416,11 +439,11 @@ impl Registry {
             .collect();
         let verdict = flake::verdict(&calls);
         if verdict != Verdict::Unsure {
-            return verdict;
+            return (verdict, features);
         }
         let mode = crate::extract::mode(&self.host.context_dir);
         if mode == AutoMode::Off || !self.supervisor.lock().unwrap().room() {
-            return Verdict::Unsure;
+            return (Verdict::Unsure, features);
         }
         let unsure: Vec<Failure> = signals
             .failures
@@ -443,7 +466,7 @@ impl Registry {
             Ok::<_, anyhow::Error>(flake::parse_reply(&reply, &bugs))
         })
         .await;
-        match asked {
+        let verdict = match asked {
             Ok(Ok(Some((true, why)))) => Verdict::Rerun(why),
             Ok(Ok(Some((false, why)))) => Verdict::CiFix(why),
             Ok(Ok(None)) => Verdict::Unsure,
@@ -452,7 +475,8 @@ impl Registry {
                 Verdict::Unsure
             }
             Err(_) => Verdict::Unsure,
-        }
+        };
+        (verdict, features)
     }
 
     /// The open bugs in `item`'s repository, title and body.
@@ -555,6 +579,7 @@ impl Registry {
         let prompts = session.prompts();
         let said = match action {
             StepAction::Leave => format!("left session {id}'s flag for you"),
+            StepAction::Launch => bail!("launch is offered on a ready item, not a flagged session"),
             StepAction::MergeBase => {
                 let base = offer.base.as_deref().unwrap_or("its base branch");
                 let checks = self.checks_of(&offer.project);
@@ -653,6 +678,7 @@ impl Registry {
             taken: action,
             pr: offer.pr.clone(),
             policy: by,
+            features: offer.features.filter(|_| trigger == Trigger::Red),
         };
         if let Err(e) = self
             .context
@@ -683,7 +709,7 @@ impl Registry {
 
     /// Proposes a policy for each step the user's answers in `root` say to take
     /// without asking (ADR-0019 §3).
-    fn learn(&self, root: &Path, session: &str, now: u64) {
+    pub(crate) fn learn(&self, root: &Path, session: &str, now: u64) {
         let store = self.context.lock().unwrap();
         let offers = steps::offers(&store.steps(root, now), &store.load(root), now);
         let mut proposed = false;
@@ -817,7 +843,7 @@ impl Registry {
 /// Whether the Context setting is on (ADR-0019 §6): off, policies stop, the
 /// supervisor's with them. It's kept in `settings.toml`, which the daemon reads as
 /// the hooks do, at the moment it matters.
-fn context_on() -> bool {
+pub(crate) fn context_on() -> bool {
     let off = |v: &str| matches!(v.trim().trim_matches('"'), "false" | "off");
     if let Ok(v) = std::env::var("VALK_PROJECT_CONTEXT") {
         return !off(&v);
@@ -966,6 +992,49 @@ pub(crate) fn gather(dir: &Path, url: &str, head: &str, failed: &[Check]) -> Sig
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two daemons on one state dir each keep the heads they reran at, so a
+    /// restart doesn't rerun a pull request again because the other one saved.
+    #[test]
+    fn two_daemons_keep_their_own_reruns() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-reruns2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let open = |socket: &str| {
+            crate::new_registry(
+                dir.join(socket),
+                &dir.join("state"),
+                Path::new("/bin/true"),
+                1,
+                0,
+                7,
+                false,
+            )
+            .unwrap()
+            .0
+        };
+        let (user, admin) = (open("u.sock"), open("a.sock"));
+        {
+            let mut sup = user.supervisor.lock().unwrap();
+            sup.reruns.insert("pr/1".into(), "abc".into());
+            sup.save();
+        }
+        {
+            let mut sup = admin.supervisor.lock().unwrap();
+            sup.reruns.insert("pr/2".into(), "def".into());
+            sup.save();
+        }
+        drop(user);
+        assert!(
+            open("u.sock")
+                .supervisor
+                .lock()
+                .unwrap()
+                .rerun_spent("pr/1", "abc"),
+            "the other daemon's save forgot this one's rerun"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn conflicting_merges_the_base_first_and_red_follows_the_rules() {

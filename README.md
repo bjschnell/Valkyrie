@@ -398,6 +398,15 @@ How it works:
    prompting those sessions differently before the PR comes back clean. `valk
    pings` counts the steps it took. Turning Context off stops the automatic steps,
    and `valk supervise off` stops the supervisor altogether. The flags still show.
+
+   It also keeps the backlog moving. When an accepted item nobody's on has every
+   blocker shipped or dropped, and fewer than `max_running` agent sessions run in
+   its repository (3 unless `settings.toml` says `max_running = N`; yours count
+   too), the board offers to start it on its last agent and model: `R` starts it
+   and `X` leaves it in the TUI, or Start and Leave on the web board. When nothing
+   is ready, a model is asked once whether the first waiting item really needs its
+   unfinished blocker. Start two items this way and a `template: launch` / `on:
+   ready` policy is proposed, and once accepted it starts them on its own.
 8. **Agents know about each other.** With each prompt, an agent also hears what the
    other agents in the same repo are doing: what you asked them, the files they're
    editing, and any file you've both touched. Two agents don't end up silently

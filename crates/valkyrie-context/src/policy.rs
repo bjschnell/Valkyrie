@@ -175,6 +175,8 @@ pub enum Trigger {
     Conflicting,
     /// The item's pull request has failed checks.
     Red,
+    /// An open item nobody's on is free to start (ADR-0019 §1, phase 4).
+    Ready,
 }
 
 impl Trigger {
@@ -182,6 +184,7 @@ impl Trigger {
         match s {
             "conflicting" => Some(Trigger::Conflicting),
             "red" => Some(Trigger::Red),
+            "ready" => Some(Trigger::Ready),
             _ => None,
         }
     }
@@ -190,6 +193,7 @@ impl Trigger {
         match self {
             Trigger::Conflicting => "conflicting",
             Trigger::Red => "red",
+            Trigger::Ready => "ready",
         }
     }
 }
@@ -209,10 +213,12 @@ pub const LEARNABLE: &[(StepAction, Trigger)] = &[
     (StepAction::MergeBase, Trigger::Conflicting),
     (StepAction::CiFix, Trigger::Red),
     (StepAction::Rerun, Trigger::Red),
+    (StepAction::Launch, Trigger::Ready),
 ];
 
 const STEP_FORMAT: &str = "a supervisor step's body is `template: merge-base` with \
-     `on: conflicting`, or `template: ci-fix|rerun` with `on: red`, one a line";
+     `on: conflicting`, `template: ci-fix|rerun` with `on: red`, or `template: launch` \
+     with `on: ready`, one a line";
 
 /// Reads a supervisor step's body; `None` when its template isn't one (a `ship`
 /// policy, say). Lines starting `>` are evidence, as in [`parse`].
@@ -225,9 +231,14 @@ pub fn step(body: &str) -> Option<Result<StepPolicy, String>> {
         .map(|(k, v)| (k.trim(), v.trim()))
         .collect();
     let template = lines.iter().find(|(k, _)| *k == "template")?.1;
-    let action = [StepAction::MergeBase, StepAction::CiFix, StepAction::Rerun]
-        .into_iter()
-        .find(|a| a.as_str() == template)?;
+    let action = [
+        StepAction::MergeBase,
+        StepAction::CiFix,
+        StepAction::Rerun,
+        StepAction::Launch,
+    ]
+    .into_iter()
+    .find(|a| a.as_str() == template)?;
     Some((|| {
         let mut on = None;
         for line in body
@@ -243,7 +254,7 @@ pub fn step(body: &str) -> Option<Result<StepPolicy, String>> {
                 "template" => {}
                 "on" => {
                     on = Some(Trigger::parse(value).ok_or_else(|| {
-                        format!("on is {value:?}, not conflicting or red; {STEP_FORMAT}")
+                        format!("on is {value:?}, not conflicting, red or ready; {STEP_FORMAT}")
                     })?)
                 }
                 other => return Err(format!("unknown setting {other:?}; {STEP_FORMAT}")),
