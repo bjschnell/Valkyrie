@@ -202,16 +202,22 @@ pub struct Record {
     pub overridden: bool,
     /// `stop`, `gave up`, `interrupted` or `reply`.
     pub how: String,
+    /// A supervisor step's: how its pull request was found (`steps::Via`).
+    pub via: Option<String>,
 }
 
 impl Record {
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "at": self.at, "session": self.session, "policy": self.policy,
             "scope": self.scope, "project": self.project,
             "outcome": if self.overridden { "overridden" } else { "handled" },
             "how": self.how,
-        })
+        });
+        if let Some(via) = &self.via {
+            v["via"] = via.as_str().into();
+        }
+        v
     }
 
     pub fn from_json(v: &serde_json::Value) -> Option<Record> {
@@ -223,6 +229,7 @@ impl Record {
             project: v["project"].as_str().unwrap_or_default().to_owned(),
             overridden: v["outcome"].as_str()? == "overridden",
             how: v["how"].as_str().unwrap_or_default().to_owned(),
+            via: v["via"].as_str().map(str::to_owned),
         })
     }
 }
@@ -286,6 +293,7 @@ mod tests {
             session: session.into(),
             policy,
             scope: "project".into(),
+            via: None,
             project: "/r".into(),
             overridden,
             how: if overridden { "interrupted" } else { "stop" }.into(),

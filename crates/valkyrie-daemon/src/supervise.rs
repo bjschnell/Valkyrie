@@ -39,6 +39,48 @@ const LOG_TIMEOUT: Duration = Duration::from_secs(30);
 /// The tail of a failed log that's kept: panics and failed tests are at the end.
 const LOG_KEEP: usize = 20_000;
 
+/// The work a flagged pull request belongs to: a backlog item's, or a session's
+/// branch with no item behind it (ADR-0019 §7, backlog #80).
+#[derive(Debug, Clone)]
+pub(crate) struct Watched {
+    /// The item, when the PR was read from one.
+    pub(crate) item: Option<u32>,
+    /// Where git and `gh` run for its steps: the checkout.
+    pub(crate) dir: PathBuf,
+    pub(crate) branch: String,
+    /// The repository, for its open bugs.
+    pub(crate) project: Option<PathBuf>,
+}
+
+impl Watched {
+    pub(crate) fn of_item(item: &Item) -> Self {
+        let dir = item
+            .checkout
+            .clone()
+            .filter(|p| p.is_dir())
+            .or_else(|| item.project.clone())
+            .unwrap_or_else(std::env::temp_dir);
+        Self {
+            item: Some(item.id),
+            branch: item
+                .branch
+                .clone()
+                .or_else(|| crate::work::current_branch(&dir))
+                .unwrap_or_default(),
+            dir,
+            project: item.project.clone(),
+        }
+    }
+
+    /// How its pull request was found, for `supervisor.jsonl`.
+    fn via(&self) -> steps::Via {
+        match self.item {
+            Some(_) => steps::Via::Item,
+            None => steps::Via::Branch,
+        }
+    }
+}
+
 /// What the supervisor offers on one flagged session.
 #[derive(Debug, Clone)]
 pub(crate) struct Offer {
@@ -55,6 +97,8 @@ pub(crate) struct Offer {
     head: String,
     /// What the flake call read, kept with the answer as a labelled example.
     features: Option<Features>,
+    /// How the pull request was found: from an item, or the session's branch.
+    via: steps::Via,
 }
 
 impl Offer {
@@ -78,6 +122,7 @@ pub(crate) struct Taken {
     root: PathBuf,
     /// The session's name, for the outcome.
     session: String,
+    via: steps::Via,
     /// The session's prompts before the step, and whether the step typed one.
     prompts: u64,
     typed: bool,
@@ -159,6 +204,10 @@ pub(crate) struct Supervisor {
     taken: HashMap<SessionId, Taken>,
     /// Reads the Context setting; tests set their own.
     pub(crate) context_on: Option<fn() -> bool>,
+    /// Branches `gh` found no pull request for, by repository and branch: the
+    /// commit they were at and when, so an idle session's branch isn't asked
+    /// about every poll (`branches`).
+    pub(crate) no_pr: HashMap<(PathBuf, String), (String, Instant)>,
 }
 
 impl Supervisor {
@@ -276,11 +325,11 @@ fn rerunnable(failed: &[Check]) -> bool {
 }
 
 impl Registry {
-    /// After the poll flagged `session` at `seq` about `item`'s pull request:
+    /// After the poll flagged `session` at `seq` about `work`'s pull request:
     /// works out the step to offer, and offers it.
     pub(crate) async fn offer_step(
         &self,
-        item: &Item,
+        work: &Watched,
         session: SessionId,
         seq: u64,
         reason: &str,
@@ -299,27 +348,19 @@ impl Registry {
         if !self.supervisor.lock().unwrap().on() {
             return;
         }
-        let project = item
-            .checkout
-            .clone()
-            .filter(|p| p.is_dir())
-            .or_else(|| item.project.clone())
-            .unwrap_or_else(std::env::temp_dir);
+        let project = work.dir.clone();
         let mut offer = Offer {
             seq,
             reason: reason.to_owned(),
             pr: url.clone(),
             step: None,
             project: project.clone(),
-            branch: item
-                .branch
-                .clone()
-                .or_else(|| crate::work::current_branch(&project))
-                .unwrap_or_default(),
+            branch: work.branch.clone(),
             base: conflicts.clone(),
             failed: failed.clone(),
             head: head.clone(),
             features: None,
+            via: work.via(),
         };
         // Offers on sessions that have moved on go; this one's shown at once, its
         // step to follow, since the flake call can take a while.
@@ -344,7 +385,7 @@ impl Registry {
             // Nothing to rerun outside Actions: no need to read anything.
             Verdict::CiFix("a failed check isn't GitHub Actions, so it can't be rerun".into())
         } else {
-            let (verdict, features) = self.flake_call(item, url, head, failed, &project).await;
+            let (verdict, features) = self.flake_call(work, url, head, failed, &project).await;
             offer.features = Some(features);
             verdict
         };
@@ -354,8 +395,9 @@ impl Registry {
             alt: (!spent).then_some(StepAction::Rerun),
         });
         tracing::info!(
-            item = item.id,
+            item = work.item,
             session,
+            via = work.via().as_str(),
             action = step.action.as_str(),
             why = step.why,
             "supervisor offers a step"
@@ -368,7 +410,7 @@ impl Registry {
             {
                 Ok(said) => {
                     tracing::info!(
-                        item = item.id,
+                        item = work.item,
                         session,
                         policy,
                         said,
@@ -400,13 +442,13 @@ impl Registry {
     /// (not with auto off, nor past its hourly limit). With what it read.
     async fn flake_call(
         &self,
-        item: &Item,
+        work: &Watched,
         url: &str,
         head: &str,
         failed: &[Check],
         project: &Path,
     ) -> (Verdict, Features) {
-        let bugs = self.open_bugs(item);
+        let bugs = self.open_bugs(work);
         let (url, head, failed, project) = (
             url.to_owned(),
             head.to_owned(),
@@ -479,15 +521,15 @@ impl Registry {
         (verdict, features)
     }
 
-    /// The open bugs in `item`'s repository, title and body.
-    fn open_bugs(&self, item: &Item) -> Vec<Bug> {
+    /// The open bugs in `work`'s repository, title and body.
+    fn open_bugs(&self, work: &Watched) -> Vec<Bug> {
         let items = self.backlog.lock().unwrap().load();
         items
             .into_iter()
             .filter(|i| {
                 i.kind == ItemKind::Bug
                     && matches!(i.status, ItemStatus::Open | ItemStatus::Proposed)
-                    && i.project == item.project
+                    && i.project == work.project
             })
             .map(|i| (i.id, format!("{}\n{}", i.title, i.body)))
             .collect()
@@ -679,6 +721,7 @@ impl Registry {
             pr: offer.pr.clone(),
             policy: by,
             features: offer.features.filter(|_| trigger == Trigger::Red),
+            via: offer.via,
         };
         if let Err(e) = self
             .context
@@ -696,6 +739,7 @@ impl Registry {
                     pr: offer.pr.clone(),
                     root,
                     session: session.key(),
+                    via: offer.via,
                     prompts,
                     typed: matches!(action, StepAction::MergeBase | StepAction::CiFix),
                     at: Instant::now(),
@@ -793,6 +837,7 @@ impl Registry {
                 project: t.root.display().to_string(),
                 overridden,
                 how: how.to_owned(),
+                via: Some(t.via.as_str().to_owned()),
             };
             tracing::info!(
                 session = id,
@@ -857,7 +902,7 @@ pub(crate) fn context_on() -> bool {
 }
 
 /// Runs `gh` in `dir`: its stdout, or an error. Killed past `timeout`.
-fn gh(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+pub(crate) fn gh(dir: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     let mut child = Command::new("gh")
         .no_window()
         .args(args)
@@ -1067,6 +1112,7 @@ mod tests {
             pr: "u".into(),
             root: PathBuf::from("/r"),
             session: "s".into(),
+            via: steps::Via::Item,
             prompts: 4,
             typed,
             at: Instant::now(),
@@ -1085,6 +1131,7 @@ mod tests {
             conflicts: conflicts.then(|| "main".into()),
             head: "h".into(),
             settled,
+            author: String::new(),
         };
         let handled = Judged::Outcome {
             overridden: false,
@@ -1235,6 +1282,7 @@ mod tests {
             conflicts: Some("main".into()),
             head: "h1".into(),
             settled: true,
+            author: String::new(),
         });
         AS_CALLER.with(|cell| {
             *cell.borrow_mut() = Some(Box::new(|| Caller {
@@ -1333,6 +1381,7 @@ mod tests {
             conflicts: None,
             head: "h2".into(),
             settled: true,
+            author: String::new(),
         });
         registry.ship_merged_prs(clean.clone()).await;
         assert!(

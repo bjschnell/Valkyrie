@@ -17,6 +17,35 @@ pub const REJECTED_DAYS: u64 = 30;
 /// Sessions the same step must be taken in before it's offered as a policy.
 pub const SESSIONS: usize = 2;
 
+/// How the supervisor found a flagged pull request (ADR-0019 §7): recorded with
+/// each step so `valk decisions health` can say whether watching branches with
+/// no backlog item overreaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Via {
+    /// Recorded on a backlog item (`Item.pr`), or a launch of one.
+    #[default]
+    Item,
+    /// Looked up from the session's branch: no item had it.
+    Branch,
+}
+
+impl Via {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Via::Item => "item",
+            Via::Branch => "branch",
+        }
+    }
+
+    /// A record from before `via` was kept is an item's.
+    pub fn parse(s: Option<&str>) -> Via {
+        match s {
+            Some("branch") => Via::Branch,
+            _ => Via::Item,
+        }
+    }
+}
+
 /// One step offered and answered, or taken by a policy (`supervisor.jsonl`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
@@ -34,6 +63,7 @@ pub struct Record {
     /// What the flake call read, on a red pull request: with the answer, a
     /// labelled example for the fitted tree (`flaketree`).
     pub features: Option<Features>,
+    pub via: Via,
 }
 
 impl Record {
@@ -46,7 +76,7 @@ impl Record {
         let mut v = serde_json::json!({
             "at": self.at, "session": self.session, "trigger": self.trigger.as_str(),
             "offered": self.offered.as_str(), "taken": self.taken.as_str(),
-            "accepted": self.accepted(), "pr": self.pr,
+            "accepted": self.accepted(), "pr": self.pr, "via": self.via.as_str(),
         });
         if let Some(id) = self.policy {
             v["policy"] = id.into();
@@ -79,8 +109,51 @@ impl Record {
             pr: v["pr"].as_str().unwrap_or_default().to_owned(),
             policy: v["policy"].as_u64().and_then(|n| u32::try_from(n).ok()),
             features: Features::from_json(&v["features"]),
+            via: Via::parse(v["via"].as_str()),
         })
     }
+}
+
+/// How the supervisor fares on pull requests it found from a branch against
+/// ones on backlog items (ADR-0019 §7): the user's answers and how often they
+/// left the flag, and how policies' steps turned out. `None` until it has
+/// flagged one by branch. Launch offers aren't about a pull request, so they
+/// don't count.
+pub fn reach(steps: &[Record], outcomes: &[crate::outcome::Record]) -> Option<String> {
+    if !steps.iter().any(|r| r.via == Via::Branch) {
+        return None;
+    }
+    let side = |via: Via| {
+        let answers: Vec<&Record> = steps
+            .iter()
+            .filter(|r| r.via == via && r.policy.is_none() && r.trigger != Trigger::Ready)
+            .collect();
+        let left = answers
+            .iter()
+            .filter(|r| r.taken == StepAction::Leave)
+            .count();
+        let judged: Vec<&crate::outcome::Record> = outcomes
+            .iter()
+            .filter(|o| o.via.as_deref() == Some(via.as_str()))
+            .collect();
+        let overridden = judged.iter().filter(|o| o.overridden).count();
+        let mut said = format!("{} answered, {left} left", answers.len());
+        if !answers.is_empty() {
+            said += &format!(" ({}%)", left * 100 / answers.len());
+        }
+        if !judged.is_empty() {
+            said += &format!(
+                "; policies {} handled, {overridden} overridden",
+                judged.len() - overridden
+            );
+        }
+        said
+    };
+    Some(format!(
+        "supervisor on PRs found by branch: {}. On backlog items: {}",
+        side(Via::Branch),
+        side(Via::Item)
+    ))
 }
 
 /// The flake call's labelled examples: each red pull request the user answered
@@ -204,6 +277,7 @@ mod tests {
 
     fn rec(at: u64, session: &str, offered: StepAction, taken: StepAction) -> Record {
         Record {
+            via: Via::Item,
             at,
             session: session.into(),
             trigger: match offered {
@@ -412,5 +486,49 @@ mod tests {
         let v = r.to_json();
         assert_eq!(v["accepted"], false);
         assert_eq!(Record::from_json(&v), Some(r));
+    }
+
+    #[test]
+    fn health_compares_flags_found_by_branch_with_items_once_there_are_any() {
+        let answer = |via, taken, policy: Option<u32>| Record {
+            via,
+            policy,
+            ..rec(1, "s", StepAction::MergeBase, taken)
+        };
+        let items = [
+            answer(Via::Item, StepAction::MergeBase, None),
+            answer(Via::Item, StepAction::MergeBase, None),
+            answer(Via::Item, StepAction::Leave, None),
+        ];
+        assert_eq!(reach(&items, &[]), None, "nothing found by branch yet");
+        let mut all = items.to_vec();
+        all.push(answer(Via::Branch, StepAction::Leave, None));
+        // A policy's step isn't an answer.
+        all.push(answer(Via::Branch, StepAction::MergeBase, Some(4)));
+        let outcome = |via: &str, overridden| crate::outcome::Record {
+            at: 1,
+            session: "s".into(),
+            policy: 4,
+            scope: "project".into(),
+            project: "/r".into(),
+            overridden,
+            how: "stop".into(),
+            via: Some(via.into()),
+        };
+        let mut stop_policy = outcome("item", true);
+        stop_policy.via = None;
+        let outcomes = [outcome("branch", true), outcome("item", false), stop_policy];
+        assert_eq!(
+            reach(&all, &outcomes).unwrap(),
+            "supervisor on PRs found by branch: 1 answered, 1 left (100%); policies 0 \
+             handled, 1 overridden. On backlog items: 3 answered, 1 left (33%); policies 1 \
+             handled, 0 overridden"
+        );
+        // Kept across a write and a read; a record from before is an item's.
+        let r = &all[3];
+        assert_eq!(Record::from_json(&r.to_json()).unwrap().via, Via::Branch);
+        let mut old = all[0].to_json();
+        old.as_object_mut().unwrap().remove("via");
+        assert_eq!(Record::from_json(&old).unwrap().via, Via::Item);
     }
 }

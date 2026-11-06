@@ -3,6 +3,7 @@
 
 mod activity;
 mod backlog;
+mod branches;
 mod chat;
 mod context;
 mod dispatch;
@@ -925,7 +926,8 @@ async fn watch_stale(registry: Arc<Registry>) {
 const PRS_EVERY: Duration = Duration::from_secs(300);
 
 /// Ships items whose PRs merged. Only items with a PR are asked about, so with
-/// none open this costs nothing.
+/// none open this costs nothing. Then the supervisor's watch on the branches of
+/// sessions no item covers (`branches`), once `gh` says who the user is.
 async fn watch_prs(registry: Arc<Registry>) {
     let lookup: work::PrLookup = Arc::new(|dir, url| work::gh_pr(dir, url, work::GH_TIMEOUT));
     // In a debug build, `$VALK_PRS_EVERY_MS` for trying the watchers out.
@@ -936,9 +938,19 @@ async fn watch_prs(registry: Arc<Registry>) {
         .map_or(PRS_EVERY, Duration::from_millis);
     let mut interval = tokio::time::interval(every);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut me: Option<String> = None;
     loop {
         interval.tick().await;
         registry.ship_merged_prs(lookup.clone()).await;
+        if me.is_none() {
+            me = tokio::task::spawn_blocking(branches::me)
+                .await
+                .ok()
+                .flatten();
+        }
+        if let Some(me) = &me {
+            registry.watch_branches(lookup.clone(), me).await;
+        }
     }
 }
 

@@ -61,6 +61,8 @@ pub enum Pr {
         /// Every check has finished and GitHub knows whether it merges: what the
         /// read says about red and conflicting is final for this head.
         settled: bool,
+        /// Who opened it (`author.login`); empty when `gh` didn't say.
+        author: String,
     },
     Merged {
         url: String,
@@ -86,6 +88,11 @@ pub type PrLookup = std::sync::Arc<dyn Fn(&Path, &str) -> Pr + Send + Sync>;
 /// The default branch of the repository `dir` is in (see `default_branch`).
 pub fn default_branch_at(dir: &Path) -> Option<String> {
     default_branch(dir)
+}
+
+/// The commit checked out in `dir`; `None` outside git or before the first commit.
+pub fn head_commit(dir: &Path) -> Option<String> {
+    git_out(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok()
 }
 
 /// The branch checked out in `dir`; `None` on a detached head or outside git.
@@ -232,7 +239,7 @@ pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
             "view",
             which,
             "--json",
-            "state,url,statusCheckRollup,mergeable,baseRefName,headRefOid",
+            "state,url,statusCheckRollup,mergeable,baseRefName,headRefOid,author",
         ])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -270,7 +277,7 @@ pub fn gh_pr(cwd: &Path, which: &str, timeout: Duration) -> Pr {
     serde_json::from_slice::<Value>(&out.stdout).map_or(Pr::Unknown, |v| parse_pr(&v))
 }
 
-/// `gh pr view --json state,url,statusCheckRollup,mergeable,baseRefName,headRefOid`,
+/// `gh pr view --json state,url,statusCheckRollup,mergeable,baseRefName,headRefOid,author`,
 /// read.
 fn parse_pr(v: &Value) -> Pr {
     let url = v["url"].as_str().unwrap_or("").to_owned();
@@ -355,6 +362,7 @@ fn parse_pr(v: &Value) -> Pr {
         conflicts,
         head: v["headRefOid"].as_str().unwrap_or("").to_owned(),
         settled,
+        author: v["author"]["login"].as_str().unwrap_or("").to_owned(),
     }
 }
 
@@ -465,6 +473,7 @@ mod tests {
             conflicts: None,
             head: String::new(),
             settled: true,
+            author: String::new(),
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
@@ -731,6 +740,7 @@ mod tests {
                         conflicts: None,
                         head: String::new(),
                         settled: true,
+                        author: String::new(),
                     }
                 }
                 _ => Pr::None,

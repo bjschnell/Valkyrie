@@ -794,6 +794,13 @@ fn print_health(root: &Path, list: &[Decision], habits: &[Decision]) {
     for line in &overridden {
         println!("  {line}");
     }
+    // Whether the supervisor's watch on branches with no item reaches too far
+    // (ADR-0019 §7): for the user to judge, so it isn't counted as waiting.
+    if let Some(line) =
+        valkyrie_context::steps::reach(&store.steps(root, now), &store.outcomes(root, now))
+    {
+        println!("  {line}");
+    }
     let unserved = store.unserved(root, list, now);
     for (id, days) in &unserved {
         println!("  #{id}: {}", valkyrie_context::served::says(*days));
