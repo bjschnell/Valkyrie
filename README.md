@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-rel
 
 Five agents in five tabs means one sat on a prompt for twenty minutes, another
 needed "we use pnpm" for the third time today, and a PR went red after its
-agent stopped. Valkyrie watches all of them so you don't have to.
+agent stopped. Valkyrie tracks all of them and tells you which one needs you.
 
 ## What it does
 
@@ -52,17 +52,17 @@ agent stopped. Valkyrie watches all of them so you don't have to.
 
 - **Teach one, teach all.** Correct one agent and the rest learn the rule, once
   you approve it.
-- **Learns your habits.** Say "ship it" twice and it offers to make that the
+- **Picks up your habits.** Say "ship it" twice and it offers to make that the
   default.
 
 ### So you move faster
 
 - **Never miss a waiting agent.** `Alt-n` jumps to whoever needs you.
-- **A supervisor on every PR.** When CI breaks or main moves, the fix is one tap
-  away.
-- **A backlog that runs itself.** Jot a bug, tap to start an agent, and get the
-  build order proposed.
-- **Main stays yours.** Nothing merges without your yes.
+- **A supervisor on your PRs.** When CI breaks or main moves, the fix is one
+  tap away.
+- **A backlog that starts agents.** Jot a bug, tap to start an agent on it, and
+  get a build order proposed.
+- **Main stays yours.** No agent merges without your yes.
 
 ## The phone app
 
@@ -126,8 +126,7 @@ Yes, natively, as well as on macOS, Linux and WSL2.
 **How is it different from running agents in tmux?**
 tmux shows you terminals; it doesn't know what's in them. Valkyrie reads each
 agent's state, so it can rank who's waiting, chime, show the prompt on your
-phone and give every agent your project's rules. It also keeps sessions alive
-on its own, without tmux.
+phone and give every agent your project's rules.
 
 **What does it cost?**
 Valkyrie is free and open source under the AGPL-3.0. The features that draft
