@@ -42,6 +42,15 @@ describe("blocks", () => {
     ]);
   });
 
+  it("never folds an agent's question into a group", () => {
+    const b = blocks([tool("1"), tool("2"), tool("3"), tool("q", "AskUserQuestion"), tool("4"), tool("5"), tool("6")]);
+    expect(b.map((x) => (x.k === "tools" ? `group ${x.tools.length}` : x.item.id))).toEqual([
+      "group 3",
+      "q",
+      "group 3",
+    ]);
+  });
+
   it("summarises a group", () => {
     expect(
       groupSummary([

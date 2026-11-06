@@ -1461,7 +1461,8 @@ button.title-name {
   color: var(--muted);
 }
 
-.tool-pre.command {
+.tool-pre.command,
+.tool-pre.question {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
