@@ -59,7 +59,12 @@ fn hook(mut cmd: Command, stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    // A hook may exit without reading its input; the exit status and output are
+    // what's tested, so a write it outlived (EPIPE) is no failure.
+    match child.stdin.take().unwrap().write_all(stdin) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        written => written.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -86,6 +91,11 @@ fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
     let mut cmd = valk(&socket, &dir);
     cmd.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
     assert_silent_success(&hook(cmd, b"{}"));
+    // That path exits without reading stdin, so a payload larger than the pipe
+    // buffer always outlives it: the write then fails with EPIPE every time.
+    let mut cmd = valk(&socket, &dir);
+    cmd.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
+    assert_silent_success(&hook(cmd, &vec![b' '; 1 << 20]));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
