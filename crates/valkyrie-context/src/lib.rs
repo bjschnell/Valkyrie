@@ -840,7 +840,8 @@ impl Store {
     /// batch is one small write. Once the oldest line is a week past
     /// [`served::SERVED_DAYS`], what no longer counts is dropped first: only
     /// that line is read, so a busy project's hooks don't re-read the log each
-    /// time. An append racing a compaction can be lost; it's only a measure.
+    /// time. Writers hold `served.lock` throughout, so an append can't land in
+    /// the file a prune is about to replace and be lost with it.
     pub fn record_served(&self, root: &Path, serves: &[served::Serve], now: u64) -> Result<()> {
         use std::io::{BufRead, Write};
         if serves.is_empty() {
@@ -848,6 +849,15 @@ impl Store {
         }
         self.mark_project(root)?;
         let path = self.served_file(root);
+        let lock_path = path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("open {}", lock_path.display()))?;
+        lock.lock()
+            .with_context(|| format!("lock {}", lock_path.display()))?;
         let oldest = std::fs::File::open(&path).ok().and_then(|f| {
             let mut first = String::new();
             std::io::BufReader::new(f).read_line(&mut first).ok()?;
@@ -1862,6 +1872,62 @@ mod tests {
             .unwrap();
         assert_eq!(lines(), 3);
         assert_eq!(f.store.served(&f.repo, much_later)[0].id, 2);
+    }
+
+    #[test]
+    fn a_prune_keeps_serves_another_session_appends_meanwhile() {
+        use served::{Layer, Serve};
+        let f = Fixture::new("served-race");
+        let day = 86_400;
+        let now = (served::SERVED_DAYS + 30) * day;
+        let file = f.store.served_file(&f.repo);
+        let serve = |session: &str, id, at| Serve {
+            session: session.into(),
+            id,
+            layer: Layer::Show,
+            at,
+        };
+        // Lets the store make its own folders.
+        f.store
+            .record_served(&f.repo, &[serve("old", 0, now)], now)
+            .unwrap();
+        // Recent lines the prune keeps, so its read-and-rewrite takes a while.
+        let recent: String = (0..2_000)
+            .map(|i| format!("{}\n", serve("old", i, now - day).to_json()))
+            .collect();
+        const APPENDERS: u32 = 8;
+        for round in 0..40 {
+            // An ancient first line, so the next write prunes.
+            std::fs::write(&file, format!("{}\n{recent}", serve("old", 0, 0).to_json())).unwrap();
+            let start = std::sync::Barrier::new(APPENDERS as usize + 1);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    start.wait();
+                    f.store
+                        .record_served(&f.repo, &[serve("pruner", 0, now)], now)
+                        .unwrap();
+                });
+                for n in 0..APPENDERS {
+                    let (start, store, repo) = (&start, &f.store, &f.repo);
+                    s.spawn(move || {
+                        start.wait();
+                        for k in 0..20 {
+                            store
+                                .record_served(repo, &[serve("other", n * 100 + k, now)], now)
+                                .unwrap();
+                        }
+                    });
+                }
+            });
+            let got = f.store.served(&f.repo, now);
+            let others = got.iter().filter(|s| s.session == "other").count();
+            assert_eq!(
+                others,
+                APPENDERS as usize * 20,
+                "round {round}: serves lost"
+            );
+            assert_eq!(got.iter().filter(|s| s.session == "pruner").count(), 1);
+        }
     }
 
     #[test]
