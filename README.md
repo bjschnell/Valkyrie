@@ -4,11 +4,11 @@
 
 # Valkyrie
 
-**Run all your coding agents in one place, and know which one needs you next.**
+**Many agents, one focus.**
 
-Claude Code, Codex and your shells side by side, with one queue of who's
-waiting, on your terminal and your phone. It learns your project's rules and
-catches pull requests that break after their agent is done.
+An agent manager that learns how you work, so you ship faster and get
+interrupted less. Claude Code, Codex and your shells run side by side, with one
+queue of who's waiting, on your terminal and your phone.
 
 [![CI](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml/badge.svg)](https://github.com/bjschnell/Valkyrie/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/bjschnell/Valkyrie?label=release&color=bd93f9)](https://github.com/bjschnell/Valkyrie/releases)
@@ -36,86 +36,54 @@ curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-rel
 
 ## Why Valkyrie
 
-When you run five coding agents at once, most of your time goes into checking
-on them. One has been waiting on a permission prompt for twenty minutes while
-you looked at another tab. You tell a third, for the third time today, that the
-project uses pnpm. A pull request went red an hour after its agent stopped, and
-nobody noticed.
-
-Valkyrie runs Claude Code, Codex and your shells side by side and keeps track
-of them for you. It puts whoever is waiting at the top of one queue, on your
-terminal and on your phone. It gives every agent in a repo the rules you've
-already taught one of them. When a pull request breaks after its agent is done,
-it brings the session back with the fix ready to send.
+Five agents in five tabs means one sat on a prompt for twenty minutes, another
+needed "we use pnpm" for the third time today, and a PR went red after its
+agent stopped. Valkyrie tracks all of them and tells you which one needs you.
 
 ## What it does
 
-### Shows you who's waiting
+### Agents that work together
 
-Agents that need you go to the top of the queue with the question they asked,
-and a chime tells you when that changes. `Alt-n` jumps to the next one from
-anywhere and returns you to where you were when the queue is empty.
+- **No stepping on toes.** Each agent sees what the others are editing.
+- **Hand off mid-task.** Move work from Claude to Codex with its context.
+- **They track their own work.** What they find lands on your backlog.
 
-### Teaches every agent what you taught one
+### Learns your project
 
-You can write a rule once ("never pkill by pattern") and every agent in the
-repo starts with it. Most rules you never have to write. When you correct an
-agent, or say the same thing in three sessions, Valkyrie drafts the rule and
-asks you to accept it. Agents can propose rules but can't accept them.
+- **Teach one, teach all.** Correct one agent and the rest learn the rule, once
+  you approve it.
+- **Picks up your habits.** Say "ship it" twice and it offers to make that the
+  default.
 
-### Carries work past the agent's last message
+### So you move faster
 
-Agents often stop at "the changes are ready" with nothing committed. A ship
-policy sends a Claude agent on to run your checks and open the pull request.
-After that, Valkyrie watches the PR. If CI fails or main moves underneath it,
-the session comes back flagged, with one step offered: fix CI, merge main in,
-or rerun a known flake. A step you take every time can become automatic.
-
-Merging stays with you. No agent merges a pull request or pushes to your
-default branch until you say yes at your own keyboard.
-
-### Turns a bug report into a running agent
-
-Write a bug down with `Alt-a`, or from your phone with a screenshot. When
-you're ready, one tap starts an agent on it in its own git worktree. The card
-moves across the board as the agent works and closes when the PR merges.
-
-### Keeps agents out of each other's way
-
-Each agent hears which files the others in the repo are editing, so two of
-them don't rewrite the same file without knowing. With `-w`, each one gets its
-own worktree.
+- **Never miss a waiting agent.** `Alt-n` jumps to whoever needs you.
+- **A supervisor on your PRs.** When CI breaks or main moves, the fix is one
+  tap away.
+- **A backlog that starts agents.** Jot a bug, tap to start an agent on it, and
+  get a build order proposed.
+- **Main stays yours.** No agent merges without your yes.
 
 ## The phone app
 
-`valk web` turns the queue into an app built for a phone screen. The inbox
-shows prompts with their answers as buttons, and each agent's work reads as a
-chat, with the live terminal one tab away.
+Your whole queue, built for a phone. Run `valk setup web` and scan one QR code.
 
 <p align="center">
   <img src="docs/images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons and a decision to review, and the chat view of a session" width="640">
+  <br><sub>Answer prompts with a tap, and follow each agent's work as a chat.</sub>
 </p>
-
-When an agent finishes, open its diff and send "Commit it" or "Run the tests"
-with one tap. The backlog board lives here too, including the supervisor's
-offer to start whatever is ready next.
 
 <p align="center">
   <img src="docs/images/phone-work.png" alt="A finished agent's changes as a diff with Commit it, Run the tests and Explain buttons, and the backlog board with a ready item offered to start" width="640">
+  <br><sub>Review a diff and send "Commit it" in one tap. Run the backlog from the couch.</sub>
 </p>
 
-<img align="right" src="docs/images/phone-flag.png" alt="A session flagged because its pull request conflicts with main, with the supervisor offering Merge the base in" width="220">
+<p align="center">
+  <img src="docs/images/phone-flag.png" alt="A session flagged because its pull request conflicts with main, with the supervisor offering Merge the base in" width="260">
+  <br><sub>A PR broke while you were out? The fix is already offered.</sub>
+</p>
 
-If a pull request breaks while you're out, its session shows up in the inbox
-with the reason and the step the supervisor suggests. In this case main moved
-and the PR conflicts, so it offers **Merge the base in**. One tap sends the
-agent to merge main, resolve the conflicts, run the checks and push.
-
-You can also start new agents in any folder, dictate messages, attach
-screenshots, and get a push notification when an agent needs you. Pairing a
-phone takes one QR code.
-
-<br clear="right">
+Plus push notifications, dictation, screenshots to agents, and new agents in any folder.
 
 ## Under the hood
 
@@ -158,8 +126,7 @@ Yes, natively, as well as on macOS, Linux and WSL2.
 **How is it different from running agents in tmux?**
 tmux shows you terminals; it doesn't know what's in them. Valkyrie reads each
 agent's state, so it can rank who's waiting, chime, show the prompt on your
-phone and give every agent your project's rules. It also keeps sessions alive
-on its own, without tmux.
+phone and give every agent your project's rules.
 
 **What does it cost?**
 Valkyrie is free and open source under the AGPL-3.0. The features that draft
