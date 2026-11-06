@@ -58,8 +58,8 @@ struct Needs {
     why: String,
 }
 
-/// Kept in `<state>/dispatch.json`, so an offer and what was left outlive a
-/// restart.
+/// Kept in `<state>/dispatch.json` (one file per daemon, `restore::per_daemon`),
+/// so an offer and what was left outlive a restart.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Book {
     pending: Vec<LaunchOffer>,

@@ -41,8 +41,16 @@ struct List {
 /// sessions.
 pub fn path(state_dir: &Path, socket: &Path) -> PathBuf {
     let host = valkyrie_proto::hostname();
+    per_daemon(state_dir, socket, &format!("restore-{host}"))
+}
+
+/// `<state dir>/<stem>.json` for the daemon on the default socket, and
+/// `<stem>-<hash of the socket>.json` for any other: two daemons on one state dir
+/// (an admin terminal's beside the user's, on Windows) each keep their own file
+/// instead of saving over each other's.
+pub(crate) fn per_daemon(state_dir: &Path, socket: &Path, stem: &str) -> PathBuf {
     if socket == valkyrie_proto::default_socket_path() {
-        return state_dir.join(format!("restore-{host}.json"));
+        return state_dir.join(format!("{stem}.json"));
     }
     // FNV-1a: stable across builds, unlike the std hasher.
     let hash = socket
@@ -52,7 +60,7 @@ pub fn path(state_dir: &Path, socket: &Path) -> PathBuf {
         .fold(0xcbf29ce484222325u64, |h, &b| {
             (h ^ b as u64).wrapping_mul(0x100000001b3)
         });
-    state_dir.join(format!("restore-{host}-{hash:016x}.json"))
+    state_dir.join(format!("{stem}-{hash:016x}.json"))
 }
 
 fn read(path: &Path) -> Result<List> {

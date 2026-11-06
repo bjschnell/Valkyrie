@@ -462,7 +462,7 @@ fn new_registry(
     let (answers, answers_rx) = mpsc::unbounded_channel();
     let (seen, seen_rx) = mpsc::unbounded_channel();
     let (order_tx, order_rx) = mpsc::unbounded_channel();
-    let socket_for_restore = socket.clone();
+    let own_socket = socket.clone();
     let registry = Arc::new(Registry {
         sessions: Mutex::default(),
         next_id: AtomicU32::new(next_id),
@@ -483,7 +483,7 @@ fn new_registry(
         gate: std::sync::RwLock::new(()),
         dying: Mutex::default(),
         upgrades,
-        restore_file: restore::path(state_dir, &socket_for_restore),
+        restore_file: restore::path(state_dir, &own_socket),
         unrestored: Mutex::default(),
         restore_now: Notify::new(),
         layouts: Mutex::default(),
@@ -503,11 +503,23 @@ fn new_registry(
         )),
         items: watch::Sender::new(Arc::default()),
         orders: watch::Sender::new(Arc::default()),
-        order_book: Mutex::new(order::Book::load(state_dir.join("orders.json"))),
+        order_book: Mutex::new(order::Book::load(restore::per_daemon(
+            state_dir,
+            &own_socket,
+            "orders",
+        ))),
         launches: watch::Sender::new(Arc::default()),
-        dispatch: Mutex::new(dispatch::Book::load(state_dir.join("dispatch.json"))),
+        dispatch: Mutex::new(dispatch::Book::load(restore::per_daemon(
+            state_dir,
+            &own_socket,
+            "dispatch",
+        ))),
         dispatch_kick: Notify::new(),
-        supervisor: Mutex::new(supervise::Supervisor::load(state_dir.join("reruns.json"))),
+        supervisor: Mutex::new(supervise::Supervisor::load(restore::per_daemon(
+            state_dir,
+            &own_socket,
+            "reruns",
+        ))),
         order_tx,
         order_rx: Mutex::new(Some(order_rx)),
         launching: Mutex::default(),
