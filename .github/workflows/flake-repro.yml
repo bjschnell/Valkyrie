@@ -13,16 +13,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            test: daemon
-          - os: windows-latest
-            test: windows
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p valkyrie-daemon --test ${{ matrix.test }} --locked --no-run
+      - run: cargo test --workspace --locked --no-run
       - name: pty limits
         if: runner.os == 'macOS'
         run: |
@@ -33,13 +29,16 @@ jobs:
         shell: bash
         run: |
           fails=0
-          for i in $(seq 1 25); do
-            if ! cargo test -p valkyrie-daemon --test ${{ matrix.test }} --locked -q > out.txt 2>&1; then
+          for i in $(seq 1 20); do
+            start=$SECONDS
+            if ! cargo test --workspace --locked --no-fail-fast -q > out.txt 2>&1; then
               fails=$((fails + 1))
               echo "::group::run $i failed"
               grep -E "panicked|never matched|openpty|FAILED|^---- " -A3 out.txt | head -40
               echo "::endgroup::"
+              grep -E "^test .* FAILED$|^    [a-z_:]+$" out.txt | sed "s/^/run $i: /"
             fi
+            echo "run $i took $((SECONDS - start))s"
           done
-          echo "failures: $fails/25"
+          echo "failures: $fails/20"
           test "$fails" -eq 0
