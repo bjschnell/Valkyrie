@@ -36,17 +36,9 @@ curl -fsSL https://raw.githubusercontent.com/bjschnell/Valkyrie/main/install-rel
 
 ## Why Valkyrie
 
-When you run five coding agents at once, most of your time goes into checking
-on them. One has been waiting on a permission prompt for twenty minutes while
-you looked at another tab. You tell a third, for the third time today, that the
-project uses pnpm. A pull request went red an hour after its agent stopped, and
-nobody noticed.
-
-Valkyrie runs Claude Code, Codex and your shells side by side and keeps track
-of them for you. It puts whoever is waiting at the top of one queue, on your
-terminal and on your phone. It gives every agent in a repo the rules you've
-already taught one of them. When a pull request breaks after its agent is done,
-it brings the session back with the fix ready to send.
+Five agents in five tabs means one sat on a prompt for twenty minutes, another
+needed "we use pnpm" for the third time today, and a PR went red after its
+agent stopped. Valkyrie watches all of them so you don't have to.
 
 ## What it does
 
