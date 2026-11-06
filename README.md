@@ -50,41 +50,17 @@ it brings the session back with the fix ready to send.
 
 ## What it does
 
-### Shows you who's waiting
-
-Agents that need you go to the top of the queue with the question they asked,
-and a chime tells you when that changes. `Alt-n` jumps to the next one from
-anywhere and returns you to where you were when the queue is empty.
-
-### Teaches every agent what you taught one
-
-You can write a rule once ("never pkill by pattern") and every agent in the
-repo starts with it. Most rules you never have to write. When you correct an
-agent, or say the same thing in three sessions, Valkyrie drafts the rule and
-asks you to accept it. Agents can propose rules but can't accept them.
-
-### Carries work past the agent's last message
-
-Agents often stop at "the changes are ready" with nothing committed. A ship
-policy sends a Claude agent on to run your checks and open the pull request.
-After that, Valkyrie watches the PR. If CI fails or main moves underneath it,
-the session comes back flagged, with one step offered: fix CI, merge main in,
-or rerun a known flake. A step you take every time can become automatic.
-
-Merging stays with you. No agent merges a pull request or pushes to your
-default branch until you say yes at your own keyboard.
-
-### Turns a bug report into a running agent
-
-Write a bug down with `Alt-a`, or from your phone with a screenshot. When
-you're ready, one tap starts an agent on it in its own git worktree. The card
-moves across the board as the agent works and closes when the PR merges.
-
-### Keeps agents out of each other's way
-
-Each agent hears which files the others in the repo are editing, so two of
-them don't rewrite the same file without knowing. With `-w`, each one gets its
-own worktree.
+- **Never miss a waiting agent.** Whoever needs you jumps to the top of one
+  queue, and `Alt-n` takes you there.
+- **Teach one agent, teach them all.** Correct an agent once and Valkyrie
+  offers to make it a rule every agent in the repo follows.
+- **Finished work actually ships.** Agents get sent on to run your checks and
+  open the PR. If CI breaks or main moves later, the fix is one key away.
+- **Main stays yours.** No agent merges or pushes to your default branch
+  without your yes.
+- **From bug to agent in one tap.** Jot it down from anywhere, then start an
+  agent on it in its own worktree.
+- **No stepping on toes.** Each agent knows which files the others are editing.
 
 ## The phone app
 
