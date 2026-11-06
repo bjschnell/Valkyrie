@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -340,5 +340,17 @@ describe("build order", () => {
     expect(changesSomething({ item: 1, reason: "", blocked_by: [] })).toBe(true);
     expect(appliedSummary(true, { changed: [3, 2], skipped: [[1, "edited since"]] })).toBe("Changed #3 #2; #1 left: edited since");
     expect(appliedSummary(false, { changed: [] })).toBe("Build order declined: nothing changed");
+  });
+});
+
+describe("startAgent", () => {
+  it("starts an item on the agent it was last launched with, before this device's pick", () => {
+    expect(startAgent(item({ launch: { agent: "codex", model: "gpt-5.5" } }), "claude")).toBe("codex");
+    expect(startAgent(item({ launch: { agent: "claude" } }), "codex")).toBe("claude");
+  });
+  it("falls back to the agent last picked here, then claude", () => {
+    expect(startAgent(item(), "codex")).toBe("codex");
+    expect(startAgent(null, null)).toBe("claude");
+    expect(startAgent(item({ launch: { agent: "aider" } }), "nonsense")).toBe("claude");
   });
 });

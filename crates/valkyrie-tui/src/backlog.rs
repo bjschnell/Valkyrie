@@ -271,12 +271,18 @@ pub(crate) struct LaunchForm {
     last: Option<ItemLaunch>,
 }
 
+/// The agent item `item` was last launched with, claude if never (decision #46):
+/// `↩` and `L` both start from it.
+fn last_agent(item: &Item) -> &'static str {
+    match item.launch.as_ref().map(|l| l.agent.as_str()) {
+        Some("codex") => "codex",
+        _ => "claude",
+    }
+}
+
 impl LaunchForm {
     pub(crate) fn new(item: &Item) -> Self {
-        let agent = match item.launch.as_ref().map(|l| l.agent.as_str()) {
-            Some("codex") => "codex",
-            _ => "claude",
-        };
+        let agent = last_agent(item);
         let mut form = Self {
             id: item.id,
             agent,
@@ -819,7 +825,7 @@ impl Page {
                 }
                 _ => Do::Launch {
                     id,
-                    agent: "claude",
+                    agent: last_agent(item),
                     model: None,
                     worktree: true,
                 },
@@ -1765,6 +1771,31 @@ mod tests {
             "p2→p1, after #2"
         );
         assert_eq!(step_changes(&step(None, None), Some(&i)), "");
+    }
+
+    #[test]
+    fn enter_relaunches_on_the_agent_it_last_ran() {
+        let launch = |agent| {
+            vec![Do::Launch {
+                id: 1,
+                agent,
+                model: None,
+                worktree: true,
+            }]
+        };
+        let enter = |item: Item| Page::default().keys(b"\r", &rows(&[item], &[], 7), &[], 7);
+        assert_eq!(
+            enter(item(1, 1)),
+            launch("claude"),
+            "never launched: claude"
+        );
+        let mut codex = item(1, 1);
+        codex.launch = Some(ItemLaunch {
+            agent: "codex".into(),
+            model: "gpt-5.5".into(),
+        });
+        // The daemon fills in the model it last ran with that agent.
+        assert_eq!(enter(codex), launch("codex"));
     }
 
     #[test]

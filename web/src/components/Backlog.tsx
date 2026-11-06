@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, ordersShown, planScope, prLink, priority, repoChoices, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
@@ -341,7 +341,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const boot = useApp((s) => s.boot);
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [agent, setAgent] = useState<Agent>(() => (read(AGENT_KEY) === "codex" ? "codex" : "claude"));
+  const [agent, setAgent] = useState<Agent>(() => startAgent(item, read(AGENT_KEY)));
   const live = liveSession(item, sessions, boot);
   // Accept, Open, Launch: Launch beside Open while only takes are live (it hands
   // the item over), Accept beside it for an agent's own filed work.
@@ -718,8 +718,7 @@ export function ItemEditor({ id }: { id: number | null }) {
       }
       navigator.vibrate?.(10);
       if (andLaunch && saved !== null) {
-        const agent = read(AGENT_KEY) === "codex" ? "codex" : "claude";
-        const session = await launchItem(saved, agent);
+        const session = await launchItem(saved, startAgent(item, read(AGENT_KEY)));
         location.replace(`#/s/${session}`);
       } else {
         location.replace("#/backlog");
