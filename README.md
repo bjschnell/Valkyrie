@@ -50,17 +50,33 @@ it brings the session back with the fix ready to send.
 
 ## What it does
 
+### Stay on top of every agent
+
 - **Never miss a waiting agent.** Whoever needs you jumps to the top of one
   queue, and `Alt-n` takes you there.
-- **Teach one agent, teach them all.** Correct an agent once and Valkyrie
-  offers to make it a rule every agent in the repo follows.
-- **Finished work actually ships.** Agents get sent on to run your checks and
-  open the PR. If CI breaks or main moves later, the fix is one key away.
 - **Main stays yours.** No agent merges or pushes to your default branch
   without your yes.
+
+### Agents that work as a team
+
+- **Teach one agent, teach them all.** Correct an agent once and Valkyrie
+  offers to make it a rule every agent in the repo follows.
+- **No stepping on toes.** Each agent knows which files the others are editing.
+- **Hand off mid-task.** Move a task from Claude to Codex with its goal,
+  progress and changed files.
+- **Agents track their own work.** What they find along the way lands on your
+  backlog as a proposal, and their cards follow them.
+
+### Work that manages itself
+
+- **Finished work actually ships.** Agents get sent on to run your checks and
+  open the PR. If CI breaks or main moves later, the fix is one key away.
 - **From bug to agent in one tap.** Jot it down from anywhere, then start an
   agent on it in its own worktree.
-- **No stepping on toes.** Each agent knows which files the others are editing.
+- **A backlog that plans itself.** Valkyrie proposes a build order and offers
+  to start the next ready item when an agent frees up.
+- **It learns your habits.** Say "ship it" twice and it offers to make that the
+  default. `valk pings` shows where agents interrupt you most.
 
 ## The phone app
 
