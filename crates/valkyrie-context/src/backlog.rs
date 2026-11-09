@@ -646,7 +646,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
 /// What an agent on item `id` is asked to keep track of: the end of its brief.
 fn footer(id: u32) -> String {
     format!(
-        "(This is item #{} in my Valkyrie backlog. Fix what you have to in order to deliver it, as part of this change. Anything else you find broken, keep out of this change and file it with `valk todo add -k <bug|feature|chore> \"<title>\" --body \"<what, how to reproduce it, how much it matters>\"`. When this is done, tell me what you filed and offer to fix it here; if I say go ahead, take it with `valk todo take N --branch <branch>` and fix it on its own branch and pull request. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "(This is item #{} in my Valkyrie backlog. Fix what you have to in order to deliver it, as part of this change. Anything else you find broken, keep out of this change and file it with `valk todo add -k <bug|feature|chore> \"<title>\" --body \"<what, how to reproduce it, how much it matters>\"`. When this is done, tell me in a line what you filed. Offer to fix a find here only when it's worth acting on now (it blocks my next step, or it's a real bug I'd want dealt with before moving on); otherwise leave it on the backlog and don't ask. If I say go ahead, take it with `valk todo take N --branch <branch>` and fix it on its own branch and pull request. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         id
     )
 }
