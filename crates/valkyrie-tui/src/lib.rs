@@ -208,6 +208,11 @@ struct App {
     proposal_read: std::cell::RefCell<Option<(PathBuf, u32, u64)>>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
+    /// Where the home screen's rows were last drawn, each with its index in that
+    /// selection: what a click is matched against.
+    home_rows: std::cell::RefCell<Vec<(Rect, usize)>>,
+    /// The mouse is Valkyrie's on the home screen too (written once per detach).
+    home_captured: bool,
     view: Option<Attached>,
     status: String,
     quit: bool,
@@ -377,6 +382,8 @@ impl App {
             proposal_scroll: Default::default(),
             proposal_read: Default::default(),
             selected: 0,
+            home_rows: Default::default(),
+            home_captured: false,
             view: None,
             status: String::new(),
             quit: false,
@@ -709,6 +716,19 @@ impl App {
             joined.extend(bytes);
             bytes = joined;
         }
+        if self.view.is_none() && self.backlog.is_none() && !self.mini_open() {
+            // Home: reports are clicks, and never typed into a prompt.
+            if let Some(cut) = mouse::unfinished(&bytes) {
+                self.partial = bytes.split_off(cut);
+            }
+            for input in mouse::split(&bytes) {
+                match input {
+                    Input::Bytes(keys) => Box::pin(self.home_screen_keys(keys)).await,
+                    Input::Mouse(m) => self.on_home_mouse(m).await,
+                }
+            }
+            return;
+        }
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
@@ -771,11 +791,60 @@ impl App {
             }
             return;
         }
+        self.home_screen_keys(bytes).await;
+    }
+
+    /// Typed keys while on the home screen, whichever page or prompt is over it.
+    async fn home_screen_keys(&mut self, bytes: Vec<u8>) {
+        if self.keys_page.is_some() {
+            return self.keys_page_keys(&bytes);
+        }
+        if self.settings_cursor.is_some() {
+            return self.settings_keys(&bytes);
+        }
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
         }
         self.option_hint(&bytes);
         self.home_input(&bytes).await;
+    }
+
+    /// A press on a home row selects it; on the selected row it does what Enter does.
+    async fn on_home_mouse(&mut self, m: Mouse) {
+        if m.kind != MouseKind::Press
+            || self.keys_page.is_some()
+            || self.settings_cursor.is_some()
+            || self.renaming.is_some()
+        {
+            return;
+        }
+        let at = Position::new(m.x, m.y);
+        let hit = self
+            .home_rows
+            .borrow()
+            .iter()
+            .find(|(area, _)| area.contains(at))
+            .map(|&(_, row)| row);
+        match hit {
+            Some(row) if row == self.selected => self.on_home_key(HomeKey::Enter).await,
+            Some(row) => {
+                self.selected = row;
+                self.update_preview().await;
+            }
+            None => {}
+        }
+    }
+
+    /// Takes the mouse on the home screen: clicks, no motion. Written once per
+    /// detach; attaching writes its own modes (`update_capture`).
+    fn capture_home(&mut self) {
+        if self.home_captured {
+            return;
+        }
+        self.home_captured = true;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{}{}", mouse::CAPTURE_OFF, mouse::CAPTURE_ON);
+        let _ = out.flush();
     }
 
     /// Keys on the home screen.
@@ -1167,6 +1236,7 @@ impl App {
     fn reset_outer_modes(&mut self) {
         let _ = reset_terminal_modes();
         self.paste_forced = false;
+        self.home_captured = false;
     }
 
     /// A Mac's Option typed a character where an Alt key was meant (the terminal
@@ -2812,6 +2882,9 @@ impl App {
     }
 
     fn draw(&mut self, terminal: &mut Term) -> Result<()> {
+        if self.view.is_none() {
+            self.capture_home();
+        }
         terminal.draw(|frame| {
             let [body, bar] =
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
@@ -2993,6 +3066,7 @@ impl App {
             }
         }
 
+        self.home_rows.borrow_mut().clear();
         let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
             let [lists, preview] =
                 Layout::horizontal([Constraint::Percentage(62), Constraint::Fill(1)]).areas(main);
@@ -3071,6 +3145,7 @@ impl App {
                 proposals_area,
                 &mut state,
             );
+            self.remember_rows(proposals_area, state.offset(), self.proposals.len(), 0);
         }
 
         let in_queue = self.queue_index().is_some();
@@ -3113,6 +3188,12 @@ impl App {
             let rows = self.queue.iter().map(|q| queue_row(q, now, spin, t));
             let mut state = TableState::default().with_selected(self.queue_index());
             frame.render_stateful_widget(table(rows, t).block(queue_block), queue_area, &mut state);
+            self.remember_rows(
+                queue_area,
+                state.offset(),
+                self.queue.len(),
+                self.proposals.len(),
+            );
         }
 
         let sessions_title = Line::from(vec![
@@ -3127,6 +3208,12 @@ impl App {
             table(rows, t).block(panel(sessions_title, t, in_sessions)),
             sessions_area,
             &mut state,
+        );
+        self.remember_rows(
+            sessions_area,
+            state.offset(),
+            self.sessions.len(),
+            self.proposals.len() + self.queue.len(),
         );
 
         if let Some(area) = preview {
@@ -3171,6 +3258,16 @@ impl App {
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
+    }
+
+    /// Notes where the rows of a home table, shown from `offset`, were drawn inside
+    /// its bordered `area`; `first` is the selection index of its first row.
+    fn remember_rows(&self, area: Rect, offset: usize, len: usize, first: usize) {
+        let inner = area.inner(Margin::new(1, 1));
+        let mut rows = self.home_rows.borrow_mut();
+        for (y, row) in (inner.y..inner.bottom()).zip(offset..len) {
+            rows.push((Rect::new(inner.x, y, inner.width, 1), first + row));
+        }
     }
 
     /// The selected session: its full summary, then the bottom of its screen.
@@ -5138,8 +5235,8 @@ fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     Ok(())
 }
 
-/// The mouse off: on the home screen it is nobody's. While attached it is always
-/// Valkyrie's first (`App::update_capture`).
+/// The mouse off, for leaving. Valkyrie takes it on the home screen
+/// (`App::capture_home`) and, while attached, first (`App::update_capture`).
 fn release_mouse() -> Result<()> {
     let mut out = std::io::stdout();
     write!(out, "{}", mouse::CAPTURE_OFF)?;
@@ -8117,5 +8214,69 @@ mod tests {
         let f = forced_modes(m, true);
         assert!(f.bracketed_paste && f.app_cursor);
         assert_eq!(forced_modes(m, false), m);
+    }
+
+    /// A click on a row of the home screen selects it, and a click on the selected
+    /// row does what Enter does. Mouse reports used to be thrown away there (#96).
+    #[tokio::test]
+    async fn clicking_a_home_row_selects_it_and_a_second_click_opens_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-click-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = ["alpha", "bravo", "charlie"]
+            .into_iter()
+            .zip(1..)
+            .map(|(name, id)| SessionInfo {
+                name: name.into(),
+                ..info(id)
+            })
+            .collect();
+        app.queue = vec![queued(3)];
+        app.proposals = vec![proposed("/r/a", 1, "one")];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let screen = |app: &App, terminal: &mut Terminal<TestBackend>| -> Vec<String> {
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(buffer.area.width as usize)
+                .map(|row| row.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        let rows = screen(&app, &mut terminal);
+        // The sessions list, not the queue's row for the same session.
+        let y = rows.iter().rposition(|r| r.contains("bravo")).unwrap() as u16;
+        let x = rows[y as usize].find("bravo").unwrap() as u16;
+        let click =
+            |x: u16, y: u16| format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1);
+
+        assert_eq!(app.selected, 0);
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.selection().0, Some(2), "the click selected bravo");
+        assert_eq!(app.status, "");
+        // The border and the blank space under the rows select nothing.
+        let before = app.selected;
+        app.on_input(click(x, 0).into_bytes()).await;
+        app.on_input(click(x, 28).into_bytes()).await;
+        assert_eq!(app.selected, before);
+        // A proposal's row: the first click selects it, the second is Enter, which
+        // shows its text (a session's Enter would attach, which needs a daemon).
+        screen(&app, &mut terminal);
+        let y = rows.iter().position(|r| r.contains("one")).unwrap() as u16;
+        let x = rows[y as usize].find("one").unwrap() as u16;
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!((app.selected, app.status.as_str()), (0, ""));
+        screen(&app, &mut terminal);
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.status, proposal_text(&app.proposals[0]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
