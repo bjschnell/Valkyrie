@@ -45,7 +45,7 @@ pub enum PaneCmd {
         #[arg(short = 'n', long)]
         lines: Option<u32>,
     },
-    /// Wait until TEXT is on a pane's screen, or the pane reaches STATE. Exits 1
+    /// Wait until TEXT is on a pane's screen, or the pane reaches STATE. Exits 124
     /// when the timeout runs out first. A state that already holds counts, so right
     /// after `run` wait for its output, not for `stopped`.
     #[command(group(clap::ArgGroup::new("until").required(true).args(["text", "state"])))]
@@ -227,11 +227,13 @@ pub async fn run(client: &Client, cmd: PaneCmd) -> Result<()> {
                     (Some(text), _) => client.dump(session).await?.contains(text.as_str()),
                     (None, Some(state)) => {
                         let sessions = client.list().await?;
-                        let s = sessions
-                            .iter()
-                            .find(|s| s.id == session)
-                            .with_context(|| format!("no session {session}"))?;
-                        state.holds(s)
+                        match sessions.iter().find(|s| s.id == session) {
+                            Some(s) => state.holds(s),
+                            // A pane that ended cleanly (any shell, or exit 0)
+                            // leaves the list at once: it has exited.
+                            None if matches!(state, WaitState::Exited | WaitState::Stopped) => true,
+                            None => bail!("pane {session} has ended (or never was)"),
+                        }
                     }
                     (None, None) => unreachable!("clap requires one"),
                 };
@@ -240,7 +242,8 @@ pub async fn run(client: &Client, cmd: PaneCmd) -> Result<()> {
                 }
                 if Instant::now() >= deadline {
                     eprintln!("valk: timed out after {timeout}s waiting on pane {session}");
-                    std::process::exit(1);
+                    // As timeout(1) does, so a timeout reads apart from an error.
+                    std::process::exit(124);
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -339,7 +342,13 @@ async fn tail(client: &Client, session: SessionId, n: u32) -> Result<String> {
     let (from_top, history, rows) = client.scrollback(session, ScrollAnchor::Up(0)).await?;
     let height = rows.len() as u32;
     let end = from_top + height;
-    let mut at = end.saturating_sub(n).min(history);
+    // The screen's blank rows below its last line don't count towards `n`.
+    let blank = rows
+        .iter()
+        .rev()
+        .take_while(|r| row_text(r).is_empty())
+        .count() as u32;
+    let mut at = (end - blank).saturating_sub(n).min(history);
     let mut lines: Vec<String> = Vec::new();
     // Pages from the oldest line wanted; the last page is the screen itself.
     while at < end {

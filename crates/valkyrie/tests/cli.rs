@@ -1271,7 +1271,7 @@ fn an_agent_drives_the_panes_of_its_tab() {
     let tail = ok(pane(&["read", &other, "-n", "1"]));
     assert_eq!(tail.lines().count(), 1, "{tail:?}");
     let timed_out = pane(&["wait", &other, "--match", "never-there", "--timeout", "0"]);
-    assert_eq!(timed_out.status.code(), Some(1));
+    assert_eq!(timed_out.status.code(), Some(124));
     ok(pane(&[
         "wait",
         &other,
@@ -1280,6 +1280,26 @@ fn an_agent_drives_the_panes_of_its_tab() {
         "--timeout",
         "10",
     ]));
+
+    // History above, a mostly blank screen: the last lines are the ones written.
+    ok(pane(&[
+        "run",
+        &other,
+        "seq 1 60; printf '\\\\033[2J\\\\033[H'; echo after-$((1+1))",
+    ]));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--match",
+        "after-2",
+        "--timeout",
+        "10",
+    ]));
+    let tail = ok(pane(&["read", &other, "-n", "30"]));
+    let tail: Vec<_> = tail.lines().collect();
+    // More than the 24-row screen holds, so history comes along.
+    assert_eq!(tail.len(), 30, "{tail:?}");
+    assert_eq!(tail[28], "after-2", "{tail:?}");
 
     ok(pane(&["resize", &other, "30"]));
     let cols = list()[1]["area"]["cols"].as_u64().unwrap();
@@ -1291,6 +1311,17 @@ fn an_agent_drives_the_panes_of_its_tab() {
     let refused = pane(&["close", &me]);
     assert!(!refused.status.success());
     assert!(pane(&["run", "999", "x"]).status.code() != Some(0));
+    // A shell that exits leaves the list at once; waiting on it still succeeds.
+    let gone = ok(pane(&["split", "-d", "down"])).trim().to_string();
+    ok(pane(&["run", &gone, "exit"]));
+    ok(pane(&[
+        "wait",
+        &gone,
+        "--state",
+        "exited",
+        "--timeout",
+        "10",
+    ]));
     ok(pane(&["close", &other]));
     let left = list();
     assert_eq!(left.len(), 1);

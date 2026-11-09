@@ -164,7 +164,6 @@ impl Pane {
         }
     }
 
-    /// Sets the ratio of the split where `a` and `b` part. False if there is none.
     /// The split right above `id`'s pane: a session on its other side, and whether
     /// `id` is that split's `a`. With `set_ratio` this sizes one pane against its
     /// neighbour. `None` for a tab of one pane, or if `id` isn't here.
@@ -180,6 +179,7 @@ impl Pane {
         }
     }
 
+    /// Sets the ratio of the split where `a` and `b` part. False if there is none.
     pub fn set_ratio(&mut self, a_id: SessionId, b_id: SessionId, to: u16) -> bool {
         let Pane::Split { ratio, a, b, .. } = self else {
             return false;
