@@ -892,11 +892,11 @@ export function ItemEditor({ id }: { id: number | null }) {
       </main>
 
       <footer className="dock item-dock">
-        <button className="ghost" disabled={busy || sending || empty} onClick={() => void save(false)}>
+        <button className="primary save" disabled={busy || sending || empty} onClick={() => void save(false)}>
           Save
         </button>
         <button
-          className="primary start"
+          className="ghost launch"
           disabled={busy || sending || empty || !folder || running || (item !== null && item.status !== "open")}
           onClick={() => void save(true)}
         >
