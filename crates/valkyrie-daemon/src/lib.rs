@@ -186,6 +186,33 @@ struct Registry {
 }
 
 impl Registry {
+    /// Stops a session and forgets it, as `Kill` does.
+    pub(crate) fn kill_session(&self, session: SessionId) -> Result<()> {
+        // Moved to `dying` under the sessions lock, so a handoff sees the
+        // session in one list or the other.
+        let removed = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let removed = sessions.remove(&session);
+            self.prune_layouts(&sessions);
+            if let Some(s) = &removed
+                && !s.exited()
+            {
+                let mut dying = self.dying.lock().unwrap();
+                dying.retain(|d| d.upgrade().is_some_and(|d| !d.exited()));
+                dying.push(Arc::downgrade(s));
+            }
+            removed
+        };
+        let Some(s) = removed else {
+            anyhow::bail!("no session {session}");
+        };
+        s.kill();
+        self.host.changed.notify_one();
+        // A kill just before a reboot must not come back.
+        self.restore_now.notify_one();
+        Ok(())
+    }
+
     /// `Reply::Clients`: a client is current on this daemon's protocol and binary.
     fn clients(&self) -> Reply {
         let ours = valkyrie_proto::binary_id();
@@ -1303,32 +1330,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 (req, Ok(Reply::Sessions { sessions, layouts }))
             }
             ClientMsg::Kill { req, session } => {
-                // Moved to `dying` under the sessions lock, so a handoff sees the
-                // session in one list or the other.
-                let removed = {
-                    let mut sessions = registry.sessions.lock().unwrap();
-                    let removed = sessions.remove(&session);
-                    registry.prune_layouts(&sessions);
-                    if let Some(s) = &removed
-                        && !s.exited()
-                    {
-                        let mut dying = registry.dying.lock().unwrap();
-                        dying.retain(|d| d.upgrade().is_some_and(|d| !d.exited()));
-                        dying.push(Arc::downgrade(s));
-                    }
-                    removed
-                };
-                let result = match removed {
-                    Some(s) => {
-                        s.kill();
-                        registry.host.changed.notify_one();
-                        // A kill just before a reboot must not come back.
-                        registry.restore_now.notify_one();
-                        Ok(Reply::Done)
-                    }
-                    None => Err(anyhow::anyhow!("no session {session}")),
-                };
-                (req, result)
+                (req, registry.kill_session(session).map(|()| Reply::Done))
             }
             ClientMsg::Dump { req, session } => (
                 req,

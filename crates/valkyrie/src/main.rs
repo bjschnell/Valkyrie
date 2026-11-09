@@ -368,8 +368,12 @@ fn main() -> Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         // A hook must never print or exit nonzero (exit 2 blocks the agent), even
-        // when its arguments or environment don't parse.
-        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
+        // when its arguments or environment don't parse. It still reads its input,
+        // or the agent writing it can hit EPIPE.
+        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => {
+            hook::drain();
+            return Ok(());
+        }
         Err(e) => e.exit(),
     };
     // Hooks report to the daemon that owns VALK_SESSION, which VALK_SOCKET names,
