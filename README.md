@@ -84,9 +84,10 @@ cd ~/repos/valkyrie && ./install.sh
 ## Highlights
 
 - **Many agents, side by side.** Every Claude Code, Codex or shell session is a
-  tab, and any tab splits into panes. A background daemon owns them, so they keep
-  running when you close the TUI or your SSH connection drops. Claude and Codex
-  conversations resume after a reboot.
+  tab, and any tab splits into panes. Agents can split their own tab and run
+  things in the other panes (`valk pane`). A background daemon owns them, so they
+  keep running when you close the TUI or your SSH connection drops. Claude and
+  Codex conversations resume after a reboot.
 - **Know where you're needed.** The home screen ranks sessions by who needs you:
   `needs input`, then `blocked`, then `done`. When one changes, it chimes and
   shows what the agent asked or finished. Inside a session, each tab shows its

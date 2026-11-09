@@ -1180,3 +1180,124 @@ fn a_closed_stdout_ends_valk_quietly() {
     assert_eq!(out.status.signal(), Some(libc::SIGPIPE), "{:?}", out.status);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `valk pane`: an agent in a session splits its own tab, drives the new pane and
+/// reads it back, resizes and closes it, and can't close the pane it runs in.
+#[test]
+fn an_agent_drives_the_panes_of_its_tab() {
+    let dir = temp("pane");
+    let socket = dir.join("run/o.sock");
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let new = (0..100)
+        .find_map(|_| {
+            let out = valk(&socket, &dir)
+                .args(["new", "--cwd"])
+                .arg(&dir)
+                .args(["--", "sh"])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                return Some(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .expect("daemon did not start");
+    let me = String::from_utf8(new.stdout).unwrap().trim().to_string();
+    // As the agent in that session would run it.
+    let pane = |args: &[&str]| {
+        valk(&socket, &dir)
+            .env("VALK_SESSION", &me)
+            .env("SHELL", "/bin/sh")
+            .arg("pane")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let ok = |out: Output| {
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let list = || -> Vec<serde_json::Value> {
+        serde_json::from_str(&ok(pane(&["list", "--json"]))).unwrap()
+    };
+
+    let solo = list();
+    assert_eq!(solo.len(), 1);
+    assert_eq!(solo[0]["where"], "whole tab");
+    assert_eq!(solo[0]["me"], true);
+
+    let other = ok(pane(&["split", "-d", "right"])).trim().to_string();
+    let panes = list();
+    let wheres: Vec<_> = panes
+        .iter()
+        .map(|p| {
+            (
+                p["id"].to_string(),
+                p["where"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        wheres,
+        [
+            (me.clone(), "left".to_string()),
+            (other.clone(), "right".to_string())
+        ]
+    );
+    assert_eq!(panes[1]["me"], false);
+    assert_eq!(
+        panes[1]["cwd"],
+        dir.to_str().unwrap(),
+        "the split's directory"
+    );
+
+    ok(pane(&["run", &other, "echo pane-$((40+2))"]));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--match",
+        "pane-42",
+        "--timeout",
+        "10",
+    ]));
+    assert!(ok(pane(&["read", &other])).contains("pane-42"));
+    let tail = ok(pane(&["read", &other, "-n", "1"]));
+    assert_eq!(tail.lines().count(), 1, "{tail:?}");
+    let timed_out = pane(&["wait", &other, "--match", "never-there", "--timeout", "0"]);
+    assert_eq!(timed_out.status.code(), Some(1));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--state",
+        "stopped",
+        "--timeout",
+        "10",
+    ]));
+
+    ok(pane(&["resize", &other, "30"]));
+    let cols = list()[1]["area"]["cols"].as_u64().unwrap();
+    assert!(
+        (295..=305).contains(&cols),
+        "right pane is {cols}/1000 wide"
+    );
+
+    let refused = pane(&["close", &me]);
+    assert!(!refused.status.success());
+    assert!(pane(&["run", "999", "x"]).status.code() != Some(0));
+    ok(pane(&["close", &other]));
+    let left = list();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["where"], "whole tab");
+
+    let _ = valk(&socket, &dir).args(["kill", &me]).output();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

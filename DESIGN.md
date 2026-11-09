@@ -473,7 +473,16 @@ herdr splits a tab into panes; Valkyrie had one session per tab. Now a tab can h
 - **Limits.**
   - Two clients on different terminal sizes resize the same panes; the last wins, as for one pane.
   - No zoom (one pane full-screen for a while) and no keyboard resize yet. Focus moves in layout order, not by direction.
+
   - A tab's name and rename are its focused pane's.
+
+**Agents drive the panes (2026-11-09).** herdr lets an agent split its pane and run, read and wait on the others from its CLI; Valkyrie's splits were the TUI's alone. `valk pane` gives agents the same, on what the daemon already had (`Split`, `Ratio`, `Kill`, `Input`, `Dump`, `Scrollback`), with no protocol change:
+- `list [ID]` names the panes of the caller's tab (`$VALK_SESSION`), or of ID's: id, where it sits (`left`, `top-right`), name, agent, state; `*` marks the caller's own, `--json` adds its area in thousandths.
+- `split [ID] -d right|down|left|up [-- cmd]` starts COMMAND, or `$SHELL` in the pane's directory, beside it and prints the new id. It never takes the keyboard: focus is the TUI's, and an agent pulling the cursor from under the user's typing is worse than one key to move there.
+- `run ID TEXT` types TEXT and Enter; `read ID [-n N]` prints the screen, or its last N lines with scrollback; `wait ID --match TEXT | --state STATE [--timeout S]` polls every 200 ms and exits 1 at the timeout. `--state stopped` is anything but working. A state that already holds counts, so after `run` an agent waits on output.
+- `close ID` kills the pane, but not the caller's own; `resize ID PERCENT` sets its share of the split right above it (`Pane::neighbour`).
+- Any session can be named, as with `valk send`; agent input still goes through the merge guard and marks the pane driven. Agents learn of it from one line in the session-start context.
+- **Verified.** A CLI test splits, runs, waits, reads, resizes and closes as the agent in a session against a throwaway daemon. Live, the TUI attached to that daemon drew an outside split at once, with the keyboard still on the first pane.
 
 ### 8.10 `valk setup web`: the web app as a service (2026-10-08)
 `valk web` ran in a terminal, and closing the terminal took the phone's connection with it. Writing a systemd unit by hand is a step most people shouldn't need, and macOS has its own way. Now one command does it on either.

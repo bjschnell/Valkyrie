@@ -165,6 +165,21 @@ impl Pane {
     }
 
     /// Sets the ratio of the split where `a` and `b` part. False if there is none.
+    /// The split right above `id`'s pane: a session on its other side, and whether
+    /// `id` is that split's `a`. With `set_ratio` this sizes one pane against its
+    /// neighbour. `None` for a tab of one pane, or if `id` isn't here.
+    pub fn neighbour(&self, id: SessionId) -> Option<(SessionId, bool)> {
+        let Pane::Split { a, b, .. } = self else {
+            return None;
+        };
+        match (&**a, &**b) {
+            (Pane::Leaf { session }, other) if *session == id => Some((other.first(), true)),
+            (other, Pane::Leaf { session }) if *session == id => Some((other.first(), false)),
+            _ if a.contains(id) => a.neighbour(id),
+            _ => b.neighbour(id),
+        }
+    }
+
     pub fn set_ratio(&mut self, a_id: SessionId, b_id: SessionId, to: u16) -> bool {
         let Pane::Split { ratio, a, b, .. } = self else {
             return false;
@@ -324,6 +339,28 @@ mod tests {
         let p = p.retain(&|id| id != 1).unwrap();
         assert_eq!(p, Pane::leaf(3));
         assert_eq!(p.retain(&|_| false), None);
+    }
+
+    #[test]
+    fn neighbour_is_across_the_split_right_above() {
+        let mut p = Pane::leaf(1);
+        p.split(1, 2, Side::Right);
+        p.split(2, 3, Side::Down);
+        // 1 | (2 / 3): 1's neighbour is the whole right side, named by its first.
+        assert_eq!(p.neighbour(1), Some((2, true)));
+        assert_eq!(p.neighbour(2), Some((3, true)));
+        assert_eq!(p.neighbour(3), Some((2, false)));
+        assert_eq!(p.neighbour(9), None);
+        assert_eq!(Pane::leaf(1).neighbour(1), None);
+        // Sizing 3 against 2 moves the inner split only.
+        let (other, a) = p.neighbour(3).unwrap();
+        assert!(!a);
+        assert!(p.set_ratio(other, 3, 300));
+        let Pane::Split { ratio, b, .. } = &p else {
+            panic!()
+        };
+        assert_eq!(*ratio, RATIO_SCALE / 2);
+        assert!(matches!(&**b, Pane::Split { ratio: 300, .. }));
     }
 
     #[test]
