@@ -188,6 +188,7 @@ impl App {
         // The snapshots only rewrite modes that differ from the defaults; the mouse
         // capture has to start now.
         self.captured = false;
+        self.home_wheel = false;
         self.update_capture();
         for &pane in &ids {
             self.report_cell(Some(pane));
