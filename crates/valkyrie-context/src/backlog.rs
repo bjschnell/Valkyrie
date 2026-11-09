@@ -262,6 +262,9 @@ impl Backlog {
                     item.kind = *kind;
                 }
                 if let Some(cwd) = cwd {
+                    if !project::in_git(cwd) {
+                        bail!("{} isn't in a git repository", cwd.display());
+                    }
                     let root = project::root(cwd);
                     if item.checkout.is_some() && item.project.as_ref() != Some(&root) {
                         bail!("#{id} already has a checkout in {}", display(&item.project));
@@ -868,6 +871,26 @@ mod tests {
             ("z", ItemKind::Bug, ItemStatus::Shipped, 3)
         );
         assert!(b.change(9, &edit, 4).is_err());
+    }
+
+    #[test]
+    fn an_edit_wont_move_an_item_to_a_folder_outside_git() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let edit = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
+            title: None,
+            body: None,
+            kind: None,
+            cwd: Some(plain),
+        };
+        // As an add does: no repository there, so no project to work in.
+        assert!(b.change(1, &edit, 2).is_err());
+        assert_eq!(b.get(1).unwrap().project, None, "left as it was");
     }
 
     #[test]
