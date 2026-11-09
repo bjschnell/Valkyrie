@@ -2495,6 +2495,14 @@ impl App {
             page.typing = Some(backlog::Typing::add());
             bytes = &bytes[len..];
         }
+        let mut roots: Vec<PathBuf> = self
+            .items
+            .iter()
+            .filter_map(|i| i.project.clone())
+            .collect();
+        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
+        roots.dedup();
+        page.roots = roots;
         let todo = page.keys(bytes, &rows, &self.sessions, boot);
         for act in todo {
             // An item that couldn't be added goes back in the prompt, not lost.
@@ -2557,6 +2565,10 @@ impl App {
                 let said = format!("#{} {}", item.id, item.status.as_str());
                 self.say(note.map_or(said.clone(), |n| format!("{said}: {n}")));
             }
+            Do::Return(id) => {
+                let (item, _) = self.client.change_item(id, ItemChange::Return).await?;
+                self.say(format!("#{} back in the backlog", item.id));
+            }
             Do::Delete(id) => {
                 let (item, _) = self.client.delete_item(id).await?;
                 self.say(format!("deleted #{} {}", item.id, item.title));
@@ -2570,6 +2582,7 @@ impl App {
                 kind,
                 title,
                 priority,
+                cwd,
             } => {
                 let (item, _) = self
                     .client
@@ -2579,7 +2592,7 @@ impl App {
                             title,
                             body: None,
                             kind,
-                            cwd: None,
+                            cwd,
                             priority,
                             blocked_by: None,
                         },
