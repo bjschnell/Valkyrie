@@ -231,13 +231,15 @@ pub(crate) enum Typing {
     Add { kind: ItemKind, text: LineEdit },
     /// A handoff note on item `id`.
     Note { id: u32, text: LineEdit },
-    /// Item `id`'s title, and its kind with Tab; the body stays as it is. `was`
-    /// holds both as the prompt opened, so only what changed here is sent.
+    /// Item `id`'s title, its kind with Tab and its repository with Shift-Tab; the
+    /// body stays as it is. `was` holds all three as the prompt opened, so only
+    /// what changed here is sent.
     Edit {
         id: u32,
         kind: ItemKind,
+        project: Option<PathBuf>,
         text: LineEdit,
-        was: (String, ItemKind),
+        was: (String, ItemKind, Option<PathBuf>),
     },
     /// `L`'s window: what item `id` launches with.
     Launch(LaunchForm),
@@ -407,6 +409,8 @@ pub(crate) struct Page {
     pub(crate) order: Option<OrderView>,
     /// Ready items the supervisor offers to start, as last pushed.
     pub(crate) launches: Vec<LaunchOffer>,
+    /// Every repository some item is for, as last pushed: what an edit can move to.
+    pub(crate) roots: Vec<PathBuf>,
 }
 
 /// A build order open over the page: which, where the cursor is, and the items
@@ -463,6 +467,8 @@ pub(crate) enum Do {
         kind: Option<ItemKind>,
         title: Option<String>,
         priority: Option<Priority>,
+        /// Moves it to this repository.
+        cwd: Option<PathBuf>,
     },
     /// Fetch, then ask what's merged, to show before shipping it.
     CheckMerged,
@@ -610,23 +616,37 @@ impl Page {
                             Typing::Edit {
                                 id,
                                 kind,
+                                project,
                                 text,
                                 was,
                             } if !text.text().trim().is_empty() => {
                                 let title = text.text().trim();
                                 let title = (title != was.0).then(|| title.to_owned());
                                 let kind = (kind != was.1).then_some(kind);
-                                if title.is_some() || kind.is_some() {
+                                let cwd = project.filter(|p| Some(p) != was.2.as_ref());
+                                if title.is_some() || kind.is_some() || cwd.is_some() {
                                     out.push(Do::Edit {
                                         id,
                                         kind,
                                         title,
                                         priority: None,
+                                        cwd,
                                     });
                                 }
                             }
                             Typing::Launch(form) => out.push(form.launch()),
                             _ => {}
+                        }
+                    }
+                    b"\x1b[Z" => {
+                        if let Typing::Edit { project, .. } = typing {
+                            let at = project
+                                .as_ref()
+                                .and_then(|p| self.roots.iter().position(|r| r == p));
+                            let next = at.map_or(0, |i| i + 1);
+                            if !self.roots.is_empty() {
+                                *project = Some(self.roots[next % self.roots.len()].clone());
+                            }
                         }
                     }
                     b"\t" => {
@@ -890,6 +910,7 @@ impl Page {
                         kind: None,
                         title: None,
                         priority: Some(p),
+                        cwd: None,
                     },
                     None => Do::Say(format!("#{id} is already {}", item.priority.as_str())),
                 }
@@ -907,8 +928,9 @@ impl Page {
                 self.typing = Some(Typing::Edit {
                     id,
                     kind: item.kind,
+                    project: item.project.clone(),
                     text: LineEdit::new(item.title.clone()),
-                    was: (item.title.clone(), item.kind),
+                    was: (item.title.clone(), item.kind, item.project.clone()),
                 });
                 return Vec::new();
             }
@@ -957,6 +979,7 @@ impl Page {
             (Some(Typing::Edit { .. }), _) => [
                 hint(" ↩ ", "save "),
                 hint(" tab ", "kind "),
+                hint(" ⇧tab ", "repo "),
                 hint(" esc ", "cancel "),
             ]
             .concat(),
@@ -1525,8 +1548,24 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             text,
         ),
         Typing::Note { id, text } => (format!(" note on #{id} "), t.accent, text),
-        Typing::Edit { id, kind, text, .. } => (
-            format!(" #{id} {} ", kind.as_str()),
+        Typing::Edit {
+            id,
+            kind,
+            project,
+            text,
+            was,
+        } => (
+            match project.as_ref().filter(|p| Some(*p) != was.2.as_ref()) {
+                Some(p) => format!(
+                    " #{id} {} → {} ",
+                    kind.as_str(),
+                    p.file_name().map_or_else(
+                        || p.display().to_string(),
+                        |n| n.to_string_lossy().into_owned()
+                    )
+                ),
+                None => format!(" #{id} {} ", kind.as_str()),
+            },
             kind_color(*kind, t),
             text,
         ),
@@ -2284,6 +2323,7 @@ mod tests {
             press(&mut page, b"e\x1b[H\x1b[3~X\t\r"),
             [Do::Edit {
                 priority: None,
+                cwd: None,
                 id: 1,
                 kind: Some(ItemKind::Feature),
                 title: Some(format!("X{}", title.chars().skip(1).collect::<String>())),
@@ -2294,10 +2334,38 @@ mod tests {
             press(&mut page, b"e\t\r"),
             [Do::Edit {
                 priority: None,
+                cwd: None,
                 id: 1,
                 kind: Some(ItemKind::Feature),
                 title: None,
             }]
+        );
+        // Shift-Tab steps through the repositories to move it to; the page's own
+        // stays put unless it's picked, and picking it again sends nothing.
+        page.roots = vec!["/r/app".into(), "/r/web".into()];
+        assert_eq!(
+            press(
+                &mut page,
+                b"e\x1b[Z
+"
+            ),
+            [Do::Edit {
+                priority: None,
+                cwd: Some("/r/web".into()),
+                id: 1,
+                kind: None,
+                title: None,
+            }],
+            "moved to the next repository"
+        );
+        assert!(
+            press(
+                &mut page,
+                b"e\x1b[Z\x1b[Z
+"
+            )
+            .is_empty(),
+            "round to where it was: nothing changed"
         );
         assert!(
             press(&mut page, b"e\r").is_empty(),
@@ -2591,6 +2659,7 @@ mod tests {
             kind: None,
             title: None,
             priority: Some(priority),
+            cwd: None,
         };
         page.cursor = 1;
         assert_eq!(page.keys(b"+", &rows, &[], 7), [edit(Priority::P1)]);
