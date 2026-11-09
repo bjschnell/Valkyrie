@@ -203,9 +203,6 @@ struct App {
     /// How far down the shown proposal's text is scrolled: whose it is, the top
     /// row, and how many rows show. Drawing keeps it in range.
     proposal_scroll: std::cell::Cell<ProposalScroll>,
-    /// The last proposal scrolled to its end (project, id, `updated`): a skill is
-    /// accepted only once read whole.
-    proposal_read: std::cell::RefCell<Option<(PathBuf, u32, u64)>>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
     /// What the home screen last drew where, first match wins: its rows (each with
@@ -381,7 +378,6 @@ impl App {
             backlog: None,
             retire_armed: None,
             proposal_scroll: Default::default(),
-            proposal_read: Default::default(),
             selected: 0,
             home_rows: Default::default(),
             home_captured: false,
@@ -768,7 +764,9 @@ impl App {
                     // Detached mid-read: the rest belongs to the home screen.
                     (None, Input::Bytes(rest)) => Box::pin(self.home_input(&rest)).await,
                     (None, Input::Mouse(_)) => {}
-                    (Some(_), Input::Mouse(_)) if self.reviewing.is_some() => {}
+                    (Some(_), Input::Mouse(m)) if self.reviewing.is_some() => {
+                        self.wheel_proposal(m)
+                    }
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
                     // A finished program: any key returns home (or to the next pane),
                     // unless you are reading its scrollback.
@@ -2111,31 +2109,34 @@ impl App {
             .checked_sub(self.proposals.len() + self.queue.len())
     }
 
-    /// Whether a proposal was read whole here, so what's accepted was seen: a
-    /// skill must have been scrolled to its end. Others are a few sentences.
-    fn read_whole(&self, d: &Decision) -> bool {
-        d.kind != valkyrie_proto::DecisionKind::Skill
-            || *self.proposal_read.borrow() == Some((d.project.clone(), d.id, d.updated))
-    }
-
     /// Scrolls the shown proposal's text by `pages` (a page less a row, so the
     /// last row stays in sight).
     fn scroll_proposal(&self, pages: i32) {
-        let mut at = self.proposal_scroll.get();
-        let page = i32::from(at.rows.saturating_sub(1).max(1));
-        at.top = (i32::from(at.top) + pages * page).clamp(0, i32::from(u16::MAX)) as u16;
-        self.proposal_scroll.set(at);
+        let page = i32::from(self.proposal_scroll.get().rows.saturating_sub(1).max(1));
+        self.scroll_proposal_rows(pages * page);
     }
 
-    /// Scrolls the shown proposal's text by `rows`.
     fn scroll_proposal_rows(&self, rows: i32) {
         let mut at = self.proposal_scroll.get();
         at.top = (i32::from(at.top) + rows).clamp(0, i32::from(u16::MAX)) as u16;
         self.proposal_scroll.set(at);
     }
 
+    /// The wheel over a proposal's text scrolls it. Anything else is not for it.
+    fn wheel_proposal(&self, m: Mouse) {
+        let at = self.proposal_scroll.get();
+        if !at.area.contains(ratatui::layout::Position::new(m.x, m.y)) {
+            return;
+        }
+        match m.kind {
+            MouseKind::WheelUp => self.scroll_proposal_rows(-WHEEL_ROWS),
+            MouseKind::WheelDown => self.scroll_proposal_rows(WHEEL_ROWS),
+            _ => {}
+        }
+    }
+
     /// A proposal's text in `area`, scrolled as `proposal_scroll` says, with how
-    /// much is left below. Notes when it has been read to its end.
+    /// much is left below.
     fn draw_proposal_text(
         &self,
         frame: &mut ratatui::Frame,
@@ -2162,13 +2163,11 @@ impl App {
         let last = total.saturating_sub(area.height);
         at.top = at.top.min(last);
         at.rows = area.height;
+        at.area = area;
         self.proposal_scroll.set(at);
-        if at.top >= last {
-            *self.proposal_read.borrow_mut() = Some((d.project.clone(), d.id, d.updated));
-        }
         frame.render_widget(text.scroll((at.top, 0)), area);
         if at.top < last && area.height > 0 {
-            let more = format!(" ↓ {} more rows · PgDn ", last - at.top);
+            let more = format!(" ↓ {} more rows · PgDn / wheel ", last - at.top);
             let width = (more.chars().count() as u16).min(area.width);
             let row = Rect::new(
                 area.x + area.width - width,
@@ -2270,9 +2269,6 @@ impl App {
         if flagged && !yes && !armed {
             self.retire_armed = Some((project, id));
             return Some(format!("d again to retire #{id}; agents stop getting it"));
-        }
-        if !flagged && yes && !self.read_whole(d) {
-            return Some(format!("read #{id} to its end first: PgDn scrolls it"));
         }
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
@@ -3579,6 +3575,8 @@ struct ProposalScroll {
     whose: Option<(u64, u32, u64)>,
     top: u16,
     rows: u16,
+    /// Where the text was drawn, so the wheel knows when it is over it.
+    area: Rect,
 }
 
 fn fnv_path(path: &std::path::Path) -> u64 {
@@ -7601,19 +7599,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A skill longer than the review panel scrolls, and is accepted only once
-    /// it has been read to its end.
+    /// A long skill's text is a preview, not a gate: `a` takes it unread, and
+    /// the wheel scrolls it in the review overlay.
     #[tokio::test]
-    async fn a_long_skill_is_read_whole_before_it_is_accepted() {
+    async fn a_long_skill_scrolls_by_wheel_and_is_not_gated() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let dir = std::env::temp_dir().join(format!("valkyrie-tui-skill-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("valkyrie-tui-skill-wheel-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         let mut skill = proposed("/r/api", 1, "Cut a release");
         skill.kind = valkyrie_proto::DecisionKind::Skill;
         skill.body = (1..=40).map(|i| format!("{i}. step {i}\n")).collect();
         app.proposals = vec![skill];
-        app.reviewing = Some(0);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut draw = |app: &App| {
             terminal
@@ -7629,34 +7627,29 @@ mod tests {
                 .collect::<Vec<String>>()
                 .join("\n")
         };
-        let text = draw(&app);
+        assert!(draw(&app).contains("1. step 1"));
+        // Unread, and `a` is not blocked: the first answer is the daemon's, not a gate's.
+        // The fake daemon never answers, so reaching it (timing out) is the proof.
+        let asked = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            app.review_at(0, true),
+        )
+        .await;
         assert!(
-            text.contains("1. step 1") && text.contains("more rows · PgDn"),
-            "{text}"
+            asked.is_err(),
+            "refused before asking the daemon: {asked:?}"
         );
-        assert!(!app.read_whole(&app.proposals[0]));
-        let said = app.review_at(0, true).await.unwrap();
-        assert!(said.contains("read #1 to its end first"), "{said}");
-        // Page by page to the end; the last step shows and the note goes.
-        for _ in 0..10 {
-            app.review_keys(b"\x1b[6~").await;
+        // The wheel over the review overlay's text (the home screen's is tested
+        // with the home mouse).
+        let over = app.proposal_scroll.get().area;
+        let wheel = |y: u16| format!("\x1b[<65;{};{}M", over.x + 2, y + 1).into_bytes();
+        app.view = Some(Attached::new(1, "p".into(), None));
+        app.reviewing = Some(0);
+        for _ in 0..20 {
+            app.on_input(wheel(over.y + 1)).await;
             draw(&app);
         }
-        let text = draw(&app);
-        assert!(
-            text.contains("40. step 40") && !text.contains("more rows"),
-            "{text}"
-        );
-        assert!(app.read_whole(&app.proposals[0]));
-        // Changed since (an edit elsewhere): read it again, from its top.
-        app.proposals[0].updated = 9;
-        assert!(!app.read_whole(&app.proposals[0]));
-        let text = draw(&app);
-        assert!(
-            text.contains("1. step 1") && text.contains("more rows"),
-            "{text}"
-        );
-        assert!(!app.read_whole(&app.proposals[0]));
+        assert!(draw(&app).contains("40. step 40"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
