@@ -26,9 +26,12 @@ fn how_to_propose(valk: &str) -> String {
          out of this change and file it: `{valk} todo add -k <bug|feature|chore> \"<title>\" \
          --body \"<what, how to reproduce it, how much it matters>\"`, after checking `{valk} \
          todo list --json`. That's the right call, not a fix skipped. When your task is \
-         done, say what you filed and offer to fix it here or leave it to launch fresh from \
-         the backlog. If the user says to go ahead here, that's enough: take it with `{valk} \
-         todo take N --branch <branch>` and fix it on its own branch and pull request. If \
+         done, say in a line what you filed (number and title). Offer to fix a find here \
+         only when it's worth acting on now: it blocks the user's next step, or it's a real \
+         bug the user would want dealt with before moving on. Otherwise leave it on the \
+         backlog and don't ask. If the user says to go ahead here, that's enough: take it \
+         with `{valk} todo take N --branch <branch>` and fix it on its own branch and pull \
+         request. If \
          this session isn't on a backlog item and the user asks for work, check `{valk} todo \
          list --json` for an open item it matches; if one does, say which and take it with \
          `{valk} todo take N --branch <branch>` as you start. A take is refused while another \
@@ -36,7 +39,9 @@ fn how_to_propose(valk: &str) -> String {
          `{valk} todo add --take -k <kind> \"<title>\" --branch <branch>`. Either way, \
          `{valk} todo take N --pr <url>` once the pull request is open and `{valk} todo note \
          -i N` for what's left, so the user can follow and ship it. Never ship, accept or \
-         merge on your own: those are the user's."
+         merge on your own: those are the user's.\n\nYou run in a Valkyrie tab: `{valk} \
+         pane` splits it and runs, reads and waits on commands in the other panes \
+         (`{valk} pane --help`)."
     )
 }
 
@@ -426,6 +431,7 @@ mod tests {
         let text = block(Path::new("/r/app"), &[], BUDGET, "/opt/v/valk");
         assert!(text.contains("none are recorded yet"));
         assert!(text.contains("`/opt/v/valk decide --kind"));
+        assert!(text.contains("`/opt/v/valk pane --help`"));
     }
 
     #[test]
