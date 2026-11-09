@@ -2425,6 +2425,14 @@ impl App {
             page.typing = Some(backlog::Typing::add());
             bytes = &bytes[len..];
         }
+        let mut roots: Vec<PathBuf> = self
+            .items
+            .iter()
+            .filter_map(|i| i.project.clone())
+            .collect();
+        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
+        roots.dedup();
+        page.roots = roots;
         let todo = page.keys(bytes, &rows, &self.sessions, boot);
         for act in todo {
             // An item that couldn't be added goes back in the prompt, not lost.
@@ -2504,6 +2512,7 @@ impl App {
                 kind,
                 title,
                 priority,
+                cwd,
             } => {
                 let (item, _) = self
                     .client
@@ -2513,7 +2522,7 @@ impl App {
                             title,
                             body: None,
                             kind,
-                            cwd: None,
+                            cwd,
                             priority,
                             blocked_by: None,
                         },
