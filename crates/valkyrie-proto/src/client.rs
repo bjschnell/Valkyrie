@@ -3,7 +3,7 @@
 use crate::codec::{read_frame, write_frame};
 use crate::{
     ClientBuild, ClientMsg, ConnectedClient, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size,
-    SpawnSpec,
+    SpawnSpec, TermColors,
 };
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
@@ -750,6 +750,17 @@ impl Client {
                 width,
                 height,
             })
+            .map_err(|_| anyhow!("daemon connection closed"))
+    }
+
+    /// Fire-and-forget: the colors sessions draw with (see `ClientMsg::TermColors`).
+    pub fn term_colors(
+        &self,
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    ) -> Result<()> {
+        self.out
+            .send(ClientMsg::TermColors { session, colors })
             .map_err(|_| anyhow!("daemon connection closed"))
     }
 

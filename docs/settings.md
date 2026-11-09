@@ -3,7 +3,8 @@
 Press `,` to open the settings panel. You can change:
 
 - the theme: `dracula`, `cyberpunk`, `blackout`, `catppuccin`, `nord`, `gruvbox`,
-  `tokyonight`, `matrix`, `violet`, `valkyrie` or `netrunner`
+  `tokyonight`, `solarized`, `onedark`, `rosepine`, `monokai`, `solarizedlight`,
+  `catppuccinlatte`, `gruvboxlight`, `matrix`, `violet`, `valkyrie` or `netrunner`
 - whether sessions take the theme's colors (`theme`) or your terminal's
   (`terminal`)
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)

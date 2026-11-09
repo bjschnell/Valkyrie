@@ -442,9 +442,13 @@ export type Request =
       model?: string;
     };
 
+export type TermColors = { fg: [number, number, number]; bg: [number, number, number]; ansi: [number, number, number][] };
+
 /** Fire-and-forget messages. */
 export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
+  /** The colors this session's programs are told the terminal has (OSC 10/11/4). */
+  | { t: "term_colors"; session: SessionId; colors: TermColors | null }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
   | { t: "visible"; visible: boolean }
