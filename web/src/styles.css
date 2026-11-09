@@ -2650,11 +2650,13 @@ button.title-name {
   flex-direction: row;
 }
 
-.item-dock .ghost {
-  flex: none;
+/* Save is the usual way out of a new item, so it gets the room; Save & launch
+   is the occasional one and takes half as much. */
+.item-dock .save {
+  flex: 2;
 }
 
-.item-dock .start {
+.item-dock .launch {
   flex: 1;
 }
 
