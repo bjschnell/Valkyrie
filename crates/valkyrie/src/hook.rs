@@ -196,7 +196,7 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         store.load(&valkyrie_context::project::user()),
     );
     let ship = policy::ship(&project, &user).filter(|_| !active);
-    let ci = policy::ci(&project).filter(|(ci, _)| *ci == policy::Ci::Gh);
+    let ci = policy::ci(&project).filter(|(ci, _)| *ci != policy::Ci::None);
     if ship.is_none() && ci.is_none() {
         return None;
     }
@@ -228,7 +228,34 @@ fn policy_block(payload: &mut Value) -> Option<String> {
             "scope": scope, "state": state.as_str(), "until": ship.until.0.as_str()});
         return Some(policy::reason(&ship, state.as_str(), &branch));
     }
-    let (_, source) = ci?;
+    let (mode, source) = ci?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if mode == policy::Ci::Agent {
+        // Valkyrie can't read this CI, so it asks once per pushed head (ADR-0016
+        // §5). Never on the stop right after a block, and never without a head to
+        // count it against: uncounted, it could go on forever.
+        let (true, work::State::Clean, Some(url)) = (!active, state, url) else {
+            return None;
+        };
+        let Some(work::Pr::Open { head, .. }) = seen.take() else {
+            return None;
+        };
+        if head.is_empty() {
+            return None;
+        }
+        let block = store
+            .record_ci_agent(&root, &url, &head, now, policy::CI_FIX_LIMIT)
+            .ok()??;
+        let (policy, scope) = named(source);
+        payload["valk_continued"] = serde_json::json!({"template": "ci-fix", "mode": "agent",
+            "policy": policy, "scope": scope, "state": state.as_str(), "pr": url, "block": block});
+        return Some(policy::ci_agent(
+            source,
+            policy::checks(&project).as_ref(),
+            &url,
+            block,
+        ));
+    }
     if state != work::State::PrRed {
         return None;
     }
@@ -236,7 +263,6 @@ fn policy_block(payload: &mut Value) -> Option<String> {
     let Some(work::Pr::Open { failed, .. }) = seen.take() else {
         return None;
     };
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     // Past the limit the stop goes through, marked so the queue shows the PR as
     // the user's to look at (ADR-0013 §3) rather than finished.
     let spent = |payload: &mut Value| {
