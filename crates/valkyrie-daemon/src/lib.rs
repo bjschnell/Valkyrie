@@ -474,6 +474,7 @@ fn new_registry(
             changed: Arc::new(Notify::new()),
             stop: Mutex::new(Arc::new(StopPipe::new()?)),
             cell_px: Mutex::default(),
+            colors: Mutex::default(),
             context_dir: state_dir.join("context"),
         },
         queue: watch::Sender::new(Arc::default()),
@@ -1069,6 +1070,19 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                     if let Some(s) = session.and_then(|id| registry.get(id).ok()) {
                         s.set_cell_pixels((width, height));
                     }
+                }
+                continue;
+            }
+            ClientMsg::TermColors { session, colors } => {
+                // One session's colors don't become the default: a phone's palette
+                // must not recolor what the desktop spawns next.
+                match session {
+                    Some(id) => {
+                        if let Ok(s) = registry.get(id) {
+                            s.set_colors(colors);
+                        }
+                    }
+                    None => *registry.host.colors.lock().unwrap() = colors,
                 }
                 continue;
             }

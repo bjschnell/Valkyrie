@@ -1684,6 +1684,12 @@ impl App {
         if field == Field::Updates {
             self.look_for_updates();
         }
+        if matches!(field, Field::Theme | Field::SessionColors) {
+            self.report_colors(None);
+            for id in self.pane_ids() {
+                self.report_colors(Some(id));
+            }
+        }
         // So you hear what you picked.
         if field == Field::Sound && self.settings.sound {
             ping::play(self.settings.noise, Kind::Request);
@@ -2875,6 +2881,18 @@ impl App {
         if let Some((width, height)) = cell_pixels() {
             let _ = self.client.cell_pixels(session, width, height);
         }
+        self.report_colors(session);
+    }
+
+    /// Tells the daemon what colors sessions are drawn with, so a program that asks
+    /// for the background (OSC 11) picks a matching light or dark palette. With the
+    /// terminal's own colors it can't know them, so the daemon's dark guess stands.
+    fn report_colors(&self, session: Option<SessionId>) {
+        let colors = self
+            .settings
+            .themed_sessions
+            .then(|| self.settings.theme.term_colors());
+        let _ = self.client.term_colors(session, colors);
     }
 
     fn fire_pings(&mut self) {

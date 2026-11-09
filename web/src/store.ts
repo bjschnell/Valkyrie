@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
+import { termColors } from "./lib/theme";
 import type {
   Decision,
   Item,
@@ -520,6 +521,12 @@ export function openChoices(screen: Screen | null): Choice[] {
   return screen ? findChoices(screenText(screen)) : [];
 }
 
+/** Tells a session we started the colors it is shown in, so its programs can tell a light look from a dark one. */
+function reportColors(session: SessionId): void {
+  const colors = termColors();
+  if (colors) conn?.send({ t: "term_colors", session, colors });
+}
+
 /** The size a new session starts at; a TUI that attaches later resizes it. */
 const SPAWN_SIZE = { cols: 120, rows: 40 };
 
@@ -535,6 +542,7 @@ export async function spawn(
   const reply = await conn.request({ t: "spawn", spec });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 
@@ -672,7 +680,10 @@ export async function answerLaunch(offer: LaunchOffer, launch: boolean): Promise
   if (!conn) return null;
   try {
     const reply = await conn.request({ t: "answer_launch", project: offer.project, id: offer.id, launch });
-    if (reply.t === "session") return reply.info.id;
+    if (reply.t === "session") {
+      reportColors(reply.info.id);
+      return reply.info.id;
+    }
     if (reply.t === "text") toast(reply.text);
     return null;
   } catch (e) {
@@ -722,6 +733,7 @@ export async function launchItem(
   });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 

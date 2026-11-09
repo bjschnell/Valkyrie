@@ -156,9 +156,10 @@ bar at the bottom has the keys, and the number of decisions waiting for you.
 
 <img src="docs/images/session.svg" alt="An attached Claude Code session under a tab strip showing four sessions and their states" width="100%">
 
-**Themes.** Dracula, Blackout, Catppuccin, Nord, Gruvbox and Tokyo Night, plus
-Cyberpunk, Matrix, Violet, Valkyrie and Netrunner, whose home screens have
-digital rain.
+**Themes.** Dracula, Blackout, Catppuccin, Nord, Gruvbox, Tokyo Night, Solarized,
+One Dark, Rosé Pine and Monokai, three light ones (Solarized Light, Catppuccin
+Latte, Gruvbox Light), plus Cyberpunk, Matrix, Violet, Valkyrie and Netrunner,
+whose home screens have digital rain. The phone app has them all too.
 
 <img src="docs/images/themes.png" alt="The home screen in the tokyonight, matrix, cyberpunk and gruvbox themes" width="100%">
 
@@ -255,7 +256,8 @@ such as vim). Over SSH, the link is copied to your clipboard instead.
 Press `,` to open the settings panel. You can change:
 
 - the theme: `dracula`, `cyberpunk`, `blackout`, `catppuccin`, `nord`, `gruvbox`,
-  `tokyonight`, `matrix`, `violet`, `valkyrie` or `netrunner`
+  `tokyonight`, `solarized`, `onedark`, `rosepine`, `monokai`, `solarizedlight`,
+  `catppuccinlatte`, `gruvboxlight`, `matrix`, `violet`, `valkyrie` or `netrunner`
 - whether sessions take the theme's colors (`theme`) or your terminal's
   (`terminal`)
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
