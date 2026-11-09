@@ -269,6 +269,24 @@ impl Backlog {
                     item.project = Some(root);
                 }
             }
+            ItemChange::Return => {
+                if !matches!(item.status, ItemStatus::Open) && !item.agent_filed() {
+                    bail!(
+                        "#{id} is {}: only an item being worked on goes back",
+                        item.status.as_str()
+                    );
+                }
+                if item.sessions.is_empty() {
+                    bail!("#{id} isn't started");
+                }
+                if item.pr.is_some() {
+                    bail!("#{id} has a pull request: ship or drop it instead");
+                }
+                // Its branch and checkout stay, for the next launch to reuse.
+                item.sessions.clear();
+                item.taken.clear();
+                item.joined.clear();
+            }
             ItemChange::Status { status } => {
                 // Shipped or dropped before the user accepted it (an agent's own
                 // work, shipped by the user's confirm): reopened, it's proposed
@@ -1053,6 +1071,44 @@ mod tests {
         b.change(2, &status(ItemStatus::Dropped), 8).unwrap();
         let item = b.change(2, &status(ItemStatus::Open), 9).unwrap();
         assert_eq!(item.status, ItemStatus::Proposed);
+    }
+
+    #[test]
+    fn a_returned_item_forgets_its_sessions_and_keeps_its_branch() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let status = |status| ItemChange::Status { status };
+        b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
+        b.change(1, &status(ItemStatus::Open), 1).unwrap();
+        assert!(
+            b.change(1, &ItemChange::Return, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("isn't started")
+        );
+        b.taken(1, 5, 77, &[], Some("fix/1-x"), None, None, 3)
+            .unwrap();
+        let item = b.change(1, &ItemChange::Return, 4).unwrap();
+        assert!(item.sessions.is_empty() && item.taken.is_empty() && item.joined.is_empty());
+        assert_eq!(item.branch.as_deref(), Some("fix/1-x"));
+        assert_eq!(item.status, ItemStatus::Open);
+        // With a pull request it's in review: ship or drop it.
+        b.taken(
+            1,
+            6,
+            77,
+            &[],
+            None,
+            Some("https://github.com/o/r/pull/7"),
+            None,
+            5,
+        )
+        .unwrap();
+        let refused = b.change(1, &ItemChange::Return, 6).unwrap_err().to_string();
+        assert!(refused.contains("has a pull request"), "{refused}");
+        // Shipped is done, not started.
+        b.change(1, &status(ItemStatus::Shipped), 7).unwrap();
+        assert!(b.change(1, &ItemChange::Return, 8).is_err());
     }
 
     #[test]

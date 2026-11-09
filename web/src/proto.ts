@@ -335,7 +335,9 @@ export type ItemChange =
       /** The whole list, replacing the item's; empty clears it. */
       blocked_by?: number[];
     }
-  | { do: "status"; status: ItemStatus };
+  | { do: "status"; status: ItemStatus }
+  /** Puts a started item back in the backlog and stops its sessions (protocol 28). */
+  | { do: "return" };
 
 /** One item's place in a build order: why, and what accepting it changes
  * (`priority` and the whole `blocked_by` list; absent keeps what it has). */

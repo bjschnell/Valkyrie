@@ -118,7 +118,7 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
             _ => Lane::Review,
         };
     }
-    if item.pr.is_some() || item.checkout.is_some() || !item.sessions.is_empty() {
+    if item.pr.is_some() || !item.sessions.is_empty() {
         Lane::Review
     } else {
         Lane::Backlog
@@ -381,6 +381,9 @@ pub(crate) struct Page {
     pub(crate) typing: Option<Typing>,
     /// `x` was pressed once on this item: deleting has no undo, so it takes two.
     pub(crate) armed: Option<u32>,
+    /// `B` was pressed once on this item with an agent running on it: sending it
+    /// back stops that agent, so it takes two.
+    pub(crate) returning: Option<u32>,
     /// What `S` found merged, waiting on a second `S` to ship exactly these.
     pub(crate) ship_armed: Option<Vec<u32>>,
     /// The selected item's facts, for `(id, updated)`, read when the cursor lands.
@@ -443,6 +446,8 @@ pub(crate) enum Do {
     },
     Attach(SessionId),
     Status(u32, ItemStatus),
+    /// Back to the backlog: stops its sessions, `ItemChange::Return`.
+    Return(u32),
     Delete(u32),
     Add {
         kind: ItemKind,
@@ -659,6 +664,9 @@ impl Page {
             if key != b"x" {
                 self.armed = None;
             }
+            if key != b"B" {
+                self.returning = None;
+            }
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
                 b"j" | b"\x1b[B" | b"\x1bOB" => {
@@ -853,6 +861,21 @@ impl Page {
                 Do::Status(id, ItemStatus::Shipped)
             }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
+            b"B" if item.sessions.is_empty() => Do::Say(format!("#{id} isn't started")),
+            b"B" if item.pr.is_some() => {
+                Do::Say(format!("#{id} has a pull request: ship or drop it"))
+            }
+            b"B" if live.is_some() && self.returning != Some(id) => {
+                self.returning = Some(id);
+                Do::Say(format!("B again stops its agent and returns #{id}"))
+            }
+            b"B" if matches!(lane, Lane::Done | Lane::Proposed) => {
+                Do::Say(format!("#{id} is {}", lane.title()))
+            }
+            b"B" => {
+                self.returning = None;
+                Do::Return(id)
+            }
             // Up toward p0, down toward p3; nothing past either end.
             b"+" | b"=" | b"-" if lane != Lane::Done => {
                 let at = Priority::ALL.iter().position(|&p| p == item.priority);
@@ -996,6 +1019,7 @@ impl Page {
                     hint(" +/- ", "priority "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
+                    hint(" B ", "to backlog "),
                     hint(" r ", "repo "),
                     hint(" n ", "new "),
                     hint(" P ", "order "),
@@ -1947,6 +1971,7 @@ mod tests {
             ..item(2, 9)
         };
         let review = Item {
+            sessions: vec![9],
             checkout: Some("/r/app-fix-3".into()),
             ..item(3, 2)
         };
@@ -2163,6 +2188,36 @@ mod tests {
         );
         assert_eq!(press(&mut page, b"s"), [Do::Status(1, ItemStatus::Shipped)]);
         assert_eq!(press(&mut page, b"\x1b"), [Do::Close]);
+    }
+
+    #[test]
+    fn back_to_backlog_stops_a_running_agent_on_the_second_press() {
+        let mut started = item(1, 1);
+        started.sessions = vec![4];
+        let mut kept = item(2, 1);
+        kept.checkout = Some("/r/app-wt".into());
+        let sessions = [session(4, AgentState::Working)];
+        let rows = rows(&[started.clone(), kept.clone()], &sessions, 7);
+        // A worktree alone is no start: the item is in the backlog, nothing to return.
+        assert_eq!(
+            rows.iter().find(|(_, i)| i.id == 2).unwrap().0,
+            Lane::Backlog
+        );
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &sessions, 7);
+        assert!(
+            matches!(press(&mut page, b"B")[..], [Do::Say(_)]),
+            "running: asks first"
+        );
+        assert_eq!(press(&mut page, b"B"), [Do::Return(1)]);
+        // Another key in between disarms it.
+        press(&mut page, b"B");
+        press(&mut page, b"+");
+        assert!(matches!(press(&mut page, b"B")[..], [Do::Say(_)]));
+        // Not started: said, never sent.
+        let at = rows.iter().position(|(_, i)| i.id == 2).unwrap();
+        page.cursor = at;
+        assert!(matches!(press(&mut page, b"B")[..], [Do::Say(_)]));
     }
 
     #[test]

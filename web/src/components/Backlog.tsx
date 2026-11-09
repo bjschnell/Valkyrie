@@ -377,6 +377,15 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
     return () => clearTimeout(t);
   }, [sure]);
   const remove = () => (sure ? act(() => deleteItem(item.id)) : setSure(true));
+  // Back to the backlog stops the agent on it, so with one running it asks twice too.
+  const [back, setBack] = useState(false);
+  useEffect(() => {
+    if (!back) return;
+    const t = setTimeout(() => setBack(false), 5000);
+    return () => clearTimeout(t);
+  }, [back]);
+  const startedBefore = (item.sessions?.length ?? 0) > 0 && !item.pr;
+  const sendBack = () => (live && !back ? setBack(true) : act(() => changeItem(item.id, { do: "return" })));
 
   // What its checkout holds, read from git when the card opens and as it changes.
   const [facts, setFacts] = useState<ItemFacts | null>(null);
@@ -532,6 +541,11 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
               {expanded && (
                 <button className="ghost no" disabled={busy} onClick={() => void status("dropped")}>
                   Drop
+                </button>
+              )}
+              {expanded && startedBefore && (
+                <button className={`ghost ${back ? "item-sure" : ""}`} disabled={busy} onClick={() => void sendBack()}>
+                  {back ? "Stop it and return" : "Back to backlog"}
                 </button>
               )}
               {expanded && (

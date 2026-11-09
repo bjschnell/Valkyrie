@@ -16,6 +16,7 @@ valk todo adopt 12         # a claude session you started by hand becomes an ite
 valk todo add --take -k bug "Off-by-one in resize" --branch fix/resize  # an agent tracks a fix nobody planned
 valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
 valk todo note -i 4 "left: X"   # a handoff, kept for the item's next launch
+valk todo return 5         # back to the backlog: stops its sessions, keeps the branch and worktree
 valk todo accept 5         # also: show, drop, reopen, rm
 ```
 

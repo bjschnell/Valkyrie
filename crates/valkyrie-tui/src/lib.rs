@@ -2487,6 +2487,10 @@ impl App {
                 let said = format!("#{} {}", item.id, item.status.as_str());
                 self.say(note.map_or(said.clone(), |n| format!("{said}: {n}")));
             }
+            Do::Return(id) => {
+                let (item, _) = self.client.change_item(id, ItemChange::Return).await?;
+                self.say(format!("#{} back in the backlog", item.id));
+            }
             Do::Delete(id) => {
                 let (item, _) = self.client.delete_item(id).await?;
                 self.say(format!("deleted #{} {}", item.id, item.title));
