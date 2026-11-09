@@ -194,6 +194,10 @@ pub enum TodoCmd {
         #[arg(short, long, requires = "merged")]
         yes: bool,
     },
+    /// Put a started item back in the backlog: stops the sessions on it and
+    /// forgets them. Its branch and worktree stay for the next launch. Yours to
+    /// do, not an agent's; refused once it has a pull request.
+    Return { id: u32 },
     /// Not going to happen.
     Drop { id: u32 },
     /// Open a shipped or dropped item again.
@@ -692,6 +696,11 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             };
             status(client, id, ItemStatus::Shipped).await
         }
+        TodoCmd::Return { id } => {
+            let (item, _) = client.change_item(id, ItemChange::Return).await?;
+            println!("#{} {}: back in the backlog", item.id, item.title);
+            Ok(None)
+        }
         TodoCmd::Drop { id } => status(client, id, ItemStatus::Dropped).await,
         TodoCmd::Reopen { id } | TodoCmd::Accept { id } => {
             status(client, id, ItemStatus::Open).await
@@ -776,7 +785,7 @@ fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
         _ if item.pr_closed => "PR closed".into(),
         _ if item.pr.is_some() => "PR open".into(),
         Some(s) => s.status.state.label().into(),
-        None if item.checkout.is_some() || !item.sessions.is_empty() => "to review".into(),
+        None if !item.sessions.is_empty() => "to review".into(),
         None => "backlog".into(),
     }
 }
