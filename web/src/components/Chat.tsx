@@ -7,6 +7,7 @@ import {
   diffKind,
   fileLine,
   groupSummary,
+  isQuestion,
   parseInline,
   parseMarkdown,
   TOOL_STATUS_LABEL,
@@ -157,7 +158,7 @@ function ToolGroup({ tools, live }: { tools: ToolItem[]; live: boolean }) {
  * carried on without it.
  */
 function ToolCard({ card }: { card: ToolItem }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => isQuestion(card));
   const body = cardBody(card);
   const file = fileLine(card);
   return (
