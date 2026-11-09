@@ -1252,9 +1252,11 @@ fn an_agent_drives_the_panes_of_its_tab() {
         ]
     );
     assert_eq!(panes[1]["me"], false);
+    // Canonical: macOS's temp dir is under /var, a link to /private/var.
+    let cwd = std::fs::canonicalize(panes[1]["cwd"].as_str().unwrap()).unwrap();
     assert_eq!(
-        panes[1]["cwd"],
-        dir.to_str().unwrap(),
+        cwd,
+        std::fs::canonicalize(&dir).unwrap(),
         "the split's directory"
     );
 
