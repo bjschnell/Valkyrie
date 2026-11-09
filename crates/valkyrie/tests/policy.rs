@@ -418,6 +418,109 @@ fn ci_fix_keeps_the_agent_on_a_red_pull_request_twice_then_lets_it_stop() {
     assert!(payload["valk_ci_fix_spent"].is_null(), "{payload}");
 }
 
+/// `ci: agent` (ADR-0016 §5): Valkyrie can't read the CI, so a clean stop with an
+/// open pull request asks the agent to check it, once per pushed head, twice per
+/// pull request.
+#[test]
+fn ci_agent_asks_once_per_pushed_head_and_twice_per_pull_request() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Dir(std::env::temp_dir().join(format!("valkyrie-ci-agent-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&dir.0);
+    let repo = dir.0.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(
+        &dir.0,
+        &["init", "--quiet", "--bare", "-b", "main", "origin.git"],
+    );
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    git(&repo, &["remote", "add", "origin", "../origin.git"]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+    git(&repo, &["checkout", "--quiet", "-b", "fix"]);
+    std::fs::write(repo.join("a.txt"), "fixed").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "fix"]);
+    git(&repo, &["push", "--quiet", "-u", "origin", "fix"]);
+
+    let bin = dir.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let answer = dir.0.join("gh.json");
+    let gh = bin.join("gh");
+    std::fs::write(&gh, format!("#!/bin/sh\ncat '{}'\n", answer.display())).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pr = "https://github.com/o/r/pull/93";
+    let open = |head: &str| {
+        // No checks on GitHub at all: that's why the CI is the agent's to read.
+        let v = serde_json::json!({"state": "OPEN", "url": pr, "headRefOid": head,
+            "statusCheckRollup": []});
+        std::fs::write(&answer, v.to_string()).unwrap();
+    };
+    open("aaa");
+    let stop = |active| stop_heard(&dir.0, &repo, active, Some(&bin));
+
+    // No `ci` accepted: a clean stop is an ordinary turn end.
+    assert_eq!(stop(false).0, "");
+
+    let store = valkyrie_context::Store::new(dir.0.join("context"));
+    let facts = store
+        .decide(
+            &NewDecision {
+                cwd: repo.clone(),
+                title: "Checks to run before shipping".into(),
+                body: "template: ship\nchecks: make check\nci: agent".into(),
+                kind: DecisionKind::Policy,
+                propose: false,
+                supersedes: None,
+                review_every: None,
+                session: None,
+                scope: None,
+            },
+            Provenance {
+                by: "human".into(),
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap()
+        .id;
+    let block = |out: &str| -> String {
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["decision"], "block", "{out}");
+        v["reason"].as_str().unwrap().to_owned()
+    };
+    let (out, payload) = stop(false);
+    let reason = block(&out);
+    assert!(
+        reason.starts_with(&format!("Valkyrie policy #{facts}, accepted")),
+        "{reason}"
+    );
+    assert!(reason.contains("pull request #93"), "{reason}");
+    assert!(reason.contains("Run `make check` first"), "{reason}");
+    assert!(reason.contains("block 1 of 2"), "{reason}");
+    assert_eq!(payload["valk_continued"]["template"], "ci-fix", "{payload}");
+    assert_eq!(payload["valk_continued"]["mode"], "agent", "{payload}");
+    // The stop right after a block goes through, and so does a stop with the
+    // head unchanged: once per head.
+    assert_eq!(stop(true).0, "");
+    assert_eq!(stop(false).0, "");
+    // Pushed since: the second and last block.
+    open("bbb");
+    assert!(block(&stop(false).0).contains("block 2 of 2"));
+    // A third head is over the cap for this pull request.
+    open("ccc");
+    assert_eq!(stop(false).0, "");
+    // Another pull request starts its own count.
+    let other = serde_json::json!({"state": "OPEN", "url": "https://github.com/o/r/pull/94",
+        "headRefOid": "aaa", "statusCheckRollup": []});
+    std::fs::write(&answer, other.to_string()).unwrap();
+    assert!(block(&stop(false).0).contains("pull request #94"));
+    // Nothing to ask once it's merged, or when gh can't say.
+    let merged = serde_json::json!({"state": "MERGED", "url": pr});
+    std::fs::write(&answer, merged.to_string()).unwrap();
+    assert_eq!(stop(false).0, "");
+}
+
 /// A session that took another item and works it in a second worktree stops with
 /// its cwd still in the first (backlog #68): `ci-fix` reads the item's branch and
 /// pull request, not the cwd's merged one.

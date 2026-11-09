@@ -699,6 +699,53 @@ impl Store {
         Ok(Some(blocks + 1))
     }
 
+    /// Counts one `ci: agent` block on the pull request at `pr` when its branch is
+    /// at `head` (ADR-0016 §5) and returns the new count, or `None` when this head
+    /// was already blocked or the pull request has been blocked `limit` times. Kept
+    /// apart from [`Store::record_ci_fix`]: a different mode, its own count.
+    pub fn record_ci_agent(
+        &self,
+        root: &Path,
+        pr: &str,
+        head: &str,
+        now: u64,
+        limit: u32,
+    ) -> Result<Option<u32>> {
+        let path = self.base.join(project::key(root)).join("ci-agent.json");
+        let mut all = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let map = all
+            .as_object_mut()
+            .context("ci-agent.json isn't an object")?;
+        map.retain(|_, v| {
+            now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+        });
+        let entry = map.get(pr);
+        let blocks = entry.and_then(|v| v["blocks"].as_u64()).unwrap_or(0) as u32;
+        let mut heads: Vec<String> = entry
+            .and_then(|v| v["heads"].as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if blocks >= limit || heads.iter().any(|h| h == head) {
+            return Ok(None);
+        }
+        heads.push(head.to_owned());
+        map.insert(
+            pr.to_owned(),
+            serde_json::json!({"blocks": blocks + 1, "heads": heads, "at": now}),
+        );
+        self.mark_project(root)?;
+        write_atomic(&path, &format!("{all}\n"))?;
+        Ok(Some(blocks + 1))
+    }
+
     fn ci_fixes(&self, root: &Path) -> serde_json::Value {
         let path = self.base.join(project::key(root)).join("ci-fix.json");
         std::fs::read_to_string(path)
@@ -1928,6 +1975,27 @@ mod tests {
             );
             assert_eq!(got.iter().filter(|s| s.session == "pruner").count(), 1);
         }
+    }
+
+    #[test]
+    fn ci_agent_blocks_once_per_head_and_twice_per_pull_request() {
+        let f = Fixture::new("ci-agent");
+        let pr = "https://github.com/o/r/pull/1";
+        let record = |head, at| f.store.record_ci_agent(&f.repo, pr, head, at, 2).unwrap();
+        assert_eq!(record("aaa", 1), Some(1));
+        assert_eq!(record("aaa", 2), None, "same head: once");
+        assert_eq!(record("bbb", 3), Some(2));
+        assert_eq!(record("ccc", 4), None, "two blocks is the limit");
+        let other = "https://github.com/o/r/pull/2";
+        assert_eq!(
+            f.store
+                .record_ci_agent(&f.repo, other, "aaa", 5, 2)
+                .unwrap(),
+            Some(1),
+            "another pull request has its own count"
+        );
+        let later = 3 + FAILURE_DAYS * 86_400 + 1;
+        assert_eq!(record("ccc", later), Some(1), "forgotten after a while");
     }
 
     #[test]

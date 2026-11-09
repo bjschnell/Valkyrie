@@ -60,6 +60,13 @@ change, it files a bug instead of retrying. This happens at most twice per pull
 request; after that the stop goes through and the queue marks it as needing
 you ([ADR-0013](adr/0013-learned-policies.md)).
 
+With `ci: agent`, for CI that posts nothing to GitHub, Valkyrie can't see a red
+build. A Claude agent that stops with an open pull request is asked once to
+check the branch's CI with its own tools, fix and push if it's red, or stop and
+say why. It asks once per pushed commit and at most twice per pull request, and
+takes the agent's word for the result
+([ADR-0016](adr/0016-learn-habits-and-repo-facts.md)).
+
 ## The merge guard
 
 Merging is yours. When an agent is about to run `gh pr merge` (or the API call
