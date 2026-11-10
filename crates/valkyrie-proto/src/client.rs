@@ -357,9 +357,10 @@ impl Client {
             .map(drop)
     }
 
-    /// Start receiving `Notice` pushes.
-    pub async fn watch_notices(&self) -> Result<()> {
-        self.request(|req| ClientMsg::WatchNotices { req })
+    /// Start receiving `Notice` pushes; `shows` if this client puts them in front of
+    /// someone, so `notify` counts it.
+    pub async fn watch_notices(&self, shows: bool) -> Result<()> {
+        self.request(|req| ClientMsg::WatchNotices { req, shows })
             .await
             .map(drop)
     }

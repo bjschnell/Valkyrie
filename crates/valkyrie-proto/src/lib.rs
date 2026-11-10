@@ -335,10 +335,14 @@ pub enum ClientMsg {
     WatchQueue {
         req: ReqId,
     },
-    /// Subscribe this connection to `Notice` pushes (protocol 29). For clients that
-    /// show them to someone: a `Notify` counts the connections that did this.
+    /// Subscribe this connection to `Notice` pushes (protocol 29). `shows` is for
+    /// clients that put them in front of someone (a TUI): a `Notify` counts those,
+    /// so a sender knows whether to deliver it itself. A relay, like the web
+    /// server's push, leaves it off and gets the notices without being counted.
     WatchNotices {
         req: ReqId,
+        #[serde(default)]
+        shows: bool,
     },
     /// Raise a toast and a ping on every client watching notices (`valk notify`,
     /// protocol 29). `sound` is `request` or `done`, else the toast is silent.

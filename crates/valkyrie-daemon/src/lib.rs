@@ -156,6 +156,8 @@ struct Registry {
     turns: mpsc::UnboundedSender<SessionId>,
     /// Toasts raised with `valk notify`, for the clients watching notices.
     notices: broadcast::Sender<Arc<ServerMsg>>,
+    /// How many of its watchers show notices to someone (`WatchNotices::shows`).
+    notice_viewers: AtomicU32,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// Replies to stops short of shipping, for `habit` to learn from.
     answers: mpsc::UnboundedSender<(SessionId, session::Answered)>,
@@ -548,6 +550,7 @@ fn new_registry(
         ))),
         launches: watch::Sender::new(Arc::default()),
         notices: broadcast::channel(16).0,
+        notice_viewers: AtomicU32::new(0),
         dispatch: Mutex::new(dispatch::Book::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -1047,6 +1050,8 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut queue_watch: Option<JoinHandle<()>> = None;
     let mut notice_watch: Option<JoinHandle<()>> = None;
+    // This connection is one of `notice_viewers`.
+    let mut notice_viewer = false;
     // Hidden sessions this connection spawned: nobody else can find them, so they
     // go with it.
     let mut owned_hidden: Vec<SessionId> = Vec::new();
@@ -1185,8 +1190,13 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 }
                 continue;
             }
-            ClientMsg::WatchNotices { req } => {
+            ClientMsg::WatchNotices { req, shows } => {
                 reply(&out, req, Ok(Reply::Done)).await;
+                // Counted once, however often it asks.
+                if shows && !notice_viewer {
+                    notice_viewer = true;
+                    registry.notice_viewers.fetch_add(1, Ordering::Relaxed);
+                }
                 if notice_watch.is_none() {
                     notice_watch = Some(tokio::spawn(forward_notices(
                         registry.notices.subscribe(),
@@ -1456,6 +1466,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     if let Some(task) = notice_watch {
         task.abort();
     }
+    if notice_viewer {
+        registry.notice_viewers.fetch_sub(1, Ordering::Relaxed);
+    }
     registry.clients.lock().unwrap().remove(&conn);
     writer.abort();
     ended
@@ -1686,8 +1699,10 @@ impl Registry {
             text: text.to_owned(),
             sound,
         });
-        // No receivers is an error to `send`, and what the sender needs to know.
-        let watchers = self.notices.send(msg).map_or(0, |n| n as u32);
+        // No receivers is an error to `send`; relays get it either way, but only the
+        // ones that show it to someone count.
+        let _ = self.notices.send(msg);
+        let watchers = self.notice_viewers.load(Ordering::Relaxed);
         Ok(Reply::Notified { watchers })
     }
 }
