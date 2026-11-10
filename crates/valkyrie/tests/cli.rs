@@ -15,6 +15,39 @@ fn temp(name: &str) -> PathBuf {
     dir
 }
 
+/// Removes a test's directory. A session's process can outlive the daemon by a
+/// moment and write into it while it's being removed (`DirectoryNotEmpty`, #131),
+/// so this tries again for a while. If it still fails, it names what was left.
+fn remove_test_dir(dir: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if Instant::now() >= deadline => {
+                let left: Vec<_> = walk(dir)
+                    .into_iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                panic!("can't remove {}: {e}; left: {left:?}", dir.display());
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        }
+        out.push(path);
+    }
+    out
+}
+
 /// A daemon a test started itself, killed when the test ends however it ends: an
 /// assert failing before the test's own `kill` used to leave it running for good.
 struct KillOnDrop(std::process::Child);
@@ -108,7 +141,7 @@ fn hook_reads_its_whole_input_even_when_it_does_nothing_with_it() {
         );
         assert_silent_success(&out);
     }
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 #[test]
@@ -133,7 +166,7 @@ fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
     let mut cmd = valk(&socket, &dir);
     cmd.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
     assert_silent_success(&hook(cmd, &vec![b' '; 1 << 20]));
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 fn statusline(mut cmd: Command, then: &str, stdin: &[u8]) -> Output {
@@ -195,7 +228,7 @@ fn statusline_runs_the_users_own_and_tells_the_daemon_the_quota() {
         ])
     );
     drop(_daemon);
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 #[test]
@@ -262,7 +295,7 @@ fn hook_reaches_the_daemon_quickly() {
     let report = String::from_utf8(out.stdout).unwrap();
     assert!(report.contains("needs input"), "{report}");
     assert!(report.contains("0 mismatches"), "{report}");
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 #[test]
@@ -329,7 +362,7 @@ fn setup_codex_installs_backs_up_and_removes() {
         doc,
         serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify-send done"}]}]}})
     );
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// A `claude` typed in a Valkyrie shell gets no `--settings`, so the context hook
@@ -401,7 +434,7 @@ fn setup_claude_installs_once_keeps_the_rest_and_removes() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(!empty.join("settings.json").exists());
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The Context setting switches the hook off wherever it runs, and the copy in
@@ -456,7 +489,7 @@ fn context_hook_follows_the_setting_and_the_sessions_own_hooks() {
     assert!(!speaks(&run(&["claude", "--ambient"], &[])));
     // The environment wins over the file, as for every setting.
     assert!(speaks(&run(&["claude"], &[("VALK_PROJECT_CONTEXT", "on")])));
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The daemon keeps the hook in Claude Code's settings while Context is on, and
@@ -540,7 +573,7 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
     );
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The observer hook in Claude Code's own settings reports a typed `claude` to the
@@ -616,7 +649,7 @@ fn ambient_observer_reports_a_typed_claude_once() {
     assert_eq!(reported(), 1);
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The M1 accuracy gate (DESIGN §14.6) on recorded real sessions with hand labels.
@@ -1214,7 +1247,7 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     let _ = valk(&socket, &dir).args(["kill", &id]).output();
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// ADR-0007: the context hook answers Claude Code and Codex alike at session start,
@@ -1265,7 +1298,7 @@ fn context_hook_gives_decisions_at_session_start_only() {
     }
     assert_silent_success(&run("codex", true, start("Stop")));
     assert_silent_success(&run("aider", true, start("SessionStart")));
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// `valk … | head -1`: a reader that leaves early must end valk quietly, the way it
@@ -1441,5 +1474,5 @@ fn an_agent_drives_the_panes_of_its_tab() {
     let _ = valk(&socket, &dir).args(["kill", &me]).output();
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
