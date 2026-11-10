@@ -515,13 +515,28 @@ async fn a_notify_reaches_the_clients_watching_notices_and_counts_them() {
     // Nobody watching: the sender hears so, to deliver it itself.
     assert_eq!(client.notify("deploy done", None).await.unwrap(), 0);
 
-    // A queue watcher alone (the web server's kind) isn't a notice watcher.
+    // A queue watcher alone gets no notices; a relay (the web server's kind, which
+    // doesn't `show`) gets them without being counted.
     let (web, mut web_pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
     web.watch_queue().await.unwrap();
     assert_eq!(client.notify("still nobody", None).await.unwrap(), 0);
+    web.watch_notices(false).await.unwrap();
+    assert_eq!(client.notify("relay only", None).await.unwrap(), 0);
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), web_pushes.recv()).await {
+            Ok(Some(ServerMsg::Notice { text, .. })) => {
+                assert_eq!(text, "relay only");
+                break;
+            }
+            Ok(Some(_)) => continue,
+            other => panic!("the relay got no notice: {other:?}"),
+        }
+    }
 
     let (tui, mut tui_pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
-    tui.watch_notices().await.unwrap();
+    tui.watch_notices(true).await.unwrap();
+    // Asking again doesn't count it twice.
+    tui.watch_notices(true).await.unwrap();
     let sent = client
         .notify("  deploy\x1b[2J done\n ", Some(NoticeSound::Request))
         .await
@@ -539,10 +554,42 @@ async fn a_notify_reaches_the_clients_watching_notices_and_counts_them() {
         notice,
         ("deploy [2J done".to_string(), Some(NoticeSound::Request))
     );
-    while let Ok(msg) = web_pushes.try_recv() {
-        assert!(!matches!(msg, ServerMsg::Notice { .. }), "{msg:?}");
+    // The relay heard it too.
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), web_pushes.recv()).await {
+            Ok(Some(ServerMsg::Notice { text, .. })) if text == "deploy [2J done" => break,
+            Ok(Some(_)) => continue,
+            other => panic!("the relay missed it: {other:?}"),
+        }
     }
     assert!(client.notify("  \n ", None).await.is_err());
+    // A viewer that goes away stops counting. A dropped `Client` keeps its socket
+    // open, so this one is a connection of its own to close.
+    assert_eq!(client.notify("two", None).await.unwrap(), 1);
+    let mut raw = valkyrie_proto::ipc::connect(&dir.join("run/o.sock"))
+        .await
+        .unwrap();
+    valkyrie_proto::codec::write_frame(
+        &mut raw,
+        &valkyrie_proto::ClientMsg::WatchNotices {
+            req: 1,
+            shows: true,
+        },
+    )
+    .await
+    .unwrap();
+    let _: Option<ServerMsg> = valkyrie_proto::codec::read_frame(&mut raw).await.unwrap();
+    assert_eq!(client.notify("three", None).await.unwrap(), 2);
+    drop(raw);
+    let mut watchers = 2;
+    for _ in 0..50 {
+        watchers = client.notify("anyone?", None).await.unwrap();
+        if watchers == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(watchers, 1);
 }
 
 #[tokio::test]
