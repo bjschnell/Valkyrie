@@ -58,8 +58,9 @@ export function SessionView({ id }: { id: number }) {
   const [typing, setTyping] = useState(false);
   const live = !exited && info?.exited == null;
   const keyboard = typing && mode === "terminal" && live && desktop;
-  // Another session, or the chat, starts without it.
-  useEffect(() => setTyping(false), [id, mode]);
+  // Another session, the chat, a window gone narrow or a program gone: it starts
+  // again with a click, never by itself.
+  useEffect(() => setTyping(false), [id, mode, desktop, live]);
 
   const choose = (next: Mode) => {
     try {

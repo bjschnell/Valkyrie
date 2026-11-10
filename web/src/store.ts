@@ -407,6 +407,11 @@ export function sendBytes(data: number[]): boolean {
   return id !== null && data.length > 0 && input(id, data);
 }
 
+/** Bytes for one session, whichever is open: what's owed to the one you just left. */
+export function sendBytesTo(session: SessionId, data: number[]): void {
+  conn?.send({ t: "input", session, data });
+}
+
 /** The modes of the open session's program as last heard, ahead of the frame that shows them. */
 export function openModes(): Modes | undefined {
   return latest()?.modes;

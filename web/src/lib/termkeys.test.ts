@@ -35,8 +35,15 @@ describe("encodeKey", () => {
     expect(encodeKey(key("_", "Minus", "ctrl", "shift"))).toEqual([0x1f]);
   });
 
-  it("reads Ctrl-letters by position on another layout", () => {
+  it("reads Ctrl-letters by position on a layout with no Latin letters", () => {
     expect(encodeKey(key("с", "KeyC", "ctrl"))).toEqual([0x03]);
+  });
+
+  it("takes a Latin layout's letter from the key, wherever it sits", () => {
+    // Dvorak: C is where QWERTY has I. AZERTY: A is where QWERTY has Q.
+    expect(encodeKey(key("c", "KeyI", "ctrl"))).toEqual([0x03]);
+    expect(encodeKey(key("a", "KeyQ", "ctrl"))).toEqual([0x01]);
+    expect(text(encodeKey(key("b", "KeyN", "alt")))).toBe("\x1bb");
   });
 
   it("leaves Ctrl chords with no control code to the browser", () => {
@@ -50,6 +57,13 @@ describe("encodeKey", () => {
     expect(text(encodeKey(key(".", "Period", "alt")))).toBe("\x1b.");
     expect(text(encodeKey(key("Backspace", "Backspace", "alt")))).toBe("\x1b\x7f");
     expect(encodeKey(key("c", "KeyC", "ctrl", "alt"))).toEqual([0x1b, 0x03]);
+  });
+
+  it("types what Option types on a Mac layout that needs it", () => {
+    expect(text(encodeKey(key("@", "KeyL", "alt"), undefined, { mac: true }))).toBe("@");
+    expect(text(encodeKey(key("|", "Digit7", "alt"), undefined, { mac: true }))).toBe("|");
+    expect(text(encodeKey(key("∫", "KeyB", "alt"), undefined, { mac: true }))).toBe("\x1bb");
+    expect(text(encodeKey(key(".", "Period", "alt"), undefined, { mac: true }))).toBe("\x1b.");
   });
 
   it("types what AltGr types", () => {
@@ -71,12 +85,17 @@ describe("encodeKey", () => {
     expect(text(encodeKey(key("F1", "", "shift")))).toBe("\x1b[1;2P");
     expect(text(encodeKey(key("F5")))).toBe("\x1b[15~");
     expect(text(encodeKey(key("F12", "", "ctrl")))).toBe("\x1b[24;5~");
+    expect(text(encodeKey(key("F10")))).toBe("\x1b[21~");
+    expect(encodeKey(key("F11"))).toBeNull();
+    expect(encodeKey(key("F12"))).toBeNull();
     expect(text(encodeKey(key("PageUp")))).toBe("\x1b[5~");
   });
 
   it("encodes the editing keys", () => {
     expect(text(encodeKey(key("Enter")))).toBe("\r");
-    expect(text(encodeKey(key("Enter", "", "shift")))).toBe("\x1b\r");
+    expect(text(encodeKey(key("Enter", "", "shift")))).toBe("\r");
+    expect(text(encodeKey(key("Enter", "", "shift"), undefined, { agent: true }))).toBe("\x1b\r");
+    expect(text(encodeKey(key("Enter", "", "alt")))).toBe("\x1b\r");
     expect(text(encodeKey(key("Tab")))).toBe("\t");
     expect(text(encodeKey(key("Tab", "", "shift")))).toBe("\x1b[Z");
     expect(text(encodeKey(key("Backspace")))).toBe("\x7f");
@@ -101,10 +120,16 @@ describe("pasteBytes", () => {
     expect(text(pasteBytes("a\nb"))).toBe("a\rb");
   });
 
-  it("drops an end mark inside the text", () => {
-    expect(text(pasteBytes("ok\x1b[201~rm -rf", modes({ bracketed_paste: true })))).toBe(
-      "\x1b[200~okrm -rf\x1b[201~",
-    );
+  it("lets no end mark through, nested or not", () => {
+    const marked = modes({ bracketed_paste: true });
+    expect(text(pasteBytes("ok\x1b[201~rm -rf", marked))).toBe("\x1b[200~ok[201~rm -rf\x1b[201~");
+    const nested = text(pasteBytes("ok\x1b[20\x1b[201~1~rm -rf\n", marked))!;
+    expect(nested.indexOf("\x1b[201~")).toBe(nested.length - 6);
+    expect(nested.slice(6, -6)).not.toContain("\x1b");
+  });
+
+  it("types no Esc from unmarked text either", () => {
+    expect(text(pasteBytes("a\x1b[Ab"))).toBe("a[Ab");
   });
 });
 

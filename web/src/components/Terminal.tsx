@@ -12,11 +12,11 @@ import {
   useSyncExternalStore,
   type RefObject,
 } from "react";
-import type { Cursor, Row, ScrollAnchor } from "../proto";
+import { program, type Cursor, type Modes, type Row, type ScrollAnchor } from "../proto";
 import { pathBytes } from "../lib/keys";
 import { cssStyle, reflow, rowRuns, type Run } from "../lib/screen";
 import { copiedText, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes } from "../lib/termkeys";
-import { openModes, resizeOpen, scrollback, sendBytes, sendFile, toast, useApp } from "../store";
+import { openModes, resizeOpen, scrollback, sendBytes, sendBytesTo, sendFile, toast, useApp } from "../store";
 
 const DESKTOP = "(min-width: 760px) and (pointer: fine)";
 
@@ -38,6 +38,10 @@ interface Back {
   history: number;
   rows: Row[];
 }
+
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+/** Agents whose message box takes Esc Enter as a new line. */
+const AGENTS = ["claude", "codex"];
 
 const PROBE = 50;
 /** A page of history that reaches into the live screen is fetched again this often. */
@@ -61,6 +65,10 @@ export function ScreenView({
 }) {
   const screen = useApp((s) => s.screen);
   const openId = useApp((s) => s.openId);
+  const agent = useApp((s) => {
+    const info = s.sessions.find((x) => x.id === s.openId);
+    return !!info && AGENTS.includes(program(info));
+  });
   const desktop = useDesktop();
   const [back, setBack] = useState<Back | null>(null);
   const stick = useRef(true);
@@ -102,8 +110,11 @@ export function ScreenView({
     void fetchBack(next);
   };
   // The handlers below are set up once per focus; they reach the latest of these.
-  const now = useRef({ back, toLive, scrollLines, rows: screen?.rows.length ?? 0 });
-  now.current = { back, toLive, scrollLines, rows: screen?.rows.length ?? 0 };
+  const now = useRef({ back, toLive, scrollLines, agent, rows: screen?.rows.length ?? 0 });
+  now.current = { back, toLive, scrollLines, agent, rows: screen?.rows.length ?? 0 };
+  // The session on show and its modes, for what's owed to it once another is open.
+  const shown = useRef<{ id: number; modes: Modes } | null>(null);
+  if (screen && openId !== null) shown.current = { id: openId, modes: screen.modes };
 
   // Another session's history is not this one's.
   useEffect(() => now.current.toLive(), [openId]);
@@ -118,14 +129,16 @@ export function ScreenView({
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [screen, view, ref]);
 
-  // History that ends inside the live screen shows rows that are still changing.
+  // History that ends inside the live screen shows rows that are still changing:
+  // fetched again when the screen changes, not when the fetch itself lands.
   useEffect(() => {
-    if (!back || back.fromTop + back.rows.length <= back.history) return;
+    const at = now.current.back;
+    if (!at || at.fromTop + at.rows.length <= at.history) return;
     const timer = setTimeout(() => {
       if (want.current) void fetchBack(want.current);
     }, REFRESH_MS);
     return () => clearTimeout(timer);
-  }, [screen, back]);
+  }, [screen]);
 
   const keys = typing && live && desktop;
   useEffect(() => {
@@ -149,6 +162,13 @@ export function ScreenView({
         return;
       }
       if ((chord || e.metaKey) && e.code === "KeyV") return;
+      // The one key that isn't the program's: the way out without a mouse.
+      if (chord && e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        onTyping(false);
+        return;
+      }
       const plainShift = e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
       if (plainShift && (e.key === "PageUp" || e.key === "PageDown") && !modes?.alt_screen) {
         e.preventDefault();
@@ -167,6 +187,7 @@ export function ScreenView({
           altGraph: e.getModifierState("AltGraph"),
         },
         modes,
+        { mac: MAC, agent: now.current.agent },
       );
       if (!data) {
         // A dead key or an input method starting: what it types lands in the field.
@@ -197,9 +218,15 @@ export function ScreenView({
       if (text) send(pasteBytes(text, modes));
     };
 
+    // Focus is this session's to hear about, even if another is open by the time
+    // the keyboard is given back.
+    const session = useApp.getState().openId;
     const report = (focused: boolean) => {
-      const data = focusBytes(focused, openModes());
-      if (data) sendBytes(data);
+      if (session === null) return;
+      const open = useApp.getState().openId === session;
+      const modes = open ? openModes() : shown.current?.id === session ? shown.current.modes : undefined;
+      const data = focusBytes(focused, modes);
+      if (data) sendBytesTo(session, data);
     };
     const onFocus = () => report(true);
     const onBlur = () => report(false);
@@ -291,6 +318,7 @@ export function ScreenView({
     <div
       ref={ref}
       className={`screen ${view}${keys ? " typing" : ""}`}
+      title={keys ? "Ctrl+Shift+Enter gives the keyboard back" : undefined}
       onScroll={onScroll}
       onWheel={onWheel}
       onPointerDown={(e) => {

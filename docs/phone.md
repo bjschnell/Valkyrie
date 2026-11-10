@@ -47,5 +47,5 @@ valk web revoke <name>    # unpair one
 On a computer, the session's terminal takes your keyboard: click it and every
 key goes to the program, the session is sized to the window, and the wheel
 scrolls back through its history. Ctrl+C is the program's, so copy and paste are
-Ctrl+Shift+C and Ctrl+Shift+V (Cmd+C and Cmd+V on a Mac). Click anywhere else to
-get the keyboard back.
+Ctrl+Shift+C and Ctrl+Shift+V (Cmd+C and Cmd+V on a Mac). Click anywhere else,
+or press Ctrl+Shift+Enter, to get the keyboard back.
