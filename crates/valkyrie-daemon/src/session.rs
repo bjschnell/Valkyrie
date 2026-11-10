@@ -1471,6 +1471,25 @@ impl Session {
         self.state.lock().unwrap().activity.take_accepted()
     }
 
+    /// See `Activity::merged`.
+    pub fn merged_news(&self, line: String) {
+        self.state.lock().unwrap().activity.merged(line)
+    }
+
+    /// See `Activity::take_merged`.
+    pub fn take_merged(&self) -> Vec<String> {
+        self.state.lock().unwrap().activity.take_merged()
+    }
+
+    /// Writes into the event log that the agent was told its PR merged, typed
+    /// or saved for its next prompt (backlog #121).
+    pub fn log_merged(&self, pr: &str, typed: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .log(now_ms(), "merged", json!({"pr": pr, "typed": typed}));
+    }
+
     /// The name the user gave it, if they did.
     pub fn own_name(&self) -> Option<String> {
         self.name.lock().unwrap().clone()

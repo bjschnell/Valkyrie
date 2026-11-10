@@ -37,6 +37,9 @@ pub struct Activity {
     /// Items this session filed that the user has accepted since, until its agent
     /// is told on its next prompt, so it can take them (backlog #53).
     accepted: Vec<u32>,
+    /// Pull requests merged in this repository since its last prompt, one line
+    /// each, until its agent is told (backlog #121).
+    merged: Vec<String>,
 }
 
 impl Activity {
@@ -121,6 +124,18 @@ impl Activity {
         if !self.accepted.contains(&id) {
             self.accepted.push(id);
         }
+    }
+
+    /// Remembers to tell the agent `line` about a merge, once.
+    pub fn merged(&mut self, line: String) {
+        if !self.merged.contains(&line) {
+            self.merged.push(line);
+        }
+    }
+
+    /// The merges to tell the agent of, once, oldest first.
+    pub fn take_merged(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.merged)
     }
 
     /// The items to tell the agent the user accepted, once, oldest first.

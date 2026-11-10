@@ -402,7 +402,9 @@ How it works:
    an open PR you opened is flagged the same way (someone else's PR, checked out
    to review, never is). `valk decisions health` compares how often you leave
    those flags, and override the steps on them, with flags on backlog items, so
-   you can tell whether it reaches too far.
+   you can tell whether it reaches too far. When a PR merges, its idle agent is
+   told to wrap up, and the repository's other agents hear on their next prompt
+   that the base moved.
 
    It also keeps the backlog moving. When an accepted item nobody's on has every
    blocker shipped or dropped, and fewer than `max_running` agent sessions run in
