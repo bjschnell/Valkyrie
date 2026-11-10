@@ -4,6 +4,7 @@ import { byProject, inFull, pinnable } from "../lib/decisions";
 import { scopeName } from "../lib/scope";
 import { allDecisions, review, useApp } from "../store";
 import { Back } from "./icons";
+import { Markdown } from "./Markdown";
 
 const home = () => {
   location.hash = "#/";
@@ -121,7 +122,7 @@ function DecisionRow({ d, onChange }: { d: Decision; onChange: () => Promise<voi
         <button className="decision-title as-text" aria-expanded={open} onClick={() => setOpen(!open)}>
           {d.title}
         </button>
-        {open && d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+        {open && d.body && <Markdown text={d.body} className={`decision-body ${d.kind}`} />}
         {d.scope?.length ? <div className="decision-scope">applies to {d.scope.join(", ")}</div> : null}
         {pinnable(d) && (
           <div className="card-actions">
