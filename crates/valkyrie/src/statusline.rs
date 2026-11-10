@@ -35,10 +35,10 @@ pub fn run(socket: &Path, then: Option<&str>) -> ! {
     if let Some(quota) = read(&raw) {
         let _ = send(socket, quota);
     }
+    // Killed by a signal, it has no code; that's still a failure.
     let code = child
         .and_then(|mut child| child.wait().ok())
-        .and_then(|status| status.code())
-        .unwrap_or(0);
+        .map_or(0, |status| status.code().unwrap_or(1));
     std::process::exit(code)
 }
 

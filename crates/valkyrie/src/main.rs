@@ -372,7 +372,14 @@ fn main() -> Result<()> {
         // when its arguments or environment don't parse.
         Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
         // Nor may the status line stop drawing the user's own.
-        Err(_) if std::env::args().any(|a| a == "statusline") => {
+        // Only as the settings run it, and not when asked for help.
+        Err(e)
+            if std::env::args().nth(1).as_deref() == Some("statusline")
+                && !matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
             let args: Vec<String> = std::env::args().collect();
             let then = args
                 .iter()

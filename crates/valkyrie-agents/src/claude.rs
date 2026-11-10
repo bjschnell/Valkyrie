@@ -191,11 +191,17 @@ pub fn statusline_command(exe: &Path, then: Option<&str>) -> String {
 /// For a `statusline_command`, the user's own command it runs, if any; `None` when
 /// the status line isn't Valkyrie's.
 fn unwrap_statusline(command: &str) -> Option<Option<String>> {
-    if command.starts_with('\'') && command.ends_with("' statusline") {
+    // Only Valkyrie's: other tools have a `statusline` too (`ccusage statusline`).
+    let rest = command.strip_prefix('\'')?;
+    let (exe, rest) = rest.split_once("' statusline")?;
+    let name = exe.rsplit(['/', '\\']).next()?;
+    if name != "valk" && name != "valk.exe" {
+        return None;
+    }
+    if rest.is_empty() {
         return Some(None);
     }
-    let (_, then) = command.split_once("' statusline --then '")?;
-    let then = then.strip_suffix('\'')?;
+    let then = rest.strip_prefix(" --then '")?.strip_suffix('\'')?;
     Some(Some(then.replace(r"'\''", "'")))
 }
 
@@ -658,6 +664,16 @@ mod tests {
         assert!(!moved.to_string().contains("/old/valk"));
         let back = remove_ambient(moved);
         assert_eq!(back["statusLine"], user["statusLine"]);
+        // Another tool's own `statusline` subcommand is theirs, not ours.
+        for theirs in [
+            "'/home/u/.bun/bin/ccusage' statusline",
+            "'/opt/tool' statusline --then 'x'",
+        ] {
+            let doc = json!({"statusLine": {"type": "command", "command": theirs}});
+            assert_eq!(remove_ambient(doc.clone()), doc);
+            let wrapped = install_ambient(doc, Path::new("/v/valk"));
+            assert_eq!(remove_ambient(wrapped)["statusLine"]["command"], theirs);
+        }
         // One it can't run before its own is left as it is.
         let other = json!({"statusLine": {"type": "static", "text": "hi"}});
         assert_eq!(

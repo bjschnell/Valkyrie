@@ -13,6 +13,9 @@ pub(crate) type Held = Option<Arc<Quota>>;
 /// A reading that says the same as the one held pushes again only this much later,
 /// for its age: a status line redraws every few seconds.
 const SAME_AGAIN_SECS: u64 = 60;
+/// Racing status lines are seconds apart; a held reading further ahead than this
+/// came from a clock that has since moved back.
+const SKEW_SECS: u64 = 300;
 
 pub(crate) fn file(state_dir: &Path) -> PathBuf {
     state_dir.join("quota.json")
@@ -27,6 +30,8 @@ pub(crate) fn load(path: &Path) -> Held {
 fn replaces(held: Option<&Quota>, new: &Quota) -> bool {
     match held {
         None => true,
+        // Far ahead of any new one, the clock moved back: it would hold forever.
+        Some(held) if held.at > new.at + SKEW_SECS => true,
         Some(held) => {
             new.at >= held.at && (new.limits != held.limits || new.at >= held.at + SAME_AGAIN_SECS)
         }
@@ -85,6 +90,8 @@ mod tests {
         assert!(replaces(Some(&held), &reading(1060, 20)));
         // Status lines race: an older one never wins.
         assert!(!replaces(Some(&held), &reading(999, 50)));
+        // But not one from a clock that moved back.
+        assert!(replaces(Some(&held), &reading(600, 20)));
     }
 
     #[test]
