@@ -445,7 +445,7 @@ impl App {
             self.status = format!("queue unavailable: {e:#}");
         }
         // Best effort: an older daemon doesn't know notices.
-        let _ = self.client.watch_notices().await;
+        let _ = self.client.watch_notices(true).await;
         self.refresh().await;
         if let Some(id) = attach_to {
             self.attach(id).await;
@@ -578,7 +578,7 @@ impl App {
             if let Err(e) = self.client.watch_queue().await {
                 self.status = format!("queue unavailable: {e:#}");
             }
-            let _ = self.client.watch_notices().await;
+            let _ = self.client.watch_notices(true).await;
             self.report_cell(None);
             self.refresh().await;
             if let Some(id) = self.view.as_ref().map(|v| v.id) {
