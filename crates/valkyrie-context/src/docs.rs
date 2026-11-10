@@ -93,8 +93,9 @@ impl Docs {
                 }
                 std::fs::create_dir_all(root)
                     .with_context(|| format!("make {}", root.display()))?;
-                let real = std::fs::canonicalize(root)?;
-                if real == valkyrie_proto::home_dir() || real.parent().is_none() {
+                let real = valkyrie_proto::canonical(root)?;
+                let home = valkyrie_proto::canonical(&valkyrie_proto::home_dir()).ok();
+                if Some(&real) == home.as_ref() || real.parent().is_none() {
                     bail!(
                         "{} is too wide: pick a folder for agent docs, like ~/vault/valk",
                         real.display()
@@ -116,7 +117,7 @@ impl Docs {
         } else {
             std::fs::create_dir_all(&root)?;
         }
-        Ok(std::fs::canonicalize(&root)?)
+        Ok(valkyrie_proto::canonical(&root)?)
     }
 
     /// The folder for docs about `repo` (a project root), or the root for
@@ -253,7 +254,7 @@ impl Docs {
         if path.extension().is_none_or(|e| e != "md") {
             bail!("a doc is a .md file under {}", root.display());
         }
-        let real = std::fs::canonicalize(&path)
+        let real = valkyrie_proto::canonical(&path)
             .with_context(|| format!("no doc {which} under {}", root.display()))?;
         inside(root, &real)?;
         Ok(real)
@@ -481,11 +482,7 @@ fn doc(root: &Path, path: &Path, front: &Front, text: String) -> Doc {
         id: front.id,
         kind: front.kind,
         title: front.title.clone(),
-        path: path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .display()
-            .to_string(),
+        path: slashed(path.strip_prefix(root).unwrap_or(path)),
         by: front.by.clone(),
         created: front.created.clone(),
         session: front.session.clone(),
@@ -581,10 +578,19 @@ fn create_new(dir: &Path, stem: &str, text: &str) -> Result<PathBuf> {
     bail!("too many docs named {stem} in {}", dir.display())
 }
 
+/// A path under the root as the web app and the CLI name it: `/` between
+/// folders on every platform.
+fn slashed(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Refuses `path` unless it resolves inside `root`: a symlinked folder can't take
 /// a write, or the web app's read, outside it.
 fn inside(root: &Path, path: &Path) -> Result<()> {
-    let real = std::fs::canonicalize(path)?;
+    let real = valkyrie_proto::canonical(path)?;
     if !real.starts_with(root) {
         bail!("{} is outside the docs folder", path.display());
     }
@@ -667,7 +673,7 @@ mod tests {
             let repo = base.join("code/valkyrie");
             std::fs::create_dir_all(repo.join(".git")).unwrap();
             std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-            let repo = std::fs::canonicalize(repo).unwrap();
+            let repo = valkyrie_proto::canonical(&repo).unwrap();
             let docs = Docs::new(base.join("state"));
             Self { base, docs, repo }
         }
@@ -756,7 +762,7 @@ mod tests {
         let other = f.base.join("work/valkyrie");
         std::fs::create_dir_all(other.join(".git")).unwrap();
         std::fs::write(other.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        let other = std::fs::canonicalize(other).unwrap();
+        let other = valkyrie_proto::canonical(&other).unwrap();
         let mut new = f.new_doc("Two", false);
         new.cwd = other.clone();
         let d = f.docs.write(&new, &claude(), NOV_9).unwrap();
@@ -870,7 +876,7 @@ mod tests {
         assert!(f.docs.set_root(Some(&valkyrie_proto::home_dir())).is_err());
         let vault = f.base.join("vault/valk");
         let set = f.docs.set_root(Some(&vault)).unwrap();
-        assert_eq!(set, std::fs::canonicalize(&vault).unwrap());
+        assert_eq!(set, valkyrie_proto::canonical(&vault).unwrap());
         assert!(Docs::new(f.base.join("state")).root_is_set());
         let d = f
             .docs
