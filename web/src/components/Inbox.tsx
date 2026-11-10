@@ -15,6 +15,7 @@ import { Chevron, Gear, List, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyHint } from "./Notify";
+import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
 import { Mark, Wordmark } from "./Logo";
 
@@ -124,6 +125,7 @@ export function Inbox() {
       </header>
 
       <main className="inbox">
+        <QuotaMeter />
         <NotifyHint />
         <AllowAll />
         <Proposals />

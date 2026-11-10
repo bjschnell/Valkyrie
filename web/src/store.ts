@@ -13,6 +13,7 @@ import type {
   NewItem,
   OrderProposal,
   LaunchOffer,
+  Quota,
   QueueItem,
   ReviewAction,
   ServerMsg,
@@ -73,6 +74,8 @@ interface State {
   orders: OrderProposal[];
   /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
   launches: LaunchOffer[];
+  /** The plan's quota (protocol 28), pushed with the queue. */
+  quota: Quota | null;
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -102,6 +105,7 @@ export const useApp = create<State>(() => ({
   items: [],
   orders: [],
   launches: [],
+  quota: null,
   boot: 0,
   openId: null,
   screen: null,
@@ -199,6 +203,9 @@ function onPush(msg: ServerMsg): void {
       break;
     case "items":
       set({ items: msg.items, orders: msg.orders ?? [], launches: msg.launches ?? [] });
+      break;
+    case "quota":
+      set({ quota: msg.quota });
       break;
     case "screen":
       if (msg.session === get().openId)

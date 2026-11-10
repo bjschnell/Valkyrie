@@ -14,6 +14,7 @@ mod mouse;
 mod panes;
 mod ping;
 mod quiet;
+mod quota;
 mod rain;
 mod settings;
 mod theme;
@@ -193,6 +194,8 @@ struct App {
     orders: Vec<valkyrie_proto::OrderProposal>,
     /// Ready items the supervisor offers to start, as last pushed with the items.
     launches: Vec<valkyrie_proto::LaunchOffer>,
+    /// The plan's quota, as last pushed (protocol 28).
+    quota: Option<valkyrie_proto::Quota>,
     /// Where a background task (`P`'s model call) reports a line to say.
     said: Option<mpsc::UnboundedSender<String>>,
     /// The backlog page is open (`b`).
@@ -372,6 +375,7 @@ impl App {
             sessions: Vec::new(),
             proposals: Vec::new(),
             items: Vec::new(),
+            quota: None,
             backlog: None,
             retire_armed: None,
             proposal_scroll: Default::default(),
@@ -2707,6 +2711,10 @@ impl App {
             self.launches = launches;
             return Ok(true);
         }
+        if let ServerMsg::Quota { quota } = msg {
+            self.quota = quota;
+            return Ok(true);
+        }
         if let ServerMsg::Queue { items } = msg {
             let viewing = self.pane_ids();
             self.pinger.on_queue(&items, &viewing, Instant::now());
@@ -2968,16 +2976,31 @@ impl App {
             )),
             header,
         );
-        if let Some(newer) = self.newer.as_ref().filter(|_| self.settings.updates) {
-            let notice = Line::from(vec![
-                format!(" ↑ {newer} ").fg(t.bg).bg(t.accent2).bold(),
-                " valk upgrade ".fg(t.muted),
-            ]);
-            // Only where it clears the counts on the left.
-            let left = header_line(&self.queue, &self.sessions, self.proposals.len(), now, t);
-            if left.width() + notice.width() < header.width as usize {
-                frame.render_widget(Paragraph::new(notice).right_aligned(), header);
-            }
+        // On the right, the plan's quota and a newer release, each only where it
+        // clears the counts on the left; the quota first, it's the one to act on.
+        let notice = self
+            .newer
+            .as_ref()
+            .filter(|_| self.settings.updates)
+            .map(|newer| {
+                vec![
+                    format!(" ↑ {newer} ").fg(t.bg).bg(t.accent2).bold(),
+                    " valk upgrade ".fg(t.muted),
+                ]
+            });
+        let quota = self.quota.as_ref().map(|q| quota::line(q, now, t).spans);
+        let both = notice
+            .clone()
+            .zip(quota.clone())
+            .map(|(notice, quota)| [quota, notice].concat());
+        let left = header_line(&self.queue, &self.sessions, self.proposals.len(), now, t);
+        if let Some(right) = [both, quota, notice]
+            .into_iter()
+            .flatten()
+            .map(Line::from)
+            .find(|right| left.width() + right.width() < header.width as usize)
+        {
+            frame.render_widget(Paragraph::new(right).right_aligned(), header);
         }
 
         let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {

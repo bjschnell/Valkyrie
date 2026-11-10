@@ -362,6 +362,24 @@ export interface OrderProposal {
 /** A ready item the supervisor offers to start (ADR-0019 §2 `launch`, protocol 27):
  * open, nobody on it, its blockers finished (or waived by the model), with room
  * under the repository's `max_running`. One per repository at most. */
+/** How much of the plan is used (protocol 28), as Claude Code's status line last
+ * said it: only as new as the last Claude session to draw one. */
+export interface Quota {
+  /** When it was read, seconds since the epoch. */
+  at: number;
+  /** Shortest window first. */
+  limits: QuotaLimit[];
+}
+
+export interface QuotaLimit {
+  /** Claude Code's name: `five_hour`, `seven_day`, `seven_day_opus`, … */
+  name: string;
+  /** Share used, 0–100. */
+  used: number;
+  /** Seconds since the epoch. */
+  resets_at?: number;
+}
+
 export interface LaunchOffer {
   /** Changes when the repository's offer is replaced. */
   id: number;
@@ -485,6 +503,8 @@ export type ServerMsg =
   | { t: "proposals"; items: Decision[] }
   /** Every backlog item, and the build orders and launch offers waiting on the user. */
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
+  /** The plan's quota, if anything has said it yet (protocol 28). */
+  | { t: "quota"; quota: Quota | null }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

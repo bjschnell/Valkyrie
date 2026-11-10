@@ -276,6 +276,65 @@ code {
   text-align: center;
 }
 
+/* The Claude plan's quota (protocol 28): one bar per window. */
+.quota {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin: 10px 4px 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.quota-who {
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--soft);
+}
+
+.quota-window {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  --level: var(--done);
+}
+
+.quota-low { --level: var(--needs); }
+.quota-full { --level: var(--blocked); }
+.quota.stale .quota-window,
+.quota-reset { --level: var(--muted); }
+
+.quota-bar {
+  width: 56px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.quota-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--level);
+}
+
+.quota-used {
+  min-width: 3ch;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-low .quota-used,
+.quota-full .quota-used {
+  color: var(--level);
+  font-weight: 650;
+}
+
+.quota.stale .quota-used { color: var(--muted); }
+
 .calm {
   padding: 28px 16px;
   text-align: center;

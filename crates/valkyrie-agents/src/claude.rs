@@ -145,12 +145,82 @@ pub fn install_ambient(doc: Value, exe: &Path) -> Value {
             .unwrap()
             .extend(ours.as_array().into_iter().flatten().cloned());
     }
+    // The status line is the one place Claude Code says how much of the plan is
+    // used, so `valk statusline` reads it there, then runs the user's own.
+    match doc.get("statusLine") {
+        None => {
+            doc["statusLine"] = json!({"type": "command", "command": statusline_command(exe, None)})
+        }
+        Some(line) if line["type"] == "command" => {
+            let theirs = line["command"].as_str().map(str::to_owned);
+            doc["statusLine"]["command"] = statusline_command(exe, theirs.as_deref()).into();
+        }
+        // A kind of status line this doesn't know: left alone, without the quota.
+        Some(_) => {}
+    }
     doc
 }
 
-/// Claude Code's settings without Valkyrie's ambient hooks, wherever `valk` was.
+/// Claude Code's settings without Valkyrie's ambient hooks, wherever `valk` was,
+/// and with the user's own status line back as it was.
 pub fn remove_ambient(doc: Value) -> Value {
-    crate::codex::remove_where(doc, is_ambient)
+    let mut doc = crate::codex::remove_where(doc, is_ambient);
+    let ours = doc["statusLine"]["command"]
+        .as_str()
+        .and_then(unwrap_statusline);
+    match ours {
+        Some(Some(theirs)) => doc["statusLine"]["command"] = theirs.into(),
+        Some(None) => {
+            doc.as_object_mut().map(|map| map.remove("statusLine"));
+        }
+        None => {}
+    }
+    doc
+}
+
+/// `valk statusline`, then (`--then`) the user's own status line, if they had one.
+pub fn statusline_command(exe: &Path, then: Option<&str>) -> String {
+    let mut command = format!("{} statusline", shell_quote(exe));
+    if let Some(then) = then {
+        command.push_str(" --then ");
+        command.push_str(&quote(then));
+    }
+    command
+}
+
+/// For a `statusline_command`, the user's own command it runs, if any; `None` when
+/// the status line isn't Valkyrie's.
+fn unwrap_statusline(command: &str) -> Option<Option<String>> {
+    if command.starts_with('\'') && command.ends_with("' statusline") {
+        return Some(None);
+    }
+    let (_, then) = command.split_once("' statusline --then '")?;
+    let then = then.strip_suffix('\'')?;
+    Some(Some(then.replace(r"'\''", "'")))
+}
+
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The plan's windows in a status line payload (`rate_limits`), shortest first:
+/// each `{used_percentage, resets_at}` Claude Code gives, whatever it's called.
+/// `None` where it gives none (an API key, Bedrock, an older Claude Code).
+pub fn statusline_quota(payload: &Value) -> Option<Vec<valkyrie_proto::QuotaLimit>> {
+    let mut limits: Vec<_> = payload["rate_limits"]
+        .as_object()?
+        .iter()
+        .filter_map(|(name, window)| {
+            let used = window["used_percentage"].as_f64()?;
+            Some(valkyrie_proto::QuotaLimit {
+                name: name.clone(),
+                used: used.round().clamp(0.0, 100.0) as u8,
+                resets_at: window["resets_at"].as_u64(),
+            })
+        })
+        .collect();
+    limits.sort_by(|a, b| (a.name != "five_hour", &a.name).cmp(&(b.name != "five_hour", &b.name)));
+    (!limits.is_empty()).then_some(limits)
 }
 
 pub(crate) fn shell_quote(path: &Path) -> String {
@@ -568,7 +638,58 @@ mod tests {
         assert_eq!(again["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(again["hooks"]["PreToolUse"][1]["matcher"], FILE_TOOLS);
         assert_eq!(again["model"], "opus");
+        assert_eq!(again["statusLine"]["command"], "'/new/valk' statusline");
         assert_eq!(remove_ambient(again), user);
+    }
+
+    #[test]
+    fn the_status_line_wraps_the_users_own_and_gives_it_back() {
+        let user = json!({
+            "statusLine": {"type": "command", "command": "node 'my hud'.mjs", "padding": 0}
+        });
+        let once = install_ambient(user.clone(), Path::new("/old/valk"));
+        assert_eq!(
+            once["statusLine"],
+            json!({"type": "command", "padding": 0,
+                   "command": r"'/old/valk' statusline --then 'node '\''my hud'\''.mjs'"})
+        );
+        assert_eq!(install_ambient(once.clone(), Path::new("/old/valk")), once);
+        let moved = install_ambient(once, Path::new("/new/valk"));
+        assert!(!moved.to_string().contains("/old/valk"));
+        let back = remove_ambient(moved);
+        assert_eq!(back["statusLine"], user["statusLine"]);
+        // One it can't run before its own is left as it is.
+        let other = json!({"statusLine": {"type": "static", "text": "hi"}});
+        assert_eq!(
+            install_ambient(other.clone(), Path::new("/v"))["statusLine"],
+            other["statusLine"]
+        );
+    }
+
+    #[test]
+    fn quota_reads_every_window_the_status_line_gives() {
+        let payload = json!({"rate_limits": {
+            "seven_day": {"used_percentage": 10, "resets_at": 1794754800},
+            "five_hour": {"used_percentage": 26.6, "resets_at": 1794276000},
+            "seven_day_opus": {"used_percentage": 140},
+            "seven_day_oauth_apps": null,
+        }});
+        let limits = statusline_quota(&payload).unwrap();
+        let got: Vec<_> = limits
+            .iter()
+            .map(|l| (l.name.as_str(), l.used, l.resets_at))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("five_hour", 27, Some(1794276000)),
+                ("seven_day", 10, Some(1794754800)),
+                ("seven_day_opus", 100, None),
+            ]
+        );
+        assert_eq!(statusline_quota(&json!({"rate_limits": null})), None);
+        assert_eq!(statusline_quota(&json!({"rate_limits": {}})), None);
+        assert_eq!(statusline_quota(&json!({"model": "x"})), None);
     }
 
     #[test]
