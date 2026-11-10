@@ -7,6 +7,7 @@ mod branches;
 mod chat;
 mod context;
 mod dispatch;
+mod docs;
 mod extract;
 mod facts;
 mod foreground;
@@ -140,6 +141,8 @@ struct Registry {
     /// Tabs split into panes (DESIGN §8.9). Panes whose session left the lists are
     /// pruned by `layouts`.
     layouts: Mutex<Vec<Pane>>,
+    /// Docs (ADR-0021): the lock keeps their ids from colliding.
+    docs: Mutex<valkyrie_context::docs::Docs>,
     /// Project decisions (ADR-0007). The lock makes the daemon their only writer,
     /// one change at a time, so ids can't collide.
     context: Mutex<valkyrie_context::Store>,
@@ -527,6 +530,7 @@ fn new_registry(
         unrestored: Mutex::default(),
         restore_now: Notify::new(),
         layouts: Mutex::default(),
+        docs: Mutex::new(valkyrie_context::docs::Docs::new(state_dir.to_path_buf())),
         context: Mutex::new(valkyrie_context::Store::new(state_dir.join("context"))),
         proposals: watch::Sender::new(Arc::default()),
         stale: Mutex::default(),
@@ -1365,6 +1369,16 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
             ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
             ClientMsg::Supervise { req, on } => (req, registry.supervise(on, peer)),
+            ClientMsg::WriteDoc { req, doc } => (req, registry.write_doc(doc, peer)),
+            ClientMsg::ReadDoc { req, which } => (req, registry.read_doc(&which)),
+            ClientMsg::EditDoc {
+                req,
+                id,
+                base,
+                body,
+            } => (req, registry.edit_doc(id, &base, &body, peer)),
+            ClientMsg::Docs { req } => (req, registry.docs()),
+            ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (
                 req,
                 registry.vouch_in_person(peer, &what).map(|()| Reply::Done),

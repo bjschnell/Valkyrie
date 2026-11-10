@@ -45,3 +45,21 @@ valk pane resize 4 30 · valk pane close 4
 ```
 
 Agents learn of it from their session-start context.
+
+## Docs for you to read
+
+Agents write plans, research and reports as markdown into one docs folder
+instead of scattering them around the repository. Point it at a folder in your
+Obsidian vault and they show up there:
+
+```sh
+valk doc root ~/vault/valk         # you only; an agent can't move it
+valk doc list                      # newest first
+valk doc read 3                    # with the hash an edit needs
+```
+
+Docs from inside a repository go in `repos/<name>/`, the rest at the top. Each
+one says which agent, session, commit and backlog item it came from. Agents can
+edit any doc, yours too, but only from the version on disk: if you saved in
+between, their edit is refused and they fold your change in first. Every version
+an edit replaces is kept.

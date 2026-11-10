@@ -1,6 +1,7 @@
 mod alias;
 mod bench;
 mod context;
+mod doc;
 mod guard;
 mod hook;
 mod mcp;
@@ -203,6 +204,10 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<todo::TodoCmd>,
     },
+    /// Docs for you to read: plans, research and reports agents write into the
+    /// docs folder (your Obsidian vault, if you point it there).
+    #[command(subcommand)]
+    Doc(doc::DocCmd),
     /// The worktrees sessions and backlog launches made beside the repository.
     #[command(subcommand)]
     Worktree(worktree::WorktreeCmd),
@@ -768,6 +773,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => Ok(()),
             }
         }
+        Some(Cmd::Doc(cmd)) => doc::run(&connect(&socket).await?.0, cmd).await,
         Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
         Some(Cmd::Decisions { all, user, action }) => {
             context::decisions(&connect(&socket).await?.0, all, user, action).await

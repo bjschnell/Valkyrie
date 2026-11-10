@@ -9,6 +9,7 @@ pub mod backlog;
 pub mod client;
 pub mod codec;
 pub mod context;
+pub mod docs;
 pub mod ipc;
 pub mod layout;
 pub mod pastes;
@@ -27,12 +28,13 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
+pub use docs::{Doc, DocKind, NewDoc};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 31;
+pub const PROTOCOL: u32 = 32;
 
 /// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
 /// something that needs you, `done` for something that finished.
@@ -587,6 +589,37 @@ pub enum ClientMsg {
         remote: bool,
         remove: bool,
     },
+    /// Writes a doc into the docs folder (ADR-0021, protocol 32). Replies `Doc`,
+    /// with its text and hash.
+    WriteDoc {
+        req: ReqId,
+        doc: NewDoc,
+    },
+    /// A doc by its `valk-id` or its path under the docs folder, giving one that has
+    /// no id an id. Replies `Doc`, with its text and hash.
+    ReadDoc {
+        req: ReqId,
+        which: String,
+    },
+    /// Replaces a doc's body, if `base` is still the hash of what's on disk; the
+    /// version replaced is kept. Replies `Doc`.
+    EditDoc {
+        req: ReqId,
+        id: u32,
+        base: String,
+        body: String,
+    },
+    /// Every doc, newest first, without their text. Replies `Docs`.
+    Docs {
+        req: ReqId,
+    },
+    /// Where docs go; with `root`, sets it first (the user only; `""` goes back
+    /// to the default). Replies `Text` with the folder.
+    DocsRoot {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<PathBuf>,
+    },
 }
 
 fn yes() -> bool {
@@ -710,6 +743,14 @@ pub enum Reply {
     },
     Decisions {
         decisions: Vec<Decision>,
+    },
+    Doc {
+        doc: Box<Doc>,
+    },
+    Docs {
+        docs: Vec<Doc>,
+        /// The docs folder.
+        root: PathBuf,
     },
     Item {
         item: Box<Item>,

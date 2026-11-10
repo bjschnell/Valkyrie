@@ -405,6 +405,57 @@ impl Client {
         }
     }
 
+    pub async fn write_doc(&self, doc: crate::NewDoc) -> Result<crate::Doc> {
+        match self.request(|req| ClientMsg::WriteDoc { req, doc }).await? {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn read_doc(&self, which: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::ReadDoc { req, which })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn edit_doc(&self, id: u32, base: String, body: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::EditDoc {
+                req,
+                id,
+                base,
+                body,
+            })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Every doc, newest first, and the docs folder.
+    pub async fn docs(&self) -> Result<(Vec<crate::Doc>, PathBuf)> {
+        match self.request(|req| ClientMsg::Docs { req }).await? {
+            Reply::Docs { docs, root } => Ok((docs, root)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The docs folder; with `root`, sets it first (`""` for the default).
+    pub async fn docs_root(&self, root: Option<PathBuf>) -> Result<String> {
+        match self
+            .request(|req| ClientMsg::DocsRoot { req, root })
+            .await?
+        {
+            Reply::Text { text } => Ok(text),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn review(
         &self,
         project: PathBuf,
