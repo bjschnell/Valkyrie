@@ -126,7 +126,10 @@ export function ScreenView({
   if (screen && openId !== null) shown.current = { id: openId, modes: screen.modes };
 
   // Another session's history is not this one's.
-  useEffect(() => now.current.toLive(), [openId]);
+  useEffect(() => {
+    now.current.toLive();
+    stick.current = true;
+  }, [openId]);
 
   // Follow new output unless you scrolled up to read.
   const onScroll = () => {
@@ -174,6 +177,12 @@ export function ScreenView({
       };
       // Moving between sessions is the app's, here as in the TUI.
       if (shellChord(pressed, MAC)) return;
+      // The session you moved to hasn't shown its screen: what it asked of its
+      // keys isn't known yet, so nothing is typed blind.
+      if (!ready) {
+        if (!e.metaKey) e.preventDefault();
+        return;
+      }
       const modes = openModes();
       const chord = e.ctrlKey && e.shiftKey && !e.altKey;
       // Ctrl+C is the program's, so copy and paste take Shift, as in a terminal.
@@ -212,6 +221,8 @@ export function ScreenView({
       const clip = e.clipboardData;
       if (!clip) return;
       e.preventDefault();
+      // Without the modes a paste would go in unmarked and run line by line.
+      if (!ready) return;
       const modes = openModes();
       if (clip.files.length) {
         // A screenshot or a copied file goes up, and its path is pasted.

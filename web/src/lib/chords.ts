@@ -25,17 +25,22 @@ export function chord(e: KeyLike, mac = false): Chord | null {
   if ([...e.key].length !== 1) return null;
   // On a Mac, Option is how some layouts type @ [ ] { } | ~: those stay typed.
   if (mac && isAscii(e.key) && !/[a-z0-9]/i.test(e.key)) return null;
-  const own = (isAscii(e.key) ? e.key : (byPosition(e) ?? "")).toLowerCase();
-  if (own >= "1" && own <= "9") return { go: "tab", n: Number(own) };
-  return LETTERS[own] ?? null;
+  // A digit is one on the digit row: Alt and the number pad types a character
+  // by its code on Windows. AZERTY has punctuation there, so those go by position.
+  if (e.code.startsWith("Digit")) {
+    const digit = /^[0-9]$/.test(e.key) ? e.key : (byPosition(e) ?? "");
+    return digit >= "1" && digit <= "9" ? { go: "tab", n: Number(digit) } : null;
+  }
+  const own = /^[a-z]$/i.test(e.key) ? e.key : isAscii(e.key) ? "" : (byPosition(e) ?? "");
+  return LETTERS[own.toLowerCase()] ?? null;
 }
 
 /** Where a chord leads: a session, home, or nowhere (`undefined`). */
 export function chordTarget(
   c: Chord,
-  at: { sessions: number[]; needs: number[]; open: number | null; last: number | null },
+  at: { sessions: number[]; needs: number[]; open: number | null; recent: number[] },
 ): { session: number } | "home" | undefined {
-  const { sessions, needs, open, last } = at;
+  const { sessions, needs, open, recent } = at;
   const step = (list: number[], by: 1 | -1) => {
     if (!list.length) return undefined;
     const i = open === null ? -1 : list.indexOf(open);
@@ -51,8 +56,11 @@ export function chordTarget(
       return step(sessions, -1);
     case "needs":
       return step(needs, 1);
-    case "last":
-      return last !== null && last !== open && sessions.includes(last) ? { session: last } : undefined;
+    case "last": {
+      // The latest session you were on that isn't this one and still exists.
+      const last = recent.findLast((id) => id !== open && sessions.includes(id));
+      return last === undefined ? undefined : { session: last };
+    }
     case "tab": {
       const id = sessions[c.n - 1];
       return id === undefined || id === open ? undefined : { session: id };

@@ -32,6 +32,9 @@ describe("chord", () => {
     expect(chord(key("J", "KeyJ", "alt", "shift"))).toBeNull();
     expect(chord(key("j", "KeyJ", "alt", "meta"))).toBeNull();
     expect(chord(key("ArrowDown", "ArrowDown", "alt"))).toBeNull();
+    // Alt and the number pad types a character by its code on Windows.
+    expect(chord(key("2", "Numpad2", "alt"))).toBeNull();
+    expect(chord(key(",", "KeyW", "alt"))).toBeNull();
   });
 
   it("takes the letter from the key on a Latin layout, the position otherwise", () => {
@@ -40,6 +43,9 @@ describe("chord", () => {
     // A Mac's Option+J types ∆; a Cyrillic layout has о on that key.
     expect(chord(key("∆", "KeyJ", "alt"), true)).toEqual({ go: "next" });
     expect(chord(key("о", "KeyJ", "alt"))).toEqual({ go: "next" });
+    // AZERTY: the digit row types & é " without Shift.
+    expect(chord(key("&", "Digit1", "alt"))).toEqual({ go: "tab", n: 1 });
+    expect(chord(key("é", "Digit2", "alt"))).toEqual({ go: "tab", n: 2 });
   });
 
   it("types what Option or AltGr types", () => {
@@ -51,11 +57,11 @@ describe("chord", () => {
 });
 
 describe("chordTarget", () => {
-  const at = (open: number | null, last: number | null = null, needs: number[] = []) => ({
+  const at = (open: number | null, last: number | null = null, needs: number[] = [], recent?: number[]) => ({
     sessions: [4, 7, 9],
     needs,
     open,
-    last,
+    recent: recent ?? (last === null ? [] : [last]),
   });
 
   it("steps through the sessions and wraps", () => {
@@ -85,5 +91,8 @@ describe("chordTarget", () => {
     expect(chordTarget({ go: "last" }, at(4, 9))).toEqual({ session: 9 });
     expect(chordTarget({ go: "last" }, at(4, 12))).toBeUndefined();
     expect(chordTarget({ go: "last" }, at(4))).toBeUndefined();
+    // 4, then 7, home, 7 again: the one before is still 4.
+    expect(chordTarget({ go: "last" }, at(7, null, [], [4, 7]))).toEqual({ session: 4 });
+    expect(chordTarget({ go: "last" }, at(null, null, [], [4, 7]))).toEqual({ session: 7 });
   });
 });

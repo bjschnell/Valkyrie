@@ -3058,6 +3058,12 @@ button.title-name {
   z-index: 1;
 }
 
+/* Beside the list the rain falls behind both panes. */
+[data-fx] .split-pane {
+  position: relative;
+  z-index: 1;
+}
+
 /* CRT scanlines over everything. */
 [data-fx] body::after {
   content: "";

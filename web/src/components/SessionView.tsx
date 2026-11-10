@@ -8,7 +8,7 @@ import { Back, Clip, Dots, Grid, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
 import { MicButton } from "./Mic";
-import { ScreenView, useDesktop } from "./Terminal";
+import { ScreenView, useDesktop, useWide } from "./Terminal";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -43,10 +43,19 @@ export function SessionView({ id }: { id: number }) {
   // The name while you're editing it; null when you aren't.
   const [naming, setNaming] = useState<string | null>(null);
   const cancelled = useRef(false);
+  const namingFor = useRef(id);
   const startNaming = () => {
     cancelled.current = false;
+    namingFor.current = id;
     setNaming(info?.name ?? "");
   };
+  // Beside the session list this view stays up from one session to the next:
+  // a menu or a half-typed name belongs to the session it was opened on.
+  useEffect(() => {
+    setMenu(false);
+    setNaming(null);
+  }, [id]);
+  const wide = useWide();
   const scroller = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const choices = useMemo(() => openChoices(screen), [screen]);
@@ -113,7 +122,7 @@ export function SessionView({ id }: { id: number }) {
   return (
     <div className="page session">
       <header className="topbar">
-        <button className="icon-btn" aria-label="Back" onClick={() => history.length > 1 ? history.back() : (location.hash = "#/")}>
+        <button className="icon-btn" aria-label="Back" onClick={() => (!wide && history.length > 1 ? history.back() : (location.hash = "#/"))}>
           <Back />
         </button>
         <div className="title">
@@ -132,6 +141,8 @@ export function SessionView({ id }: { id: number }) {
               onFocus={(e) => e.target.select()}
               // Enter or tapping away saves (a phone's usual way out); Esc doesn't.
               onBlur={() => {
+                // A name typed for another session isn't this one's.
+                if (namingFor.current !== id) return setNaming(null);
                 if (!cancelled.current && naming !== (info?.name ?? "")) void rename(id, naming.trim() || null);
                 setNaming(null);
               }}
@@ -209,7 +220,7 @@ export function SessionView({ id }: { id: number }) {
           )}
           {/* A desktop keyboard has these keys; click the terminal to use them. */}
           {!(desktop && mode === "terminal") && <KeyBar />}
-          <Composer id={id} area={composer} />
+          <Composer key={id} id={id} area={composer} />
         </footer>
       )}
     </div>

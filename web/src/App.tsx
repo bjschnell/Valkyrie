@@ -68,8 +68,12 @@ export function App() {
   // On a desktop keyboard the TUI's Alt chords move between sessions, from
   // anywhere: the terminal leaves them alone even while it has the keyboard.
   const desktop = useDesktop();
-  const last = useRef<{ open: number | null; before: number | null }>({ open: null, before: null });
-  if (last.current.open !== openId) last.current = { open: openId, before: last.current.open ?? last.current.before };
+  // The sessions you've been on, latest last, for Alt-P.
+  const seen = useRef<{ open: number | null; recent: number[] }>({ open: null, recent: [] });
+  if (seen.current.open !== openId) {
+    const recent = seen.current.recent.filter((id) => id !== openId);
+    seen.current = { open: openId, recent: openId === null ? recent : [...recent, openId] };
+  }
   const paired = !!token && status !== "unpaired" && status !== "outdated";
   useEffect(() => {
     if (!desktop || !paired) return;
@@ -87,16 +91,20 @@ export function App() {
         MAC,
       );
       if (!pressed) return;
+      // In a text field a Mac's Option types (£, ∆, π): those are the field's.
+      if (MAC && (e.target as HTMLElement).closest?.("textarea:not(.typing-field), input, [contenteditable]")) return;
       // The browser has uses for some of these (Alt+1 is its first tab on Linux).
       e.preventDefault();
       const { sessions, queue } = useApp.getState();
       const to = chordTarget(pressed, {
         sessions: sessions.map((s) => s.id),
         needs: queue.map((q) => q.session),
-        open: last.current.open,
-        last: last.current.before,
+        open: seen.current.open,
+        recent: seen.current.recent,
       });
       if (to === "home") location.hash = "#/";
+      // Stepping through sessions is one place in the browser's history, not a trail.
+      else if (to && seen.current.open !== null) location.replace(`#/s/${to.session}`);
       else if (to) location.hash = `#/s/${to.session}`;
     };
     window.addEventListener("keydown", onKey, true);
@@ -115,7 +123,7 @@ export function App() {
           <Inbox beside={openId} />
           <div className="split-pane">
             {at.page === "session" && <SessionView id={at.id} />}
-            {at.page === "review" && <ReviewView id={at.id} />}
+            {at.page === "review" && <ReviewView key={at.id} id={at.id} />}
             {at.page === "inbox" && (
               <div className="split-empty">
                 <div className="split-empty-title">No session open</div>
