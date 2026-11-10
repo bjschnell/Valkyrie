@@ -263,7 +263,13 @@ impl Settings {
         let _ = std::fs::create_dir_all(dir);
         // Whole or not at all: a new file renamed over the old.
         let new = dir.join(".settings.toml.new");
-        if std::fs::write(&new, kept.to_toml()).is_ok() {
+        let mut text = kept.to_toml();
+        let others = others(&std::fs::read_to_string(path).unwrap_or_default());
+        if !others.is_empty() {
+            text.push_str("# Not the TUI's: kept as they were.\n");
+            text.push_str(&others);
+        }
+        if std::fs::write(&new, text).is_ok() {
             let _ = std::fs::rename(&new, path);
         }
     }
@@ -503,6 +509,35 @@ fn step<'a, T>(all: &'a [T], current: &str, by: isize, name_of: impl Fn(&T) -> &
     &all[(i as isize + by).rem_euclid(all.len() as isize) as usize]
 }
 
+/// The keys `to_toml` writes, or drops when they're back on their defaults.
+const OURS: [&str; 10] = [
+    "theme",
+    "session_colors",
+    "tabs",
+    "tab_side",
+    "tab_detail",
+    "hints",
+    "sound",
+    "desktop",
+    "context",
+    "updates",
+];
+
+/// The `key = value` lines of `text` the TUI doesn't own (`max_running`, a
+/// hand-added key), as they were: a save rewrites only its own (#136).
+fn others(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let line = line.split('#').next().unwrap_or("");
+            line.split_once('=').is_some_and(|(key, _)| {
+                let key = key.trim();
+                !OURS.contains(&key) && !key.starts_with("keys.")
+            })
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,7 +620,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("settings.toml");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&file, "theme = 'dracula'\ntabs = \"cards\"\n").unwrap();
+        std::fs::write(
+            &file,
+            "theme = 'dracula'\ntabs = \"cards\"\nmax_running = 5  # mine\nkeys.home = \"alt+#\"\n",
+        )
+        .unwrap();
         // Started with VALK_THEME=cyberpunk, then muted: only sound is saved.
         let mut running = Settings::kept(&file);
         running.set("theme", "cyberpunk");
@@ -595,6 +634,19 @@ mod tests {
         assert_eq!(kept.theme.name, "dracula");
         assert_eq!(kept.tabs, TabStyle::Cards);
         assert!(!kept.sound);
+        // A key the TUI doesn't know survives the save, once (#136).
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            text.matches("max_running = 5  # mine\n").count(),
+            1,
+            "{text}"
+        );
+        // A keymap reset to its default isn't brought back from the old file.
+        running.keys = crate::keys::Keymap::default();
+        running.save_keys(&file);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("keys.home"), "{text}");
+        assert_eq!(text.matches("max_running = 5").count(), 1, "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
