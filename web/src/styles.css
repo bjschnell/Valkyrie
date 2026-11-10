@@ -245,6 +245,63 @@ code {
   }
 }
 
+/* Wide screens: the session list beside the open session ------------------ */
+
+.split {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  height: var(--app-height, 100dvh);
+}
+
+.split > .page {
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.split-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.split-pane > .page.session {
+  height: 100%;
+}
+
+/* The list's header says whether you're connected. */
+.split-pane .topbar .pill {
+  display: none;
+}
+
+.split-empty {
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  height: 100%;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.split-empty-title {
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.split-empty kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: 12px var(--mono);
+}
+
+.row.current {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 /* Inbox ---------------------------------------------------------------- */
 
 .inbox {

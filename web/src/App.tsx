@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Backlog, ItemEditor } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
 import { Inbox } from "./components/Inbox";
@@ -7,9 +7,14 @@ import { Outdated } from "./components/Outdated";
 import { Pair } from "./components/Pair";
 import { ReviewView } from "./components/Review";
 import { SessionView } from "./components/SessionView";
+import { MAC, useDesktop, useWide } from "./components/Terminal";
+import { chord, chordTarget } from "./lib/chords";
 import { Settings } from "./components/Settings";
 import { Toast } from "./components/Toast";
 import { close, connect, open, useApp } from "./store";
+
+/** Alt on most keyboards, Option on a Mac's. */
+const ALT = MAC ? "Option" : "Alt";
 
 type Route =
   | { page: "inbox" }
@@ -60,8 +65,72 @@ export function App() {
     else void open(openId);
   }, [openId]);
 
+  // On a desktop keyboard the TUI's Alt chords move between sessions, from
+  // anywhere: the terminal leaves them alone even while it has the keyboard.
+  const desktop = useDesktop();
+  const last = useRef<{ open: number | null; before: number | null }>({ open: null, before: null });
+  if (last.current.open !== openId) last.current = { open: openId, before: last.current.open ?? last.current.before };
+  const paired = !!token && status !== "unpaired" && status !== "outdated";
+  useEffect(() => {
+    if (!desktop || !paired) return;
+    const onKey = (e: KeyboardEvent) => {
+      const pressed = chord(
+        {
+          key: e.key,
+          code: e.code,
+          ctrlKey: e.ctrlKey,
+          altKey: e.altKey,
+          shiftKey: e.shiftKey,
+          metaKey: e.metaKey,
+          altGraph: e.getModifierState("AltGraph"),
+        },
+        MAC,
+      );
+      if (!pressed) return;
+      // The browser has uses for some of these (Alt+1 is its first tab on Linux).
+      e.preventDefault();
+      const { sessions, queue } = useApp.getState();
+      const to = chordTarget(pressed, {
+        sessions: sessions.map((s) => s.id),
+        needs: queue.map((q) => q.session),
+        open: last.current.open,
+        last: last.current.before,
+      });
+      if (to === "home") location.hash = "#/";
+      else if (to) location.hash = `#/s/${to.session}`;
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [desktop, paired]);
+
+  // With the room for it, the session list stays beside the open session.
+  const wide = useWide();
+
   if (!token || status === "unpaired") return <Pair />;
   if (status === "outdated") return <Outdated />;
+  if (wide && (at.page === "inbox" || at.page === "session" || at.page === "review")) {
+    return (
+      <>
+        <div className="split">
+          <Inbox beside={openId} />
+          <div className="split-pane">
+            {at.page === "session" && <SessionView id={at.id} />}
+            {at.page === "review" && <ReviewView id={at.id} />}
+            {at.page === "inbox" && (
+              <div className="split-empty">
+                <div className="split-empty-title">No session open</div>
+                <div>
+                  Pick one from the list. <kbd>{ALT}</kbd>+<kbd>J</kbd> and <kbd>{ALT}</kbd>+<kbd>K</kbd> step through
+                  them, <kbd>{ALT}</kbd>+<kbd>N</kbd> goes to whoever needs you.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        <Toast />
+      </>
+    );
+  }
   return (
     <>
       {at.page === "inbox" && <Inbox />}

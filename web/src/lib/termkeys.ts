@@ -81,14 +81,14 @@ const CTRL: Record<string, number> = {
  * Option turned a letter into on a Mac. A Latin layout's letter is the key's own,
  * wherever it sits (Ctrl+C on Dvorak is the key marked C).
  */
-function byPosition(e: KeyLike): string | null {
+export function byPosition(e: KeyLike): string | null {
   const letter = /^Key([A-Z])$/.exec(e.code);
   if (letter) return e.shiftKey ? letter[1] : letter[1].toLowerCase();
   const digit = /^Digit([0-9])$/.exec(e.code);
   return digit && !e.shiftKey ? digit[1] : null;
 }
 
-const isAscii = (ch: string) => ch.length === 1 && ch.charCodeAt(0) < 0x80;
+export const isAscii = (ch: string) => ch.length === 1 && ch.charCodeAt(0) < 0x80;
 
 /**
  * What a key press sends, or `null` for one the browser or the system keeps (a

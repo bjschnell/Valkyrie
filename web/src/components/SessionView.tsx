@@ -58,9 +58,10 @@ export function SessionView({ id }: { id: number }) {
   const [typing, setTyping] = useState(false);
   const live = !exited && info?.exited == null;
   const keyboard = typing && mode === "terminal" && live && desktop;
-  // Another session, the chat, a window gone narrow or a program gone: it starts
-  // again with a click, never by itself.
-  useEffect(() => setTyping(false), [id, mode, desktop, live]);
+  // The chat, a window gone narrow or a program gone: it starts again with a
+  // click, never by itself. It does follow you to another session's terminal
+  // (Alt-J), where a click on the list has already given it back.
+  useEffect(() => setTyping(false), [mode, desktop, live]);
 
   const choose = (next: Mode) => {
     try {
