@@ -231,22 +231,22 @@ async fn known_host(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-        .or_else(|| req.uri().authority().map(|a| a.to_string()));
-    // No Host at all is no browser; the token still has to match.
-    let Some(host) = host else {
-        return next.run(req).await;
+    // A Host that isn't text is refused below; none at all is no browser (the
+    // token still has to match).
+    let host = match req.headers().get(header::HOST) {
+        Some(v) => v.to_str().unwrap_or("").to_owned(),
+        None => match req.uri().authority() {
+            Some(a) => a.to_string(),
+            None => return next.run(req).await,
+        },
     };
     if !app.hosts.known(&host) && app.hosts.recheck_due() {
-        let url = tokio::task::spawn_blocking(|| tailscale::tailnet().map(|t| t.url))
-            .await
-            .ok()
-            .flatten();
-        app.hosts.set_tailnet(url.as_deref());
+        // A wedged tailscaled mustn't hold the request; the lookup's thread is
+        // left to finish on its own.
+        let lookup = tokio::task::spawn_blocking(|| tailscale::tailnet().map(|t| t.url));
+        if let Ok(Ok(url)) = tokio::time::timeout(Duration::from_secs(3), lookup).await {
+            app.hosts.set_tailnet(url.as_deref());
+        }
     }
     if app.hosts.known(&host) {
         return next.run(req).await;
@@ -990,6 +990,8 @@ mod tests {
         assert_eq!(status(addr, &format!("127.0.0.1:{port}"), "").await, 200);
         assert_eq!(status(addr, &format!("localhost:{port}"), "").await, 200);
         assert_eq!(status(addr, &format!("[::1]:{port}"), "").await, 200);
+        // A Host that isn't text fails closed.
+        assert_eq!(status(addr, "\u{e9}vil.example", "").await, 421);
     }
 
     #[test]
