@@ -14,6 +14,7 @@ import {
 } from "react";
 import { program, type Cursor, type Modes, type Row, type ScrollAnchor } from "../proto";
 import { pathBytes } from "../lib/keys";
+import { cellAt, mouseBytes, wantsMouse, type MouseAction } from "../lib/mouse";
 import { cssStyle, reflow, rowRuns, textWidth, type Run } from "../lib/screen";
 import { chord as shellChord } from "../lib/chords";
 import { copiedRows, copiedText, type CopiedRow, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes } from "../lib/termkeys";
@@ -88,6 +89,10 @@ export function ScreenView({
   const want = useRef<ScrollAnchor | null>(null);
   const asked = useRef(0);
   const wheel = useRef(0);
+  // The program's mouse: the button held down and the cell it was last reported
+  // at, and the cell a plain move was last reported at.
+  const held = useRef<{ button: number; x: number; y: number } | null>(null);
+  const over = useRef<{ x: number; y: number } | null>(null);
 
   const toLive = () => {
     asked.current++;
@@ -316,13 +321,44 @@ export function ScreenView({
   const rows = back ? back.rows : screen.rows;
   const modes = screen.modes;
 
+  // The program asked for the mouse, and the terminal has the keyboard: clicks,
+  // drags and the wheel over the live grid are the program's. Shift keeps them
+  // the browser's, to select text, as in a terminal.
+  const mouse = keys && view === "grid" && !back && wantsMouse(modes);
+  const cellOf = (e: React.MouseEvent): { x: number; y: number } | null => {
+    if (!pre.current || !probe.current) return null;
+    const css = getComputedStyle(pre.current);
+    const box = pre.current.getBoundingClientRect();
+    return cellAt(
+      e.clientX - box.left - (parseFloat(css.paddingLeft) || 0),
+      e.clientY - box.top - (parseFloat(css.paddingTop) || 0),
+      probe.current.getBoundingClientRect().width / PROBE,
+      parseFloat(css.lineHeight) || 17,
+      screen.cols,
+      screen.rows.length,
+    );
+  };
+  const report = (action: MouseAction, at: { x: number; y: number }, e: React.MouseEvent, button = e.button) => {
+    const data = mouseBytes({ action, button, ...at, alt: e.altKey, ctrl: e.ctrlKey }, modes);
+    if (data) sendBytes(data);
+  };
+
   const onWheel = (e: React.WheelEvent) => {
     const el = ref.current;
     if (!desktop || !el || e.ctrlKey || !e.deltaY) return;
+    const line = parseFloat(getComputedStyle(pre.current ?? el).lineHeight) || 17;
+    if (mouse && !e.shiftKey) {
+      wheel.current += e.deltaMode === 0 ? e.deltaY / line : e.deltaY;
+      const turns = Math.trunc(wheel.current);
+      wheel.current -= turns;
+      // One report a line, as a terminal sends them; a flick isn't a hundred.
+      const at = cellOf(e);
+      for (let i = 0; at && i < Math.min(Math.abs(turns), 10); i++) report(turns < 0 ? "wheel-up" : "wheel-down", at, e);
+      return;
+    }
     // What the pane can scroll itself comes first; past its edge, the history.
     const up = e.deltaY < 0;
     if (up ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return;
-    const line = parseFloat(getComputedStyle(pre.current ?? el).lineHeight) || 17;
     wheel.current += e.deltaMode === 0 ? e.deltaY / line : e.deltaY;
     const lines = Math.trunc(wheel.current);
     if (!lines) return;
@@ -341,11 +377,55 @@ export function ScreenView({
     <div
       ref={ref}
       className={`screen ${view}${keys ? " typing" : ""}`}
-      title={keys ? "Ctrl+Shift+Enter gives the keyboard back" : undefined}
+      title={
+        mouse
+          ? "The program has the mouse: hold Shift to select text. Ctrl+Shift+Enter gives the keyboard back"
+          : keys
+            ? "Ctrl+Shift+Enter gives the keyboard back"
+            : undefined
+      }
       onScroll={onScroll}
       onWheel={onWheel}
       onPointerDown={(e) => {
-        if (desktop && live && e.button === 0 && !typing) onTyping(true);
+        // The click that gives the terminal the keyboard is only that.
+        if (desktop && live && e.button === 0 && !typing) return onTyping(true);
+        if (!mouse || e.shiftKey || e.button > 2 || e.pointerType !== "mouse") return;
+        const at = cellOf(e);
+        if (!at) return;
+        report("press", at, e);
+        held.current = { button: e.button, ...at };
+        // A drag that leaves the pane still ends here.
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (!mouse || e.pointerType !== "mouse") return;
+        const down = held.current;
+        if (!down && (!modes.mouse_motion || e.shiftKey)) return;
+        // One report a cell, not one a pixel.
+        const was = down ?? over.current;
+        const at = cellOf(e);
+        if (!at || (was && was.x === at.x && was.y === at.y)) return;
+        report(down ? "drag" : "move", at, e, down?.button ?? 0);
+        if (down) held.current = { ...down, ...at };
+        else over.current = at;
+      }}
+      onPointerUp={(e) => {
+        const down = held.current;
+        if (!down) return;
+        held.current = null;
+        // Where it came up, or where it was last seen if that can't be told.
+        report("release", cellOf(e) ?? down, e, down.button);
+      }}
+      onPointerCancel={() => {
+        held.current = null;
+      }}
+      // The program's click isn't the start of a selection, and its right
+      // button isn't the browser's menu.
+      onMouseDown={(e) => {
+        if (mouse && !e.shiftKey && e.button <= 2) e.preventDefault();
+      }}
+      onContextMenu={(e) => {
+        if (mouse && !e.shiftKey) e.preventDefault();
       }}
       onMouseUp={() => {
         // The field holds the keyboard for input methods; a selection stays put.
