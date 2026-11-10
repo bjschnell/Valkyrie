@@ -153,7 +153,14 @@ pub enum Local {
 
 /// Asks whatever listens on `addr` to prove it's this user's `valk web`.
 pub async fn check(addr: SocketAddr) -> Result<Local> {
-    check_in(&dir(), addr).await
+    let dir = dir();
+    // The web state directory first, private as `valk web` insists it be: made
+    // as a mere parent of this one it would get the default mode, and a server
+    // set up afterwards would refuse to use it.
+    if let Some(web) = dir.parent() {
+        valkyrie_proto::ensure_private_dir(web)?;
+    }
+    check_in(&dir, addr).await
 }
 
 async fn check_in(dir: &Path, addr: SocketAddr) -> Result<Local> {

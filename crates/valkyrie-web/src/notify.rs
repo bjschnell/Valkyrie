@@ -100,7 +100,7 @@ impl Watch {
     /// The push for a `valk notify`. Always sent, even with the app open: nothing in
     /// the app shows a notice. Its tag is its own, so notices don't replace each
     /// other; asking for you is urgent.
-    fn notice(&self, text: &str, sound: Option<NoticeSound>, now_ms: u64) -> Note {
+    pub fn notice(&self, text: &str, sound: Option<NoticeSound>, now_ms: u64) -> Note {
         Note {
             title: "Valkyrie".into(),
             body: text.into(),
@@ -352,7 +352,9 @@ fn note(item: &QueueItem, badge: usize) -> Note {
 }
 
 /// The last line with words on it, for a notification's body.
-fn last_line(screen: &str) -> Option<String> {
+/// A screen's last line with something on it: what a notification says when
+/// the agent gave nothing better (`Note::from_screen`).
+pub fn last_line(screen: &str) -> Option<String> {
     let line = screen
         .lines()
         .rev()

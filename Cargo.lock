@@ -3776,6 +3776,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "valkyrie-desktop"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
+ "valkyrie-proto",
+ "valkyrie-web",
+]
+
+[[package]]
 name = "valkyrie-proto"
 version = "0.4.0"
 dependencies = [

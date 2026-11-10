@@ -1,0 +1,17 @@
+[package]
+name = "valkyrie-desktop"
+description = "Valkyrie desktop app: the shell around the web app (ADR-0020)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+valkyrie-proto.workspace = true
+valkyrie-web.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Paused time, for the wait on a service that never answers.
+tokio = { workspace = true, features = ["test-util"] }
