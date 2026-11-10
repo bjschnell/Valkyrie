@@ -15,22 +15,31 @@ import {
 import { program, type Cursor, type Modes, type Row, type ScrollAnchor } from "../proto";
 import { pathBytes } from "../lib/keys";
 import { cssStyle, reflow, rowRuns, textWidth, type Run } from "../lib/screen";
+import { chord as shellChord } from "../lib/chords";
 import { copiedRows, copiedText, type CopiedRow, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes } from "../lib/termkeys";
 import { openModes, resizeOpen, scrollback, sendBytes, sendBytesTo, sendFile, toast, useApp } from "../store";
 
 const DESKTOP = "(min-width: 760px) and (pointer: fine)";
 
-/** A screen wide enough for the grid, with a keyboard and a mouse. */
-export function useDesktop(): boolean {
+/** Room for the session list beside a grid of that width. */
+const WIDE = "(min-width: 1120px) and (pointer: fine)";
+
+function useMedia(media: string): boolean {
   return useSyncExternalStore(
     (changed) => {
-      const query = window.matchMedia(DESKTOP);
+      const query = window.matchMedia(media);
       query.addEventListener("change", changed);
       return () => query.removeEventListener("change", changed);
     },
-    () => window.matchMedia(DESKTOP).matches,
+    () => window.matchMedia(media).matches,
   );
 }
+
+/** A screen wide enough for the grid, with a keyboard and a mouse. */
+export const useDesktop = () => useMedia(DESKTOP);
+
+/** A desktop screen wide enough for the session list beside the open session. */
+export const useWide = () => useMedia(WIDE);
 
 /** A page of history on show instead of the live screen. */
 interface Back {
@@ -39,7 +48,7 @@ interface Back {
   rows: Row[];
 }
 
-const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+export const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 /** Agents whose message box takes Esc Enter as a new line. */
 const AGENTS = ["claude", "codex"];
 
@@ -117,7 +126,10 @@ export function ScreenView({
   if (screen && openId !== null) shown.current = { id: openId, modes: screen.modes };
 
   // Another session's history is not this one's.
-  useEffect(() => now.current.toLive(), [openId]);
+  useEffect(() => {
+    now.current.toLive();
+    stick.current = true;
+  }, [openId]);
 
   // Follow new output unless you scrolled up to read.
   const onScroll = () => {
@@ -141,6 +153,7 @@ export function ScreenView({
   }, [screen]);
 
   const keys = typing && live && desktop;
+  const ready = !!screen;
   useEffect(() => {
     if (!keys) return;
     const send = (data: number[] | null) => {
@@ -153,6 +166,23 @@ export function ScreenView({
     const onKey = (e: KeyboardEvent) => {
       // An input method is mid-word: its keys are its own until it commits.
       if (e.isComposing || e.keyCode === 229) return;
+      const pressed = {
+        key: e.key,
+        code: e.code,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+        altGraph: e.getModifierState("AltGraph"),
+      };
+      // Moving between sessions is the app's, here as in the TUI.
+      if (shellChord(pressed, MAC)) return;
+      // The session you moved to hasn't shown its screen: what it asked of its
+      // keys isn't known yet, so nothing is typed blind.
+      if (!ready) {
+        if (!e.metaKey) e.preventDefault();
+        return;
+      }
       const modes = openModes();
       const chord = e.ctrlKey && e.shiftKey && !e.altKey;
       // Ctrl+C is the program's, so copy and paste take Shift, as in a terminal.
@@ -176,19 +206,7 @@ export function ScreenView({
         now.current.scrollLines(e.key === "PageUp" ? -page : page);
         return;
       }
-      const data = encodeKey(
-        {
-          key: e.key,
-          code: e.code,
-          ctrlKey: e.ctrlKey,
-          altKey: e.altKey,
-          shiftKey: e.shiftKey,
-          metaKey: e.metaKey,
-          altGraph: e.getModifierState("AltGraph"),
-        },
-        modes,
-        { mac: MAC, agent: now.current.agent },
-      );
+      const data = encodeKey(pressed, modes, { mac: MAC, agent: now.current.agent });
       if (!data) {
         // A dead key or an input method starting: what it types lands in the field.
         if (!e.metaKey && !e.ctrlKey) focusField();
@@ -203,6 +221,8 @@ export function ScreenView({
       const clip = e.clipboardData;
       if (!clip) return;
       e.preventDefault();
+      // Without the modes a paste would go in unmarked and run line by line.
+      if (!ready) return;
       const modes = openModes();
       if (clip.files.length) {
         // A screenshot or a copied file goes up, and its path is pasted.
@@ -219,7 +239,9 @@ export function ScreenView({
     };
 
     // Focus is this session's to hear about, even if another is open by the time
-    // the keyboard is given back.
+    // the keyboard is given back. The keyboard can follow you to another session
+    // (Alt-J): the one you left hears it lose focus, the next hears it gain it
+    // once its screen, and so what it asked for, is here.
     const session = useApp.getState().openId;
     const report = (focused: boolean) => {
       if (session === null) return;
@@ -240,7 +262,7 @@ export function ScreenView({
     window.addEventListener("focus", onFocus);
     window.addEventListener("blur", onBlur);
     document.addEventListener("pointerdown", onPointer, true);
-    report(true);
+    if (ready) report(true);
     focusField();
     return () => {
       window.removeEventListener("keydown", onKey, true);
@@ -248,10 +270,11 @@ export function ScreenView({
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("blur", onBlur);
       document.removeEventListener("pointerdown", onPointer, true);
-      report(false);
+      // A session whose screen hadn't come was never told it had the keyboard.
+      if (ready) report(false);
       field.current?.blur();
     };
-  }, [keys, ref, onTyping]);
+  }, [keys, ref, onTyping, openId, ready]);
 
   // While you type in it, the session is as big as the pane, like any terminal.
   const fit = keys && view === "grid" && !!screen;

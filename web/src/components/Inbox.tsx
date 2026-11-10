@@ -24,7 +24,7 @@ const go = (id: number) => {
 };
 
 /** Home: who needs you, with the answers right on the card, then every session. */
-export function Inbox() {
+export function Inbox({ beside }: { beside?: number | null } = {}) {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
   const openItems = useApp(
@@ -45,6 +45,8 @@ export function Inbox() {
   // changes, b opens the backlog, d the decisions, `,` opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Beside an open session, the keys are that session's.
+      if (beside != null) return;
       if (
         (e.target as HTMLElement).closest("textarea, input") ||
         e.ctrlKey ||
@@ -168,6 +170,7 @@ export function Inbox() {
                 s={s}
                 n={i + 1}
                 picked={sel === queue.length + i}
+                current={beside === s.id}
                 swiped={swiped === s.id}
                 onSwipe={(open) =>
                   setSwiped((was) => (open ? s.id : was === s.id ? null : was))
@@ -384,12 +387,15 @@ function SessionRow({
   s,
   n,
   picked,
+  current,
   swiped,
   onSwipe,
 }: {
   s: SessionInfo;
   n: number;
   picked: boolean;
+  /** Open in the pane beside the list. */
+  current: boolean;
   swiped: boolean;
   onSwipe: (open: boolean) => void;
 }) {
@@ -431,7 +437,8 @@ function SessionRow({
         {state === "exited" ? "Remove" : "Close"}
       </button>
       <button
-        className={`row ${queued ? "queued" : ""} ${picked ? "picked" : ""} ${drag !== null ? "dragging" : ""}`}
+        aria-current={current || undefined}
+        className={`row ${queued ? "queued" : ""} ${picked ? "picked" : ""} ${current ? "current" : ""} ${drag !== null ? "dragging" : ""}`}
         style={x ? { transform: `translateX(${x}px)` } : undefined}
         onPointerDown={(e) => {
           swallow.current = false;
