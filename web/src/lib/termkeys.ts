@@ -188,6 +188,31 @@ export function copiedText(selected: string): string {
     .replace(/\n+$/, "");
 }
 
+/** One row of a selection off the grid. */
+export interface CopiedRow {
+  /** The selected part of the row. */
+  text: string;
+  /** The program wrapped this row onto the next: they are one line. */
+  wrapped: boolean;
+  /** Blank cells between the row's last character and the right edge. */
+  missing: number;
+}
+
+/**
+ * Text selected off the grid, row by row: a row the program soft-wrapped runs
+ * into the next with no line break and keeps its blanks (`hello ` + `world`),
+ * as the TUI copies it.
+ */
+export function copiedRows(rows: CopiedRow[]): string {
+  let out = "";
+  rows.forEach((row, i) => {
+    const last = i === rows.length - 1;
+    if (row.wrapped && !last) out += row.text + " ".repeat(Math.max(0, row.missing));
+    else out += row.text.trimEnd() + (last ? "" : "\n");
+  });
+  return out.replace(/\n+$/, "");
+}
+
 /** The grid that fits a pane of `width` by `height` pixels, in cells of `cw` by `ch`. */
 export function fitSize(width: number, height: number, cw: number, ch: number): { cols: number; rows: number } | null {
   if (!(cw > 0) || !(ch > 0)) return null;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Modes } from "../proto";
-import { copiedText, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes, type KeyLike } from "./termkeys";
+import { copiedRows, copiedText, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes, type KeyLike } from "./termkeys";
 
 const text = (bytes: number[] | null) => (bytes === null ? null : new TextDecoder().decode(new Uint8Array(bytes)));
 const modes = (m: Partial<Modes> = {}): Modes => ({ app_cursor: false, bracketed_paste: false, alt_screen: false, ...m });
@@ -157,6 +157,24 @@ describe("wheelBytes", () => {
 describe("copiedText", () => {
   it("drops the padding at the end of rows and the blank rows after", () => {
     expect(copiedText("ls   \n  a  b   \n   \n")).toBe("ls\n  a  b");
+  });
+});
+
+describe("copiedRows", () => {
+  const row = (text: string, wrapped = false, missing = 0) => ({ text, wrapped, missing });
+
+  it("joins a row the program wrapped to the next, blanks kept", () => {
+    expect(copiedRows([row("echo hello", true, 1), row("world   "), row("$ ")])).toBe("echo hello world\n$");
+    expect(copiedRows([row("aaaa", true), row("bbbb", true), row("cc")])).toBe("aaaabbbbcc");
+  });
+
+  it("breaks the line after any other row", () => {
+    expect(copiedRows([row("ls   "), row(" "), row("a  b  ")])).toBe("ls\n\na  b");
+  });
+
+  it("ends at the selection, on a wrapped row too", () => {
+    expect(copiedRows([row("tail", true, 3)])).toBe("tail");
+    expect(copiedRows([row("a"), row(" "), row("")])).toBe("a");
   });
 });
 
