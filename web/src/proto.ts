@@ -209,6 +209,13 @@ export interface Modes {
   focus_events?: boolean;
   /** 1007: the wheel scrolls by sending arrow keys in the alternate screen. */
   alt_scroll?: boolean;
+  /** The program asked for the mouse: clicks (1000), drags too (1002), every move (1003). */
+  mouse_click?: boolean;
+  mouse_drag?: boolean;
+  mouse_motion?: boolean;
+  /** How it wants reports written: 1006 (SGR) or 1005 (UTF-8); neither is the old X10 form. */
+  mouse_sgr?: boolean;
+  mouse_utf8?: boolean;
 }
 
 /** Where a `scrollback` page starts: lines above the live screen, or a line

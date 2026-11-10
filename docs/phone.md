@@ -49,6 +49,8 @@ key goes to the program, the session is sized to the window, and the wheel
 scrolls back through its history. Ctrl+C is the program's, so copy and paste are
 Ctrl+Shift+C and Ctrl+Shift+V (Cmd+C and Cmd+V on a Mac). Click anywhere else,
 or press Ctrl+Shift+Enter, to get the keyboard back.
+A program that uses the mouse (vim, htop, lazygit) gets your clicks, drags and
+wheel there too; hold Shift to select text instead.
 
 On a wide screen the session list stays beside the open session. The Alt keys
 from the terminal app move between sessions: `Alt-j` and `Alt-k` step through
