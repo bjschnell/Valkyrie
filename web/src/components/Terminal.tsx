@@ -14,8 +14,8 @@ import {
 } from "react";
 import { program, type Cursor, type Modes, type Row, type ScrollAnchor } from "../proto";
 import { pathBytes } from "../lib/keys";
-import { cssStyle, reflow, rowRuns, type Run } from "../lib/screen";
-import { copiedText, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes } from "../lib/termkeys";
+import { cssStyle, reflow, rowRuns, textWidth, type Run } from "../lib/screen";
+import { copiedRows, copiedText, type CopiedRow, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes } from "../lib/termkeys";
 import { openModes, resizeOpen, scrollback, sendBytes, sendBytesTo, sendFile, toast, useApp } from "../store";
 
 const DESKTOP = "(min-width: 760px) and (pointer: fine)";
@@ -110,8 +110,8 @@ export function ScreenView({
     void fetchBack(next);
   };
   // The handlers below are set up once per focus; they reach the latest of these.
-  const now = useRef({ back, toLive, scrollLines, agent, rows: screen?.rows.length ?? 0 });
-  now.current = { back, toLive, scrollLines, agent, rows: screen?.rows.length ?? 0 };
+  const now = useRef({ back, toLive, scrollLines, agent, rows: screen?.rows.length ?? 0, cols: screen?.cols ?? 0 });
+  now.current = { back, toLive, scrollLines, agent, rows: screen?.rows.length ?? 0, cols: screen?.cols ?? 0 };
   // The session on show and its modes, for what's owed to it once another is open.
   const shown = useRef<{ id: number; modes: Modes } | null>(null);
   if (screen && openId !== null) shown.current = { id: openId, modes: screen.modes };
@@ -158,7 +158,7 @@ export function ScreenView({
       // Ctrl+C is the program's, so copy and paste take Shift, as in a terminal.
       if (chord && e.code === "KeyC") {
         e.preventDefault();
-        copySelection();
+        copySelection(now.current.cols);
         return;
       }
       if ((chord || e.metaKey) && e.code === "KeyV") return;
@@ -329,9 +329,9 @@ export function ScreenView({
         if (keys && getSelection()?.isCollapsed) field.current?.focus({ preventScroll: true });
       }}
       onCopy={(e) => {
-        const selected = view === "grid" ? getSelection()?.toString() : "";
-        if (!selected) return;
-        e.clipboardData.setData("text/plain", copiedText(selected));
+        const text = view === "grid" ? selectedText(screen.cols) : "";
+        if (!text) return;
+        e.clipboardData.setData("text/plain", text);
         e.preventDefault();
       }}
     >
@@ -367,9 +367,9 @@ function cell(at: Cursor): React.CSSProperties {
   return { left: `calc(var(--screen-pad) + ${at.x}ch)`, top: `calc(var(--screen-pad) + ${at.y} * var(--screen-line))` };
 }
 
-function Line({ runs }: { runs: Run[] }) {
+function Line({ runs, wrapped }: { runs: Run[]; wrapped?: boolean }) {
   return (
-    <div className="line">
+    <div className="line" data-wrapped={wrapped || undefined}>
       {runs.length === 0
         ? " "
         : runs.map((r, j) => (
@@ -383,7 +383,7 @@ function Line({ runs }: { runs: Run[] }) {
 
 /** A grid row. An update replaces only the rows it changed, so the rest don't render again. */
 const GridLine = memo(function GridLine({ row }: { row: Row }) {
-  return <Line runs={rowRuns(row)} />;
+  return <Line runs={rowRuns(row)} wrapped={row.wrapped} />;
 });
 
 /**
@@ -440,10 +440,37 @@ function TypingField({
 }
 
 /** Copies what's selected, by the clipboard API or, on a plain-http page, the old command. */
-function copySelection(): void {
-  const selected = getSelection()?.toString();
-  if (!selected) return;
-  const text = copiedText(selected);
+function copySelection(cols: number): void {
+  const text = selectedText(cols);
+  if (!text) return;
   if (navigator.clipboard) void navigator.clipboard.writeText(text).catch(() => document.execCommand("copy"));
   else document.execCommand("copy");
+}
+
+/**
+ * The selection as a terminal copies it. The browser's own text has a line break
+ * after every row; read row by row, a row the program wrapped joins the next.
+ */
+function selectedText(cols: number): string {
+  const selection = getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return "";
+  const range = selection.getRangeAt(0);
+  const rows: CopiedRow[] = [];
+  const lines = document.querySelectorAll<HTMLElement>(".screen.grid .line");
+  for (const line of lines) {
+    if (!range.intersectsNode(line)) continue;
+    const part = document.createRange();
+    part.selectNodeContents(line);
+    if (range.compareBoundaryPoints(Range.START_TO_START, part) > 0) part.setStart(range.startContainer, range.startOffset);
+    if (range.compareBoundaryPoints(Range.END_TO_END, part) < 0) part.setEnd(range.endContainer, range.endOffset);
+    // A selection that only touches a row's edge takes nothing from it.
+    if (part.collapsed) continue;
+    rows.push({
+      text: part.toString(),
+      wrapped: line.dataset.wrapped !== undefined,
+      missing: cols - textWidth(line.textContent ?? ""),
+    });
+  }
+  // Not the grid's rows (the selection is somewhere else on the page): as the browser has it.
+  return rows.length ? copiedRows(rows) : copiedText(selection.toString());
 }
