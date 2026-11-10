@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use valkyrie_proto::codec::{read_frame, write_frame};
 use valkyrie_proto::ipc::{Listener, Stream};
@@ -152,6 +152,8 @@ struct Registry {
     stale_check: tokio::sync::Mutex<()>,
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
+    /// Toasts raised with `valk notify`, for the clients watching notices.
+    notices: broadcast::Sender<Arc<ServerMsg>>,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     /// Replies to stops short of shipping, for `habit` to learn from.
     answers: mpsc::UnboundedSender<(SessionId, session::Answered)>,
@@ -539,6 +541,7 @@ fn new_registry(
             "orders",
         ))),
         launches: watch::Sender::new(Arc::default()),
+        notices: broadcast::channel(16).0,
         dispatch: Mutex::new(dispatch::Book::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -1035,6 +1038,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // Every pane of the attached tab; one session for a tab that isn't split.
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut queue_watch: Option<JoinHandle<()>> = None;
+    let mut notice_watch: Option<JoinHandle<()>> = None;
     // Hidden sessions this connection spawned: nobody else can find them, so they
     // go with it.
     let mut owned_hidden: Vec<SessionId> = Vec::new();
@@ -1178,6 +1182,17 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 }
                 continue;
             }
+            ClientMsg::WatchNotices { req } => {
+                reply(&out, req, Ok(Reply::Done)).await;
+                if notice_watch.is_none() {
+                    notice_watch = Some(tokio::spawn(forward_notices(
+                        registry.notices.subscribe(),
+                        out.clone(),
+                    )));
+                }
+                continue;
+            }
+            ClientMsg::Notify { req, text, sound } => (req, registry.notify(&text, sound)),
             ClientMsg::Decide { req, decision } => (req, registry.decide(decision, peer)),
             ClientMsg::Review {
                 req,
@@ -1435,6 +1450,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     if let Some(task) = queue_watch {
         task.abort();
     }
+    if let Some(task) = notice_watch {
+        task.abort();
+    }
     registry.clients.lock().unwrap().remove(&conn);
     writer.abort();
     ended
@@ -1634,6 +1652,45 @@ async fn forward_queue(
         };
         if !send(msg).await {
             return;
+        }
+    }
+}
+
+/// The longest toast `valk notify` raises, in characters.
+const NOTICE_MAX: usize = 200;
+
+impl Registry {
+    /// Raises a toast on every watching client. Control characters become spaces,
+    /// since the text reaches terminals and desktop notifications.
+    fn notify(&self, text: &str, sound: Option<valkyrie_proto::NoticeSound>) -> Result<Reply> {
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(NOTICE_MAX)
+            .collect();
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "nothing to notify");
+        let msg = Arc::new(ServerMsg::Notice {
+            text: text.to_owned(),
+            sound,
+        });
+        // No receivers is an error to `send`, and what the sender needs to know.
+        let watchers = self.notices.send(msg).map_or(0, |n| n as u32);
+        Ok(Reply::Notified { watchers })
+    }
+}
+
+/// Pushes each toast to one connection. A client too slow to take them misses some.
+async fn forward_notices(mut rx: broadcast::Receiver<Arc<ServerMsg>>, out: Out) {
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                if out.send(msg).await.is_err() {
+                    return;
+                }
+            }
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => return,
         }
     }
 }

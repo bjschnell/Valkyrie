@@ -2,8 +2,8 @@
 
 use crate::codec::{read_frame, write_frame};
 use crate::{
-    ClientBuild, ClientMsg, ConnectedClient, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size,
-    SpawnSpec, TermColors,
+    ClientBuild, ClientMsg, ConnectedClient, NoticeSound, Reply, ReqId, ServerMsg, SessionId,
+    SessionInfo, Size, SpawnSpec, TermColors,
 };
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
@@ -355,6 +355,25 @@ impl Client {
         self.request(|req| ClientMsg::WatchQueue { req })
             .await
             .map(drop)
+    }
+
+    /// Start receiving `Notice` pushes.
+    pub async fn watch_notices(&self) -> Result<()> {
+        self.request(|req| ClientMsg::WatchNotices { req })
+            .await
+            .map(drop)
+    }
+
+    /// Raises `text` as a toast on every client watching notices; how many it reached.
+    pub async fn notify(&self, text: &str, sound: Option<NoticeSound>) -> Result<u32> {
+        let text = text.to_owned();
+        match self
+            .request(|req| ClientMsg::Notify { req, text, sound })
+            .await?
+        {
+            Reply::Notified { watchers } => Ok(watchers),
+            other => bail!("unexpected reply: {other:?}"),
+        }
     }
 
     pub async fn move_session(&self, session: SessionId, to: usize) -> Result<()> {

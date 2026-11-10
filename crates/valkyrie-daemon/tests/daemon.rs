@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
-use valkyrie_proto::{ScreenUpdate, ServerMsg, Size, SpawnSpec};
+use valkyrie_proto::{NoticeSound, ScreenUpdate, ServerMsg, Size, SpawnSpec};
 
 /// A per-test temp dir, removed when the test ends so runs don't pile up in /tmp.
 struct TempDir(PathBuf);
@@ -507,6 +507,42 @@ async fn attaching_marks_a_finished_turn_seen_but_not_an_open_question() {
     assert!(s.seen);
     assert!(valkyrie_agents::queued(s));
     client.kill(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_notify_reaches_the_clients_watching_notices_and_counts_them() {
+    let (client, _pushes, dir) = start().await;
+    // Nobody watching: the sender hears so, to deliver it itself.
+    assert_eq!(client.notify("deploy done", None).await.unwrap(), 0);
+
+    // A queue watcher alone (the web server's kind) isn't a notice watcher.
+    let (web, mut web_pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
+    web.watch_queue().await.unwrap();
+    assert_eq!(client.notify("still nobody", None).await.unwrap(), 0);
+
+    let (tui, mut tui_pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
+    tui.watch_notices().await.unwrap();
+    let sent = client
+        .notify("  deploy\x1b[2J done\n ", Some(NoticeSound::Request))
+        .await
+        .unwrap();
+    assert_eq!(sent, 1);
+    let notice = loop {
+        match tokio::time::timeout(Duration::from_secs(5), tui_pushes.recv()).await {
+            Ok(Some(ServerMsg::Notice { text, sound })) => break (text, sound),
+            Ok(Some(_)) => continue,
+            other => panic!("no notice: {other:?}"),
+        }
+    };
+    // Control characters are gone, so a toast can't carry an escape sequence.
+    assert_eq!(
+        notice,
+        ("deploy [2J done".to_string(), Some(NoticeSound::Request))
+    );
+    while let Ok(msg) = web_pushes.try_recv() {
+        assert!(!matches!(msg, ServerMsg::Notice { .. }), "{msg:?}");
+    }
+    assert!(client.notify("  \n ", None).await.is_err());
 }
 
 #[tokio::test]

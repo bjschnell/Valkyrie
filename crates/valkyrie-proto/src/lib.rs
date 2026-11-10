@@ -30,7 +30,16 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 29;
+pub const PROTOCOL: u32 = 30;
+
+/// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
+/// something that needs you, `done` for something that finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSound {
+    Request,
+    Done,
+}
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -204,7 +213,7 @@ pub struct SessionInfo {
     pub chat: Option<PathBuf>,
     /// One line when another live agent in the same repository has changed the
     /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
-    /// 29). Shown beside the state, which it never changes.
+    /// 30). Shown beside the state, which it never changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
 }
@@ -318,6 +327,20 @@ pub enum ClientMsg {
     /// Subscribe this connection to `Queue` pushes, starting with the current queue.
     WatchQueue {
         req: ReqId,
+    },
+    /// Subscribe this connection to `Notice` pushes (protocol 29). For clients that
+    /// show them to someone: a `Notify` counts the connections that did this.
+    WatchNotices {
+        req: ReqId,
+    },
+    /// Raise a toast and a ping on every client watching notices (`valk notify`,
+    /// protocol 29). `sound` is `request` or `done`, else the toast is silent.
+    /// Anyone may send one, agents included. Replies `Notified`.
+    Notify {
+        req: ReqId,
+        text: String,
+        #[serde(default)]
+        sound: Option<NoticeSound>,
     },
     /// Mark a session's current state seen (DESIGN §14.4). Ignored if the session has
     /// moved past `seq` since the client looked.
@@ -578,6 +601,11 @@ pub enum ServerMsg {
         session: SessionId,
         code: Option<i32>,
     },
+    /// A toast someone raised on purpose with `Notify` (protocol 29).
+    Notice {
+        text: String,
+        sound: Option<NoticeSound>,
+    },
     /// The whole ranked queue, pushed whenever it changes.
     Queue {
         items: Vec<QueueItem>,
@@ -655,6 +683,11 @@ pub enum Reply {
     },
     Text {
         text: String,
+    },
+    /// How many connections a `Notify` reached (protocol 29); none means nobody is
+    /// watching, so the sender should deliver it itself.
+    Notified {
+        watchers: u32,
     },
     Decision {
         decision: Box<Decision>,
