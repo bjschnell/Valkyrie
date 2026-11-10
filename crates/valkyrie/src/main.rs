@@ -1,11 +1,14 @@
 mod alias;
 mod bench;
 mod context;
+mod doc;
 mod guard;
 mod hook;
 mod mcp;
+mod pane;
 mod pings;
 mod service;
+mod statusline;
 mod todo;
 mod tools;
 mod update;
@@ -105,6 +108,12 @@ enum Cmd {
     Dump { session: SessionId },
     /// Send input to a session. Understands \r \n \t \e and \xHH escapes.
     Send { session: SessionId, text: String },
+    /// Drive the panes of a tab: split, run, read, wait, close, resize. An agent
+    /// run in a session drives its own tab.
+    Pane {
+        #[command(subcommand)]
+        action: pane::PaneCmd,
+    },
     /// Forward an agent hook event (stdin JSON) to the daemon. Agents run this; it
     /// prints nothing, always exits 0, and does nothing outside a Valkyrie session.
     #[command(hide = true)]
@@ -122,6 +131,13 @@ enum Cmd {
         /// Run from the user's own settings: quiet where the session already has it.
         #[arg(long)]
         ambient: bool,
+    },
+    /// Claude Code's status line, as Valkyrie sets it: tells the daemon how much of
+    /// the plan is used, then runs `--then`, the user's own status line.
+    #[command(hide = true)]
+    Statusline {
+        #[arg(long)]
+        then: Option<String>,
     },
     /// Record a project decision that every agent in this repo gets from now on. Run
     /// by an agent, it is only proposed, for you to accept.
@@ -188,6 +204,10 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<todo::TodoCmd>,
     },
+    /// Docs for you to read: plans, research and reports agents write into the
+    /// docs folder (your Obsidian vault, if you point it there).
+    #[command(subcommand)]
+    Doc(doc::DocCmd),
     /// The worktrees sessions and backlog launches made beside the repository.
     #[command(subcommand)]
     Worktree(worktree::WorktreeCmd),
@@ -247,6 +267,16 @@ enum Cmd {
         #[arg(value_parser = ["on", "off"])]
         mode: Option<String>,
     },
+    /// Raise a toast on every open `valk`, with a sound if you ask for one. With none
+    /// open, it is a desktop notification (and the sound) from this process.
+    Notify {
+        /// What to say.
+        text: String,
+        /// A ping to go with it: `request` for something that needs you, `done` for
+        /// something that finished. Silent without.
+        #[arg(long, value_parser = ["request", "done"])]
+        sound: Option<String>,
+    },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
 }
@@ -261,6 +291,10 @@ enum WebCmd {
     Devices,
     /// Unpair a device by name, or `all`.
     Revoke { name: String },
+    /// Say whether what listens on the address is your own `valk web`: it has to
+    /// read a file only you can. The desktop app checks this before it trusts
+    /// the port. Exits 0 when it is.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -309,8 +343,12 @@ enum SetupCmd {
         #[arg(long, default_value = "127.0.0.1:8790")]
         listen: std::net::SocketAddr,
         /// The address phones open (default: this machine's tailnet name).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "local")]
         url: Option<String>,
+        /// For this machine only, as the desktop app sets it up: no
+        /// `tailscale serve`, and no pairing code.
+        #[arg(long)]
+        local: bool,
         /// The valk binary the service runs (default: this one, by its PATH name).
         #[arg(long)]
         exe: Option<PathBuf>,
@@ -367,6 +405,25 @@ fn main() -> Result<()> {
             hook::drain();
             return Ok(());
         }
+        // Nor may the status line stop drawing the user's own.
+        // Only as the settings run it, and not when asked for help.
+        Err(e)
+            if std::env::args().nth(1).as_deref() == Some("statusline")
+                && !matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            let args: Vec<String> = std::env::args().collect();
+            let then = args
+                .iter()
+                .position(|a| a == "--then")
+                .and_then(|i| args.get(i + 1));
+            statusline::run(
+                &valkyrie_proto::default_socket_path(),
+                then.map(String::as_str),
+            )
+        }
         Err(e) => e.exit(),
     };
     // Hooks report to the daemon that owns VALK_SESSION, which VALK_SOCKET names,
@@ -381,6 +438,12 @@ fn main() -> Result<()> {
     if let Some(Cmd::ContextHook { agent, ambient }) = &cli.cmd {
         context::hook(agent, *ambient);
         return Ok(());
+    }
+    if let Some(Cmd::Statusline { then }) = &cli.cmd {
+        let socket = cli
+            .socket
+            .unwrap_or_else(valkyrie_proto::default_socket_path);
+        statusline::run(&socket, then.as_deref());
     }
     let socket = valkyrie_proto::daemon_socket(cli.socket);
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
@@ -622,6 +685,20 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 println!("unpaired {n} device(s)");
                 Ok(())
             }
+            Some(WebCmd::Check) => {
+                use valkyrie_web::proof::Local;
+                match valkyrie_web::proof::check(listen).await? {
+                    Local::Ours => {
+                        println!("{listen} is your valk web");
+                        Ok(())
+                    }
+                    Local::Stranger => bail!(
+                        "something answers on {listen}, and it isn't your valk web \
+                         (or it's one from before this check: restart it)"
+                    ),
+                    Local::Nothing => bail!("nothing listens on {listen}"),
+                }
+            }
         },
         Some(Cmd::Kill { session }) => connect(&socket).await?.0.kill(session).await,
         Some(Cmd::Rename { session, name }) => {
@@ -637,7 +714,8 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             // Input is fire-and-forget; a round trip guarantees it was flushed before exit.
             client.list().await.map(drop)
         }
-        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. }) => {
+        Some(Cmd::Pane { action }) => pane::run(&connect(&socket).await?.0, action).await,
+        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. } | Cmd::Statusline { .. }) => {
             unreachable!("handled before the runtime starts")
         }
         Some(Cmd::Decide {
@@ -717,6 +795,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => Ok(()),
             }
         }
+        Some(Cmd::Doc(cmd)) => doc::run(&connect(&socket).await?.0, cmd).await,
         Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
         Some(Cmd::Decisions { all, user, action }) => {
             context::decisions(&connect(&socket).await?.0, all, user, action).await
@@ -747,27 +826,44 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         Some(Cmd::Setup(SetupCmd::Web {
             listen,
             url,
+            local,
             exe,
             dry_run,
             remove,
             name,
         })) => {
+            // The desktop app's own call prints no pairing code and changes no
+            // service that's already there, so nobody has to vouch for it. Taking
+            // a service away, or naming the binary one runs, is still the user's.
+            let unasked = local && !remove && (exe.is_none() || dry_run);
             let exe = match exe {
                 Some(exe) => std::path::absolute(exe)?,
                 None => service::default_exe()?,
             };
-            // It ends by printing a pairing code.
-            connect(&socket)
-                .await?
-                .0
-                .vouch("setting up the web app")
-                .await?;
+            if !unasked {
+                connect(&socket)
+                    .await?
+                    .0
+                    .vouch("setting up the web app")
+                    .await?;
+            }
+            let url = if local {
+                // The desktop app keeps its device token under this exact address
+                // (ADR-0020 §3): another spelling would mean pairing again.
+                if listen.ip() != std::net::Ipv4Addr::LOCALHOST {
+                    bail!("--local listens on 127.0.0.1 only, not {}", listen.ip());
+                }
+                Some(format!("http://{listen}"))
+            } else {
+                url
+            };
             service::run(service::Setup {
                 name,
                 exe,
                 socket: std::path::absolute(&socket)?,
                 listen,
                 url,
+                local,
                 dry_run,
                 remove,
             })
@@ -811,6 +907,22 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     "flagged sessions show their flag and offer nothing; no step runs on its own"
                 }
             );
+            Ok(())
+        }
+        Some(Cmd::Notify { text, sound }) => {
+            use valkyrie_proto::NoticeSound;
+            let sound = sound.map(|s| match s.as_str() {
+                "request" => NoticeSound::Request,
+                _ => NoticeSound::Done,
+            });
+            // No daemon, or nobody watching: deliver it here.
+            let watchers = match connect(&socket).await {
+                Ok((client, _)) => client.notify(&text, sound).await?,
+                Err(_) => 0,
+            };
+            if watchers == 0 && !valkyrie_tui::deliver_notice(&text, sound) {
+                bail!("no valk is open and nothing here could show it (is notify-send installed?)");
+            }
             Ok(())
         }
         Some(Cmd::Bench(cmd)) => bench::run(cmd, &socket).await,

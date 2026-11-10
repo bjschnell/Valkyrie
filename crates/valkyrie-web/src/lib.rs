@@ -5,8 +5,10 @@
 
 pub mod auth;
 pub mod chat;
+mod host;
 pub mod notify;
 pub mod places;
+pub mod proof;
 pub mod push;
 pub mod review;
 pub mod tailscale;
@@ -91,6 +93,8 @@ static BUILD: LazyLock<String> = LazyLock::new(|| {
 pub(crate) struct App {
     store: auth::Store,
     socket: PathBuf,
+    /// The address it listens on, which a proof is made for (`proof`).
+    listen: SocketAddr,
     /// Sends Web Push; `None` if the VAPID key couldn't be set up.
     push: Option<push::Sender>,
     /// Connected web apps on screen right now.
@@ -102,6 +106,8 @@ pub(crate) struct App {
     /// The daemon said it is a development one (`Hello::dev`) on the connection the
     /// queue watch holds now; false until it says so, and as soon as that drops.
     dev: AtomicBool,
+    /// The Host names it answers to (`host`).
+    hosts: host::Allowed,
 }
 
 impl App {
@@ -134,13 +140,43 @@ pub fn store() -> Result<auth::Store> {
     auth::Store::open(&valkyrie_proto::state_dir().join("web"))
 }
 
+/// Where the latest `valk web` of this user's wrote down that it listens.
+fn listening_file() -> PathBuf {
+    valkyrie_proto::state_dir().join("web").join("listen")
+}
+
+/// Writes down where this server listens, for a program on this machine that
+/// looks for it (the desktop app). Only a hint: such a program still has the
+/// server prove itself (`proof`), so a stale or wrong one costs nothing.
+fn record_listening(addr: SocketAddr) {
+    if let Err(e) = std::fs::write(listening_file(), addr.to_string()) {
+        tracing::warn!("couldn't record the listen address: {e}");
+    }
+}
+
+/// Where a `valk web` of this user's last said it listens, if one did. It may
+/// have stopped since, or never been this one: ask it for `proof`.
+pub fn listening() -> Option<SocketAddr> {
+    std::fs::read_to_string(listening_file())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 pub async fn run(opts: Options) -> Result<()> {
     let store = store()?;
-    let url = public_url(opts.url, opts.listen);
+    let tailnet = tailscale::tailnet().map(|t| t.url);
+    let hosts = host::Allowed::new(opts.url.as_deref(), tailnet.as_deref());
+    let url = opts
+        .url
+        .or(tailnet)
+        .unwrap_or_else(|| format!("http://{}", opts.listen));
     let listener = tokio::net::TcpListener::bind(opts.listen)
         .await
         .with_context(|| format!("listen on {}", opts.listen))?;
     println!("valk web on http://{}", opts.listen);
+    record_listening(listener.local_addr().unwrap_or(opts.listen));
     if !opts.listen.ip().is_loopback() {
         println!(
             "  listening beyond localhost: anyone who can reach {} can try to pair",
@@ -176,18 +212,32 @@ pub async fn run(opts: Options) -> Result<()> {
     let app = Arc::new(App {
         store,
         socket: opts.socket,
+        listen: listener.local_addr().unwrap_or(opts.listen),
         push,
         visible: AtomicUsize::new(0),
         upgraded: tokio::sync::Notify::new(),
         upgraded_to: std::sync::Mutex::default(),
         dev: AtomicBool::new(false),
+        hosts,
     });
     tokio::spawn(notify::run(app.clone()));
     let watch = app.clone();
-    let router = Router::new()
+    let router = router(app);
+    tokio::select! {
+        served = axum::serve(listener, router) => Ok(served?),
+        _ = watch.upgraded.notified() => {
+            let daemon = watch.upgraded_to.lock().unwrap().take();
+            Err(Upgraded { daemon: daemon.context("upgraded with no Hello")? }.into())
+        }
+    }
+}
+
+fn router(app: Arc<App>) -> Router {
+    Router::new()
         .route("/api/pair", post(pair))
         .route("/api/pair/code", post(new_short_code))
         .route("/api/pair/code/{id}", get(code_state))
+        .route("/api/proof/{id}", get(proof_route))
         .route("/api/push", get(push_key))
         .route("/api/push/subscribe", post(subscribe))
         .route("/api/push/unsubscribe", post(unsubscribe))
@@ -198,14 +248,48 @@ pub async fn run(opts: Options) -> Result<()> {
         .route("/api/upload", post(upload))
         .route("/ws", get(ws))
         .fallback(get(asset))
-        .with_state(app);
-    tokio::select! {
-        served = axum::serve(listener, router) => Ok(served?),
-        _ = watch.upgraded.notified() => {
-            let daemon = watch.upgraded_to.lock().unwrap().take();
-            Err(Upgraded { daemon: daemon.context("upgraded with no Hello")? }.into())
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            known_host,
+        ))
+        .with_state(app)
+}
+
+/// Refuses a request whose Host isn't a name this server is known by (`host`).
+async fn known_host(
+    State(app): State<Arc<App>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // A Host that isn't text is refused below; none at all is no browser (the
+    // token still has to match).
+    let host = match req.headers().get(header::HOST) {
+        Some(v) => v.to_str().unwrap_or("").to_owned(),
+        None => match req.uri().authority() {
+            Some(a) => a.to_string(),
+            None => return next.run(req).await,
+        },
+    };
+    if !app.hosts.known(&host) && app.hosts.recheck_due() {
+        // A wedged tailscaled mustn't hold the request; the lookup's thread is
+        // left to finish on its own.
+        let lookup = tokio::task::spawn_blocking(|| tailscale::tailnet().map(|t| t.url));
+        if let Ok(Ok(url)) = tokio::time::timeout(Duration::from_secs(3), lookup).await {
+            app.hosts.set_tailnet(url.as_deref());
         }
     }
+    if app.hosts.known(&host) {
+        return next.run(req).await;
+    }
+    tracing::warn!(
+        host,
+        "refused a request for a name this server isn't known by"
+    );
+    (
+        StatusCode::MISDIRECTED_REQUEST,
+        "valk web doesn't answer to this name; give its public address with --url",
+    )
+        .into_response()
 }
 
 /// A link that pairs whichever browser opens it, once, with a fresh code.
@@ -284,6 +368,15 @@ async fn pair(State(app): State<Arc<App>>, Json(req): Json<PairRequest>) -> Resp
             Json(serde_json::json!({ "token": token })).into_response()
         }
         Err(e) => (StatusCode::FORBIDDEN, e.to_string()).into_response(),
+    }
+}
+
+/// Proves this is the user's `valk web` to a program that wrote a nonce where only
+/// the user can read (`proof`). No token: the desktop app asks before it pairs.
+async fn proof_route(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    match proof::respond(&proof::dir(), &id, app.listen) {
+        Some(answer) => answer.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -857,11 +950,13 @@ mod tests {
         let app = App {
             store,
             socket: dir.join("d.sock"),
+            listen: "127.0.0.1:8790".parse().unwrap(),
             push: None,
             visible: AtomicUsize::new(0),
             upgraded: tokio::sync::Notify::new(),
             upgraded_to: std::sync::Mutex::default(),
             dev: AtomicBool::new(false),
+            hosts: host::Allowed::new(None, None),
         };
         assert!(
             app.check(auth::DEV_TOKEN).is_none(),
@@ -882,6 +977,62 @@ mod tests {
             "never written as a device"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A served router on a free port, and its address.
+    async fn serve(app: App) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(Arc::new(app))).await });
+        addr
+    }
+
+    fn test_app(name: &str) -> App {
+        let dir = std::env::temp_dir().join(format!("valk-web-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        App {
+            store: auth::Store::open(&dir).unwrap(),
+            socket: dir.join("d.sock"),
+            listen: "127.0.0.1:8790".parse().unwrap(),
+            push: None,
+            visible: AtomicUsize::new(0),
+            upgraded: tokio::sync::Notify::new(),
+            upgraded_to: std::sync::Mutex::default(),
+            dev: AtomicBool::new(false),
+            hosts: host::Allowed::new(None, None),
+        }
+    }
+
+    /// The status line's code for a GET of `/` with these headers.
+    async fn status(addr: SocketAddr, host: &str, extra: &str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n");
+        tcp.write_all(req.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        tcp.read_to_end(&mut out).await.unwrap();
+        let head = String::from_utf8_lossy(&out);
+        head.split(' ').nth(1).unwrap().parse().unwrap()
+    }
+
+    /// DNS rebinding: a page on a name the attacker points at 127.0.0.1 is its
+    /// own origin there, so Origin matching Host proves nothing. Only names this
+    /// server is known by get an answer; an IP address can't be rebound.
+    #[tokio::test]
+    async fn a_rebound_hostname_gets_no_answer() {
+        let addr = serve(test_app("rebind")).await;
+        let port = addr.port();
+        let evil = format!("evil.example:{port}");
+        let origin = format!("Origin: http://{evil}\r\n");
+        assert_eq!(status(addr, &evil, &origin).await, 421);
+        // A proxy can't vouch for it: the browser sets Host itself.
+        let forged = format!("{origin}X-Forwarded-Host: 127.0.0.1:{port}\r\n");
+        assert_eq!(status(addr, &evil, &forged).await, 421);
+        assert_eq!(status(addr, &format!("127.0.0.1:{port}"), "").await, 200);
+        assert_eq!(status(addr, &format!("localhost:{port}"), "").await, 200);
+        assert_eq!(status(addr, &format!("[::1]:{port}"), "").await, 200);
+        // A Host that isn't text fails closed.
+        assert_eq!(status(addr, "\u{e9}vil.example", "").await, 421);
     }
 
     #[test]

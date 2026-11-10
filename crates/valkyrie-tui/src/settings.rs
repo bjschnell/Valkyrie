@@ -86,6 +86,8 @@ pub struct Settings {
     /// it was, so `sound = on` brings it back.
     pub sound: bool,
     pub noise: Noise,
+    /// Toasts also go out as desktop notifications (not over SSH).
+    pub desktop: bool,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
     /// The home screen says when a newer release is out (release builds; GitHub is
@@ -105,6 +107,7 @@ impl PartialEq for Settings {
             self.hints,
             self.sound,
             self.noise,
+            self.desktop,
             self.context,
             self.updates,
             self.keys,
@@ -117,6 +120,7 @@ impl PartialEq for Settings {
             other.hints,
             other.sound,
             other.noise,
+            other.desktop,
             other.context,
             other.updates,
             other.keys,
@@ -140,6 +144,7 @@ impl Default for Settings {
             minimal_tabs: false,
             hints: true,
             sound: true,
+            desktop: true,
             noise: Noise::Chime,
             context: true,
             updates: true,
@@ -158,6 +163,7 @@ pub enum Field {
     TabDetail,
     Hints,
     Sound,
+    Desktop,
     Context,
     Updates,
 }
@@ -171,6 +177,7 @@ impl Field {
         Field::TabDetail,
         Field::Hints,
         Field::Sound,
+        Field::Desktop,
         Field::Context,
         Field::Updates,
     ];
@@ -184,6 +191,7 @@ impl Field {
             Field::TabDetail => "Tab detail",
             Field::Hints => "Key hints",
             Field::Sound => "Sound",
+            Field::Desktop => "Desktop",
             Field::Context => "Context",
             Field::Updates => "Updates",
         }
@@ -203,6 +211,7 @@ impl Settings {
             ("tab_detail", "VALK_TAB_DETAIL"),
             ("hints", "VALK_HINTS"),
             ("sound", "VALK_SOUND"),
+            ("desktop", "VALK_DESKTOP"),
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
         ] {
@@ -236,6 +245,7 @@ impl Settings {
             Field::TabDetail => kept.minimal_tabs = self.minimal_tabs,
             Field::Hints => kept.hints = self.hints,
             Field::Sound => (kept.sound, kept.noise) = (self.sound, self.noise),
+            Field::Desktop => kept.desktop = self.desktop,
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
         });
@@ -253,7 +263,13 @@ impl Settings {
         let _ = std::fs::create_dir_all(dir);
         // Whole or not at all: a new file renamed over the old.
         let new = dir.join(".settings.toml.new");
-        if std::fs::write(&new, kept.to_toml()).is_ok() {
+        let mut text = kept.to_toml();
+        let others = others(&std::fs::read_to_string(path).unwrap_or_default());
+        if !others.is_empty() {
+            text.push_str("# Not the TUI's: kept as they were.\n");
+            text.push_str(&others);
+        }
+        if std::fs::write(&new, text).is_ok() {
             let _ = std::fs::rename(&new, path);
         }
     }
@@ -268,6 +284,7 @@ impl Settings {
              tab_detail = \"{}\"  # full | minimal: a row per tab, its state and name\n\
              hints = {}        # the bar under a session shows its keys\n\
              sound = \"{}\"     # none | {}\n\
+             desktop = {}      # toasts also go out as desktop notifications (not over SSH)\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
              # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
@@ -283,6 +300,7 @@ impl Settings {
             self.hints,
             self.value(Field::Sound),
             names(Noise::ALL.iter().map(|n| n.name())),
+            self.desktop,
             self.context,
             self.updates,
             self.keys.to_toml(),
@@ -339,6 +357,11 @@ impl Settings {
                         (self.sound, self.noise) = (true, noise);
                     }
                 }
+            },
+            "desktop" => match value {
+                "true" | "on" => self.desktop = true,
+                "false" | "off" => self.desktop = false,
+                _ => {}
             },
             "hints" => match value {
                 "true" | "on" => self.hints = true,
@@ -405,6 +428,7 @@ impl Settings {
                 }
             }
             Field::Hints => on_off(self.hints),
+            Field::Desktop => on_off(self.desktop),
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
         }
@@ -421,6 +445,7 @@ impl Settings {
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::TabDetail => self.minimal_tabs = !self.minimal_tabs,
             Field::Hints => self.hints = !self.hints,
+            Field::Desktop => self.desktop = !self.desktop,
             // None, then each noise.
             Field::Sound => {
                 let choices: Vec<Option<Noise>> = std::iter::once(None)
@@ -482,6 +507,35 @@ fn find<'a, T>(all: &'a [T], name: &str, name_of: impl Fn(&T) -> &str) -> Option
 fn step<'a, T>(all: &'a [T], current: &str, by: isize, name_of: impl Fn(&T) -> &str) -> &'a T {
     let i = all.iter().position(|x| name_of(x) == current).unwrap_or(0);
     &all[(i as isize + by).rem_euclid(all.len() as isize) as usize]
+}
+
+/// The keys `to_toml` writes, or drops when they're back on their defaults.
+const OURS: [&str; 10] = [
+    "theme",
+    "session_colors",
+    "tabs",
+    "tab_side",
+    "tab_detail",
+    "hints",
+    "sound",
+    "desktop",
+    "context",
+    "updates",
+];
+
+/// The `key = value` lines of `text` the TUI doesn't own (`max_running`, a
+/// hand-added key), as they were: a save rewrites only its own (#136).
+fn others(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let line = line.split('#').next().unwrap_or("");
+            line.split_once('=').is_some_and(|(key, _)| {
+                let key = key.trim();
+                !OURS.contains(&key) && !key.starts_with("keys.")
+            })
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -566,7 +620,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("settings.toml");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&file, "theme = 'dracula'\ntabs = \"cards\"\n").unwrap();
+        std::fs::write(
+            &file,
+            "theme = 'dracula'\ntabs = \"cards\"\nmax_running = 5  # mine\nkeys.home = \"alt+#\"\n",
+        )
+        .unwrap();
         // Started with VALK_THEME=cyberpunk, then muted: only sound is saved.
         let mut running = Settings::kept(&file);
         running.set("theme", "cyberpunk");
@@ -576,7 +634,33 @@ mod tests {
         assert_eq!(kept.theme.name, "dracula");
         assert_eq!(kept.tabs, TabStyle::Cards);
         assert!(!kept.sound);
+        // A key the TUI doesn't know survives the save, once (#136).
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            text.matches("max_running = 5  # mine\n").count(),
+            1,
+            "{text}"
+        );
+        // A keymap reset to its default isn't brought back from the old file.
+        running.keys = crate::keys::Keymap::default();
+        running.save_keys(&file);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("keys.home"), "{text}");
+        assert_eq!(text.matches("max_running = 5").count(), 1, "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_is_on_until_turned_off() {
+        let mut s = Settings::default();
+        assert!(s.desktop);
+        s.apply("desktop = off\n");
+        assert_eq!(s.value(Field::Desktop), "off");
+        let mut back = Settings::default();
+        back.apply(&s.to_toml());
+        assert!(!back.desktop);
+        s.set("desktop", "on");
+        assert!(s.desktop);
     }
 
     #[test]
@@ -592,6 +676,7 @@ mod tests {
                 Field::SessionColors
                 | Field::TabDetail
                 | Field::Hints
+                | Field::Desktop
                 | Field::Context
                 | Field::Updates => 2,
             };

@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
+import { termColors } from "./lib/theme";
 import type {
   Decision,
   Item,
@@ -13,11 +14,15 @@ import type {
   NewItem,
   OrderProposal,
   LaunchOffer,
+  Quota,
   QueueItem,
   ReviewAction,
+  Row,
+  ScrollAnchor,
   ServerMsg,
   SessionId,
   SessionInfo,
+  Size,
   StepAction,
 } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
@@ -73,6 +78,8 @@ interface State {
   orders: OrderProposal[];
   /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
   launches: LaunchOffer[];
+  /** The plan's quota (protocol 30), pushed with the queue. */
+  quota: Quota | null;
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -102,6 +109,7 @@ export const useApp = create<State>(() => ({
   items: [],
   orders: [],
   launches: [],
+  quota: null,
   boot: 0,
   openId: null,
   screen: null,
@@ -200,9 +208,11 @@ function onPush(msg: ServerMsg): void {
     case "items":
       set({ items: msg.items, orders: msg.orders ?? [], launches: msg.launches ?? [] });
       break;
+    case "quota":
+      set({ quota: msg.quota });
+      break;
     case "screen":
-      if (msg.session === get().openId)
-        set({ screen: apply(get().screen, msg.update) });
+      if (msg.session === get().openId) showScreen(apply(latest(), msg.update));
       break;
     case "chat":
       if (msg.session === get().openId)
@@ -218,6 +228,39 @@ function onPush(msg: ServerMsg): void {
       );
       break;
   }
+}
+
+// The open session's screen is shown once a frame: a burst of output (a build log,
+// `cat` of a big file) arrives as many updates between two paints, and rendering
+// each would only fall behind. Every update is still applied, in order.
+let pending: Screen | null = null;
+let frame: { raf: number; timer: number } | null = null;
+/** A window that's covered gets a frame a second or none; the screen still moves on. */
+const FRAME_LATEST_MS = 100;
+
+function latest(): Screen | null {
+  return frame === null ? get().screen : pending;
+}
+
+function showScreen(screen: Screen): void {
+  pending = screen;
+  if (frame !== null) return;
+  const paint = () => {
+    const shown = pending;
+    clearScreen();
+    set({ screen: shown });
+  };
+  frame = { raf: requestAnimationFrame(paint), timer: window.setTimeout(paint, FRAME_LATEST_MS) };
+}
+
+/** Forgets the screen on show, and any update still waiting for its frame. */
+function clearScreen(): void {
+  if (frame !== null) {
+    cancelAnimationFrame(frame.raf);
+    clearTimeout(frame.timer);
+  }
+  frame = null;
+  pending = null;
 }
 
 /** Tells the server whether this app is on screen: notifications wait while it is. */
@@ -326,6 +369,7 @@ async function refreshPrompts(items: QueueItem[]): Promise<void> {
 
 export async function open(id: SessionId): Promise<void> {
   if (get().openId === id) return;
+  clearScreen();
   set({ openId: id, screen: null, exited: null, chat: null });
   // Followed whichever view shows, so switching to Chat is instant.
   conn?.send({ t: "chat", session: id });
@@ -345,6 +389,7 @@ async function attach(id: SessionId): Promise<void> {
 
 export async function close(): Promise<void> {
   if (get().openId === null) return;
+  clearScreen();
   set({ openId: null, screen: null, exited: null, chat: null });
   conn?.send({ t: "chat", session: null });
   await conn?.request({ t: "detach" }).catch(() => {});
@@ -354,6 +399,45 @@ function input(session: SessionId, data: number[]): boolean {
   const ok = conn?.send({ t: "input", session, data }) ?? false;
   if (!ok) toast("not connected; nothing was sent");
   return ok;
+}
+
+/** Keys typed into the open session's terminal, already as the bytes to send. */
+export function sendBytes(data: number[]): boolean {
+  const id = get().openId;
+  return id !== null && data.length > 0 && input(id, data);
+}
+
+/** Bytes for one session, whichever is open: what's owed to the one you just left. */
+export function sendBytesTo(session: SessionId, data: number[]): void {
+  conn?.send({ t: "input", session, data });
+}
+
+/** The modes of the open session's program as last heard, ahead of the frame that shows them. */
+export function openModes(): Modes | undefined {
+  return latest()?.modes;
+}
+
+/**
+ * Sizes the open session to the terminal you're typing in. Only the desktop
+ * terminal does, once it has the keyboard: watching never resizes a session.
+ */
+export function resizeOpen(size: Size): void {
+  const id = get().openId;
+  if (id !== null) conn?.send({ t: "resize", session: id, size });
+}
+
+/** A screenful of the open session's history, or `null` when it can't be had. */
+export async function scrollback(
+  anchor: ScrollAnchor,
+): Promise<{ from_top: number; history: number; rows: Row[] } | null> {
+  const id = get().openId;
+  if (id === null || !conn) return null;
+  try {
+    const reply = await conn.request({ t: "scrollback", session: id, anchor });
+    return reply.t === "scrollback" && get().openId === id ? reply : null;
+  } catch {
+    return null;
+  }
 }
 
 export function sendKey(key: Key): void {
@@ -520,6 +604,12 @@ export function openChoices(screen: Screen | null): Choice[] {
   return screen ? findChoices(screenText(screen)) : [];
 }
 
+/** Tells a session we started the colors it is shown in, so its programs can tell a light look from a dark one. */
+function reportColors(session: SessionId): void {
+  const colors = termColors();
+  if (colors) conn?.send({ t: "term_colors", session, colors });
+}
+
 /** The size a new session starts at; a TUI that attaches later resizes it. */
 const SPAWN_SIZE = { cols: 120, rows: 40 };
 
@@ -535,6 +625,7 @@ export async function spawn(
   const reply = await conn.request({ t: "spawn", spec });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 
@@ -672,7 +763,10 @@ export async function answerLaunch(offer: LaunchOffer, launch: boolean): Promise
   if (!conn) return null;
   try {
     const reply = await conn.request({ t: "answer_launch", project: offer.project, id: offer.id, launch });
-    if (reply.t === "session") return reply.info.id;
+    if (reply.t === "session") {
+      reportColors(reply.info.id);
+      return reply.info.id;
+    }
     if (reply.t === "text") toast(reply.text);
     return null;
   } catch (e) {
@@ -722,6 +816,7 @@ export async function launchItem(
   });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 

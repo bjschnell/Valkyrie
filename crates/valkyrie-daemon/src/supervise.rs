@@ -210,6 +210,10 @@ pub(crate) struct Supervisor {
     /// commit they were at and when, so an idle session's branch isn't asked
     /// about every poll (`branches`).
     pub(crate) no_pr: HashMap<(PathBuf, String), (String, Instant)>,
+    /// Pull requests the branch watch read open since this daemon started: one
+    /// it then reads merged is news to tell its agents (backlog #121), once. One
+    /// first read merged merged before anyone was watching.
+    pub(crate) open_seen: HashSet<String>,
 }
 
 impl Supervisor {
@@ -902,7 +906,7 @@ impl Registry {
         })
     }
 
-    fn drop_offer(&self, id: SessionId) {
+    pub(crate) fn drop_offer(&self, id: SessionId) {
         self.supervisor.lock().unwrap().offers.remove(&id);
         self.host.changed.notify_one();
     }
@@ -1246,7 +1250,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            judge(&rerun, false, 4, true, &Pr::Merged { url: "u".into() }),
+            judge(&rerun, false, 4, true, &Pr::merged("u")),
             Judged::Outcome {
                 overridden: false,
                 ..

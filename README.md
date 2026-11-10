@@ -97,7 +97,7 @@ Plus push notifications, dictation, screenshots to agents, and new agents in any
   keep going (Windows restarts them).
 - The daemon never listens on a network. You choose how your phone reaches it,
   and Valkyrie sets up Tailscale for you if you have it.
-- Eleven themes, five of them with digital rain, plus splits and full mouse
+- Eighteen themes, three of them light and five with digital rain, plus splits and full mouse
   support.
 
 <img src="docs/images/themes.png" alt="The home screen in the tokyonight, matrix, cyberpunk and gruvbox themes" width="100%">

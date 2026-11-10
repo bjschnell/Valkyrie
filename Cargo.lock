@@ -3752,6 +3752,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "libc",
+ "serde",
  "serde_json",
  "valkyrie-proto",
 ]
@@ -3772,6 +3773,17 @@ dependencies = [
  "valkyrie-proto",
  "valkyrie-term",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "valkyrie-desktop"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
+ "valkyrie-proto",
+ "valkyrie-web",
 ]
 
 [[package]]

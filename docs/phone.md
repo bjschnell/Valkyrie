@@ -43,3 +43,17 @@ valk web open             # open it in this computer's browser, paired
 valk web devices          # list paired devices
 valk web revoke <name>    # unpair one
 ```
+
+On a computer, the session's terminal takes your keyboard: click it and every
+key goes to the program, the session is sized to the window, and the wheel
+scrolls back through its history. Ctrl+C is the program's, so copy and paste are
+Ctrl+Shift+C and Ctrl+Shift+V (Cmd+C and Cmd+V on a Mac). Click anywhere else,
+or press Ctrl+Shift+Enter, to get the keyboard back.
+A program that uses the mouse (vim, htop, lazygit) gets your clicks, drags and
+wheel there too; hold Shift to select text instead.
+
+On a wide screen the session list stays beside the open session. The Alt keys
+from the terminal app move between sessions: `Alt-j` and `Alt-k` step through
+them, `Alt-1` to `Alt-9` jump to one, `Alt-n` goes to whoever needs you, `Alt-p`
+to the one you were last on and `Alt-h` home. They work while you type in a
+terminal too.

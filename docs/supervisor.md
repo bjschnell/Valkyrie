@@ -31,6 +31,17 @@ to review, never is). `valk decisions health` compares how often you leave
 those flags, and override the steps on them, with flags on backlog items, so
 you can tell whether it reaches too far.
 
+## When a PR merges
+
+The agent whose PR merged doesn't wait for you to tell it. If it's idle, it gets
+a short wrap-up typed in: the PR merged and its item shipped, so leave a handoff
+note if anything's left, say what was filed, and stop. If it's mid-turn or
+waiting on you, it gets the same text on its next prompt instead. Every other
+agent in the repository hears on its next prompt that the base moved, without
+being woken. For a PR with no backlog item, only one you opened, and that
+Valkyrie saw open before it merged, counts. With the supervisor or Context off,
+nothing is typed and the wrap-up waits for the next prompt.
+
 ## Keeping the backlog moving
 
 When an accepted item nobody's on has every

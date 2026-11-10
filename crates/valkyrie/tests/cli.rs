@@ -15,6 +15,39 @@ fn temp(name: &str) -> PathBuf {
     dir
 }
 
+/// Removes a test's directory. A session's process can outlive the daemon by a
+/// moment and write into it while it's being removed (`DirectoryNotEmpty`, #131),
+/// so this tries again for a while. If it still fails, it names what was left.
+fn remove_test_dir(dir: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if Instant::now() >= deadline => {
+                let left: Vec<_> = walk(dir)
+                    .into_iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                panic!("can't remove {}: {e}; left: {left:?}", dir.display());
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        }
+        out.push(path);
+    }
+    out
+}
+
 /// A daemon a test started itself, killed when the test ends however it ends: an
 /// assert failing before the test's own `kill` used to leave it running for good.
 struct KillOnDrop(std::process::Child);
@@ -108,7 +141,7 @@ fn hook_reads_its_whole_input_even_when_it_does_nothing_with_it() {
         );
         assert_silent_success(&out);
     }
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 #[test]
@@ -133,7 +166,69 @@ fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
     let mut cmd = valk(&socket, &dir);
     cmd.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
     assert_silent_success(&hook(cmd, &vec![b' '; 1 << 20]));
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
+}
+
+fn statusline(mut cmd: Command, then: &str, stdin: &[u8]) -> Output {
+    let mut child = cmd
+        .args(["statusline", "--then", then])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The user's own status line draws as it would without Valkyrie: the same input,
+/// its output and its exit, daemon or none, arguments that parse or not.
+#[test]
+fn statusline_runs_the_users_own_and_tells_the_daemon_the_quota() {
+    let dir = temp("statusline");
+    let none = dir.join("run/none.sock");
+    let payload = br#"{"model":{"id":"x"},"rate_limits":{"five_hour":{"used_percentage":81,"resets_at":4102444800},"seven_day":{"used_percentage":12,"resets_at":4102444800}}}"#;
+    let theirs = "printf 'hud:'; cat; exit 3";
+    let out = statusline(valk(&none, &dir), theirs, payload);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(out.stdout, [&b"hud:"[..], payload].concat());
+    let mut cmd = valk(&none, &dir);
+    cmd.env("VALK_SOCKET", "");
+    let out = statusline(cmd, theirs, b"{}");
+    assert_eq!(out.stdout, b"hud:{}", "{out:?}");
+
+    let socket = dir.join("run/s.sock");
+    let _daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon never bound");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = statusline(valk(&socket, &dir), "cat", payload);
+    assert_eq!(out.stdout, payload, "{out:?}");
+    // The daemon keeps what it heard, for after a restart.
+    let kept = dir.join("valkyrie/quota.json");
+    while !kept.exists() {
+        assert!(Instant::now() < deadline, "quota never kept");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let quota: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&kept).unwrap()).unwrap();
+    assert_eq!(
+        quota["limits"],
+        serde_json::json!([
+            {"name": "five_hour", "used": 81, "resets_at": 4102444800u64},
+            {"name": "seven_day", "used": 12, "resets_at": 4102444800u64},
+        ])
+    );
+    drop(_daemon);
+    remove_test_dir(&dir);
 }
 
 #[test]
@@ -200,7 +295,39 @@ fn hook_reaches_the_daemon_quickly() {
     let report = String::from_utf8(out.stdout).unwrap();
     assert!(report.contains("needs input"), "{report}");
     assert!(report.contains("0 mismatches"), "{report}");
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
+}
+
+/// The desktop app's setup (ADR-0020 §4): no daemon is asked to vouch, since no
+/// pairing code is printed, and the service is told the one local address.
+#[test]
+fn setup_web_local_stays_on_this_machine() {
+    let dir = temp("web-local");
+    let setup = |extra: &[&str]| {
+        valk(&dir.join("none.sock"), &dir)
+            .args(["setup", "web", "--local", "--dry-run", "--exe", "/opt/valk"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let out = setup(&[]);
+    assert!(out.status.success(), "{out:?}");
+    let unit = String::from_utf8(out.stdout).unwrap();
+    assert!(unit.contains("http://127.0.0.1:8790"), "{unit}");
+
+    let out = setup(&["--listen", "127.0.0.1:9001"]);
+    let unit = String::from_utf8(out.stdout).unwrap();
+    assert!(unit.contains("http://127.0.0.1:9001"), "{unit}");
+
+    // Never beyond the machine, and never under another name.
+    let out = setup(&["--listen", "0.0.0.0:8790"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("127.0.0.1 only"), "{err}");
+    let out = setup(&["--url", "https://box.example.ts.net"]);
+    assert!(!out.status.success());
+    remove_test_dir(&dir);
 }
 
 #[test]
@@ -267,7 +394,7 @@ fn setup_codex_installs_backs_up_and_removes() {
         doc,
         serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify-send done"}]}]}})
     );
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// A `claude` typed in a Valkyrie shell gets no `--settings`, so the context hook
@@ -339,7 +466,7 @@ fn setup_claude_installs_once_keeps_the_rest_and_removes() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(!empty.join("settings.json").exists());
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The Context setting switches the hook off wherever it runs, and the copy in
@@ -394,7 +521,7 @@ fn context_hook_follows_the_setting_and_the_sessions_own_hooks() {
     assert!(!speaks(&run(&["claude", "--ambient"], &[])));
     // The environment wins over the file, as for every setting.
     assert!(speaks(&run(&["claude"], &[("VALK_PROJECT_CONTEXT", "on")])));
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The daemon keeps the hook in Claude Code's settings while Context is on, and
@@ -478,7 +605,7 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
     );
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The observer hook in Claude Code's own settings reports a typed `claude` to the
@@ -554,7 +681,7 @@ fn ambient_observer_reports_a_typed_claude_once() {
     assert_eq!(reported(), 1);
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// The M1 accuracy gate (DESIGN §14.6) on recorded real sessions with hand labels.
@@ -1152,7 +1279,7 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     let _ = valk(&socket, &dir).args(["kill", &id]).output();
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// ADR-0007: the context hook answers Claude Code and Codex alike at session start,
@@ -1203,7 +1330,7 @@ fn context_hook_gives_decisions_at_session_start_only() {
     }
     assert_silent_success(&run("codex", true, start("Stop")));
     assert_silent_success(&run("aider", true, start("SessionStart")));
-    std::fs::remove_dir_all(&dir).unwrap();
+    remove_test_dir(&dir);
 }
 
 /// `valk … | head -1`: a reader that leaves early must end valk quietly, the way it
@@ -1226,4 +1353,158 @@ fn a_closed_stdout_ends_valk_quietly() {
     assert!(stderr.is_empty(), "valk complained: {stderr}");
     assert_eq!(out.status.signal(), Some(libc::SIGPIPE), "{:?}", out.status);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `valk pane`: an agent in a session splits its own tab, drives the new pane and
+/// reads it back, resizes and closes it, and can't close the pane it runs in.
+#[test]
+fn an_agent_drives_the_panes_of_its_tab() {
+    let dir = temp("pane");
+    let socket = dir.join("run/o.sock");
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let new = (0..100)
+        .find_map(|_| {
+            let out = valk(&socket, &dir)
+                .args(["new", "--cwd"])
+                .arg(&dir)
+                .args(["--", "sh"])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                return Some(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .expect("daemon did not start");
+    let me = String::from_utf8(new.stdout).unwrap().trim().to_string();
+    // As the agent in that session would run it.
+    let pane = |args: &[&str]| {
+        valk(&socket, &dir)
+            .env("VALK_SESSION", &me)
+            .env("SHELL", "/bin/sh")
+            .arg("pane")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let ok = |out: Output| {
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let list = || -> Vec<serde_json::Value> {
+        serde_json::from_str(&ok(pane(&["list", "--json"]))).unwrap()
+    };
+
+    let solo = list();
+    assert_eq!(solo.len(), 1);
+    assert_eq!(solo[0]["where"], "whole tab");
+    assert_eq!(solo[0]["me"], true);
+
+    let other = ok(pane(&["split", "-d", "right"])).trim().to_string();
+    let panes = list();
+    let wheres: Vec<_> = panes
+        .iter()
+        .map(|p| {
+            (
+                p["id"].to_string(),
+                p["where"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        wheres,
+        [
+            (me.clone(), "left".to_string()),
+            (other.clone(), "right".to_string())
+        ]
+    );
+    assert_eq!(panes[1]["me"], false);
+    // Canonical: macOS's temp dir is under /var, a link to /private/var.
+    let cwd = std::fs::canonicalize(panes[1]["cwd"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        cwd,
+        std::fs::canonicalize(&dir).unwrap(),
+        "the split's directory"
+    );
+
+    ok(pane(&["run", &other, "echo pane-$((40+2))"]));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--match",
+        "pane-42",
+        "--timeout",
+        "10",
+    ]));
+    assert!(ok(pane(&["read", &other])).contains("pane-42"));
+    let tail = ok(pane(&["read", &other, "-n", "1"]));
+    assert_eq!(tail.lines().count(), 1, "{tail:?}");
+    let timed_out = pane(&["wait", &other, "--match", "never-there", "--timeout", "0"]);
+    assert_eq!(timed_out.status.code(), Some(124));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--state",
+        "stopped",
+        "--timeout",
+        "10",
+    ]));
+
+    // History above, a mostly blank screen: the last lines are the ones written.
+    ok(pane(&[
+        "run",
+        &other,
+        "seq 1 60; printf '\\\\033[2J\\\\033[H'; echo after-$((1+1))",
+    ]));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--match",
+        "after-2",
+        "--timeout",
+        "10",
+    ]));
+    let tail = ok(pane(&["read", &other, "-n", "30"]));
+    let tail: Vec<_> = tail.lines().collect();
+    // More than the 24-row screen holds, so history comes along.
+    assert_eq!(tail.len(), 30, "{tail:?}");
+    assert_eq!(tail[28], "after-2", "{tail:?}");
+
+    ok(pane(&["resize", &other, "30"]));
+    let cols = list()[1]["area"]["cols"].as_u64().unwrap();
+    assert!(
+        (295..=305).contains(&cols),
+        "right pane is {cols}/1000 wide"
+    );
+
+    let refused = pane(&["close", &me]);
+    assert!(!refused.status.success());
+    assert!(pane(&["run", "999", "x"]).status.code() != Some(0));
+    // A shell that exits leaves the list at once; waiting on it still succeeds.
+    let gone = ok(pane(&["split", "-d", "down"])).trim().to_string();
+    ok(pane(&["run", &gone, "exit"]));
+    ok(pane(&[
+        "wait",
+        &gone,
+        "--state",
+        "exited",
+        "--timeout",
+        "10",
+    ]));
+    ok(pane(&["close", &other]));
+    let left = list();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["where"], "whole tab");
+
+    let _ = valk(&socket, &dir).args(["kill", &me]).output();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    remove_test_dir(&dir);
 }

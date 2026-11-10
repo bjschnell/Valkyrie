@@ -2,8 +2,8 @@
 
 use crate::codec::{read_frame, write_frame};
 use crate::{
-    ClientBuild, ClientMsg, ConnectedClient, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size,
-    SpawnSpec,
+    ClientBuild, ClientMsg, ConnectedClient, NoticeSound, Reply, ReqId, ServerMsg, SessionId,
+    SessionInfo, Size, SpawnSpec, TermColors,
 };
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
@@ -250,7 +250,7 @@ impl Client {
 
     pub async fn spawn(&self, spec: SpawnSpec) -> Result<SessionInfo> {
         match self.request(|req| ClientMsg::Spawn { req, spec }).await? {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -283,7 +283,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -357,6 +357,26 @@ impl Client {
             .map(drop)
     }
 
+    /// Start receiving `Notice` pushes; `shows` if this client puts them in front of
+    /// someone, so `notify` counts it.
+    pub async fn watch_notices(&self, shows: bool) -> Result<()> {
+        self.request(|req| ClientMsg::WatchNotices { req, shows })
+            .await
+            .map(drop)
+    }
+
+    /// Raises `text` as a toast on every client watching notices; how many it reached.
+    pub async fn notify(&self, text: &str, sound: Option<NoticeSound>) -> Result<u32> {
+        let text = text.to_owned();
+        match self
+            .request(|req| ClientMsg::Notify { req, text, sound })
+            .await?
+        {
+            Reply::Notified { watchers } => Ok(watchers),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn move_session(&self, session: SessionId, to: usize) -> Result<()> {
         self.request(|req| ClientMsg::Move { req, session, to })
             .await
@@ -381,6 +401,57 @@ impl Client {
             .await?
         {
             Reply::Decision { decision } => Ok(*decision),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn write_doc(&self, doc: crate::NewDoc) -> Result<crate::Doc> {
+        match self.request(|req| ClientMsg::WriteDoc { req, doc }).await? {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn read_doc(&self, which: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::ReadDoc { req, which })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn edit_doc(&self, id: u32, base: String, body: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::EditDoc {
+                req,
+                id,
+                base,
+                body,
+            })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Every doc, newest first, and the docs folder.
+    pub async fn docs(&self) -> Result<(Vec<crate::Doc>, PathBuf)> {
+        match self.request(|req| ClientMsg::Docs { req }).await? {
+            Reply::Docs { docs, root } => Ok((docs, root)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The docs folder; with `root`, sets it first (`""` for the default).
+    pub async fn docs_root(&self, root: Option<PathBuf>) -> Result<String> {
+        match self
+            .request(|req| ClientMsg::DocsRoot { req, root })
+            .await?
+        {
+            Reply::Text { text } => Ok(text),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -549,7 +620,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(Some(info)),
+            Reply::Session { info } => Ok(Some(*info)),
             Reply::Text { .. } => Ok(None),
             other => bail!("unexpected reply: {other:?}"),
         }
@@ -737,7 +808,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -750,6 +821,17 @@ impl Client {
                 width,
                 height,
             })
+            .map_err(|_| anyhow!("daemon connection closed"))
+    }
+
+    /// Fire-and-forget: the colors sessions draw with (see `ClientMsg::TermColors`).
+    pub fn term_colors(
+        &self,
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    ) -> Result<()> {
+        self.out
+            .send(ClientMsg::TermColors { session, colors })
             .map_err(|_| anyhow!("daemon connection closed"))
     }
 

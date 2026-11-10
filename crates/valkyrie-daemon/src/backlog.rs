@@ -647,6 +647,10 @@ impl Registry {
                     .await;
                 }
             }
+            let base = match &pr {
+                Pr::Merged { base, .. } => base.clone(),
+                _ => String::new(),
+            };
             let closed = match pr {
                 Pr::Merged { .. } => None,
                 Pr::Closed { .. } => Some(true),
@@ -661,6 +665,8 @@ impl Registry {
                 }
                 continue;
             }
+            // Before it ships: shipping takes the checkout off the card.
+            let own = self.item_sessions(&item);
             let note = match self.ship_judged(&item).await {
                 None => continue,
                 Some(Err(e)) => {
@@ -683,6 +689,11 @@ impl Registry {
             }
             tracing::info!(id, pr = url, "shipped a backlog item: its PR merged");
             shipped += 1;
+            // Its sessions are the branch watch's from now on: not news there again.
+            self.supervisor.lock().unwrap().open_seen.remove(&url);
+            if let Some(root) = Self::root_of(&item) {
+                self.announce_merge(&url, &base, &own, &root, Some(&item));
+            }
         }
         if shipped > 0 || changed {
             self.refresh_items();
@@ -1191,7 +1202,7 @@ mod tests {
             seen.lock().unwrap().push(pr.to_owned());
             let url = pr.to_owned();
             match pr.rsplit('/').next() {
-                Some("1" | "4") => Pr::Merged { url },
+                Some("1" | "4") => Pr::merged(url),
                 Some("2") => Pr::Closed { url },
                 _ => Pr::Unknown,
             }

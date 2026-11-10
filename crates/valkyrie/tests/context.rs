@@ -1212,7 +1212,7 @@ fn mcp_serves_and_proposes_decisions() {
         .collect();
     assert_eq!(replies.len(), 6, "{replies:?}");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "valkyrie");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 9);
     let text = |i: usize| {
         replies[i]["result"]["content"][0]["text"]
             .as_str()

@@ -42,6 +42,8 @@ export interface SessionInfo {
   status: AgentStatus;
   /** The agent's own transcript, when known: the Chat view reads it. */
   chat?: string;
+  /** Another live agent in the repository changed the same files (protocol 31). */
+  overlap?: string;
 }
 
 export interface QueueItem {
@@ -203,15 +205,37 @@ export interface Modes {
   app_cursor: boolean;
   bracketed_paste: boolean;
   alt_screen: boolean;
+  /** 1004: the program wants to know when the terminal gains or loses the keyboard. */
+  focus_events?: boolean;
+  /** 1007: the wheel scrolls by sending arrow keys in the alternate screen. */
+  alt_scroll?: boolean;
+  /** The program asked for the mouse: clicks (1000), drags too (1002), every move (1003). */
+  mouse_click?: boolean;
+  mouse_drag?: boolean;
+  mouse_motion?: boolean;
+  /** How it wants reports written: 1006 (SGR) or 1005 (UTF-8); neither is the old X10 form. */
+  mouse_sgr?: boolean;
+  mouse_utf8?: boolean;
 }
+
+/** Where a `scrollback` page starts: lines above the live screen, or a line
+ * counted from the oldest in history (which stays put while output arrives). */
+export type ScrollAnchor = { up: number } | { from_top: number };
 
 export interface ScreenUpdate {
   full: boolean;
   size: Size;
   rows: Row[];
-  cursor: { x: number; y: number; visible: boolean };
+  cursor: Cursor;
   modes: Modes;
   title: string | null;
+}
+
+export interface Cursor {
+  x: number;
+  y: number;
+  visible: boolean;
+  shape?: "block" | "underline" | "beam";
 }
 
 export interface SpawnSpec {
@@ -364,6 +388,24 @@ export interface OrderProposal {
 /** A ready item the supervisor offers to start (ADR-0019 §2 `launch`, protocol 27):
  * open, nobody on it, its blockers finished (or waived by the model), with room
  * under the repository's `max_running`. One per repository at most. */
+/** How much of the plan is used (protocol 30), as Claude Code's status line last
+ * said it: only as new as the last Claude session to draw one. */
+export interface Quota {
+  /** When it was read, seconds since the epoch. */
+  at: number;
+  /** Shortest window first. */
+  limits: QuotaLimit[];
+}
+
+export interface QuotaLimit {
+  /** Claude Code's name: `five_hour`, `seven_day`, `seven_day_opus`, … */
+  name: string;
+  /** Share used, 0–100. */
+  used: number;
+  /** Seconds since the epoch. */
+  resets_at?: number;
+}
+
 export interface LaunchOffer {
   /** Changes when the repository's offer is replaced. */
   id: number;
@@ -395,6 +437,8 @@ export type Request =
   | { t: "attach"; session: SessionId; size: Size | null }
   | { t: "detach" }
   | { t: "dump"; session: SessionId }
+  /** One screenful of history, then the screen; replies `scrollback`. */
+  | { t: "scrollback"; session: SessionId; anchor: ScrollAnchor }
   | { t: "kill"; session: SessionId }
   | { t: "mark_seen"; session: SessionId; seq: number }
   | { t: "rename"; session: SessionId; name: string | null }
@@ -442,9 +486,14 @@ export type Request =
       model?: string;
     };
 
+export type TermColors = { fg: [number, number, number]; bg: [number, number, number]; ansi: [number, number, number][] };
+
 /** Fire-and-forget messages. */
 export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
+  | { t: "resize"; session: SessionId; size: Size }
+  /** The colors this session's programs are told the terminal has (OSC 10/11/4). */
+  | { t: "term_colors"; session: SessionId; colors: TermColors | null }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
   | { t: "visible"; visible: boolean }
@@ -475,7 +524,10 @@ export type Reply =
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
   | { t: "step_taken"; said: string }
-  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] };
+  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] }
+  /** `from_top`: the first row's line, from the oldest in history; `history`: lines
+   * above the screen, so `from_top == history` is the live screen. */
+  | { t: "scrollback"; from_top: number; history: number; rows: Row[] };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
@@ -487,6 +539,8 @@ export type ServerMsg =
   | { t: "proposals"; items: Decision[] }
   /** Every backlog item, and the build orders and launch offers waiting on the user. */
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
+  /** The plan's quota, if anything has said it yet (protocol 30). */
+  | { t: "quota"; quota: Quota | null }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

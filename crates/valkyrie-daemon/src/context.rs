@@ -77,7 +77,7 @@ pub(crate) fn withhold(d: &mut valkyrie_proto::Decision) {
 const WITHHELD: &str = "(A proposal the user hasn't reviewed yet: its text isn't shown to agents. \
                         Read it in the TUI, the web app or your own terminal.)";
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -330,6 +330,7 @@ impl Registry {
             .into_iter()
             .collect();
         said.extend(self.accepted_for(&me));
+        said.extend(me.take_merged());
         if !said.is_empty() {
             if !text.is_empty() {
                 said.push(text);
