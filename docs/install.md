@@ -234,6 +234,7 @@ is up to you. The app installs and sends notifications only over HTTPS.
 ```sh
 valk setup web                                  # with Tailscale
 valk setup web --url https://valk.example.com   # behind your own proxy or tunnel
+valk setup web --local                          # this machine only: no Tailscale, no pairing code
 ```
 
 That runs `valk web` in the background as a service (systemd on Linux, launchd on

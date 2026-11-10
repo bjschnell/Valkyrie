@@ -8,6 +8,7 @@ pub mod chat;
 mod host;
 pub mod notify;
 pub mod places;
+pub mod proof;
 pub mod push;
 pub mod review;
 pub mod tailscale;
@@ -208,6 +209,7 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/pair", post(pair))
         .route("/api/pair/code", post(new_short_code))
         .route("/api/pair/code/{id}", get(code_state))
+        .route("/api/proof/{id}", get(proof_route))
         .route("/api/push", get(push_key))
         .route("/api/push/subscribe", post(subscribe))
         .route("/api/push/unsubscribe", post(unsubscribe))
@@ -338,6 +340,15 @@ async fn pair(State(app): State<Arc<App>>, Json(req): Json<PairRequest>) -> Resp
             Json(serde_json::json!({ "token": token })).into_response()
         }
         Err(e) => (StatusCode::FORBIDDEN, e.to_string()).into_response(),
+    }
+}
+
+/// Proves this is the user's `valk web` to a program that wrote a nonce where only
+/// the user can read (`proof`). No token: the desktop app asks before it pairs.
+async fn proof_route(Path(id): Path<String>) -> Response {
+    match proof::respond(&proof::dir(), &id) {
+        Some(answer) => answer.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

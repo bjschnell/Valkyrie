@@ -291,6 +291,10 @@ enum WebCmd {
     Devices,
     /// Unpair a device by name, or `all`.
     Revoke { name: String },
+    /// Say whether what listens on the address is your own `valk web`: it has to
+    /// read a file only you can. The desktop app checks this before it trusts
+    /// the port. Exits 0 when it is.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -339,8 +343,12 @@ enum SetupCmd {
         #[arg(long, default_value = "127.0.0.1:8790")]
         listen: std::net::SocketAddr,
         /// The address phones open (default: this machine's tailnet name).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "local")]
         url: Option<String>,
+        /// For this machine only, as the desktop app sets it up: no
+        /// `tailscale serve`, and no pairing code.
+        #[arg(long)]
+        local: bool,
         /// The valk binary the service runs (default: this one, by its PATH name).
         #[arg(long)]
         exe: Option<PathBuf>,
@@ -677,6 +685,20 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 println!("unpaired {n} device(s)");
                 Ok(())
             }
+            Some(WebCmd::Check) => {
+                use valkyrie_web::proof::Local;
+                match valkyrie_web::proof::check(listen).await? {
+                    Local::Ours => {
+                        println!("{listen} is your valk web");
+                        Ok(())
+                    }
+                    Local::Stranger => bail!(
+                        "something answers on {listen}, and it isn't your valk web \
+                         (or it's one from before this check: restart it)"
+                    ),
+                    Local::Nothing => bail!("nothing listens on {listen}"),
+                }
+            }
         },
         Some(Cmd::Kill { session }) => connect(&socket).await?.0.kill(session).await,
         Some(Cmd::Rename { session, name }) => {
@@ -804,6 +826,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         Some(Cmd::Setup(SetupCmd::Web {
             listen,
             url,
+            local,
             exe,
             dry_run,
             remove,
@@ -813,18 +836,29 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Some(exe) => std::path::absolute(exe)?,
                 None => service::default_exe()?,
             };
-            // It ends by printing a pairing code.
-            connect(&socket)
-                .await?
-                .0
-                .vouch("setting up the web app")
-                .await?;
+            let url = if local {
+                // The desktop app keeps its device token under this exact address
+                // (ADR-0020 §3): another spelling would mean pairing again.
+                if listen.ip() != std::net::Ipv4Addr::LOCALHOST {
+                    bail!("--local listens on 127.0.0.1 only, not {}", listen.ip());
+                }
+                Some(format!("http://{listen}"))
+            } else {
+                // It ends by printing a pairing code.
+                connect(&socket)
+                    .await?
+                    .0
+                    .vouch("setting up the web app")
+                    .await?;
+                url
+            };
             service::run(service::Setup {
                 name,
                 exe,
                 socket: std::path::absolute(&socket)?,
                 listen,
                 url,
+                local,
                 dry_run,
                 remove,
             })

@@ -298,6 +298,38 @@ fn hook_reaches_the_daemon_quickly() {
     remove_test_dir(&dir);
 }
 
+/// The desktop app's setup (ADR-0020 §4): no daemon is asked to vouch, since no
+/// pairing code is printed, and the service is told the one local address.
+#[test]
+fn setup_web_local_stays_on_this_machine() {
+    let dir = temp("web-local");
+    let setup = |extra: &[&str]| {
+        valk(&dir.join("none.sock"), &dir)
+            .args(["setup", "web", "--local", "--dry-run", "--exe", "/opt/valk"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let out = setup(&[]);
+    assert!(out.status.success(), "{out:?}");
+    let unit = String::from_utf8(out.stdout).unwrap();
+    assert!(unit.contains("http://127.0.0.1:8790"), "{unit}");
+
+    let out = setup(&["--listen", "127.0.0.1:9001"]);
+    let unit = String::from_utf8(out.stdout).unwrap();
+    assert!(unit.contains("http://127.0.0.1:9001"), "{unit}");
+
+    // Never beyond the machine, and never under another name.
+    let out = setup(&["--listen", "0.0.0.0:8790"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("127.0.0.1 only"), "{err}");
+    let out = setup(&["--url", "https://box.example.ts.net"]);
+    assert!(!out.status.success());
+    remove_test_dir(&dir);
+}
+
 #[test]
 fn setup_codex_installs_backs_up_and_removes() {
     let dir = temp("codex");
