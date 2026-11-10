@@ -78,7 +78,7 @@ export function lane(item: Item, sessions: SessionInfo[], boot: number): Lane {
         return "review";
     }
   }
-  return item.pr || item.checkout || (item.sessions?.length ?? 0) > 0 ? "review" : "backlog";
+  return item.pr || (item.sessions?.length ?? 0) > 0 ? "review" : "backlog";
 }
 
 export const priority = (item: Item): Priority => item.priority ?? "p2";

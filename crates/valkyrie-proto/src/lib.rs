@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 28;
+pub const PROTOCOL: u32 = 29;
 
 /// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
 /// something that needs you, `done` for something that finished.
@@ -43,6 +43,15 @@ pub enum NoticeSound {
 
 pub type ReqId = u64;
 pub type SessionId = u32;
+
+/// What a program is told its terminal looks like: default text and background,
+/// and the 16 ANSI colors (black to bright white), each as RGB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermColors {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub ansi: Vec<[u8; 3]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
@@ -292,6 +301,15 @@ pub enum ClientMsg {
         width: u16,
         height: u16,
     },
+    /// The colors the client draws a session with, so a program that asks the
+    /// terminal for its background or palette (OSC 4/10/11) gets the answer a real
+    /// terminal would give. With `session`, that session only; without, the default
+    /// for sessions spawned from now on. `colors: None` puts the stock dark palette
+    /// back. No reply.
+    TermColors {
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    },
     /// An agent hook event, forwarded by `valk hook <agent>` (ADR-0005). No reply:
     /// the hook never waits on the daemon.
     Hook {
@@ -305,13 +323,13 @@ pub enum ClientMsg {
     WatchQueue {
         req: ReqId,
     },
-    /// Subscribe this connection to `Notice` pushes (protocol 28). For clients that
+    /// Subscribe this connection to `Notice` pushes (protocol 29). For clients that
     /// show them to someone: a `Notify` counts the connections that did this.
     WatchNotices {
         req: ReqId,
     },
     /// Raise a toast and a ping on every client watching notices (`valk notify`,
-    /// protocol 28). `sound` is `request` or `done`, else the toast is silent.
+    /// protocol 29). `sound` is `request` or `done`, else the toast is silent.
     /// Anyone may send one, agents included. Replies `Notified`.
     Notify {
         req: ReqId,
@@ -578,7 +596,7 @@ pub enum ServerMsg {
         session: SessionId,
         code: Option<i32>,
     },
-    /// A toast someone raised on purpose with `Notify` (protocol 28).
+    /// A toast someone raised on purpose with `Notify` (protocol 29).
     Notice {
         text: String,
         sound: Option<NoticeSound>,
@@ -661,7 +679,7 @@ pub enum Reply {
     Text {
         text: String,
     },
-    /// How many connections a `Notify` reached (protocol 28); none means nobody is
+    /// How many connections a `Notify` reached (protocol 29); none means nobody is
     /// watching, so the sender should deliver it itself.
     Notified {
         watchers: u32,

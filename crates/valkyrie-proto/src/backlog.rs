@@ -314,6 +314,11 @@ pub enum ItemChange {
     /// Ships, drops or reopens it. Shipping also takes away a worktree its launch
     /// made, when nothing is left in it.
     Status { status: ItemStatus },
+    /// Puts a started item back in the backlog (protocol 28): the user only. The
+    /// daemon stops every live session on it and the item forgets them, so it
+    /// reads as not started; its branch and checkout stay for the next launch.
+    /// Refused for one with a pull request, or that nothing started on.
+    Return,
 }
 
 /// A build order for one repository's open items (ADR-0019 §2, `order`): what to
@@ -438,6 +443,13 @@ pub struct KeptItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_return_is_a_bare_tag() {
+        let back: ItemChange = serde_json::from_str(r#"{"do":"return"}"#).unwrap();
+        assert_eq!(back, ItemChange::Return);
+        assert_eq!(serde_json::to_string(&back).unwrap(), r#"{"do":"return"}"#);
+    }
 
     #[test]
     fn an_edit_carries_only_what_it_changes() {

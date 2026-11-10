@@ -54,7 +54,7 @@ export function blocks(items: ChatItem[]): Block[] {
     run = [];
   };
   for (const item of items) {
-    if (item.k === "tool") {
+    if (item.k === "tool" && !isQuestion(item)) {
       run.push(item);
     } else {
       flush();
@@ -63,6 +63,11 @@ export function blocks(items: ChatItem[]): Block[] {
   }
   flush();
   return out;
+}
+
+/** The agent asking you something: shown in full, never folded into a run. */
+export function isQuestion(card: ToolItem): boolean {
+  return card.tool === "AskUserQuestion";
 }
 
 const EDITS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit", "Delete"]);
@@ -105,7 +110,7 @@ export function cardBody(card: ToolItem): { label: string; text: string }[] | nu
   const parts: { label: string; text: string }[] = [];
   if (d.command) parts.push({ label: "command", text: `$ ${d.command}` });
   if (d.diff) parts.push({ label: "diff", text: d.diff });
-  else if (d.content) parts.push({ label: "content", text: d.content });
+  else if (d.content) parts.push({ label: isQuestion(card) ? "question" : "content", text: d.content });
   if (d.result) parts.push({ label: "result", text: d.result });
   return parts.length ? parts : null;
 }
