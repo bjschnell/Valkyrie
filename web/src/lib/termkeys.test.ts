@@ -175,6 +175,8 @@ describe("copiedRows", () => {
   it("ends at the selection, on a wrapped row too", () => {
     expect(copiedRows([row("tail", true, 3)])).toBe("tail");
     expect(copiedRows([row("a"), row(" "), row("")])).toBe("a");
+    // Dragged to the left edge of the row after a wrapped one.
+    expect(copiedRows([row("echo hello", true, 70), row("")])).toBe("echo hello");
   });
 });
 

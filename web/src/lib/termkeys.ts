@@ -210,7 +210,9 @@ export function copiedRows(rows: CopiedRow[]): string {
     if (row.wrapped && !last) out += row.text + " ".repeat(Math.max(0, row.missing));
     else out += row.text.trimEnd() + (last ? "" : "\n");
   });
-  return out.replace(/\n+$/, "");
+  // The last row is trimmed already; this takes a wrapped row's blanks too when
+  // nothing of the row after it was selected.
+  return out.trimEnd();
 }
 
 /** The grid that fits a pane of `width` by `height` pixels, in cells of `cw` by `ch`. */
