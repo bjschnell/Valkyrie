@@ -2,13 +2,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject }
 import { STATE_LABEL, program } from "../proto";
 import { isNegative } from "../lib/choices";
 import type { Key } from "../lib/keys";
-import { cssStyle, reflow, rowRuns, type Run } from "../lib/screen";
 import { age } from "../lib/time";
 import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, toast, useApp } from "../store";
 import { Back, Clip, Dots, Grid, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
 import { MicButton } from "./Mic";
+import { ScreenView, useDesktop } from "./Terminal";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -53,6 +53,14 @@ export function SessionView({ id }: { id: number }) {
   const state = exited || info?.exited != null ? "exited" : (info?.status.state ?? "idle");
   const hasChat = !!info?.chat;
   const mode: Mode = hasChat ? chosen : "terminal";
+  const desktop = useDesktop();
+  // The keyboard is the session's: you clicked into the terminal at desktop width.
+  const [typing, setTyping] = useState(false);
+  const live = !exited && info?.exited == null;
+  const keyboard = typing && mode === "terminal" && live && desktop;
+  // Another session, the chat, a window gone narrow or a program gone: it starts
+  // again with a click, never by itself.
+  useEffect(() => setTyping(false), [id, mode, desktop, live]);
 
   const choose = (next: Mode) => {
     try {
@@ -67,7 +75,8 @@ export function SessionView({ id }: { id: number }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target.closest("textarea, input, [contenteditable]") || e.altKey || e.metaKey) return;
+      // In the terminal every key is the program's, these included.
+      if (keyboard || target.closest("textarea, input, [contenteditable]") || e.altKey || e.metaKey) return;
       const el = scroller.current;
       const page = (el?.clientHeight ?? 400) / 2;
       const by = (dy: number) => el?.scrollBy({ top: dy, behavior: "smooth" });
@@ -172,7 +181,7 @@ export function SessionView({ id }: { id: number }) {
       {mode === "chat" ? (
         <ChatView info={info} scroller={scroller} onTerminal={() => choose("terminal")} />
       ) : (
-        <ScreenView view={view} scroller={scroller} />
+        <ScreenView view={view} scroller={scroller} typing={typing} onTyping={setTyping} live={live} />
       )}
 
       {exited && (
@@ -197,45 +206,11 @@ export function SessionView({ id }: { id: number }) {
               ))}
             </div>
           )}
-          <KeyBar />
+          {/* A desktop keyboard has these keys; click the terminal to use them. */}
+          {!(desktop && mode === "terminal") && <KeyBar />}
           <Composer id={id} area={composer} />
         </footer>
       )}
-    </div>
-  );
-}
-
-function ScreenView({ view, scroller: ref }: { view: "reflow" | "grid"; scroller: RefObject<HTMLDivElement | null> }) {
-  const screen = useApp((s) => s.screen);
-  const stick = useRef(true);
-
-  // Follow new output unless you scrolled up to read.
-  const onScroll = () => {
-    const el = ref.current;
-    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [screen, view, ref]);
-
-  if (!screen) return <div ref={ref} className="screen loading">Opening…</div>;
-  const lines: Run[][] = view === "reflow" ? reflow(screen) : screen.rows.map(rowRuns);
-  return (
-    <div ref={ref} className={`screen ${view}`} onScroll={onScroll}>
-      <pre style={view === "grid" ? { width: `${screen.cols}ch` } : undefined}>
-        {lines.map((runs, i) => (
-          <div className="line" key={i}>
-            {runs.length === 0
-              ? " "
-              : runs.map((r, j) => (
-                  <span key={j} style={cssStyle(r.style)}>
-                    {r.text}
-                  </span>
-                ))}
-          </div>
-        ))}
-      </pre>
     </div>
   );
 }
