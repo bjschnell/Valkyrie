@@ -8,6 +8,7 @@ pub mod chat;
 mod host;
 pub mod notify;
 pub mod places;
+pub mod proof;
 pub mod push;
 pub mod review;
 pub mod tailscale;
@@ -92,6 +93,8 @@ static BUILD: LazyLock<String> = LazyLock::new(|| {
 pub(crate) struct App {
     store: auth::Store,
     socket: PathBuf,
+    /// The address it listens on, which a proof is made for (`proof`).
+    listen: SocketAddr,
     /// Sends Web Push; `None` if the VAPID key couldn't be set up.
     push: Option<push::Sender>,
     /// Connected web apps on screen right now.
@@ -184,6 +187,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let app = Arc::new(App {
         store,
         socket: opts.socket,
+        listen: listener.local_addr().unwrap_or(opts.listen),
         push,
         visible: AtomicUsize::new(0),
         upgraded: tokio::sync::Notify::new(),
@@ -208,6 +212,7 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/pair", post(pair))
         .route("/api/pair/code", post(new_short_code))
         .route("/api/pair/code/{id}", get(code_state))
+        .route("/api/proof/{id}", get(proof_route))
         .route("/api/push", get(push_key))
         .route("/api/push/subscribe", post(subscribe))
         .route("/api/push/unsubscribe", post(unsubscribe))
@@ -338,6 +343,15 @@ async fn pair(State(app): State<Arc<App>>, Json(req): Json<PairRequest>) -> Resp
             Json(serde_json::json!({ "token": token })).into_response()
         }
         Err(e) => (StatusCode::FORBIDDEN, e.to_string()).into_response(),
+    }
+}
+
+/// Proves this is the user's `valk web` to a program that wrote a nonce where only
+/// the user can read (`proof`). No token: the desktop app asks before it pairs.
+async fn proof_route(State(app): State<Arc<App>>, Path(id): Path<String>) -> Response {
+    match proof::respond(&proof::dir(), &id, app.listen) {
+        Some(answer) => answer.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -911,6 +925,7 @@ mod tests {
         let app = App {
             store,
             socket: dir.join("d.sock"),
+            listen: "127.0.0.1:8790".parse().unwrap(),
             push: None,
             visible: AtomicUsize::new(0),
             upgraded: tokio::sync::Notify::new(),
@@ -953,6 +968,7 @@ mod tests {
         App {
             store: auth::Store::open(&dir).unwrap(),
             socket: dir.join("d.sock"),
+            listen: "127.0.0.1:8790".parse().unwrap(),
             push: None,
             visible: AtomicUsize::new(0),
             upgraded: tokio::sync::Notify::new(),
