@@ -4,6 +4,7 @@ import { age } from "../lib/time";
 import { USER_SCOPE, scopeName } from "../lib/scope";
 import { review, useApp } from "../store";
 import { parseScope, scoping } from "../lib/decisions";
+import { Markdown } from "./Markdown";
 
 /** The last part of a path: the project's name. */
 
@@ -58,7 +59,7 @@ function ProposalCard({ d }: { d: Decision }) {
         ) : (
           <>
             <p className="decision-title">{d.title}</p>
-            {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+            {d.body && <Markdown text={d.body} className={`decision-body ${d.kind}`} />}
             {d.scope?.length ? <div className="decision-scope">applies to {d.scope.join(", ")}</div> : null}
             <div className="decision-by">
               proposed by {who}
@@ -100,7 +101,7 @@ function StaleCard({ d }: { d: Decision }) {
           <span className="card-prog">{scopeName(d.project)}</span>
         </div>
         <p className="decision-title">{d.title}</p>
-        {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+        {d.body && <Markdown text={d.body} className={`decision-body ${d.kind}`} />}
         <div className="decision-by">{d.fresh?.review}</div>
         <div className="card-actions">
           <button className="ghost no" disabled={busy} onClick={() => void act({ a: "retire" })}>
@@ -136,7 +137,7 @@ function ScopeCard({ d }: { d: Decision }) {
           <span className="card-prog">{scopeName(d.project)}</span>
         </div>
         <p className="decision-title">{d.title}</p>
-        {d.body && <p className={`decision-body ${d.kind}`}>{d.body}</p>}
+        {d.body && <Markdown text={d.body} className={`decision-body ${d.kind}`} />}
         <label className="field">
           <span className="field-label">Applies to</span>
           <input value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />

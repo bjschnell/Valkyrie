@@ -2052,12 +2052,11 @@ button.title-name {
   word-break: break-word;
 }
 
-/* A skill is a procedure, often long: scroll it in place. */
+/* A skill is a procedure, often long: scroll it in place. Its commands are
+   markdown code, so the prose around them stays in the body font. */
 .decision-body.skill {
   max-height: 45vh;
   overflow-y: auto;
-  font-family: var(--mono);
-  font-size: 13px;
 }
 
 .decision-by {
