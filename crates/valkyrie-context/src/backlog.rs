@@ -654,6 +654,46 @@ fn footer(id: u32) -> String {
     )
 }
 
+/// What's typed into an idle session when its own pull request merges (backlog
+/// #121): the user's merge ended the work, so the agent wraps up instead of
+/// waiting to be told. `item`, when the PR was its card's, shipped with it.
+pub fn merged_own(url: &str, item: Option<&Item>) -> String {
+    let (shipped, note) = match item {
+        Some(item) => (
+            format!(
+                ", and backlog #{} “{}” shipped with it",
+                item.id,
+                one_line(&item.title)
+            ),
+            format!(" with `valk todo note -i {} \"<what's left>\"`", item.id),
+        ),
+        None => (String::new(), String::new()),
+    };
+    format!(
+        "Valkyrie: the user merged your PR {url}{shipped}. There's nothing more to build on it. \
+         If anything is left over, leave it in a short handoff{note}; say what you filed while \
+         on it, then stop. Don't start other work unless the user asks."
+    )
+}
+
+/// What every other agent in the repository is told on its next prompt when a
+/// pull request merges into `base` (backlog #121), so a branch built on the old
+/// base isn't news at push time.
+pub fn merged_other(url: &str, base: &str, item: Option<&Item>) -> String {
+    let card = item
+        .map(|item| format!(" (#{} “{}”)", item.id, one_line(&item.title)))
+        .unwrap_or_default();
+    let base = if base.is_empty() {
+        "the default branch"
+    } else {
+        base
+    };
+    format!(
+        "Merged into `{base}` since your last prompt: PR {url}{card}. If your branch touches \
+         the same code, merge `{base}` in before you push."
+    )
+}
+
 /// What the agent in a session the user just adopted into `item` is told on its
 /// next prompt, having no `VALK_ITEM` (`valk todo adopt`).
 pub fn adopted(item: &Item) -> String {

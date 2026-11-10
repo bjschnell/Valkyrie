@@ -12,6 +12,7 @@ mod facts;
 mod foreground;
 mod guard;
 mod habit;
+mod merged;
 mod order;
 mod overlap;
 mod pairing;

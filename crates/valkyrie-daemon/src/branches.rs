@@ -130,11 +130,33 @@ impl Registry {
                     continue;
                 }
                 Pr::Unknown => continue,
-                Pr::Open { url, .. } | Pr::Merged { url } | Pr::Closed { url } => url.clone(),
+                Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => url.clone(),
             };
             self.supervisor.lock().unwrap().no_pr.remove(&key);
             // How the steps policies took on it turned out.
             self.judge_steps(&url, &pr);
+            if let Pr::Merged { base, author, .. } = &pr {
+                // Only the user's own, seen open first: an old merge, or a
+                // colleague's PR checked out to review, is no reason to type.
+                let news = author == me && self.supervisor.lock().unwrap().open_seen.remove(&url);
+                if news {
+                    let own: Vec<SessionId> = places.iter().map(|p| p.session).collect();
+                    self.announce_merge(&url, base, &own, &key.0, None);
+                }
+                continue;
+            }
+            if let Pr::Closed { .. } = &pr {
+                self.supervisor.lock().unwrap().open_seen.remove(&url);
+            }
+            if let Pr::Open { author, .. } = &pr
+                && author == me
+            {
+                self.supervisor
+                    .lock()
+                    .unwrap()
+                    .open_seen
+                    .insert(url.clone());
+            }
             let Pr::Open {
                 failed,
                 conflicts,
@@ -353,6 +375,115 @@ mod tests {
         git(&bare, &["commit", "-q", "--allow-empty", "-m", "two"]);
         registry.watch_branches(lookup, "me").await;
         assert!(asked.lock().unwrap().contains(&"feat/bare".to_owned()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no item, a PR of the user's that the branch watch saw open and then
+    /// merged wakes the session on its branch and tells the repository's other
+    /// agents (backlog #121), once. One first seen merged (merged before anyone
+    /// watched) and somebody else's say nothing.
+    #[tokio::test]
+    async fn a_pr_seen_open_then_merged_tells_its_branchs_agents() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = std::env::temp_dir().join(format!("valkyrie-brmerged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let wt = |branch: &str| {
+            let path = dir.join(branch.replace('/', "-"));
+            let path_s = path.to_str().unwrap().to_owned();
+            git(&repo, &["worktree", "add", "-q", "-b", branch, &path_s]);
+            path
+        };
+        let (mine, old, theirs) = (wt("feat/mine"), wt("feat/old"), wt("feat/theirs"));
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        registry.supervisor.lock().unwrap().context_on = Some(|| true);
+        let spawn = |cwd: &Path| {
+            let spec = SpawnSpec {
+                command: vec!["sleep".into(), "30".into()],
+                cwd: Some(cwd.to_owned()),
+                name: None,
+                size: Size { cols: 40, rows: 10 },
+                env: Vec::new(),
+                worktree: None,
+                hidden: false,
+            };
+            let Reply::Session { info } = crate::spawn(&registry, spec).unwrap() else {
+                panic!("no session");
+            };
+            let s = registry.get(info.id).unwrap();
+            s.driven_by("claude");
+            s
+        };
+        let (a, b, c, on_main) = (spawn(&mine), spawn(&old), spawn(&theirs), spawn(&repo));
+        let merged = Arc::new(AtomicBool::new(false));
+        let now = merged.clone();
+        let lookup: PrLookup = Arc::new(move |_, branch| {
+            let (n, author) = match branch {
+                "feat/mine" => (1, "me"),
+                "feat/old" => (2, "me"),
+                "feat/theirs" => (3, "someone"),
+                _ => return Pr::None,
+            };
+            let url = format!("https://github.com/o/r/pull/{n}");
+            if n == 2 || now.load(Ordering::Relaxed) {
+                return Pr::Merged {
+                    url,
+                    base: "main".into(),
+                    author: author.into(),
+                };
+            }
+            Pr::Open {
+                url,
+                failed: vec![],
+                conflicts: None,
+                head: "h1".into(),
+                settled: true,
+                author: author.into(),
+            }
+        });
+        let state = dir.join("state/sessions");
+        let told = |s: &Arc<crate::session::Session>| -> Vec<bool> {
+            std::fs::read_to_string(state.join(format!("{}.events.jsonl", s.key())))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v["k"] == "merged")
+                .map(|v| v["typed"].as_bool().unwrap())
+                .collect()
+        };
+        assert_eq!(registry.watch_branches(lookup.clone(), "me").await, 0);
+        assert!([&a, &b, &c, &on_main].iter().all(|s| told(s).is_empty()));
+        merged.store(true, Ordering::Relaxed);
+        registry.watch_branches(lookup.clone(), "me").await;
+        assert_eq!(told(&a), [true]);
+        assert!(a.take_merged().is_empty());
+        for s in [&b, &c] {
+            let news = s.take_merged();
+            assert_eq!(news.len(), 1, "{news:?}");
+            assert!(news[0].contains("/pull/1"), "{news:?}");
+        }
+        assert_eq!(told(&on_main), [false]);
+        assert!(on_main.take_merged()[0].contains("/pull/1"));
+        // Read merged again: not news.
+        registry.watch_branches(lookup, "me").await;
+        assert_eq!(told(&a), [true]);
+        assert!(
+            [&b, &c, &on_main]
+                .iter()
+                .all(|s| s.take_merged().is_empty())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
