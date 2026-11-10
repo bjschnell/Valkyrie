@@ -140,6 +140,30 @@ pub fn store() -> Result<auth::Store> {
     auth::Store::open(&valkyrie_proto::state_dir().join("web"))
 }
 
+/// Where the latest `valk web` of this user's wrote down that it listens.
+fn listening_file() -> PathBuf {
+    valkyrie_proto::state_dir().join("web").join("listen")
+}
+
+/// Writes down where this server listens, for a program on this machine that
+/// looks for it (the desktop app). Only a hint: such a program still has the
+/// server prove itself (`proof`), so a stale or wrong one costs nothing.
+fn record_listening(addr: SocketAddr) {
+    if let Err(e) = std::fs::write(listening_file(), addr.to_string()) {
+        tracing::warn!("couldn't record the listen address: {e}");
+    }
+}
+
+/// Where a `valk web` of this user's last said it listens, if one did. It may
+/// have stopped since, or never been this one: ask it for `proof`.
+pub fn listening() -> Option<SocketAddr> {
+    std::fs::read_to_string(listening_file())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 pub async fn run(opts: Options) -> Result<()> {
     let store = store()?;
     let tailnet = tailscale::tailnet().map(|t| t.url);
@@ -152,6 +176,7 @@ pub async fn run(opts: Options) -> Result<()> {
         .await
         .with_context(|| format!("listen on {}", opts.listen))?;
     println!("valk web on http://{}", opts.listen);
+    record_listening(listener.local_addr().unwrap_or(opts.listen));
     if !opts.listen.ip().is_loopback() {
         println!(
             "  listening beyond localhost: anyone who can reach {} can try to pair",
