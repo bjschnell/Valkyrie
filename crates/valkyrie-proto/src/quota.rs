@@ -1,4 +1,4 @@
-//! How much of the agent's plan is used up (protocol 28), as Claude Code tells its
+//! How much of the agent's plan is used up (protocol 29), as Claude Code tells its
 //! status line: read by `valk statusline`, held by the daemon, pushed to queue
 //! watchers so a home screen can say whether there's room for another session.
 

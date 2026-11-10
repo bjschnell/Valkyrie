@@ -647,9 +647,51 @@ fn summarise(name: &str, args: &Value, repo: &str) -> (String, Detail) {
             let n = args["todos"].as_array().map_or(0, Vec::len);
             (format!("{n} todos"), Detail::default())
         }
+        // The card's line names the questions; opening it shows each in full with
+        // its options, since a clipped question can't be answered.
         "AskUserQuestion" => {
-            let q = args["questions"][0]["question"].as_str().unwrap_or("");
-            (one_line(q), Detail::default())
+            let questions = args["questions"].as_array().cloned().unwrap_or_default();
+            let name = |q: &Value| {
+                let header = q["header"].as_str().unwrap_or("").trim();
+                match header {
+                    "" => q["question"].as_str().unwrap_or("").to_owned(),
+                    h => h.to_owned(),
+                }
+            };
+            let line = questions.iter().map(name).collect::<Vec<_>>().join(" · ");
+            let full = questions
+                .iter()
+                .map(|q| {
+                    let mut block = Vec::new();
+                    let header = q["header"].as_str().unwrap_or("").trim();
+                    let any = q["multiSelect"].as_bool() == Some(true);
+                    match (header, any) {
+                        ("", false) => {}
+                        ("", true) => block.push("(pick any)".to_owned()),
+                        (h, false) => block.push(h.to_owned()),
+                        (h, true) => block.push(format!("{h} (pick any)")),
+                    }
+                    block.push(q["question"].as_str().unwrap_or("").trim().to_owned());
+                    let options = q["options"].as_array().cloned().unwrap_or_default();
+                    for (n, option) in options.iter().enumerate() {
+                        let label = option["label"].as_str().unwrap_or("").trim();
+                        let line = match option["description"].as_str().map(str::trim) {
+                            Some(d) if !d.is_empty() => format!("  {}. {label}: {d}", n + 1),
+                            _ => format!("  {}. {label}", n + 1),
+                        };
+                        block.push(line);
+                    }
+                    block.join("\n")
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (
+                one_line(&line),
+                Detail {
+                    content: Some(clip(&full, MAX_DETAIL)).filter(|c| !c.is_empty()),
+                    ..Detail::default()
+                },
+            )
         }
         _ => {
             let first = args
@@ -964,6 +1006,41 @@ mod tests {
         assert_eq!(detail.file.as_deref(), Some("src/x.rs"));
         assert!(detail.diff.as_deref().unwrap().contains("-b\n+c"));
         assert_eq!(detail.result.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn a_claude_question_shows_in_full() {
+        let long = "I filed backlog #74 while fixing #68: a session's current item is whichever \
+                    one it touched last, so a handoff note on an old, still-open item makes that \
+                    item current again. Do you want it fixed here on its own branch and PR?";
+        let items = feed(
+            Agent::Claude,
+            &[
+                json!({"type":"assistant","uuid":"a","message":{"content":[{"type":"tool_use","id":"q",
+                "name":"AskUserQuestion","input":{"questions":[
+                    {"question":long,"header":"Backlog #74","multiSelect":false,"options":[
+                        {"label":"Fix it here (Recommended)","description":"Take #74 on its own branch."},
+                        {"label":"Leave for the board","description":"Leave #74 proposed."}]},
+                    {"question":"Which checks?","header":"Checks","multiSelect":true,"options":[
+                        {"label":"Clippy"},{"label":"Tests","description":"cargo test"}]}]}}]}}),
+            ],
+        );
+        let Item::Tool {
+            summary, detail, ..
+        } = &items[0]
+        else {
+            panic!()
+        };
+        assert_eq!(summary, "Backlog #74 · Checks");
+        let content = detail.content.as_deref().unwrap();
+        assert_eq!(
+            content,
+            format!(
+                "Backlog #74\n{long}\n  1. Fix it here (Recommended): Take #74 on its own branch.\n  \
+                 2. Leave for the board: Leave #74 proposed.\n\n\
+                 Checks (pick any)\nWhich checks?\n  1. Clippy\n  2. Tests: cargo test"
+            )
+        );
     }
 
     #[test]

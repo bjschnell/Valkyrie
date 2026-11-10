@@ -14,6 +14,7 @@ use alacritty_terminal::vte::ansi::{self, NamedColor, Processor, Rgb};
 use std::sync::{Arc, Mutex};
 use valkyrie_proto::{
     Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, ScrollAnchor, Size, Span, Style,
+    TermColors,
 };
 
 pub const SCROLLBACK: usize = 10_000;
@@ -66,6 +67,8 @@ pub struct VtScreen {
     images: graphics::Graphics,
     /// One cell in pixels, as the attached client's terminal reported it.
     cell_px: (u16, u16),
+    /// What OSC 4/10/11 queries answer; the stock dark palette when `None`.
+    colors: Option<TermColors>,
     events: Listener,
     size: Size,
     title: Option<String>,
@@ -88,6 +91,7 @@ impl VtScreen {
             graphics: graphics::Scanner::default(),
             images: graphics::Graphics::default(),
             cell_px: DEFAULT_CELL_PX,
+            colors: None,
             events,
             size,
             title: None,
@@ -105,6 +109,15 @@ impl VtScreen {
         if cell.0 > 0 && cell.1 > 0 {
             self.cell_px = cell;
         }
+    }
+
+    /// The colors a program is told its terminal has (see `ClientMsg::TermColors`).
+    pub fn set_colors(&mut self, colors: Option<TermColors>) {
+        self.colors = colors;
+    }
+
+    pub fn colors(&self) -> Option<&TermColors> {
+        self.colors.as_ref()
     }
 
     pub fn cell_pixels(&self) -> (u16, u16) {
@@ -146,9 +159,9 @@ impl VtScreen {
         for event in events {
             match event {
                 Event::PtyWrite(s) => signals.push(Signal::Reply(s.into_bytes())),
-                Event::ColorRequest(index, format) => {
-                    signals.push(Signal::Reply(format(default_color(index)).into_bytes()))
-                }
+                Event::ColorRequest(index, format) => signals.push(Signal::Reply(
+                    format(default_color(index, self.colors.as_ref())).into_bytes(),
+                )),
                 Event::TextAreaSizeRequest(format) => {
                     let ws = WindowSize {
                         num_lines: self.size.rows,
@@ -432,8 +445,21 @@ fn color(c: ansi::Color) -> Color {
 }
 
 /// Answers OSC 4/10/11 color queries. Programs (Codex among them) probe the
-/// background to pick a light or dark theme, so report a dark xterm palette.
-fn default_color(index: usize) -> Rgb {
+/// background to pick a light or dark theme, so report the client's colors, or a
+/// dark xterm palette when it hasn't said.
+fn default_color(index: usize, colors: Option<&TermColors>) -> Rgb {
+    if let Some(c) = colors {
+        let rgb = |[r, g, b]: [u8; 3]| Rgb { r, g, b };
+        if index == NamedColor::Background as usize {
+            return rgb(c.bg);
+        }
+        if index == NamedColor::Foreground as usize {
+            return rgb(c.fg);
+        }
+        if let (0..16, Some(&ansi)) = (index, c.ansi.get(index)) {
+            return rgb(ansi);
+        }
+    }
     const ANSI: [(u8, u8, u8); 16] = [
         (0x00, 0x00, 0x00),
         (0xcd, 0x00, 0x00),
@@ -475,6 +501,33 @@ mod tests {
 
     fn screen() -> VtScreen {
         VtScreen::new(Size { cols: 20, rows: 5 })
+    }
+
+    fn reply(s: &mut VtScreen, query: &str) -> String {
+        let signals = s.feed(query.as_bytes());
+        signals
+            .into_iter()
+            .find_map(|g| match g {
+                Signal::Reply(b) => Some(String::from_utf8(b).unwrap()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn background_query_answers_the_clients_colors() {
+        let mut s = screen();
+        assert!(reply(&mut s, "\x1b]11;?\x07").contains("1818/1818/1818"));
+        s.set_colors(Some(TermColors {
+            fg: [0x4c, 0x4f, 0x69],
+            bg: [0xef, 0xf1, 0xf5],
+            ansi: vec![[1, 2, 3]; 16],
+        }));
+        assert!(reply(&mut s, "\x1b]11;?\x07").contains("efef/f1f1/f5f5"));
+        assert!(reply(&mut s, "\x1b]10;?\x07").contains("4c4c/4f4f/6969"));
+        assert!(reply(&mut s, "\x1b]4;1;?\x07").contains("0101/0202/0303"));
+        s.set_colors(None);
+        assert!(reply(&mut s, "\x1b]11;?\x07").contains("1818/1818/1818"));
     }
 
     fn row_text(row: &Row) -> String {

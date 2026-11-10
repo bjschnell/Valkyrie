@@ -1,4 +1,4 @@
-//! The plan's quota on the home header (protocol 28): how much of each window is
+//! The plan's quota on the home header (protocol 29): how much of each window is
 //! used, so there's no starting a long session on the last few percent.
 
 use crate::theme::Theme;

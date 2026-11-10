@@ -3,7 +3,7 @@
 //! the theme. Colors it names exactly (256-color or RGB) are drawn as they are.
 
 use ratatui::style::Color;
-use valkyrie_proto::AgentState;
+use valkyrie_proto::{AgentState, TermColors};
 
 pub struct Theme {
     pub name: &'static str,
@@ -519,6 +519,286 @@ pub const NETRUNNER: Theme = Theme {
     ],
 };
 
+/// Solarized Dark (ethanschoonover.com/solarized).
+pub const SOLARIZED: Theme = Theme {
+    name: "solarized",
+    bg: hex(0x002b36),
+    panel: hex(0x00252f),
+    strip: hex(0x001e26),
+    card: hex(0x073642),
+    selection: hex(0x0b4552),
+    border: hex(0x18505e),
+    fg: hex(0x93a1a1),
+    muted: hex(0x657b83),
+    accent: hex(0x268bd2),
+    accent2: hex(0x6c71c4),
+    needs: hex(0xb58900),
+    blocked: hex(0xdc322f),
+    done: hex(0x859900),
+    working: hex(0x2aa198),
+    interrupted: hex(0xcb4b16),
+    idle: hex(0x586e75),
+    rain: None,
+    ansi: [
+        hex(0x073642),
+        hex(0xdc322f),
+        hex(0x859900),
+        hex(0xb58900),
+        hex(0x268bd2),
+        hex(0xd33682),
+        hex(0x2aa198),
+        hex(0xeee8d5),
+        hex(0x002b36),
+        hex(0xcb4b16),
+        hex(0x586e75),
+        hex(0x657b83),
+        hex(0x839496),
+        hex(0x6c71c4),
+        hex(0x93a1a1),
+        hex(0xfdf6e3),
+    ],
+};
+
+/// One Dark (Atom).
+pub const ONEDARK: Theme = Theme {
+    name: "onedark",
+    bg: hex(0x282c34),
+    panel: hex(0x21252b),
+    strip: hex(0x181a1f),
+    card: hex(0x2c313a),
+    selection: hex(0x3e4451),
+    border: hex(0x4b5263),
+    fg: hex(0xabb2bf),
+    muted: hex(0x5c6370),
+    accent: hex(0x61afef),
+    accent2: hex(0xc678dd),
+    needs: hex(0xe5c07b),
+    blocked: hex(0xe06c75),
+    done: hex(0x98c379),
+    working: hex(0x56b6c2),
+    interrupted: hex(0xd19a66),
+    idle: hex(0x4b5263),
+    rain: None,
+    ansi: [
+        hex(0x282c34),
+        hex(0xe06c75),
+        hex(0x98c379),
+        hex(0xe5c07b),
+        hex(0x61afef),
+        hex(0xc678dd),
+        hex(0x56b6c2),
+        hex(0xabb2bf),
+        hex(0x5c6370),
+        hex(0xe06c75),
+        hex(0x98c379),
+        hex(0xe5c07b),
+        hex(0x61afef),
+        hex(0xc678dd),
+        hex(0x56b6c2),
+        hex(0xffffff),
+    ],
+};
+
+/// Rosé Pine (rosepinetheme.com).
+pub const ROSEPINE: Theme = Theme {
+    name: "rosepine",
+    bg: hex(0x191724),
+    panel: hex(0x1f1d2e),
+    strip: hex(0x12101c),
+    card: hex(0x26233a),
+    selection: hex(0x403d52),
+    border: hex(0x524f67),
+    fg: hex(0xe0def4),
+    muted: hex(0x6e6a86),
+    accent: hex(0xc4a7e7),
+    accent2: hex(0xebbcba),
+    needs: hex(0xf6c177),
+    blocked: hex(0xeb6f92),
+    done: hex(0x9ccfd8),
+    working: hex(0x3e8fb0),
+    interrupted: hex(0xea9a97),
+    idle: hex(0x6e6a86),
+    rain: None,
+    ansi: [
+        hex(0x26233a),
+        hex(0xeb6f92),
+        hex(0x31748f),
+        hex(0xf6c177),
+        hex(0x9ccfd8),
+        hex(0xc4a7e7),
+        hex(0xebbcba),
+        hex(0xe0def4),
+        hex(0x6e6a86),
+        hex(0xeb6f92),
+        hex(0x31748f),
+        hex(0xf6c177),
+        hex(0x9ccfd8),
+        hex(0xc4a7e7),
+        hex(0xebbcba),
+        hex(0xe0def4),
+    ],
+};
+
+/// Monokai.
+pub const MONOKAI: Theme = Theme {
+    name: "monokai",
+    bg: hex(0x272822),
+    panel: hex(0x1e1f1c),
+    strip: hex(0x171814),
+    card: hex(0x3e3d32),
+    selection: hex(0x49483e),
+    border: hex(0x5b5a4d),
+    fg: hex(0xf8f8f2),
+    muted: hex(0x75715e),
+    accent: hex(0x66d9ef),
+    accent2: hex(0xf92672),
+    needs: hex(0xe6db74),
+    blocked: hex(0xf92672),
+    done: hex(0xa6e22e),
+    working: hex(0xae81ff),
+    interrupted: hex(0xfd971f),
+    idle: hex(0x75715e),
+    rain: None,
+    ansi: [
+        hex(0x272822),
+        hex(0xf92672),
+        hex(0xa6e22e),
+        hex(0xf4bf75),
+        hex(0x66d9ef),
+        hex(0xae81ff),
+        hex(0xa1efe4),
+        hex(0xf8f8f2),
+        hex(0x75715e),
+        hex(0xf92672),
+        hex(0xa6e22e),
+        hex(0xf4bf75),
+        hex(0x66d9ef),
+        hex(0xae81ff),
+        hex(0xa1efe4),
+        hex(0xf9f8f5),
+    ],
+};
+
+/// Solarized Light, the first light theme.
+pub const SOLARIZEDLIGHT: Theme = Theme {
+    name: "solarizedlight",
+    bg: hex(0xfdf6e3),
+    panel: hex(0xf7f0dc),
+    strip: hex(0xeee8d5),
+    card: hex(0xf5eedb),
+    selection: hex(0xe4ddc6),
+    border: hex(0xd3cbb7),
+    fg: hex(0x586e75),
+    muted: hex(0x93a1a1),
+    accent: hex(0x268bd2),
+    accent2: hex(0xd33682),
+    needs: hex(0xb58900),
+    blocked: hex(0xdc322f),
+    done: hex(0x859900),
+    working: hex(0x2aa198),
+    interrupted: hex(0xcb4b16),
+    idle: hex(0x93a1a1),
+    rain: None,
+    ansi: [
+        hex(0x073642),
+        hex(0xdc322f),
+        hex(0x859900),
+        hex(0xb58900),
+        hex(0x268bd2),
+        hex(0xd33682),
+        hex(0x2aa198),
+        hex(0xeee8d5),
+        hex(0x002b36),
+        hex(0xcb4b16),
+        hex(0x586e75),
+        hex(0x657b83),
+        hex(0x839496),
+        hex(0x6c71c4),
+        hex(0x93a1a1),
+        hex(0xfdf6e3),
+    ],
+};
+
+/// Catppuccin Latte (catppuccin.com), light.
+pub const CATPPUCCINLATTE: Theme = Theme {
+    name: "catppuccinlatte",
+    bg: hex(0xeff1f5),
+    panel: hex(0xe6e9ef),
+    strip: hex(0xccd0da),
+    card: hex(0xdce0e8),
+    selection: hex(0xbcc0cc),
+    border: hex(0xacb0be),
+    fg: hex(0x4c4f69),
+    muted: hex(0x7c7f93),
+    accent: hex(0x8839ef),
+    accent2: hex(0xea76cb),
+    needs: hex(0xdf8e1d),
+    blocked: hex(0xd20f39),
+    done: hex(0x40a02b),
+    working: hex(0x04a5e5),
+    interrupted: hex(0xfe640b),
+    idle: hex(0x9ca0b0),
+    rain: None,
+    ansi: [
+        hex(0x5c5f77),
+        hex(0xd20f39),
+        hex(0x40a02b),
+        hex(0xdf8e1d),
+        hex(0x1e66f5),
+        hex(0xea76cb),
+        hex(0x179299),
+        hex(0xacb0be),
+        hex(0x6c6f85),
+        hex(0xd20f39),
+        hex(0x40a02b),
+        hex(0xdf8e1d),
+        hex(0x1e66f5),
+        hex(0xea76cb),
+        hex(0x179299),
+        hex(0xbcc0cc),
+    ],
+};
+
+/// Gruvbox light (github.com/morhetz/gruvbox).
+pub const GRUVBOXLIGHT: Theme = Theme {
+    name: "gruvboxlight",
+    bg: hex(0xfbf1c7),
+    panel: hex(0xf9f5d7),
+    strip: hex(0xebdbb2),
+    card: hex(0xf2e5bc),
+    selection: hex(0xd5c4a1),
+    border: hex(0xbdae93),
+    fg: hex(0x3c3836),
+    muted: hex(0x7c6f64),
+    accent: hex(0xaf3a03),
+    accent2: hex(0x8f3f71),
+    needs: hex(0xb57614),
+    blocked: hex(0x9d0006),
+    done: hex(0x79740e),
+    working: hex(0x076678),
+    interrupted: hex(0x427b58),
+    idle: hex(0x928374),
+    rain: None,
+    ansi: [
+        hex(0xfbf1c7),
+        hex(0xcc241d),
+        hex(0x98971a),
+        hex(0xd79921),
+        hex(0x458588),
+        hex(0xb16286),
+        hex(0x689d6a),
+        hex(0x7c6f64),
+        hex(0x928374),
+        hex(0x9d0006),
+        hex(0x79740e),
+        hex(0xb57614),
+        hex(0x076678),
+        hex(0x8f3f71),
+        hex(0x427b58),
+        hex(0x3c3836),
+    ],
+};
+
 pub const THEMES: &[&Theme] = &[
     &DRACULA,
     &CYBERPUNK,
@@ -531,6 +811,13 @@ pub const THEMES: &[&Theme] = &[
     &VIOLET,
     &VALKYRIE,
     &NETRUNNER,
+    &SOLARIZED,
+    &ONEDARK,
+    &ROSEPINE,
+    &MONOKAI,
+    &SOLARIZEDLIGHT,
+    &CATPPUCCINLATTE,
+    &GRUVBOXLIGHT,
 ];
 
 impl Theme {
@@ -542,6 +829,19 @@ impl Theme {
             AgentState::Interrupted | AgentState::Stale => self.interrupted,
             AgentState::Working => self.working,
             AgentState::Idle | AgentState::Exited => self.idle,
+        }
+    }
+
+    /// What a session's programs are told their terminal looks like.
+    pub fn term_colors(&self) -> TermColors {
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => [r, g, b],
+            _ => [0, 0, 0],
+        };
+        TermColors {
+            fg: rgb(self.fg),
+            bg: rgb(self.bg),
+            ansi: self.ansi.iter().map(|&c| rgb(c)).collect(),
         }
     }
 
@@ -580,6 +880,14 @@ mod tests {
         }
         assert_eq!(Theme::by_name(" Cyberpunk\n").unwrap().name, "cyberpunk");
         assert!(Theme::by_name("nope").is_none());
+    }
+
+    #[test]
+    fn term_colors_carry_the_theme() {
+        let c = CATPPUCCINLATTE.term_colors();
+        assert_eq!(c.bg, [0xef, 0xf1, 0xf5]);
+        assert_eq!(c.ansi.len(), 16);
+        assert_eq!(c.ansi[1], [0xd2, 0x0f, 0x39]);
     }
 
     #[test]

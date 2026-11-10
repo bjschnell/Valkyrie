@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { LOOKS, LOOK_TEXT, setLook, useLook } from "../lib/theme";
+import { LOOKS, LOOK_TEXT, hasRain, setLook, useLook } from "../lib/theme";
 import { AddDeviceSettings } from "./AddDevice";
 import { Back, Check } from "./icons";
 import { NotifySettings } from "./Notify";
@@ -28,7 +28,7 @@ export function Settings() {
 
   return (
     <div className="page">
-      {look !== "default" && <Rain key={look} />}
+      {hasRain(look) && <Rain key={look} />}
       <header className="topbar">
         <button className="icon-btn" aria-label="Back" onClick={home}>
           <Back />

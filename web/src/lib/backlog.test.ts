@@ -33,6 +33,10 @@ describe("lane", () => {
     expect(lane(item(), [], 7)).toBe("backlog");
   });
 
+  it("is the backlog for a returned item, whose worktree is kept", () => {
+    expect(lane(item({ checkout: "/r/app-wt", branch: "fix/1-x" }), [], 7)).toBe("backlog");
+  });
+
   it("follows the newest live session's state", () => {
     const i = item({ sessions: [3, 4] });
     expect(lane(i, [session(3, "needs_input"), session(4, "working")], 7)).toBe("running");

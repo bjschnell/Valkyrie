@@ -59,7 +59,12 @@ fn hook(mut cmd: Command, stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    // A hook may exit without reading its input; the exit status and output are
+    // what's tested, so a write it outlived (EPIPE) is no failure.
+    match child.stdin.take().unwrap().write_all(stdin) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        written => written.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -67,6 +72,43 @@ fn assert_silent_success(out: &Output) {
     assert!(out.status.success(), "{out:?}");
     assert!(out.stdout.is_empty(), "hook printed to stdout: {out:?}");
     assert!(out.stderr.is_empty(), "hook printed to stderr: {out:?}");
+}
+
+/// The agent writes the whole payload before it waits, so the hook reads all of
+/// its stdin on every path, even ones that do nothing: a payload larger than the
+/// pipe buffer would otherwise hit EPIPE in the agent.
+#[test]
+fn hook_reads_its_whole_input_even_when_it_does_nothing_with_it() {
+    let dir = temp("drain");
+    let socket = dir.join("run/none.sock");
+    let big = vec![b' '; 1 << 20];
+    let outside = valk(&socket, &dir);
+    // Arguments that don't parse (empty --socket from the environment).
+    let mut bad_args = valk(&socket, &dir);
+    bad_args.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
+    let mut bad_session = valk(&socket, &dir);
+    bad_session.env("VALK_SESSION", "not a number");
+    for (case, mut cmd) in [
+        ("outside a session", outside),
+        ("bad arguments", bad_args),
+        ("bad VALK_SESSION", bad_session),
+    ] {
+        let mut child = cmd
+            .args(["hook", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let written = child.stdin.take().unwrap().write_all(&big);
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            written.is_ok(),
+            "{case}: hook left its input unread: {written:?}"
+        );
+        assert_silent_success(&out);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -86,6 +128,11 @@ fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
     let mut cmd = valk(&socket, &dir);
     cmd.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
     assert_silent_success(&hook(cmd, b"{}"));
+    // That path exits without reading stdin, so a payload larger than the pipe
+    // buffer always outlives it: the write then fails with EPIPE every time.
+    let mut cmd = valk(&socket, &dir);
+    cmd.env("VALK_SOCKET", "").env("VALK_SESSION", "1");
+    assert_silent_success(&hook(cmd, &vec![b' '; 1 << 20]));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1241,4 +1288,158 @@ fn a_closed_stdout_ends_valk_quietly() {
     assert!(stderr.is_empty(), "valk complained: {stderr}");
     assert_eq!(out.status.signal(), Some(libc::SIGPIPE), "{:?}", out.status);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `valk pane`: an agent in a session splits its own tab, drives the new pane and
+/// reads it back, resizes and closes it, and can't close the pane it runs in.
+#[test]
+fn an_agent_drives_the_panes_of_its_tab() {
+    let dir = temp("pane");
+    let socket = dir.join("run/o.sock");
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let new = (0..100)
+        .find_map(|_| {
+            let out = valk(&socket, &dir)
+                .args(["new", "--cwd"])
+                .arg(&dir)
+                .args(["--", "sh"])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                return Some(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .expect("daemon did not start");
+    let me = String::from_utf8(new.stdout).unwrap().trim().to_string();
+    // As the agent in that session would run it.
+    let pane = |args: &[&str]| {
+        valk(&socket, &dir)
+            .env("VALK_SESSION", &me)
+            .env("SHELL", "/bin/sh")
+            .arg("pane")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let ok = |out: Output| {
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let list = || -> Vec<serde_json::Value> {
+        serde_json::from_str(&ok(pane(&["list", "--json"]))).unwrap()
+    };
+
+    let solo = list();
+    assert_eq!(solo.len(), 1);
+    assert_eq!(solo[0]["where"], "whole tab");
+    assert_eq!(solo[0]["me"], true);
+
+    let other = ok(pane(&["split", "-d", "right"])).trim().to_string();
+    let panes = list();
+    let wheres: Vec<_> = panes
+        .iter()
+        .map(|p| {
+            (
+                p["id"].to_string(),
+                p["where"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        wheres,
+        [
+            (me.clone(), "left".to_string()),
+            (other.clone(), "right".to_string())
+        ]
+    );
+    assert_eq!(panes[1]["me"], false);
+    // Canonical: macOS's temp dir is under /var, a link to /private/var.
+    let cwd = std::fs::canonicalize(panes[1]["cwd"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        cwd,
+        std::fs::canonicalize(&dir).unwrap(),
+        "the split's directory"
+    );
+
+    ok(pane(&["run", &other, "echo pane-$((40+2))"]));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--match",
+        "pane-42",
+        "--timeout",
+        "10",
+    ]));
+    assert!(ok(pane(&["read", &other])).contains("pane-42"));
+    let tail = ok(pane(&["read", &other, "-n", "1"]));
+    assert_eq!(tail.lines().count(), 1, "{tail:?}");
+    let timed_out = pane(&["wait", &other, "--match", "never-there", "--timeout", "0"]);
+    assert_eq!(timed_out.status.code(), Some(124));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--state",
+        "stopped",
+        "--timeout",
+        "10",
+    ]));
+
+    // History above, a mostly blank screen: the last lines are the ones written.
+    ok(pane(&[
+        "run",
+        &other,
+        "seq 1 60; printf '\\\\033[2J\\\\033[H'; echo after-$((1+1))",
+    ]));
+    ok(pane(&[
+        "wait",
+        &other,
+        "--match",
+        "after-2",
+        "--timeout",
+        "10",
+    ]));
+    let tail = ok(pane(&["read", &other, "-n", "30"]));
+    let tail: Vec<_> = tail.lines().collect();
+    // More than the 24-row screen holds, so history comes along.
+    assert_eq!(tail.len(), 30, "{tail:?}");
+    assert_eq!(tail[28], "after-2", "{tail:?}");
+
+    ok(pane(&["resize", &other, "30"]));
+    let cols = list()[1]["area"]["cols"].as_u64().unwrap();
+    assert!(
+        (295..=305).contains(&cols),
+        "right pane is {cols}/1000 wide"
+    );
+
+    let refused = pane(&["close", &me]);
+    assert!(!refused.status.success());
+    assert!(pane(&["run", "999", "x"]).status.code() != Some(0));
+    // A shell that exits leaves the list at once; waiting on it still succeeds.
+    let gone = ok(pane(&["split", "-d", "down"])).trim().to_string();
+    ok(pane(&["run", &gone, "exit"]));
+    ok(pane(&[
+        "wait",
+        &gone,
+        "--state",
+        "exited",
+        "--timeout",
+        "10",
+    ]));
+    ok(pane(&["close", &other]));
+    let left = list();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["where"], "whole tab");
+
+    let _ = valk(&socket, &dir).args(["kill", &me]).output();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
 }

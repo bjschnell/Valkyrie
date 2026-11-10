@@ -32,10 +32,19 @@ pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 28;
+pub const PROTOCOL: u32 = 29;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
+
+/// What a program is told its terminal looks like: default text and background,
+/// and the 16 ANSI colors (black to bright white), each as RGB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermColors {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub ansi: Vec<[u8; 3]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
@@ -285,6 +294,15 @@ pub enum ClientMsg {
         width: u16,
         height: u16,
     },
+    /// The colors the client draws a session with, so a program that asks the
+    /// terminal for its background or palette (OSC 4/10/11) gets the answer a real
+    /// terminal would give. With `session`, that session only; without, the default
+    /// for sessions spawned from now on. `colors: None` puts the stock dark palette
+    /// back. No reply.
+    TermColors {
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    },
     /// An agent hook event, forwarded by `valk hook <agent>` (ADR-0005). No reply:
     /// the hook never waits on the daemon.
     Hook {
@@ -295,7 +313,7 @@ pub enum ClientMsg {
         payload: serde_json::Value,
     },
     /// The plan's quota, as `valk statusline` read it from Claude Code (protocol
-    /// 28). No reply; pushed on to queue watchers as `Quota`.
+    /// 29). No reply; pushed on to queue watchers as `Quota`.
     Quota {
         quota: Quota,
     },
@@ -586,7 +604,7 @@ pub enum ServerMsg {
         launches: Vec<LaunchOffer>,
     },
     /// The latest quota reading, if any; pushed to queue watchers after the first
-    /// `Queue` and whenever it changes (protocol 28).
+    /// `Queue` and whenever it changes (protocol 29).
     Quota {
         quota: Option<Quota>,
     },

@@ -10,7 +10,7 @@ import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
 import { answer, answerAll, kill, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
-import { useLook } from "../lib/theme";
+import { hasRain, useLook } from "../lib/theme";
 import { Chevron, Gear, List, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
@@ -83,7 +83,7 @@ export function Inbox() {
 
   return (
     <div className="page">
-      {look !== "default" && <Rain key={look} />}
+      {hasRain(look) && <Rain key={look} />}
       <header className="topbar">
         <div className="brand">
           <Mark size={26} />

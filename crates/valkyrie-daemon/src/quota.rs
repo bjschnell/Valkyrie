@@ -1,4 +1,4 @@
-//! The plan's quota (protocol 28): the latest reading `valk statusline` sent,
+//! The plan's quota (protocol 29): the latest reading `valk statusline` sent,
 //! pushed to queue watchers and kept on disk, so a restarted daemon still has one
 //! before a Claude session next draws its status line.
 
