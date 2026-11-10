@@ -142,13 +142,27 @@ impl Registry {
                     caller.vouch("rewording a proposal another filed")?
                 }
                 ItemChange::Edit { .. } => caller.vouch("rewording an accepted backlog item")?,
+                ItemChange::Return => caller.vouch("returning a backlog item")?,
                 ItemChange::Status { status } => caller.vouch(match (current.status, status) {
                     (ItemStatus::Proposed, ItemStatus::Open) => "accepting a backlog item",
                     (_, ItemStatus::Shipped) => "shipping a backlog item",
                     _ => "reopening a backlog item",
                 })?,
             }
-            (backlog.change(id, &change, now_secs())?, current.status)
+            // Asked before the item forgets them; stopped only once it agrees to go back.
+            let running = match change {
+                ItemChange::Return => self.holders(&current, None),
+                _ => Vec::new(),
+            };
+            let item = backlog.change(id, &change, now_secs())?;
+            drop(backlog);
+            for s in running {
+                // Gone already is as good as stopped.
+                if let Err(e) = self.kill_session(s) {
+                    tracing::warn!(id, session = s, "returned item's session: {e}");
+                }
+            }
+            (item, current.status)
         };
         if was == ItemStatus::Proposed && item.status == ItemStatus::Open {
             self.tell_filer(&item);

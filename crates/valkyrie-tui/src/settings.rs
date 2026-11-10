@@ -86,6 +86,8 @@ pub struct Settings {
     /// it was, so `sound = on` brings it back.
     pub sound: bool,
     pub noise: Noise,
+    /// Toasts also go out as desktop notifications (not over SSH).
+    pub desktop: bool,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
     /// The home screen says when a newer release is out (release builds; GitHub is
@@ -105,6 +107,7 @@ impl PartialEq for Settings {
             self.hints,
             self.sound,
             self.noise,
+            self.desktop,
             self.context,
             self.updates,
             self.keys,
@@ -117,6 +120,7 @@ impl PartialEq for Settings {
             other.hints,
             other.sound,
             other.noise,
+            other.desktop,
             other.context,
             other.updates,
             other.keys,
@@ -140,6 +144,7 @@ impl Default for Settings {
             minimal_tabs: false,
             hints: true,
             sound: true,
+            desktop: true,
             noise: Noise::Chime,
             context: true,
             updates: true,
@@ -158,6 +163,7 @@ pub enum Field {
     TabDetail,
     Hints,
     Sound,
+    Desktop,
     Context,
     Updates,
 }
@@ -171,6 +177,7 @@ impl Field {
         Field::TabDetail,
         Field::Hints,
         Field::Sound,
+        Field::Desktop,
         Field::Context,
         Field::Updates,
     ];
@@ -184,6 +191,7 @@ impl Field {
             Field::TabDetail => "Tab detail",
             Field::Hints => "Key hints",
             Field::Sound => "Sound",
+            Field::Desktop => "Desktop",
             Field::Context => "Context",
             Field::Updates => "Updates",
         }
@@ -203,6 +211,7 @@ impl Settings {
             ("tab_detail", "VALK_TAB_DETAIL"),
             ("hints", "VALK_HINTS"),
             ("sound", "VALK_SOUND"),
+            ("desktop", "VALK_DESKTOP"),
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
         ] {
@@ -236,6 +245,7 @@ impl Settings {
             Field::TabDetail => kept.minimal_tabs = self.minimal_tabs,
             Field::Hints => kept.hints = self.hints,
             Field::Sound => (kept.sound, kept.noise) = (self.sound, self.noise),
+            Field::Desktop => kept.desktop = self.desktop,
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
         });
@@ -268,6 +278,7 @@ impl Settings {
              tab_detail = \"{}\"  # full | minimal: a row per tab, its state and name\n\
              hints = {}        # the bar under a session shows its keys\n\
              sound = \"{}\"     # none | {}\n\
+             desktop = {}      # toasts also go out as desktop notifications (not over SSH)\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
              # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
@@ -283,6 +294,7 @@ impl Settings {
             self.hints,
             self.value(Field::Sound),
             names(Noise::ALL.iter().map(|n| n.name())),
+            self.desktop,
             self.context,
             self.updates,
             self.keys.to_toml(),
@@ -339,6 +351,11 @@ impl Settings {
                         (self.sound, self.noise) = (true, noise);
                     }
                 }
+            },
+            "desktop" => match value {
+                "true" | "on" => self.desktop = true,
+                "false" | "off" => self.desktop = false,
+                _ => {}
             },
             "hints" => match value {
                 "true" | "on" => self.hints = true,
@@ -405,6 +422,7 @@ impl Settings {
                 }
             }
             Field::Hints => on_off(self.hints),
+            Field::Desktop => on_off(self.desktop),
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
         }
@@ -421,6 +439,7 @@ impl Settings {
             Field::SessionColors => self.themed_sessions = !self.themed_sessions,
             Field::TabDetail => self.minimal_tabs = !self.minimal_tabs,
             Field::Hints => self.hints = !self.hints,
+            Field::Desktop => self.desktop = !self.desktop,
             // None, then each noise.
             Field::Sound => {
                 let choices: Vec<Option<Noise>> = std::iter::once(None)
@@ -580,6 +599,19 @@ mod tests {
     }
 
     #[test]
+    fn desktop_is_on_until_turned_off() {
+        let mut s = Settings::default();
+        assert!(s.desktop);
+        s.apply("desktop = off\n");
+        assert_eq!(s.value(Field::Desktop), "off");
+        let mut back = Settings::default();
+        back.apply(&s.to_toml());
+        assert!(!back.desktop);
+        s.set("desktop", "on");
+        assert!(s.desktop);
+    }
+
+    #[test]
     fn every_value_cycles_back_to_itself() {
         let start = Settings::default();
         for &field in Field::ALL {
@@ -592,6 +624,7 @@ mod tests {
                 Field::SessionColors
                 | Field::TabDetail
                 | Field::Hints
+                | Field::Desktop
                 | Field::Context
                 | Field::Updates => 2,
             };

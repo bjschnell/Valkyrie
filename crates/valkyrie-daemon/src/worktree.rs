@@ -696,7 +696,7 @@ fn patch_ids(repo: &Path, args: &[&str]) -> Vec<String> {
 }
 
 /// Runs `git` in `dir`, returning what it printed as it is: for `-z` output.
-fn git_raw(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_raw(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .no_window()
         .args(args)

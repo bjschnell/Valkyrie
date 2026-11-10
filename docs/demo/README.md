@@ -15,11 +15,14 @@ python3 docs/demo/frames.py /tmp/valk-frames docs/images/demo.gif
 It needs rsvg-convert, ImageMagick and ffmpeg. It has no phone and no sound, so a
 real recording can replace it later.
 
-## The phone screenshot
+## The phone screenshots
 
-`docs/images/phone.png` is the built web app in headless Chromium at phone size.
-`phone.mjs` stands in for the daemon on the app's WebSocket with made-up
-sessions, a decision and a chat, so it needs no pairing. After a web change:
+`docs/images/phone.png` (inbox and chat), `phone-work.png` (a review diff and the
+backlog board) and `phone-flag.png` (the supervisor's flag on a conflicting PR)
+are the built web app in headless Chromium at phone size. `phone.mjs` stands in
+for the daemon on the app's WebSocket with made-up sessions, backlog items, a
+decision, a chat and a diff, so it needs no pairing. It writes all three, the
+other two beside the path you give. After a web change:
 
 ```sh
 cd web && npm run build

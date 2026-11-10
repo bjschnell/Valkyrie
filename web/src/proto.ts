@@ -42,6 +42,8 @@ export interface SessionInfo {
   status: AgentStatus;
   /** The agent's own transcript, when known: the Chat view reads it. */
   chat?: string;
+  /** Another live agent in the repository changed the same files (protocol 31). */
+  overlap?: string;
 }
 
 export interface QueueItem {
@@ -335,7 +337,9 @@ export type ItemChange =
       /** The whole list, replacing the item's; empty clears it. */
       blocked_by?: number[];
     }
-  | { do: "status"; status: ItemStatus };
+  | { do: "status"; status: ItemStatus }
+  /** Puts a started item back in the backlog and stops its sessions (protocol 28). */
+  | { do: "return" };
 
 /** One item's place in a build order: why, and what accepting it changes
  * (`priority` and the whole `blocked_by` list; absent keeps what it has). */
@@ -362,6 +366,24 @@ export interface OrderProposal {
 /** A ready item the supervisor offers to start (ADR-0019 §2 `launch`, protocol 27):
  * open, nobody on it, its blockers finished (or waived by the model), with room
  * under the repository's `max_running`. One per repository at most. */
+/** How much of the plan is used (protocol 30), as Claude Code's status line last
+ * said it: only as new as the last Claude session to draw one. */
+export interface Quota {
+  /** When it was read, seconds since the epoch. */
+  at: number;
+  /** Shortest window first. */
+  limits: QuotaLimit[];
+}
+
+export interface QuotaLimit {
+  /** Claude Code's name: `five_hour`, `seven_day`, `seven_day_opus`, … */
+  name: string;
+  /** Share used, 0–100. */
+  used: number;
+  /** Seconds since the epoch. */
+  resets_at?: number;
+}
+
 export interface LaunchOffer {
   /** Changes when the repository's offer is replaced. */
   id: number;
@@ -440,9 +462,13 @@ export type Request =
       model?: string;
     };
 
+export type TermColors = { fg: [number, number, number]; bg: [number, number, number]; ansi: [number, number, number][] };
+
 /** Fire-and-forget messages. */
 export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
+  /** The colors this session's programs are told the terminal has (OSC 10/11/4). */
+  | { t: "term_colors"; session: SessionId; colors: TermColors | null }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
   | { t: "visible"; visible: boolean }
@@ -485,6 +511,8 @@ export type ServerMsg =
   | { t: "proposals"; items: Decision[] }
   /** Every backlog item, and the build orders and launch offers waiting on the user. */
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
+  /** The plan's quota, if anything has said it yet (protocol 30). */
+  | { t: "quota"; quota: Quota | null }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

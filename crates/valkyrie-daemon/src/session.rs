@@ -71,6 +71,8 @@ pub struct Host {
     pub stop: Mutex<Arc<StopPipe>>,
     /// The last cell size in pixels a client reported; new sessions start with it.
     pub cell_px: Mutex<Option<(u16, u16)>>,
+    /// The last colors a client reported; new sessions answer color queries with them.
+    pub colors: Mutex<Option<valkyrie_proto::TermColors>>,
     /// The decision store (ADR-0007), exported so `valk context hook` reads this
     /// daemon's.
     pub context_dir: PathBuf,
@@ -255,6 +257,9 @@ struct State {
     /// The reason the PR poll last showed this session blocked with, so a new
     /// reason replaces its own flag but nothing else's (`flag_blocked`).
     flagged: Option<String>,
+    /// Which live agents in the repository changed the same files as this one
+    /// (`overlap`), shown beside its state.
+    overlap: Option<String>,
     /// Prompts the agent's hooks have reported, the supervisor's own included:
     /// how a policy's step sees the user prompting first (ADR-0019 §3).
     prompts: u64,
@@ -384,6 +389,7 @@ impl Session {
         if let Some(cell) = cell {
             screen.set_cell_pixels(cell);
         }
+        screen.set_colors(host.colors.lock().unwrap().clone());
         let mut state = State {
             screen,
             exited: None,
@@ -404,6 +410,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             flagged: None,
+            overlap: None,
             prompts: 0,
             topic: None,
             guard: Default::default(),
@@ -467,6 +474,7 @@ impl Session {
         if let Some(cell) = *host.cell_px.lock().unwrap() {
             screen.set_cell_pixels(cell);
         }
+        screen.set_colors(host.colors.lock().unwrap().clone());
         let now = now_ms();
         let log = append_private(&saved.events)?;
         let transcript = append_private(&saved.transcript)?;
@@ -496,6 +504,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             flagged: None,
+            overlap: None,
             prompts: 0,
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
@@ -1422,6 +1431,11 @@ impl Session {
         }
     }
 
+    /// The colors programs in this session are told their terminal has.
+    pub fn set_colors(&self, colors: Option<valkyrie_proto::TermColors>) {
+        self.state.lock().unwrap().screen.set_colors(colors);
+    }
+
     /// Starts the restore list off with the conversation a restored agent resumes, so
     /// it is kept even if the daemon stops before the agent's first hook.
     pub fn set_conversation(&self, id: Option<String>) {
@@ -1621,7 +1635,19 @@ impl Session {
             status: state.tracker.status().clone(),
             last_input_ms: self.last_input_ms.load(Ordering::Relaxed),
             chat: state.chat.clone(),
+            overlap: state.overlap.clone(),
         }
+    }
+
+    /// Sets the note on files this agent shares with another's (`overlap`), and
+    /// says whether it changed. Never touches the agent's state.
+    pub fn set_overlap(&self, overlap: Option<String>) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.overlap == overlap {
+            return false;
+        }
+        state.overlap = overlap;
+        true
     }
 }
 

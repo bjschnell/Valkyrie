@@ -487,6 +487,41 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{refused}"
     );
 
+    // Back to the backlog: the launched session is stopped and forgotten, the
+    // branch and worktree stay for the next launch, and the lane reads backlog.
+    human("valk todo return 5", "return5");
+    let said = wait_for(&out.join("return5"));
+    assert!(
+        said.contains("#5 Held elsewhere: back in the backlog"),
+        "{said}"
+    );
+    human("valk ls", "ls-after-return");
+    let ls = wait_for(&out.join("ls-after-return"));
+    assert!(
+        !ls.lines()
+            .any(|l| l.split_whitespace().next() == Some(on5.as_str())),
+        "its session is gone: {ls}"
+    );
+    human("valk todo list --json", "list-json3");
+    let items: serde_json::Value =
+        serde_json::from_str(&wait_for(&out.join("list-json3"))).unwrap();
+    let five = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == 5)
+        .unwrap();
+    assert!(five["sessions"].is_null() || five["sessions"] == serde_json::json!([]));
+    assert!(five["checkout"].is_string(), "worktree kept: {five}");
+    assert_eq!(five["status"], "open");
+    human("valk todo return 5", "return5-again");
+    let refused = wait_for(&out.join("return5-again"));
+    assert!(refused.contains("#5 isn't started"), "{refused}");
+    // One with a pull request is in review, not unstarted.
+    human("valk todo return 3", "return3");
+    let refused = wait_for(&out.join("return3"));
+    assert!(refused.contains("#3 has a pull request"), "{refused}");
+
     human("valk todo show 3", "show3");
     let show = wait_for(&out.join("show3"));
     assert!(show.contains(&format!("\npr: {PR}\n")), "{show}");

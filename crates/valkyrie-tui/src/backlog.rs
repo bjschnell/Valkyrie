@@ -118,7 +118,7 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
             _ => Lane::Review,
         };
     }
-    if item.pr.is_some() || item.checkout.is_some() || !item.sessions.is_empty() {
+    if item.pr.is_some() || !item.sessions.is_empty() {
         Lane::Review
     } else {
         Lane::Backlog
@@ -231,13 +231,15 @@ pub(crate) enum Typing {
     Add { kind: ItemKind, text: LineEdit },
     /// A handoff note on item `id`.
     Note { id: u32, text: LineEdit },
-    /// Item `id`'s title, and its kind with Tab; the body stays as it is. `was`
-    /// holds both as the prompt opened, so only what changed here is sent.
+    /// Item `id`'s title, its kind with Tab and its repository with Shift-Tab; the
+    /// body stays as it is. `was` holds all three as the prompt opened, so only
+    /// what changed here is sent.
     Edit {
         id: u32,
         kind: ItemKind,
+        project: Option<PathBuf>,
         text: LineEdit,
-        was: (String, ItemKind),
+        was: (String, ItemKind, Option<PathBuf>),
     },
     /// `L`'s window: what item `id` launches with.
     Launch(LaunchForm),
@@ -381,6 +383,9 @@ pub(crate) struct Page {
     pub(crate) typing: Option<Typing>,
     /// `x` was pressed once on this item: deleting has no undo, so it takes two.
     pub(crate) armed: Option<u32>,
+    /// `B` was pressed once on this item with an agent running on it: sending it
+    /// back stops that agent, so it takes two.
+    pub(crate) returning: Option<u32>,
     /// What `S` found merged, waiting on a second `S` to ship exactly these.
     pub(crate) ship_armed: Option<Vec<u32>>,
     /// The selected item's facts, for `(id, updated)`, read when the cursor lands.
@@ -404,6 +409,8 @@ pub(crate) struct Page {
     pub(crate) order: Option<OrderView>,
     /// Ready items the supervisor offers to start, as last pushed.
     pub(crate) launches: Vec<LaunchOffer>,
+    /// Every repository some item is for, as last pushed: what an edit can move to.
+    pub(crate) roots: Vec<PathBuf>,
 }
 
 /// A build order open over the page: which, where the cursor is, and the items
@@ -443,6 +450,8 @@ pub(crate) enum Do {
     },
     Attach(SessionId),
     Status(u32, ItemStatus),
+    /// Back to the backlog: stops its sessions, `ItemChange::Return`.
+    Return(u32),
     Delete(u32),
     Add {
         kind: ItemKind,
@@ -458,6 +467,8 @@ pub(crate) enum Do {
         kind: Option<ItemKind>,
         title: Option<String>,
         priority: Option<Priority>,
+        /// Moves it to this repository.
+        cwd: Option<PathBuf>,
     },
     /// Fetch, then ask what's merged, to show before shipping it.
     CheckMerged,
@@ -605,23 +616,37 @@ impl Page {
                             Typing::Edit {
                                 id,
                                 kind,
+                                project,
                                 text,
                                 was,
                             } if !text.text().trim().is_empty() => {
                                 let title = text.text().trim();
                                 let title = (title != was.0).then(|| title.to_owned());
                                 let kind = (kind != was.1).then_some(kind);
-                                if title.is_some() || kind.is_some() {
+                                let cwd = project.filter(|p| Some(p) != was.2.as_ref());
+                                if title.is_some() || kind.is_some() || cwd.is_some() {
                                     out.push(Do::Edit {
                                         id,
                                         kind,
                                         title,
                                         priority: None,
+                                        cwd,
                                     });
                                 }
                             }
                             Typing::Launch(form) => out.push(form.launch()),
                             _ => {}
+                        }
+                    }
+                    b"\x1b[Z" => {
+                        if let Typing::Edit { project, .. } = typing {
+                            let at = project
+                                .as_ref()
+                                .and_then(|p| self.roots.iter().position(|r| r == p));
+                            let next = at.map_or(0, |i| i + 1);
+                            if !self.roots.is_empty() {
+                                *project = Some(self.roots[next % self.roots.len()].clone());
+                            }
                         }
                     }
                     b"\t" => {
@@ -658,6 +683,9 @@ impl Page {
             let here = rows.get(self.cursor).map(|(l, i)| (*l, i));
             if key != b"x" {
                 self.armed = None;
+            }
+            if key != b"B" {
+                self.returning = None;
             }
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
@@ -853,6 +881,21 @@ impl Page {
                 Do::Status(id, ItemStatus::Shipped)
             }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
+            b"B" if item.sessions.is_empty() => Do::Say(format!("#{id} isn't started")),
+            b"B" if item.pr.is_some() => {
+                Do::Say(format!("#{id} has a pull request: ship or drop it"))
+            }
+            b"B" if live.is_some() && self.returning != Some(id) => {
+                self.returning = Some(id);
+                Do::Say(format!("B again stops its agent and returns #{id}"))
+            }
+            b"B" if matches!(lane, Lane::Done | Lane::Proposed) => {
+                Do::Say(format!("#{id} is {}", lane.title()))
+            }
+            b"B" => {
+                self.returning = None;
+                Do::Return(id)
+            }
             // Up toward p0, down toward p3; nothing past either end.
             b"+" | b"=" | b"-" if lane != Lane::Done => {
                 let at = Priority::ALL.iter().position(|&p| p == item.priority);
@@ -867,6 +910,7 @@ impl Page {
                         kind: None,
                         title: None,
                         priority: Some(p),
+                        cwd: None,
                     },
                     None => Do::Say(format!("#{id} is already {}", item.priority.as_str())),
                 }
@@ -884,8 +928,9 @@ impl Page {
                 self.typing = Some(Typing::Edit {
                     id,
                     kind: item.kind,
+                    project: item.project.clone(),
                     text: LineEdit::new(item.title.clone()),
-                    was: (item.title.clone(), item.kind),
+                    was: (item.title.clone(), item.kind, item.project.clone()),
                 });
                 return Vec::new();
             }
@@ -934,6 +979,7 @@ impl Page {
             (Some(Typing::Edit { .. }), _) => [
                 hint(" ↩ ", "save "),
                 hint(" tab ", "kind "),
+                hint(" ⇧tab ", "repo "),
                 hint(" esc ", "cancel "),
             ]
             .concat(),
@@ -996,6 +1042,7 @@ impl Page {
                     hint(" +/- ", "priority "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
+                    hint(" B ", "to backlog "),
                     hint(" r ", "repo "),
                     hint(" n ", "new "),
                     hint(" P ", "order "),
@@ -1501,8 +1548,24 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             text,
         ),
         Typing::Note { id, text } => (format!(" note on #{id} "), t.accent, text),
-        Typing::Edit { id, kind, text, .. } => (
-            format!(" #{id} {} ", kind.as_str()),
+        Typing::Edit {
+            id,
+            kind,
+            project,
+            text,
+            was,
+        } => (
+            match project.as_ref().filter(|p| Some(*p) != was.2.as_ref()) {
+                Some(p) => format!(
+                    " #{id} {} → {} ",
+                    kind.as_str(),
+                    p.file_name().map_or_else(
+                        || p.display().to_string(),
+                        |n| n.to_string_lossy().into_owned()
+                    )
+                ),
+                None => format!(" #{id} {} ", kind.as_str()),
+            },
             kind_color(*kind, t),
             text,
         ),
@@ -1933,6 +1996,7 @@ mod tests {
             },
             last_input_ms: 0,
             chat: None,
+            overlap: None,
         }
     }
 
@@ -1947,6 +2011,7 @@ mod tests {
             ..item(2, 9)
         };
         let review = Item {
+            sessions: vec![9],
             checkout: Some("/r/app-fix-3".into()),
             ..item(3, 2)
         };
@@ -2166,6 +2231,36 @@ mod tests {
     }
 
     #[test]
+    fn back_to_backlog_stops_a_running_agent_on_the_second_press() {
+        let mut started = item(1, 1);
+        started.sessions = vec![4];
+        let mut kept = item(2, 1);
+        kept.checkout = Some("/r/app-wt".into());
+        let sessions = [session(4, AgentState::Working)];
+        let rows = rows(&[started.clone(), kept.clone()], &sessions, 7);
+        // A worktree alone is no start: the item is in the backlog, nothing to return.
+        assert_eq!(
+            rows.iter().find(|(_, i)| i.id == 2).unwrap().0,
+            Lane::Backlog
+        );
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &sessions, 7);
+        assert!(
+            matches!(press(&mut page, b"B")[..], [Do::Say(_)]),
+            "running: asks first"
+        );
+        assert_eq!(press(&mut page, b"B"), [Do::Return(1)]);
+        // Another key in between disarms it.
+        press(&mut page, b"B");
+        press(&mut page, b"+");
+        assert!(matches!(press(&mut page, b"B")[..], [Do::Say(_)]));
+        // Not started: said, never sent.
+        let at = rows.iter().position(|(_, i)| i.id == 2).unwrap();
+        page.cursor = at;
+        assert!(matches!(press(&mut page, b"B")[..], [Do::Say(_)]));
+    }
+
+    #[test]
     fn delete_takes_two_presses_and_typing_adds_and_notes() {
         let rows = rows(&[item(1, 1)], &[], 7);
         let mut page = Page::default();
@@ -2229,6 +2324,7 @@ mod tests {
             press(&mut page, b"e\x1b[H\x1b[3~X\t\r"),
             [Do::Edit {
                 priority: None,
+                cwd: None,
                 id: 1,
                 kind: Some(ItemKind::Feature),
                 title: Some(format!("X{}", title.chars().skip(1).collect::<String>())),
@@ -2239,10 +2335,38 @@ mod tests {
             press(&mut page, b"e\t\r"),
             [Do::Edit {
                 priority: None,
+                cwd: None,
                 id: 1,
                 kind: Some(ItemKind::Feature),
                 title: None,
             }]
+        );
+        // Shift-Tab steps through the repositories to move it to; the page's own
+        // stays put unless it's picked, and picking it again sends nothing.
+        page.roots = vec!["/r/app".into(), "/r/web".into()];
+        assert_eq!(
+            press(
+                &mut page,
+                b"e\x1b[Z
+"
+            ),
+            [Do::Edit {
+                priority: None,
+                cwd: Some("/r/web".into()),
+                id: 1,
+                kind: None,
+                title: None,
+            }],
+            "moved to the next repository"
+        );
+        assert!(
+            press(
+                &mut page,
+                b"e\x1b[Z\x1b[Z
+"
+            )
+            .is_empty(),
+            "round to where it was: nothing changed"
         );
         assert!(
             press(&mut page, b"e\r").is_empty(),
@@ -2536,6 +2660,7 @@ mod tests {
             kind: None,
             title: None,
             priority: Some(priority),
+            cwd: None,
         };
         page.cursor = 1;
         assert_eq!(page.keys(b"+", &rows, &[], 7), [edit(Priority::P1)]);

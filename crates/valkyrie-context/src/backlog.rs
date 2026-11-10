@@ -262,12 +262,33 @@ impl Backlog {
                     item.kind = *kind;
                 }
                 if let Some(cwd) = cwd {
+                    if !project::in_git(cwd) {
+                        bail!("{} isn't in a git repository", cwd.display());
+                    }
                     let root = project::root(cwd);
                     if item.checkout.is_some() && item.project.as_ref() != Some(&root) {
                         bail!("#{id} already has a checkout in {}", display(&item.project));
                     }
                     item.project = Some(root);
                 }
+            }
+            ItemChange::Return => {
+                if !matches!(item.status, ItemStatus::Open) && !item.agent_filed() {
+                    bail!(
+                        "#{id} is {}: only an item being worked on goes back",
+                        item.status.as_str()
+                    );
+                }
+                if item.sessions.is_empty() {
+                    bail!("#{id} isn't started");
+                }
+                if item.pr.is_some() {
+                    bail!("#{id} has a pull request: ship or drop it instead");
+                }
+                // Its branch and checkout stay, for the next launch to reuse.
+                item.sessions.clear();
+                item.taken.clear();
+                item.joined.clear();
             }
             ItemChange::Status { status } => {
                 // Shipped or dropped before the user accepted it (an agent's own
@@ -628,7 +649,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
 /// What an agent on item `id` is asked to keep track of: the end of its brief.
 fn footer(id: u32) -> String {
     format!(
-        "(This is item #{} in my Valkyrie backlog. Fix what you have to in order to deliver it, as part of this change. Anything else you find broken, keep out of this change and file it with `valk todo add -k <bug|feature|chore> \"<title>\" --body \"<what, how to reproduce it, how much it matters>\"`. When this is done, tell me what you filed and offer to fix it here; if I say go ahead, take it with `valk todo take N --branch <branch>` and fix it on its own branch and pull request. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "(This is item #{} in my Valkyrie backlog. Fix what you have to in order to deliver it, as part of this change. Anything else you find broken, keep out of this change and file it with `valk todo add -k <bug|feature|chore> \"<title>\" --body \"<what, how to reproduce it, how much it matters>\"`. When this is done, tell me in a line what you filed. Offer to fix a find here only when it's worth acting on now (it blocks my next step, or it's a real bug I'd want dealt with before moving on); otherwise leave it on the backlog and don't ask. If I say go ahead, take it with `valk todo take N --branch <branch>` and fix it on its own branch and pull request. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         id
     )
 }
@@ -893,6 +914,26 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_wont_move_an_item_to_a_folder_outside_git() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let edit = ItemChange::Edit {
+            priority: None,
+            blocked_by: None,
+            title: None,
+            body: None,
+            kind: None,
+            cwd: Some(plain),
+        };
+        // As an add does: no repository there, so no project to work in.
+        assert!(b.change(1, &edit, 2).is_err());
+        assert_eq!(b.get(1).unwrap().project, None, "left as it was");
+    }
+
+    #[test]
     fn an_agents_item_waits_proposed_and_its_brief_names_it() {
         let dir = Temp::new();
         let b = Backlog::new(dir.path().join("b"));
@@ -1093,6 +1134,44 @@ mod tests {
         b.change(2, &status(ItemStatus::Dropped), 8).unwrap();
         let item = b.change(2, &status(ItemStatus::Open), 9).unwrap();
         assert_eq!(item.status, ItemStatus::Proposed);
+    }
+
+    #[test]
+    fn a_returned_item_forgets_its_sessions_and_keeps_its_branch() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let status = |status| ItemChange::Status { status };
+        b.add(&new("x", "", ItemKind::Bug), "human", 1).unwrap();
+        b.change(1, &status(ItemStatus::Open), 1).unwrap();
+        assert!(
+            b.change(1, &ItemChange::Return, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("isn't started")
+        );
+        b.taken(1, 5, 77, &[], Some("fix/1-x"), None, None, 3)
+            .unwrap();
+        let item = b.change(1, &ItemChange::Return, 4).unwrap();
+        assert!(item.sessions.is_empty() && item.taken.is_empty() && item.joined.is_empty());
+        assert_eq!(item.branch.as_deref(), Some("fix/1-x"));
+        assert_eq!(item.status, ItemStatus::Open);
+        // With a pull request it's in review: ship or drop it.
+        b.taken(
+            1,
+            6,
+            77,
+            &[],
+            None,
+            Some("https://github.com/o/r/pull/7"),
+            None,
+            5,
+        )
+        .unwrap();
+        let refused = b.change(1, &ItemChange::Return, 6).unwrap_err().to_string();
+        assert!(refused.contains("has a pull request"), "{refused}");
+        // Shipped is done, not started.
+        b.change(1, &status(ItemStatus::Shipped), 7).unwrap();
+        assert!(b.change(1, &ItemChange::Return, 8).is_err());
     }
 
     #[test]

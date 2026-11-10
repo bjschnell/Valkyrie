@@ -194,7 +194,7 @@ fn first_line(text: &str) -> Option<String> {
 
 /// One line another agent will read: no control characters (newlines included)
 /// or bidi overrides, at most `max` characters.
-fn plain(text: &str, max: usize) -> String {
+pub(crate) fn plain(text: &str, max: usize) -> String {
     let text: String = text
         .chars()
         .map(|c| {

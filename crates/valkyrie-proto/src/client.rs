@@ -2,8 +2,8 @@
 
 use crate::codec::{read_frame, write_frame};
 use crate::{
-    ClientBuild, ClientMsg, ConnectedClient, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size,
-    SpawnSpec,
+    ClientBuild, ClientMsg, ConnectedClient, NoticeSound, Reply, ReqId, ServerMsg, SessionId,
+    SessionInfo, Size, SpawnSpec, TermColors,
 };
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
@@ -250,7 +250,7 @@ impl Client {
 
     pub async fn spawn(&self, spec: SpawnSpec) -> Result<SessionInfo> {
         match self.request(|req| ClientMsg::Spawn { req, spec }).await? {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -283,7 +283,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -355,6 +355,25 @@ impl Client {
         self.request(|req| ClientMsg::WatchQueue { req })
             .await
             .map(drop)
+    }
+
+    /// Start receiving `Notice` pushes.
+    pub async fn watch_notices(&self) -> Result<()> {
+        self.request(|req| ClientMsg::WatchNotices { req })
+            .await
+            .map(drop)
+    }
+
+    /// Raises `text` as a toast on every client watching notices; how many it reached.
+    pub async fn notify(&self, text: &str, sound: Option<NoticeSound>) -> Result<u32> {
+        let text = text.to_owned();
+        match self
+            .request(|req| ClientMsg::Notify { req, text, sound })
+            .await?
+        {
+            Reply::Notified { watchers } => Ok(watchers),
+            other => bail!("unexpected reply: {other:?}"),
+        }
     }
 
     pub async fn move_session(&self, session: SessionId, to: usize) -> Result<()> {
@@ -549,7 +568,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(Some(info)),
+            Reply::Session { info } => Ok(Some(*info)),
             Reply::Text { .. } => Ok(None),
             other => bail!("unexpected reply: {other:?}"),
         }
@@ -737,7 +756,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -750,6 +769,17 @@ impl Client {
                 width,
                 height,
             })
+            .map_err(|_| anyhow!("daemon connection closed"))
+    }
+
+    /// Fire-and-forget: the colors sessions draw with (see `ClientMsg::TermColors`).
+    pub fn term_colors(
+        &self,
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    ) -> Result<()> {
+        self.out
+            .send(ClientMsg::TermColors { session, colors })
             .map_err(|_| anyhow!("daemon connection closed"))
     }
 

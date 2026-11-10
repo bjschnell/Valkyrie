@@ -10,11 +10,12 @@ import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
 import { answer, answerAll, kill, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
-import { useLook } from "../lib/theme";
+import { hasRain, useLook } from "../lib/theme";
 import { Chevron, Gear, List, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyHint } from "./Notify";
+import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
 import { Mark, Wordmark } from "./Logo";
 
@@ -82,7 +83,7 @@ export function Inbox() {
 
   return (
     <div className="page">
-      {look !== "default" && <Rain key={look} />}
+      {hasRain(look) && <Rain key={look} />}
       <header className="topbar">
         <div className="brand">
           <Mark size={26} />
@@ -124,6 +125,7 @@ export function Inbox() {
       </header>
 
       <main className="inbox">
+        <QuotaMeter />
         <NotifyHint />
         <AllowAll />
         <Proposals />
@@ -476,6 +478,9 @@ function SessionRow({
               : STATE_LABEL[state]}
             {s.status.summary ? ` · ${s.status.summary}` : ""}
           </span>
+          {s.overlap ? (
+            <span className="row-sub row-overlap">⚠ {s.overlap}</span>
+          ) : null}
         </span>
         <span className="row-age">{age(s.status.since_ms, now)}</span>
         <Chevron />

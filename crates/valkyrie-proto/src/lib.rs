@@ -12,6 +12,7 @@ pub mod context;
 pub mod ipc;
 pub mod layout;
 pub mod pastes;
+pub mod quota;
 pub mod screen;
 
 use serde::{Deserialize, Serialize};
@@ -27,13 +28,32 @@ pub use context::{
     ReviewAction,
 };
 pub use layout::{Axis, Pane, Side};
+pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 27;
+pub const PROTOCOL: u32 = 31;
+
+/// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
+/// something that needs you, `done` for something that finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSound {
+    Request,
+    Done,
+}
 
 pub type ReqId = u64;
 pub type SessionId = u32;
+
+/// What a program is told its terminal looks like: default text and background,
+/// and the 16 ANSI colors (black to bright white), each as RGB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermColors {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub ansi: Vec<[u8; 3]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
@@ -193,6 +213,11 @@ pub struct SessionInfo {
     /// web app's Chat view reads it (DESIGN §8.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<PathBuf>,
+    /// One line when another live agent in the same repository has changed the
+    /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
+    /// 31). Shown beside the state, which it never changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,6 +308,15 @@ pub enum ClientMsg {
         width: u16,
         height: u16,
     },
+    /// The colors the client draws a session with, so a program that asks the
+    /// terminal for its background or palette (OSC 4/10/11) gets the answer a real
+    /// terminal would give. With `session`, that session only; without, the default
+    /// for sessions spawned from now on. `colors: None` puts the stock dark palette
+    /// back. No reply.
+    TermColors {
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    },
     /// An agent hook event, forwarded by `valk hook <agent>` (ADR-0005). No reply:
     /// the hook never waits on the daemon.
     Hook {
@@ -292,9 +326,28 @@ pub enum ClientMsg {
         sent_us: u64,
         payload: serde_json::Value,
     },
+    /// The plan's quota, as `valk statusline` read it from Claude Code (protocol
+    /// 30). No reply; pushed on to queue watchers as `Quota`.
+    Quota {
+        quota: Quota,
+    },
     /// Subscribe this connection to `Queue` pushes, starting with the current queue.
     WatchQueue {
         req: ReqId,
+    },
+    /// Subscribe this connection to `Notice` pushes (protocol 29). For clients that
+    /// show them to someone: a `Notify` counts the connections that did this.
+    WatchNotices {
+        req: ReqId,
+    },
+    /// Raise a toast and a ping on every client watching notices (`valk notify`,
+    /// protocol 29). `sound` is `request` or `done`, else the toast is silent.
+    /// Anyone may send one, agents included. Replies `Notified`.
+    Notify {
+        req: ReqId,
+        text: String,
+        #[serde(default)]
+        sound: Option<NoticeSound>,
     },
     /// Mark a session's current state seen (DESIGN §14.4). Ignored if the session has
     /// moved past `seq` since the client looked.
@@ -555,6 +608,11 @@ pub enum ServerMsg {
         session: SessionId,
         code: Option<i32>,
     },
+    /// A toast someone raised on purpose with `Notify` (protocol 29).
+    Notice {
+        text: String,
+        sound: Option<NoticeSound>,
+    },
     /// The whole ranked queue, pushed whenever it changes.
     Queue {
         items: Vec<QueueItem>,
@@ -577,6 +635,11 @@ pub enum ServerMsg {
         /// (protocol 27).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         launches: Vec<LaunchOffer>,
+    },
+    /// The latest quota reading, if any; pushed to queue watchers after the first
+    /// `Queue` and whenever it changes (protocol 30).
+    Quota {
+        quota: Option<Quota>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.
@@ -622,7 +685,7 @@ pub enum Reply {
         clients: Vec<ConnectedClient>,
     },
     Session {
-        info: SessionInfo,
+        info: Box<SessionInfo>,
     },
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -632,6 +695,11 @@ pub enum Reply {
     },
     Text {
         text: String,
+    },
+    /// How many connections a `Notify` reached (protocol 29); none means nobody is
+    /// watching, so the sender should deliver it itself.
+    Notified {
+        watchers: u32,
     },
     Decision {
         decision: Box<Decision>,
