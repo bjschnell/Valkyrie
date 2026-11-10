@@ -255,6 +255,9 @@ struct State {
     /// The reason the PR poll last showed this session blocked with, so a new
     /// reason replaces its own flag but nothing else's (`flag_blocked`).
     flagged: Option<String>,
+    /// Which live agents in the repository changed the same files as this one
+    /// (`overlap`), shown beside its state.
+    overlap: Option<String>,
     /// Prompts the agent's hooks have reported, the supervisor's own included:
     /// how a policy's step sees the user prompting first (ADR-0019 §3).
     prompts: u64,
@@ -404,6 +407,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             flagged: None,
+            overlap: None,
             prompts: 0,
             topic: None,
             guard: Default::default(),
@@ -496,6 +500,7 @@ impl Session {
             fg_checked_ms: 0,
             live_cwd: None,
             flagged: None,
+            overlap: None,
             prompts: 0,
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
@@ -1602,7 +1607,19 @@ impl Session {
             status: state.tracker.status().clone(),
             last_input_ms: self.last_input_ms.load(Ordering::Relaxed),
             chat: state.chat.clone(),
+            overlap: state.overlap.clone(),
         }
+    }
+
+    /// Sets the note on files this agent shares with another's (`overlap`), and
+    /// says whether it changed. Never touches the agent's state.
+    pub fn set_overlap(&self, overlap: Option<String>) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.overlap == overlap {
+            return false;
+        }
+        state.overlap = overlap;
+        true
     }
 }
 

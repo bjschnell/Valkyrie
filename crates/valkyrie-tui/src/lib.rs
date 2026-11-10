@@ -4616,6 +4616,11 @@ fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'s
     if s.status.agent != "generic" && !s.status.hooked {
         detail.push("  no hooks yet".fg(t.interrupted).italic());
     }
+    // Another live agent changed the same files (ADR-0019 §1).
+    if let Some(overlap) = &s.overlap {
+        detail.push("  ⚠ ".fg(t.interrupted));
+        detail.push(overlap.clone().fg(t.interrupted));
+    }
     if s.clients > 0 {
         detail.insert(0, "◉ ".fg(t.accent2));
     }
@@ -5539,6 +5544,7 @@ mod tests {
             status: AgentStatus::default(),
             last_input_ms: 0,
             chat: None,
+            overlap: None,
         }
     }
 

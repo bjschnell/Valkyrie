@@ -30,7 +30,7 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 27;
+pub const PROTOCOL: u32 = 28;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -193,6 +193,11 @@ pub struct SessionInfo {
     /// web app's Chat view reads it (DESIGN §8.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<PathBuf>,
+    /// One line when another live agent in the same repository has changed the
+    /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
+    /// 28). Shown beside the state, which it never changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
