@@ -12,6 +12,7 @@ pub mod context;
 pub mod ipc;
 pub mod layout;
 pub mod pastes;
+pub mod quota;
 pub mod screen;
 
 use serde::{Deserialize, Serialize};
@@ -27,10 +28,11 @@ pub use context::{
     ReviewAction,
 };
 pub use layout::{Axis, Pane, Side};
+pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 30;
+pub const PROTOCOL: u32 = 31;
 
 /// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
 /// something that needs you, `done` for something that finished.
@@ -213,7 +215,7 @@ pub struct SessionInfo {
     pub chat: Option<PathBuf>,
     /// One line when another live agent in the same repository has changed the
     /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
-    /// 30). Shown beside the state, which it never changes.
+    /// 31). Shown beside the state, which it never changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
 }
@@ -323,6 +325,11 @@ pub enum ClientMsg {
         /// When the hook process sent it (µs since the epoch); orders racing hooks.
         sent_us: u64,
         payload: serde_json::Value,
+    },
+    /// The plan's quota, as `valk statusline` read it from Claude Code (protocol
+    /// 30). No reply; pushed on to queue watchers as `Quota`.
+    Quota {
+        quota: Quota,
     },
     /// Subscribe this connection to `Queue` pushes, starting with the current queue.
     WatchQueue {
@@ -628,6 +635,11 @@ pub enum ServerMsg {
         /// (protocol 27).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         launches: Vec<LaunchOffer>,
+    },
+    /// The latest quota reading, if any; pushed to queue watchers after the first
+    /// `Queue` and whenever it changes (protocol 30).
+    Quota {
+        quota: Option<Quota>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.

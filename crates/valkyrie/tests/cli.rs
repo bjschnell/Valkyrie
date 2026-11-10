@@ -136,6 +136,68 @@ fn hook_is_silent_and_succeeds_outside_valkyrie_and_without_a_daemon() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+fn statusline(mut cmd: Command, then: &str, stdin: &[u8]) -> Output {
+    let mut child = cmd
+        .args(["statusline", "--then", then])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The user's own status line draws as it would without Valkyrie: the same input,
+/// its output and its exit, daemon or none, arguments that parse or not.
+#[test]
+fn statusline_runs_the_users_own_and_tells_the_daemon_the_quota() {
+    let dir = temp("statusline");
+    let none = dir.join("run/none.sock");
+    let payload = br#"{"model":{"id":"x"},"rate_limits":{"five_hour":{"used_percentage":81,"resets_at":4102444800},"seven_day":{"used_percentage":12,"resets_at":4102444800}}}"#;
+    let theirs = "printf 'hud:'; cat; exit 3";
+    let out = statusline(valk(&none, &dir), theirs, payload);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(out.stdout, [&b"hud:"[..], payload].concat());
+    let mut cmd = valk(&none, &dir);
+    cmd.env("VALK_SOCKET", "");
+    let out = statusline(cmd, theirs, b"{}");
+    assert_eq!(out.stdout, b"hud:{}", "{out:?}");
+
+    let socket = dir.join("run/s.sock");
+    let _daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon never bound");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = statusline(valk(&socket, &dir), "cat", payload);
+    assert_eq!(out.stdout, payload, "{out:?}");
+    // The daemon keeps what it heard, for after a restart.
+    let kept = dir.join("valkyrie/quota.json");
+    while !kept.exists() {
+        assert!(Instant::now() < deadline, "quota never kept");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let quota: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&kept).unwrap()).unwrap();
+    assert_eq!(
+        quota["limits"],
+        serde_json::json!([
+            {"name": "five_hour", "used": 81, "resets_at": 4102444800u64},
+            {"name": "seven_day", "used": 12, "resets_at": 4102444800u64},
+        ])
+    );
+    drop(_daemon);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn hook_reaches_the_daemon_quickly() {
     let dir = temp("e2e");
