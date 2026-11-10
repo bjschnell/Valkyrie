@@ -663,9 +663,14 @@ button.title-name {
 /* Session ------------------------------------------------------------- */
 
 .screen {
+  --screen-pad: 12px;
+  --screen-line: 1.38em;
   flex: 1;
   min-height: 0;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   background: var(--term-bg);
   color: var(--term-fg);
   -webkit-overflow-scrolling: touch;
@@ -678,12 +683,16 @@ button.title-name {
 }
 
 .screen pre {
+  position: relative;
+  flex: 1 0 auto;
+  box-sizing: content-box;
   margin: 0;
-  padding: 12px 12px 16px;
+  padding: var(--screen-pad) var(--screen-pad) 16px;
   font: 12.5px/1.38 var(--mono);
 }
 
 .screen.reflow pre {
+  align-self: stretch;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -693,7 +702,92 @@ button.title-name {
 }
 
 .line {
-  min-height: 1.38em;
+  min-height: var(--screen-line);
+}
+
+/* The terminal has the keyboard (desktop width): typing goes to the session. */
+.screen.typing {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  cursor: text;
+}
+
+.cursor {
+  position: absolute;
+  width: 1ch;
+  height: var(--screen-line);
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--term-fg) 60%, transparent);
+  pointer-events: none;
+}
+
+.screen.typing .cursor {
+  border: 0;
+  background: color-mix(in srgb, var(--term-fg) 55%, transparent);
+}
+
+.screen.typing .cursor-beam {
+  width: 2px;
+  background: var(--term-fg);
+}
+
+.screen.typing .cursor-underline {
+  height: 2px;
+  margin-top: calc(var(--screen-line) - 2px);
+  background: var(--term-fg);
+}
+
+/* Measures a cell; never seen. */
+.probe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Takes what an input method or a dead key types, at the cursor; never seen. */
+.typing-field {
+  position: absolute;
+  top: var(--screen-pad);
+  left: var(--screen-pad);
+  width: 2ch;
+  height: var(--screen-line);
+  padding: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow: hidden;
+  opacity: 0;
+  font: inherit;
+  color: transparent;
+  background: transparent;
+  caret-color: transparent;
+  pointer-events: none;
+}
+
+/* Stays at the pane's bottom right while its content scrolls. */
+.screen-note {
+  position: sticky;
+  right: 12px;
+  bottom: 10px;
+  align-self: flex-end;
+  flex: none;
+  display: block;
+  box-sizing: border-box;
+  margin: -28px 12px 0 0;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 26px;
+}
+
+.screen-note-quiet {
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 .banner {

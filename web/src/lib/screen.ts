@@ -11,6 +11,7 @@ import {
   STRIKEOUT,
   UNDERLINE,
   type Color,
+  type Cursor,
   type Modes,
   type Row,
   type ScreenUpdate,
@@ -20,7 +21,7 @@ import {
 export interface Screen {
   cols: number;
   rows: Row[];
-  cursor: { x: number; y: number; visible: boolean };
+  cursor: Cursor;
   modes: Modes;
   title: string | null;
 }

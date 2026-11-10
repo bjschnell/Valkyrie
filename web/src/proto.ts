@@ -203,15 +203,30 @@ export interface Modes {
   app_cursor: boolean;
   bracketed_paste: boolean;
   alt_screen: boolean;
+  /** 1004: the program wants to know when the terminal gains or loses the keyboard. */
+  focus_events?: boolean;
+  /** 1007: the wheel scrolls by sending arrow keys in the alternate screen. */
+  alt_scroll?: boolean;
 }
+
+/** Where a `scrollback` page starts: lines above the live screen, or a line
+ * counted from the oldest in history (which stays put while output arrives). */
+export type ScrollAnchor = { up: number } | { from_top: number };
 
 export interface ScreenUpdate {
   full: boolean;
   size: Size;
   rows: Row[];
-  cursor: { x: number; y: number; visible: boolean };
+  cursor: Cursor;
   modes: Modes;
   title: string | null;
+}
+
+export interface Cursor {
+  x: number;
+  y: number;
+  visible: boolean;
+  shape?: "block" | "underline" | "beam";
 }
 
 export interface SpawnSpec {
@@ -393,6 +408,8 @@ export type Request =
   | { t: "attach"; session: SessionId; size: Size | null }
   | { t: "detach" }
   | { t: "dump"; session: SessionId }
+  /** One screenful of history, then the screen; replies `scrollback`. */
+  | { t: "scrollback"; session: SessionId; anchor: ScrollAnchor }
   | { t: "kill"; session: SessionId }
   | { t: "mark_seen"; session: SessionId; seq: number }
   | { t: "rename"; session: SessionId; name: string | null }
@@ -443,6 +460,7 @@ export type Request =
 /** Fire-and-forget messages. */
 export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
+  | { t: "resize"; session: SessionId; size: Size }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
   | { t: "visible"; visible: boolean }
@@ -473,7 +491,10 @@ export type Reply =
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
   | { t: "step_taken"; said: string }
-  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] };
+  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] }
+  /** `from_top`: the first row's line, from the oldest in history; `history`: lines
+   * above the screen, so `from_top == history` is the live screen. */
+  | { t: "scrollback"; from_top: number; history: number; rows: Row[] };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
