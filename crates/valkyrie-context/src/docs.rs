@@ -766,7 +766,7 @@ mod tests {
         let mut new = f.new_doc("Two", false);
         new.cwd = other.clone();
         let d = f.docs.write(&new, &claude(), NOV_9).unwrap();
-        let key = project::key(&other);
+        let key = project::key(&project::root(&other));
         let hash6 = &key[key.len() - 8..key.len() - 2];
         assert_eq!(d.path, format!("repos/valkyrie-{hash6}/2026-11-09-two.md"));
         // Decided once: the first keeps its plain name after a restart.
