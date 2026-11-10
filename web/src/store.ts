@@ -75,7 +75,7 @@ interface State {
   orders: OrderProposal[];
   /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
   launches: LaunchOffer[];
-  /** The plan's quota (protocol 29), pushed with the queue. */
+  /** The plan's quota (protocol 30), pushed with the queue. */
   quota: Quota | null;
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;

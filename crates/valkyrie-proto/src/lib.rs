@@ -32,7 +32,16 @@ pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 29;
+pub const PROTOCOL: u32 = 30;
+
+/// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
+/// something that needs you, `done` for something that finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSound {
+    Request,
+    Done,
+}
 
 pub type ReqId = u64;
 pub type SessionId = u32;
@@ -313,13 +322,27 @@ pub enum ClientMsg {
         payload: serde_json::Value,
     },
     /// The plan's quota, as `valk statusline` read it from Claude Code (protocol
-    /// 29). No reply; pushed on to queue watchers as `Quota`.
+    /// 30). No reply; pushed on to queue watchers as `Quota`.
     Quota {
         quota: Quota,
     },
     /// Subscribe this connection to `Queue` pushes, starting with the current queue.
     WatchQueue {
         req: ReqId,
+    },
+    /// Subscribe this connection to `Notice` pushes (protocol 29). For clients that
+    /// show them to someone: a `Notify` counts the connections that did this.
+    WatchNotices {
+        req: ReqId,
+    },
+    /// Raise a toast and a ping on every client watching notices (`valk notify`,
+    /// protocol 29). `sound` is `request` or `done`, else the toast is silent.
+    /// Anyone may send one, agents included. Replies `Notified`.
+    Notify {
+        req: ReqId,
+        text: String,
+        #[serde(default)]
+        sound: Option<NoticeSound>,
     },
     /// Mark a session's current state seen (DESIGN §14.4). Ignored if the session has
     /// moved past `seq` since the client looked.
@@ -580,6 +603,11 @@ pub enum ServerMsg {
         session: SessionId,
         code: Option<i32>,
     },
+    /// A toast someone raised on purpose with `Notify` (protocol 29).
+    Notice {
+        text: String,
+        sound: Option<NoticeSound>,
+    },
     /// The whole ranked queue, pushed whenever it changes.
     Queue {
         items: Vec<QueueItem>,
@@ -604,7 +632,7 @@ pub enum ServerMsg {
         launches: Vec<LaunchOffer>,
     },
     /// The latest quota reading, if any; pushed to queue watchers after the first
-    /// `Queue` and whenever it changes (protocol 29).
+    /// `Queue` and whenever it changes (protocol 30).
     Quota {
         quota: Option<Quota>,
     },
@@ -662,6 +690,11 @@ pub enum Reply {
     },
     Text {
         text: String,
+    },
+    /// How many connections a `Notify` reached (protocol 29); none means nobody is
+    /// watching, so the sender should deliver it itself.
+    Notified {
+        watchers: u32,
     },
     Decision {
         decision: Box<Decision>,

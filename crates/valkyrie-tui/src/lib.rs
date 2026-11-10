@@ -23,6 +23,7 @@ use anyhow::Result;
 use keys::{Action, Key, Keymap};
 pub use links::open as open_link;
 use mouse::{Input, Mouse, MouseKind, Selection};
+pub use ping::deliver as deliver_notice;
 use ping::{Kind, Ping, Pinger};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -194,7 +195,7 @@ struct App {
     orders: Vec<valkyrie_proto::OrderProposal>,
     /// Ready items the supervisor offers to start, as last pushed with the items.
     launches: Vec<valkyrie_proto::LaunchOffer>,
-    /// The plan's quota, as last pushed (protocol 29).
+    /// The plan's quota, as last pushed (protocol 30).
     quota: Option<valkyrie_proto::Quota>,
     /// Where a background task (`P`'s model call) reports a line to say.
     said: Option<mpsc::UnboundedSender<String>>,
@@ -443,6 +444,8 @@ impl App {
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
         }
+        // Best effort: an older daemon doesn't know notices.
+        let _ = self.client.watch_notices().await;
         self.refresh().await;
         if let Some(id) = attach_to {
             self.attach(id).await;
@@ -575,6 +578,7 @@ impl App {
             if let Err(e) = self.client.watch_queue().await {
                 self.status = format!("queue unavailable: {e:#}");
             }
+            let _ = self.client.watch_notices().await;
             self.report_cell(None);
             self.refresh().await;
             if let Some(id) = self.view.as_ref().map(|v| v.id) {
@@ -2823,6 +2827,10 @@ impl App {
             self.quota = quota;
             return Ok(true);
         }
+        if let ServerMsg::Notice { text, sound } = msg {
+            self.show_ping(Ping::notice(&text, sound));
+            return Ok(true);
+        }
         if let ServerMsg::Queue { items } = msg {
             let viewing = self.pane_ids();
             self.pinger.on_queue(&items, &viewing, Instant::now());
@@ -3013,8 +3021,16 @@ impl App {
         let Some(ping) = self.pinger.due(&viewing, Instant::now()) else {
             return;
         };
+        self.show_ping(ping);
+    }
+
+    /// A ping's sound, desktop notification and toast, as the settings allow.
+    fn show_ping(&mut self, ping: Ping) {
         if ping.sound && self.settings.sound {
             ping::play(self.settings.noise, ping.kind);
+        }
+        if self.settings.desktop {
+            ping::desktop("Valkyrie", &ping.text);
         }
         // A fresh request stays up over a later finish.
         if self.toast().is_some_and(|t| t.kind == Kind::Request) && ping.kind == Kind::Done {
@@ -3035,7 +3051,7 @@ impl App {
     fn toast_summary(&self, ping: &Ping) -> Option<&str> {
         self.sessions
             .iter()
-            .find(|s| s.id == ping.session)
+            .find(|s| Some(s.id) == ping.session)
             .and_then(|s| s.status.summary.as_deref())
     }
 }
@@ -7891,7 +7907,7 @@ mod tests {
         // A ping says what the session finished, on one line, and short.
         let ping = Ping {
             kind: Kind::Done,
-            session: 1,
+            session: Some(1),
             text: "proj1 finished".into(),
             sound: false,
         };
@@ -7903,6 +7919,18 @@ mod tests {
         app.sessions[0].status.summary = Some("x".repeat(200));
         let toast = toast_spans(&ping, app.toast_summary(&ping), app.settings.theme);
         assert_eq!(toast[1].content.width(), TOAST_SUMMARY_MAX + 2);
+
+        // A `valk notify` is a toast with no session behind it, and no summary.
+        app.settings.sound = false;
+        app.settings.desktop = false;
+        app.on_push(ServerMsg::Notice {
+            text: "deploy done".into(),
+            sound: Some(valkyrie_proto::NoticeSound::Request),
+        })
+        .unwrap();
+        let notice = app.toast().expect("the notice shows as a toast");
+        assert_eq!((notice.kind, notice.session), (Kind::Request, None));
+        assert_eq!(app.toast_summary(notice), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

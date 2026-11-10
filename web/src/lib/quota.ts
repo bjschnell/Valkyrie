@@ -1,4 +1,4 @@
-// The plan's quota as the home screens show it (protocol 29); the TUI's is
+// The plan's quota as the home screens show it (protocol 30); the TUI's is
 // crates/valkyrie-tui/src/quota.rs, with the same names and thresholds.
 
 import type { Quota } from "../proto";

@@ -276,7 +276,7 @@ code {
   text-align: center;
 }
 
-/* The Claude plan's quota (protocol 29): one bar per window. */
+/* The Claude plan's quota (protocol 30): one bar per window. */
 .quota {
   display: flex;
   flex-wrap: wrap;
