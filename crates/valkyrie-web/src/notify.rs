@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use valkyrie_proto::client::{Client, DaemonInfo};
 use valkyrie_proto::{
-    AgentState, AskKind, ClientBuild, Decision, LaunchOffer, QueueItem, ServerMsg, SessionId,
+    AgentState, AskKind, ClientBuild, Decision, LaunchOffer, NoticeSound, QueueItem, ServerMsg,
+    SessionId,
 };
 
 /// How long without a keypress before you count as away.
@@ -96,6 +97,26 @@ pub struct Watch {
 }
 
 impl Watch {
+    /// The push for a `valk notify`. Always sent, even with the app open: nothing in
+    /// the app shows a notice. Its tag is its own, so notices don't replace each
+    /// other; asking for you is urgent.
+    fn notice(&self, text: &str, sound: Option<NoticeSound>, now_ms: u64) -> Note {
+        Note {
+            title: "Valkyrie".into(),
+            body: text.into(),
+            session: None,
+            seq: 0,
+            tag: format!("notice-{now_ms}"),
+            badge: self.queue_len,
+            urgency: if sound == Some(NoticeSound::Request) {
+                Urgency::High
+            } else {
+                Urgency::Normal
+            },
+            from_screen: false,
+        }
+    }
+
     /// A new queue from the daemon. `visible`: a web app is on screen.
     pub fn queue(&mut self, items: &[QueueItem], visible: bool, now_ms: u64) {
         self.queue_len = items.len();
@@ -379,6 +400,9 @@ async fn watch_daemon(
         app.upgraded.notify_one();
     }
     client.watch_queue().await?;
+    // Relays notices as pushes without being counted as someone who sees them. An
+    // older daemon doesn't know them, and the queue still works.
+    let _ = client.watch_notices(false).await;
     let mut tick = tokio::time::interval(TICK);
     loop {
         tokio::select! {
@@ -389,6 +413,11 @@ async fn watch_daemon(
                 }
                 Some(ServerMsg::Items { launches, .. }) => {
                     watch.launches(&launches, app.visible(), now_ms())
+                }
+                Some(ServerMsg::Notice { text, sound }) => {
+                    let note = watch.notice(&text, sound, now_ms());
+                    let d = send(app, &note, None).await;
+                    tracing::info!(sent = d.sent, of = d.subscribed, "pushed a notice");
                 }
                 Some(_) => {}
                 None => anyhow::bail!("daemon connection closed"),
@@ -499,6 +528,23 @@ mod tests {
             },
             flag: None,
         }
+    }
+
+    #[test]
+    fn a_notice_is_its_own_push_and_asking_is_urgent() {
+        let mut w = Watch::default();
+        w.queue(&[item(1, AgentState::NeedsInput, 1, false)], false, 0);
+        let n = w.notice("deploy done", Some(NoticeSound::Request), 7);
+        assert_eq!(
+            (n.title.as_str(), n.body.as_str()),
+            ("Valkyrie", "deploy done")
+        );
+        assert_eq!((n.session, n.tag.as_str(), n.badge), (None, "notice-7", 1));
+        assert_eq!(n.urgency, Urgency::High);
+        for sound in [Some(NoticeSound::Done), None] {
+            assert_eq!(w.notice("x", sound, 8).urgency, Urgency::Normal);
+        }
+        assert_ne!(w.notice("x", None, 8).tag, w.notice("x", None, 9).tag);
     }
 
     const AWAY: u64 = 1_000_000; // last keypress long before `now`

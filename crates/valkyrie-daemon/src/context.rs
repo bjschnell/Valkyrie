@@ -330,6 +330,7 @@ impl Registry {
             .into_iter()
             .collect();
         said.extend(self.accepted_for(&me));
+        said.extend(me.take_merged());
         if !said.is_empty() {
             if !text.is_empty() {
                 said.push(text);

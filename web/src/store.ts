@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
+import { termColors } from "./lib/theme";
 import type {
   Decision,
   Item,
@@ -13,6 +14,7 @@ import type {
   NewItem,
   OrderProposal,
   LaunchOffer,
+  Quota,
   QueueItem,
   ReviewAction,
   Row,
@@ -76,6 +78,8 @@ interface State {
   orders: OrderProposal[];
   /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
   launches: LaunchOffer[];
+  /** The plan's quota (protocol 30), pushed with the queue. */
+  quota: Quota | null;
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -105,6 +109,7 @@ export const useApp = create<State>(() => ({
   items: [],
   orders: [],
   launches: [],
+  quota: null,
   boot: 0,
   openId: null,
   screen: null,
@@ -202,6 +207,9 @@ function onPush(msg: ServerMsg): void {
       break;
     case "items":
       set({ items: msg.items, orders: msg.orders ?? [], launches: msg.launches ?? [] });
+      break;
+    case "quota":
+      set({ quota: msg.quota });
       break;
     case "screen":
       if (msg.session === get().openId) showScreen(apply(latest(), msg.update));
@@ -591,6 +599,12 @@ export function openChoices(screen: Screen | null): Choice[] {
   return screen ? findChoices(screenText(screen)) : [];
 }
 
+/** Tells a session we started the colors it is shown in, so its programs can tell a light look from a dark one. */
+function reportColors(session: SessionId): void {
+  const colors = termColors();
+  if (colors) conn?.send({ t: "term_colors", session, colors });
+}
+
 /** The size a new session starts at; a TUI that attaches later resizes it. */
 const SPAWN_SIZE = { cols: 120, rows: 40 };
 
@@ -606,6 +620,7 @@ export async function spawn(
   const reply = await conn.request({ t: "spawn", spec });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 
@@ -743,7 +758,10 @@ export async function answerLaunch(offer: LaunchOffer, launch: boolean): Promise
   if (!conn) return null;
   try {
     const reply = await conn.request({ t: "answer_launch", project: offer.project, id: offer.id, launch });
-    if (reply.t === "session") return reply.info.id;
+    if (reply.t === "session") {
+      reportColors(reply.info.id);
+      return reply.info.id;
+    }
     if (reply.t === "text") toast(reply.text);
     return null;
   } catch (e) {
@@ -793,6 +811,7 @@ export async function launchItem(
   });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 

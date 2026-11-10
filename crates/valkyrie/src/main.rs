@@ -4,8 +4,10 @@ mod context;
 mod guard;
 mod hook;
 mod mcp;
+mod pane;
 mod pings;
 mod service;
+mod statusline;
 mod todo;
 mod tools;
 mod update;
@@ -105,6 +107,12 @@ enum Cmd {
     Dump { session: SessionId },
     /// Send input to a session. Understands \r \n \t \e and \xHH escapes.
     Send { session: SessionId, text: String },
+    /// Drive the panes of a tab: split, run, read, wait, close, resize. An agent
+    /// run in a session drives its own tab.
+    Pane {
+        #[command(subcommand)]
+        action: pane::PaneCmd,
+    },
     /// Forward an agent hook event (stdin JSON) to the daemon. Agents run this; it
     /// prints nothing, always exits 0, and does nothing outside a Valkyrie session.
     #[command(hide = true)]
@@ -122,6 +130,13 @@ enum Cmd {
         /// Run from the user's own settings: quiet where the session already has it.
         #[arg(long)]
         ambient: bool,
+    },
+    /// Claude Code's status line, as Valkyrie sets it: tells the daemon how much of
+    /// the plan is used, then runs `--then`, the user's own status line.
+    #[command(hide = true)]
+    Statusline {
+        #[arg(long)]
+        then: Option<String>,
     },
     /// Record a project decision that every agent in this repo gets from now on. Run
     /// by an agent, it is only proposed, for you to accept.
@@ -247,6 +262,16 @@ enum Cmd {
         #[arg(value_parser = ["on", "off"])]
         mode: Option<String>,
     },
+    /// Raise a toast on every open `valk`, with a sound if you ask for one. With none
+    /// open, it is a desktop notification (and the sound) from this process.
+    Notify {
+        /// What to say.
+        text: String,
+        /// A ping to go with it: `request` for something that needs you, `done` for
+        /// something that finished. Silent without.
+        #[arg(long, value_parser = ["request", "done"])]
+        sound: Option<String>,
+    },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
 }
@@ -361,8 +386,31 @@ fn main() -> Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         // A hook must never print or exit nonzero (exit 2 blocks the agent), even
-        // when its arguments or environment don't parse.
-        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
+        // when its arguments or environment don't parse. It still reads its input,
+        // or the agent writing it can hit EPIPE.
+        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => {
+            hook::drain();
+            return Ok(());
+        }
+        // Nor may the status line stop drawing the user's own.
+        // Only as the settings run it, and not when asked for help.
+        Err(e)
+            if std::env::args().nth(1).as_deref() == Some("statusline")
+                && !matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            let args: Vec<String> = std::env::args().collect();
+            let then = args
+                .iter()
+                .position(|a| a == "--then")
+                .and_then(|i| args.get(i + 1));
+            statusline::run(
+                &valkyrie_proto::default_socket_path(),
+                then.map(String::as_str),
+            )
+        }
         Err(e) => e.exit(),
     };
     // Hooks report to the daemon that owns VALK_SESSION, which VALK_SOCKET names,
@@ -377,6 +425,12 @@ fn main() -> Result<()> {
     if let Some(Cmd::ContextHook { agent, ambient }) = &cli.cmd {
         context::hook(agent, *ambient);
         return Ok(());
+    }
+    if let Some(Cmd::Statusline { then }) = &cli.cmd {
+        let socket = cli
+            .socket
+            .unwrap_or_else(valkyrie_proto::default_socket_path);
+        statusline::run(&socket, then.as_deref());
     }
     let socket = valkyrie_proto::daemon_socket(cli.socket);
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
@@ -633,7 +687,8 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             // Input is fire-and-forget; a round trip guarantees it was flushed before exit.
             client.list().await.map(drop)
         }
-        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. }) => {
+        Some(Cmd::Pane { action }) => pane::run(&connect(&socket).await?.0, action).await,
+        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. } | Cmd::Statusline { .. }) => {
             unreachable!("handled before the runtime starts")
         }
         Some(Cmd::Decide {
@@ -807,6 +862,22 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     "flagged sessions show their flag and offer nothing; no step runs on its own"
                 }
             );
+            Ok(())
+        }
+        Some(Cmd::Notify { text, sound }) => {
+            use valkyrie_proto::NoticeSound;
+            let sound = sound.map(|s| match s.as_str() {
+                "request" => NoticeSound::Request,
+                _ => NoticeSound::Done,
+            });
+            // No daemon, or nobody watching: deliver it here.
+            let watchers = match connect(&socket).await {
+                Ok((client, _)) => client.notify(&text, sound).await?,
+                Err(_) => 0,
+            };
+            if watchers == 0 && !valkyrie_tui::deliver_notice(&text, sound) {
+                bail!("no valk is open and nothing here could show it (is notify-send installed?)");
+            }
             Ok(())
         }
         Some(Cmd::Bench(cmd)) => bench::run(cmd, &socket).await,

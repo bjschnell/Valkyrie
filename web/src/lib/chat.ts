@@ -54,7 +54,7 @@ export function blocks(items: ChatItem[]): Block[] {
     run = [];
   };
   for (const item of items) {
-    if (item.k === "tool") {
+    if (item.k === "tool" && !isQuestion(item)) {
       run.push(item);
     } else {
       flush();
@@ -63,6 +63,11 @@ export function blocks(items: ChatItem[]): Block[] {
   }
   flush();
   return out;
+}
+
+/** The agent asking you something: shown in full, never folded into a run. */
+export function isQuestion(card: ToolItem): boolean {
+  return card.tool === "AskUserQuestion";
 }
 
 const EDITS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit", "Delete"]);
@@ -105,7 +110,7 @@ export function cardBody(card: ToolItem): { label: string; text: string }[] | nu
   const parts: { label: string; text: string }[] = [];
   if (d.command) parts.push({ label: "command", text: `$ ${d.command}` });
   if (d.diff) parts.push({ label: "diff", text: d.diff });
-  else if (d.content) parts.push({ label: "content", text: d.content });
+  else if (d.content) parts.push({ label: isQuestion(card) ? "question" : "content", text: d.content });
   if (d.result) parts.push({ label: "result", text: d.result });
   return parts.length ? parts : null;
 }
@@ -142,9 +147,23 @@ export type MdBlock =
   | { t: "code"; lang: string; text: string }
   /** Tables, kept as their text in a monospace block: readable, and scrolls sideways. */
   | { t: "pre"; text: string }
-  | { t: "list"; ordered: boolean; items: string[] }
+  /** `start` is an ordered list's first number, so steps split by a heading still count on. */
+  | { t: "list"; ordered: boolean; items: string[]; start?: number }
   | { t: "quote"; text: string }
   | { t: "hr" };
+
+const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
+
+/** A line that starts a block of its own, so it can't continue a list item. */
+function startsBlock(line: string): boolean {
+  return (
+    /^\s*(```|~~~)/.test(line) ||
+    /^#{1,6}\s/.test(line) ||
+    /^\s*([-*_])(\s*\1){2,}\s*$/.test(line) ||
+    line.trimStart().startsWith("|") ||
+    line.startsWith(">")
+  );
+}
 
 export function parseMarkdown(src: string): MdBlock[] {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
@@ -187,21 +206,38 @@ export function parseMarkdown(src: string): MdBlock[] {
       out.push({ t: "pre", text: rows.join("\n") });
       continue;
     }
-    const item = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    const item = LIST_ITEM.exec(line);
     if (item) {
       flush();
       const ordered = /\d/.test(item[1]);
       const items = [item[2]];
+      const sameList = (l: string | undefined) => {
+        const m = l === undefined ? null : LIST_ITEM.exec(l);
+        return !!m && /\d/.test(m[1]) === ordered;
+      };
       for (i++; i < lines.length; i++) {
-        const next = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(lines[i]);
-        if (next && /\d/.test(next[1]) === ordered) items.push(next[2]);
-        // An indented line continues the item above it.
-        else if (/^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s/.test(lines[i]))
-          items[items.length - 1] += " " + lines[i].trim();
-        else break;
+        const next = lines[i];
+        if (LIST_ITEM.test(next)) {
+          if (!sameList(next)) break;
+          items.push(LIST_ITEM.exec(next)![2]);
+        } else if (!next.trim()) {
+          // A blank line ends the list, unless another item or an indented
+          // paragraph of this one comes after it ("1. step", blank, "2. step").
+          let j = i + 1;
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (sameList(lines[j])) i = j - 1;
+          else if (j < lines.length && /^\s{2,}\S/.test(lines[j])) {
+            items[items.length - 1] += "\n\n" + lines[j].trim();
+            i = j;
+          } else break;
+        } else if (/^\s{2,}\S/.test(next) || !startsBlock(next)) {
+          // An indented line, or a plain one right under the item (a command
+          // below a step), continues the item above it.
+          items[items.length - 1] += "\n" + next.trim();
+        } else break;
       }
       i--;
-      out.push({ t: "list", ordered, items });
+      out.push(ordered ? { t: "list", ordered, items, start: parseInt(item[1], 10) } : { t: "list", ordered, items });
       continue;
     }
     if (line.startsWith(">")) {

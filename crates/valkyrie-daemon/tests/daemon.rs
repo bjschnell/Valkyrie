@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use valkyrie_proto::client::{Client, Pushes};
-use valkyrie_proto::{ScreenUpdate, ServerMsg, Size, SpawnSpec};
+use valkyrie_proto::{NoticeSound, ScreenUpdate, ServerMsg, Size, SpawnSpec};
 
 /// A per-test temp dir, removed when the test ends so runs don't pile up in /tmp.
 struct TempDir(PathBuf);
@@ -507,6 +507,89 @@ async fn attaching_marks_a_finished_turn_seen_but_not_an_open_question() {
     assert!(s.seen);
     assert!(valkyrie_agents::queued(s));
     client.kill(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_notify_reaches_the_clients_watching_notices_and_counts_them() {
+    let (client, _pushes, dir) = start().await;
+    // Nobody watching: the sender hears so, to deliver it itself.
+    assert_eq!(client.notify("deploy done", None).await.unwrap(), 0);
+
+    // A queue watcher alone gets no notices; a relay (the web server's kind, which
+    // doesn't `show`) gets them without being counted.
+    let (web, mut web_pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
+    web.watch_queue().await.unwrap();
+    assert_eq!(client.notify("still nobody", None).await.unwrap(), 0);
+    web.watch_notices(false).await.unwrap();
+    assert_eq!(client.notify("relay only", None).await.unwrap(), 0);
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), web_pushes.recv()).await {
+            Ok(Some(ServerMsg::Notice { text, .. })) => {
+                assert_eq!(text, "relay only");
+                break;
+            }
+            Ok(Some(_)) => continue,
+            other => panic!("the relay got no notice: {other:?}"),
+        }
+    }
+
+    let (tui, mut tui_pushes) = Client::connect(&dir.join("run/o.sock")).await.unwrap();
+    tui.watch_notices(true).await.unwrap();
+    // Asking again doesn't count it twice.
+    tui.watch_notices(true).await.unwrap();
+    let sent = client
+        .notify("  deploy\x1b[2J done\n ", Some(NoticeSound::Request))
+        .await
+        .unwrap();
+    assert_eq!(sent, 1);
+    let notice = loop {
+        match tokio::time::timeout(Duration::from_secs(5), tui_pushes.recv()).await {
+            Ok(Some(ServerMsg::Notice { text, sound })) => break (text, sound),
+            Ok(Some(_)) => continue,
+            other => panic!("no notice: {other:?}"),
+        }
+    };
+    // Control characters are gone, so a toast can't carry an escape sequence.
+    assert_eq!(
+        notice,
+        ("deploy [2J done".to_string(), Some(NoticeSound::Request))
+    );
+    // The relay heard it too.
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), web_pushes.recv()).await {
+            Ok(Some(ServerMsg::Notice { text, .. })) if text == "deploy [2J done" => break,
+            Ok(Some(_)) => continue,
+            other => panic!("the relay missed it: {other:?}"),
+        }
+    }
+    assert!(client.notify("  \n ", None).await.is_err());
+    // A viewer that goes away stops counting. A dropped `Client` keeps its socket
+    // open, so this one is a connection of its own to close.
+    assert_eq!(client.notify("two", None).await.unwrap(), 1);
+    let mut raw = valkyrie_proto::ipc::connect(&dir.join("run/o.sock"))
+        .await
+        .unwrap();
+    valkyrie_proto::codec::write_frame(
+        &mut raw,
+        &valkyrie_proto::ClientMsg::WatchNotices {
+            req: 1,
+            shows: true,
+        },
+    )
+    .await
+    .unwrap();
+    let _: Option<ServerMsg> = valkyrie_proto::codec::read_frame(&mut raw).await.unwrap();
+    assert_eq!(client.notify("three", None).await.unwrap(), 2);
+    drop(raw);
+    let mut watchers = 2;
+    for _ in 0..50 {
+        watchers = client.notify("anyone?", None).await.unwrap();
+        if watchers == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(watchers, 1);
 }
 
 #[tokio::test]

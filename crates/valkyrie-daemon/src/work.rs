@@ -66,16 +66,28 @@ pub enum Pr {
     },
     Merged {
         url: String,
+        /// The branch it merged into; empty when `gh` didn't say.
+        base: String,
+        /// Who opened it (`author.login`); empty when `gh` didn't say.
+        author: String,
     },
     /// Closed without merging.
-    Closed {
-        url: String,
-    },
+    Closed { url: String },
     /// No `gh`, not signed in, not a GitHub remote, offline, too slow.
     Unknown,
 }
 
 impl Pr {
+    /// A merged pull request the tests' user opened into `main`.
+    #[cfg(test)]
+    pub(crate) fn merged(url: impl Into<String>) -> Self {
+        Pr::Merged {
+            url: url.into(),
+            base: "main".into(),
+            author: "me".into(),
+        }
+    }
+
     /// An open pull request with failed checks.
     pub fn red(&self) -> bool {
         matches!(self, Pr::Open { failed, .. } if !failed.is_empty())
@@ -154,7 +166,7 @@ pub fn state(
         // a merge: a squash merge leaves these commits off the default branch, so
         // its pull request says whether they're done with (#82).
         let tracked = git_out(cwd, &["config", &format!("branch.{branch}.merge")]).is_ok();
-        if tracked && let Pr::Merged { url } | Pr::Closed { url } = pr(cwd, &branch) {
+        if tracked && let Pr::Merged { url, .. } | Pr::Closed { url } = pr(cwd, &branch) {
             return Some((State::Clean, Some(branch), Some(url)));
         }
         return Some((State::Unpushed, Some(branch), None));
@@ -165,7 +177,9 @@ pub fn state(
     let (state, url) = match pr(cwd, &branch) {
         Pr::None => (State::NoPr, None),
         Pr::Open { url, failed, .. } if !failed.is_empty() => (State::PrRed, Some(url)),
-        Pr::Open { url, .. } | Pr::Merged { url } | Pr::Closed { url } => (State::Clean, Some(url)),
+        Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => {
+            (State::Clean, Some(url))
+        }
         Pr::Unknown => (State::Clean, None),
     };
     Some((state, Some(branch), url))
@@ -283,7 +297,14 @@ fn parse_pr(v: &Value) -> Pr {
     let url = v["url"].as_str().unwrap_or("").to_owned();
     match v["state"].as_str() {
         Some("OPEN") => {}
-        Some("MERGED") => return Pr::Merged { url },
+        Some("MERGED") => {
+            let text = |v: &Value| v.as_str().unwrap_or("").to_owned();
+            return Pr::Merged {
+                url,
+                base: text(&v["baseRefName"]),
+                author: text(&v["author"]["login"]),
+            };
+        }
         Some("CLOSED") => return Pr::Closed { url },
         _ => return Pr::Unknown,
     }
@@ -477,7 +498,7 @@ mod tests {
         };
         assert_eq!(of(&app, open(true)), State::PrRed);
         assert_eq!(of(&app, open(false)), State::Clean);
-        assert_eq!(of(&app, Pr::Merged { url: url.clone() }), State::Clean);
+        assert_eq!(of(&app, Pr::merged(url.clone())), State::Clean);
         assert_eq!(of(&app, Pr::Closed { url: url.clone() }), State::Clean);
         // Without `gh` nothing is known past the push.
         assert_eq!(of(&app, Pr::Unknown), State::Clean);
@@ -503,7 +524,7 @@ mod tests {
         git(&app, &["push", "--quiet", "origin", "--delete", "fix"]);
         git(&app, &["fetch", "--quiet", "--prune", "origin"]);
         let url = "https://example.com/pr/1".to_owned();
-        let merged = Pr::Merged { url: url.clone() };
+        let merged = Pr::merged(url.clone());
         let (got, branch, pr) = state(&app, &|_, _| merged.clone()).unwrap();
         assert_eq!(got, State::Clean);
         assert_eq!(
@@ -547,8 +568,11 @@ mod tests {
         )));
         assert!(!red(pr("OPEN", json!([]))));
         assert_eq!(
-            pr("MERGED", json!([{"conclusion": "FAILURE"}])),
-            Pr::Merged { url: "u".into() }
+            parse_pr(
+                &json!({"state": "MERGED", "url": "u", "baseRefName": "main",
+                "author": {"login": "me"}, "statusCheckRollup": [{"conclusion": "FAILURE"}]})
+            ),
+            Pr::merged("u")
         );
         assert_eq!(pr("CLOSED", json!([])), Pr::Closed { url: "u".into() });
         assert_eq!(pr("", json!([])), Pr::Unknown);
@@ -725,7 +749,7 @@ mod tests {
         let lookup = |dir: &Path, which: &str| {
             asked.borrow_mut().push(which.to_owned());
             match which {
-                w if w == "fix/38" || w == url38 => Pr::Merged { url: url38.into() },
+                w if w == "fix/38" || w == url38 => Pr::merged(url38),
                 // Only the item's own PR is red; by branch `gh` may not find it
                 // (a fork, a renamed branch), which is why the item's URL wins.
                 w if w == url65 => {
