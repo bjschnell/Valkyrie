@@ -247,6 +247,16 @@ enum Cmd {
         #[arg(value_parser = ["on", "off"])]
         mode: Option<String>,
     },
+    /// Raise a toast on every open `valk`, with a sound if you ask for one. With none
+    /// open, it is a desktop notification (and the sound) from this process.
+    Notify {
+        /// What to say.
+        text: String,
+        /// A ping to go with it: `request` for something that needs you, `done` for
+        /// something that finished. Silent without.
+        #[arg(long, value_parser = ["request", "done"])]
+        sound: Option<String>,
+    },
     #[command(subcommand)]
     Bench(bench::BenchCmd),
 }
@@ -807,6 +817,22 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     "flagged sessions show their flag and offer nothing; no step runs on its own"
                 }
             );
+            Ok(())
+        }
+        Some(Cmd::Notify { text, sound }) => {
+            use valkyrie_proto::NoticeSound;
+            let sound = sound.map(|s| match s.as_str() {
+                "request" => NoticeSound::Request,
+                _ => NoticeSound::Done,
+            });
+            // No daemon, or nobody watching: deliver it here.
+            let watchers = match connect(&socket).await {
+                Ok((client, _)) => client.notify(&text, sound).await?,
+                Err(_) => 0,
+            };
+            if watchers == 0 && !valkyrie_tui::deliver_notice(&text, sound) {
+                bail!("no valk is open and nothing here could show it (is notify-send installed?)");
+            }
             Ok(())
         }
         Some(Cmd::Bench(cmd)) => bench::run(cmd, &socket).await,
