@@ -55,7 +55,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 4. **Dispatch** (#78): the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
 5. **Sessions with a PR and no item** (#80): the branch watch (§7), the PR author guard, and `via` in the records with health's comparison.
 
-6. **Agents editing the same files** (phase 6, backlog #107): the overlap watcher, `SessionInfo.overlap` (protocol 28) and its note in the TUI and web session lists.
+6. **Agents editing the same files** (phase 6, backlog #107): the overlap watcher, `SessionInfo.overlap` (protocol 29) and its note in the TUI and web session lists.
 
 ## Consequences
 - **No standing supervisor session.** No agent sits in a loop reading the queue. It's watchers and a picker in the daemon, plus a few model calls on flags. That's cheaper, can be audited, and can't drift, at the price of DESIGN §7's open-ended "dispatch tasks" being only what the action list names. A case that needs more joins the list as a new template, as policies do.

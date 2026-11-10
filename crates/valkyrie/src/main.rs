@@ -4,6 +4,7 @@ mod context;
 mod guard;
 mod hook;
 mod mcp;
+mod pane;
 mod pings;
 mod service;
 mod todo;
@@ -105,6 +106,12 @@ enum Cmd {
     Dump { session: SessionId },
     /// Send input to a session. Understands \r \n \t \e and \xHH escapes.
     Send { session: SessionId, text: String },
+    /// Drive the panes of a tab: split, run, read, wait, close, resize. An agent
+    /// run in a session drives its own tab.
+    Pane {
+        #[command(subcommand)]
+        action: pane::PaneCmd,
+    },
     /// Forward an agent hook event (stdin JSON) to the daemon. Agents run this; it
     /// prints nothing, always exits 0, and does nothing outside a Valkyrie session.
     #[command(hide = true)]
@@ -361,8 +368,12 @@ fn main() -> Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         // A hook must never print or exit nonzero (exit 2 blocks the agent), even
-        // when its arguments or environment don't parse.
-        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => return Ok(()),
+        // when its arguments or environment don't parse. It still reads its input,
+        // or the agent writing it can hit EPIPE.
+        Err(_) if std::env::args().any(|a| a == "hook" || a == "context-hook") => {
+            hook::drain();
+            return Ok(());
+        }
         Err(e) => e.exit(),
     };
     // Hooks report to the daemon that owns VALK_SESSION, which VALK_SOCKET names,
@@ -633,6 +644,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             // Input is fire-and-forget; a round trip guarantees it was flushed before exit.
             client.list().await.map(drop)
         }
+        Some(Cmd::Pane { action }) => pane::run(&connect(&socket).await?.0, action).await,
         Some(Cmd::Hook { .. } | Cmd::ContextHook { .. }) => {
             unreachable!("handled before the runtime starts")
         }

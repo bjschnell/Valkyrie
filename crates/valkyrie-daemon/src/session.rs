@@ -71,6 +71,8 @@ pub struct Host {
     pub stop: Mutex<Arc<StopPipe>>,
     /// The last cell size in pixels a client reported; new sessions start with it.
     pub cell_px: Mutex<Option<(u16, u16)>>,
+    /// The last colors a client reported; new sessions answer color queries with them.
+    pub colors: Mutex<Option<valkyrie_proto::TermColors>>,
     /// The decision store (ADR-0007), exported so `valk context hook` reads this
     /// daemon's.
     pub context_dir: PathBuf,
@@ -387,6 +389,7 @@ impl Session {
         if let Some(cell) = cell {
             screen.set_cell_pixels(cell);
         }
+        screen.set_colors(host.colors.lock().unwrap().clone());
         let mut state = State {
             screen,
             exited: None,
@@ -471,6 +474,7 @@ impl Session {
         if let Some(cell) = *host.cell_px.lock().unwrap() {
             screen.set_cell_pixels(cell);
         }
+        screen.set_colors(host.colors.lock().unwrap().clone());
         let now = now_ms();
         let log = append_private(&saved.events)?;
         let transcript = append_private(&saved.transcript)?;
@@ -1425,6 +1429,11 @@ impl Session {
         if let Err(e) = self.pty.resize(size, cell) {
             tracing::warn!(session = self.id, "pty resize failed: {e}");
         }
+    }
+
+    /// The colors programs in this session are told their terminal has.
+    pub fn set_colors(&self, colors: Option<valkyrie_proto::TermColors>) {
+        self.state.lock().unwrap().screen.set_colors(colors);
     }
 
     /// Starts the restore list off with the conversation a restored agent resumes, so

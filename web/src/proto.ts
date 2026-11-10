@@ -42,7 +42,7 @@ export interface SessionInfo {
   status: AgentStatus;
   /** The agent's own transcript, when known: the Chat view reads it. */
   chat?: string;
-  /** Another live agent in the repository changed the same files (protocol 28). */
+  /** Another live agent in the repository changed the same files (protocol 29). */
   overlap?: string;
 }
 
@@ -337,7 +337,9 @@ export type ItemChange =
       /** The whole list, replacing the item's; empty clears it. */
       blocked_by?: number[];
     }
-  | { do: "status"; status: ItemStatus };
+  | { do: "status"; status: ItemStatus }
+  /** Puts a started item back in the backlog and stops its sessions (protocol 28). */
+  | { do: "return" };
 
 /** One item's place in a build order: why, and what accepting it changes
  * (`priority` and the whole `blocked_by` list; absent keeps what it has). */
@@ -442,9 +444,13 @@ export type Request =
       model?: string;
     };
 
+export type TermColors = { fg: [number, number, number]; bg: [number, number, number]; ansi: [number, number, number][] };
+
 /** Fire-and-forget messages. */
 export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
+  /** The colors this session's programs are told the terminal has (OSC 10/11/4). */
+  | { t: "term_colors"; session: SessionId; colors: TermColors | null }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
   | { t: "visible"; visible: boolean }

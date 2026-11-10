@@ -907,8 +907,11 @@ fn agents_hear_about_their_siblings() {
         .as_str()
         .unwrap();
     assert!(text.contains("- auth-work (claude, "), "{text}");
+    // Either order: each `valk hook` is its own connection, and the daemon can read
+    // the second edit first. Newest-first is activity.rs's unit test to pin.
     assert!(
-        text.contains("asked “refactor the auth module”; editing src/db.rs, src/auth.rs"),
+        text.contains("asked “refactor the auth module”; editing src/db.rs, src/auth.rs")
+            || text.contains("asked “refactor the auth module”; editing src/auth.rs, src/db.rs"),
         "{text}"
     );
     assert!(

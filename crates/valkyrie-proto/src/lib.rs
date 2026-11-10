@@ -30,10 +30,19 @@ pub use layout::{Axis, Pane, Side};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 28;
+pub const PROTOCOL: u32 = 29;
 
 pub type ReqId = u64;
 pub type SessionId = u32;
+
+/// What a program is told its terminal looks like: default text and background,
+/// and the 16 ANSI colors (black to bright white), each as RGB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermColors {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub ansi: Vec<[u8; 3]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
@@ -195,7 +204,7 @@ pub struct SessionInfo {
     pub chat: Option<PathBuf>,
     /// One line when another live agent in the same repository has changed the
     /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
-    /// 28). Shown beside the state, which it never changes.
+    /// 29). Shown beside the state, which it never changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
 }
@@ -287,6 +296,15 @@ pub enum ClientMsg {
         session: Option<SessionId>,
         width: u16,
         height: u16,
+    },
+    /// The colors the client draws a session with, so a program that asks the
+    /// terminal for its background or palette (OSC 4/10/11) gets the answer a real
+    /// terminal would give. With `session`, that session only; without, the default
+    /// for sessions spawned from now on. `colors: None` puts the stock dark palette
+    /// back. No reply.
+    TermColors {
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
     },
     /// An agent hook event, forwarded by `valk hook <agent>` (ADR-0005). No reply:
     /// the hook never waits on the daemon.
