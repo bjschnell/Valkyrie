@@ -91,8 +91,25 @@ export function ScreenView({
   const wheel = useRef(0);
   // The program's mouse: the button held down and the cell it was last reported
   // at, and the cell a plain move was last reported at.
-  const held = useRef<{ button: number; x: number; y: number } | null>(null);
+  const held = useRef<{ button: number; x: number; y: number; session: number; modes: Modes } | null>(null);
   const over = useRef<{ x: number; y: number } | null>(null);
+  // The pointer the last press came from: only a mouse's is the program's.
+  const byMouse = useRef(false);
+  /**
+   * The held button comes up, at `at` or where it was last seen. The release
+   * goes to the session that had the press, as that session asked for it,
+   * whatever is open by now: a button is never left down in a program.
+   */
+  const letGo = (at?: { x: number; y: number } | null, keys?: { altKey: boolean; ctrlKey: boolean }) => {
+    const down = held.current;
+    if (!down) return;
+    held.current = null;
+    const data = mouseBytes(
+      { action: "release", button: down.button, x: (at ?? down).x, y: (at ?? down).y, alt: keys?.altKey, ctrl: keys?.ctrlKey },
+      down.modes,
+    );
+    if (data) sendBytesTo(down.session, data);
+  };
 
   const toLive = () => {
     asked.current++;
@@ -134,6 +151,9 @@ export function ScreenView({
   useEffect(() => {
     now.current.toLive();
     stick.current = true;
+    // A button held in the session you left comes up there, not here.
+    letGo();
+    over.current = null;
   }, [openId]);
 
   // Follow new output unless you scrolled up to read.
@@ -347,7 +367,10 @@ export function ScreenView({
     const el = ref.current;
     if (!desktop || !el || e.ctrlKey || !e.deltaY) return;
     const line = parseFloat(getComputedStyle(pre.current ?? el).lineHeight) || 17;
-    if (mouse && !e.shiftKey) {
+    // What the pane can scroll itself comes first, as below: the wheel is never
+    // both the pane's and the program's.
+    const scrolls = e.deltaY < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+    if (mouse && !e.shiftKey && !scrolls) {
       wheel.current += e.deltaMode === 0 ? e.deltaY / line : e.deltaY;
       const turns = Math.trunc(wheel.current);
       wheel.current -= turns;
@@ -356,9 +379,8 @@ export function ScreenView({
       for (let i = 0; at && i < Math.min(Math.abs(turns), 10); i++) report(turns < 0 ? "wheel-up" : "wheel-down", at, e);
       return;
     }
-    // What the pane can scroll itself comes first; past its edge, the history.
-    const up = e.deltaY < 0;
-    if (up ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return;
+    // Past the pane's own edge, the history.
+    if (scrolls) return;
     wheel.current += e.deltaMode === 0 ? e.deltaY / line : e.deltaY;
     const lines = Math.trunc(wheel.current);
     if (!lines) return;
@@ -387,19 +409,27 @@ export function ScreenView({
       onScroll={onScroll}
       onWheel={onWheel}
       onPointerDown={(e) => {
+        byMouse.current = e.pointerType === "mouse";
         // The click that gives the terminal the keyboard is only that.
         if (desktop && live && e.button === 0 && !typing) return onTyping(true);
-        if (!mouse || e.shiftKey || e.button > 2 || e.pointerType !== "mouse") return;
+        if (!mouse || e.shiftKey || e.button > 2 || !byMouse.current || openId === null) return;
         const at = cellOf(e);
         if (!at) return;
+        // Text selected with Shift before isn't the program's: its highlight
+        // would sit on whatever the click makes the program draw.
+        getSelection()?.removeAllRanges();
+        letGo();
         report("press", at, e);
-        held.current = { button: e.button, ...at };
+        held.current = { button: e.button, ...at, session: openId, modes };
         // A drag that leaves the pane still ends here.
         e.currentTarget.setPointerCapture(e.pointerId);
       }}
       onPointerMove={(e) => {
-        if (!mouse || e.pointerType !== "mouse") return;
         const down = held.current;
+        // The button came up where no event told of it (another window, a
+        // broken grab): it comes up now.
+        if (down && e.buttons === 0) return letGo(cellOf(e), e);
+        if (!mouse || e.pointerType !== "mouse") return;
         if (!down && (!modes.mouse_motion || e.shiftKey)) return;
         // One report a cell, not one a pixel.
         const was = down ?? over.current;
@@ -409,25 +439,23 @@ export function ScreenView({
         if (down) held.current = { ...down, ...at };
         else over.current = at;
       }}
-      onPointerUp={(e) => {
-        const down = held.current;
-        if (!down) return;
-        held.current = null;
-        // Where it came up, or where it was last seen if that can't be told.
-        report("release", cellOf(e) ?? down, e, down.button);
-      }}
-      onPointerCancel={() => {
-        held.current = null;
-      }}
-      // The program's click isn't the start of a selection, and its right
-      // button isn't the browser's menu.
+      onPointerUp={(e) => letGo(cellOf(e), e)}
+      onPointerCancel={() => letGo()}
+      onLostPointerCapture={() => letGo()}
+      // The program's click isn't the start of a selection, its right button
+      // isn't the browser's menu, and its middle button doesn't paste. A pen or
+      // a finger is left alone: only a mouse is reported.
       onMouseDown={(e) => {
-        if (mouse && !e.shiftKey && e.button <= 2) e.preventDefault();
+        if (mouse && byMouse.current && !e.shiftKey && e.button <= 2) e.preventDefault();
+      }}
+      onAuxClick={(e) => {
+        if (mouse && byMouse.current && !e.shiftKey) e.preventDefault();
       }}
       onContextMenu={(e) => {
-        if (mouse && !e.shiftKey) e.preventDefault();
+        if (mouse && byMouse.current && !e.shiftKey) e.preventDefault();
       }}
-      onMouseUp={() => {
+      onMouseUp={(e) => {
+        if (mouse && byMouse.current && !e.shiftKey && e.button === 1) e.preventDefault();
         // The field holds the keyboard for input methods; a selection stays put.
         if (keys && getSelection()?.isCollapsed) field.current?.focus({ preventScroll: true });
       }}
