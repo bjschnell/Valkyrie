@@ -5,6 +5,7 @@ members = [
     "crates/valkyrie-agents",
     "crates/valkyrie-context",
     "crates/valkyrie-daemon",
+    "crates/valkyrie-desktop",
     "crates/valkyrie-proto",
     "crates/valkyrie-term",
     "crates/valkyrie-tui",
