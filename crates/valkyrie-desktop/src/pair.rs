@@ -10,7 +10,6 @@
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use valkyrie_proto::client::Client;
 
 /// What the daemon is asked to vouch for; it names this in its refusal.
@@ -19,7 +18,9 @@ const WHAT: &str = "pairing the desktop app";
 /// One launch's right to pair.
 #[derive(Default)]
 pub struct Pairing {
-    minted: AtomicBool,
+    /// The daemon has answered this launch's ask, yes or no. Held across the
+    /// ask, so two at once can't both get through.
+    asked: tokio::sync::Mutex<bool>,
 }
 
 impl Pairing {
@@ -28,20 +29,27 @@ impl Pairing {
     }
 
     /// A link that pairs the window with the server at `url`, or `None` when this
-    /// launch already had one. A refusal (an agent started the app) or a daemon
-    /// that can't be reached uses the launch's one try too.
+    /// launch already had its answer.
+    ///
+    /// The daemon's answer is what uses the launch's one try, a refusal (an agent
+    /// started the app) as much as a yes. A daemon that can't be reached yet, at
+    /// login or in the middle of an upgrade, decided nothing and minted nothing:
+    /// that can be asked again.
     pub async fn link(&self, socket: &Path, url: &str) -> Result<Option<String>> {
-        if self.minted.swap(true, Ordering::SeqCst) {
+        let mut asked = self.asked.lock().await;
+        if *asked {
             return Ok(None);
         }
-        vouched(socket).await?;
+        let client = daemon(socket).await?;
+        *asked = true;
+        client.vouch(WHAT).await?;
         let store = valkyrie_web::store()?;
         Ok(Some(valkyrie_web::pairing_link(&store, url)?))
     }
 }
 
-/// Asks the daemon whether a person, not an agent, is behind this process.
-async fn vouched(socket: &Path) -> Result<()> {
+/// The daemon, once it has said it speaks this app's protocol.
+async fn daemon(socket: &Path) -> Result<Client> {
     let (client, _pushes) = Client::connect(socket)
         .await
         .with_context(|| format!("reach the daemon on {}", socket.display()))?;
@@ -52,5 +60,26 @@ async fn vouched(socket: &Path) -> Result<()> {
             valkyrie_proto::PROTOCOL
         );
     }
-    client.vouch(WHAT).await
+    Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_daemon_that_cant_be_reached_leaves_the_try_unused() {
+        let pairing = Pairing::new();
+        let nowhere = std::env::temp_dir().join(format!("valk-no-daemon-{}", std::process::id()));
+        for _ in 0..2 {
+            // An error both times, never "this launch had its one".
+            assert!(
+                pairing
+                    .link(&nowhere, "http://127.0.0.1:8790")
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(!*pairing.asked.lock().await);
+    }
 }

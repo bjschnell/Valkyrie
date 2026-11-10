@@ -23,8 +23,11 @@ const RETRY: Duration = Duration::from_secs(2);
 /// What the tray and the notification centre are told.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// The daemon answers, or stopped answering.
+    /// The daemon answers, or doesn't. The first event is always one of these.
     Online(bool),
+    /// The daemon was upgraded past this app: it speaks another protocol, and
+    /// nothing more is known until the app is restarted on the new version.
+    Outdated,
     /// How many sessions need you: the number on the tray icon.
     Count(usize),
     /// Show this; clicking it opens `Note::session`.
@@ -94,38 +97,65 @@ fn now_ms() -> u64 {
 /// the window is in front right now.
 pub async fn run(socket: &Path, front: impl Fn() -> bool, events: UnboundedSender<Event>) {
     let mut tray = Tray::default();
-    let mut online = false;
+    // Unknown until the first try: `None` so that it is told either way.
+    let mut online = None;
+    let mut outdated = false;
     loop {
         let ended = follow(socket, &mut tray, &front, &events, &mut online).await;
         if events.is_closed() {
             return;
         }
-        if let Err(e) = ended {
-            tracing::debug!("daemon connection: {e:#}");
+        match ended {
+            Err(e) if e.is::<Outdated>() => {
+                // Said once; a restart of the app is the only way on.
+                if !outdated {
+                    outdated = true;
+                    let _ = events.send(Event::Outdated);
+                }
+            }
+            Err(e) => tracing::debug!("daemon connection: {e:#}"),
+            Ok(()) => {}
         }
         tray.lost();
-        if online {
-            online = false;
+        if online != Some(false) {
+            online = Some(false);
             let _ = events.send(Event::Online(false));
         }
         tokio::time::sleep(RETRY).await;
     }
 }
 
+/// The daemon speaks another protocol than this build.
+#[derive(Debug)]
+struct Outdated;
+
+impl std::fmt::Display for Outdated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the daemon speaks another protocol than this app")
+    }
+}
+
+impl std::error::Error for Outdated {}
+
 async fn follow(
     socket: &Path,
     tray: &mut Tray,
     front: &impl Fn() -> bool,
     events: &UnboundedSender<Event>,
-    online: &mut bool,
+    online: &mut Option<bool>,
 ) -> Result<()> {
     let (client, mut pushes) = Client::connect(socket).await?;
-    client.hello_as(ClientBuild::this("desktop")).await?;
+    let daemon = client.hello_as(ClientBuild::this("desktop")).await?;
+    // Its messages may not even decode: better no count than a wrong one that
+    // comes and goes.
+    if daemon.protocol != valkyrie_proto::PROTOCOL {
+        return Err(Outdated.into());
+    }
     client.watch_queue().await?;
     // It shows notices to someone, so `valk notify` counts it. An older daemon
     // doesn't know them, and the queue still works.
     let _ = client.watch_notices(true).await;
-    *online = true;
+    *online = Some(true);
     let _ = events.send(Event::Online(true));
     let mut tick = tokio::time::interval(TICK);
     loop {

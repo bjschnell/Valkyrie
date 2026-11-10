@@ -19,6 +19,9 @@ pub const DEFAULT_PORT: u16 = 8790;
 /// How long a service that was just set up or started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(15);
 const START_POLL: Duration = Duration::from_millis(300);
+/// How long `valk setup web --local` gets: it waits on the service manager, and
+/// on the service for ten seconds of its own.
+const SETUP_WAIT: Duration = Duration::from_secs(60);
 
 /// What the shell does to the machine, apart from deciding when (`ensure`).
 pub trait Host {
@@ -35,6 +38,9 @@ pub trait Host {
 pub enum StartError {
     /// Something else holds the port, or a `valk web` that can't prove itself.
     Stranger(SocketAddr),
+    /// The check itself couldn't be made (the state directory can't be used,
+    /// say): nothing is known about the port, so nothing is done to it.
+    Check(String),
     /// `valk setup web --local` failed; its own words.
     Setup(String),
     /// The service was set up, and nothing answered in time.
@@ -49,6 +55,7 @@ impl fmt::Display for StartError {
                 "Something answers on {addr}, and it isn't your valk web. If it is an older \
                  valk web, restart it; otherwise stop what holds the port."
             ),
+            Self::Check(why) => write!(f, "Couldn't check for valk web on this machine: {why}"),
             Self::Setup(why) => write!(f, "Couldn't set up valk web on this machine: {why}"),
             Self::Silent(addr) => write!(
                 f,
@@ -73,39 +80,57 @@ fn local(port: u16) -> SocketAddr {
 
 /// Makes sure this user's `valk web` answers locally, and says where.
 ///
-/// A `valk web` that is already running is used where it is, whichever port it
-/// was set up on. Only when none answers is one set up, on the default port. A
+/// A `valk web` that is already running is used where it is: the default port
+/// first, then wherever one last said it listens (a service set up on another
+/// port). Only when neither answers is one set up, on the default port. A
 /// stranger on the port is never loaded and never set up over.
 pub async fn ensure(host: &impl Host) -> Result<SocketAddr, StartError> {
     let check = |addr| async move {
-        // A check that couldn't be made is no proof.
-        host.check(addr).await.unwrap_or(Local::Stranger)
+        host.check(addr)
+            .await
+            .map_err(|e| StartError::Check(format!("{e:#}")))
     };
-    // Where a valk web last said it was: the user may have set another port.
-    if let Some(recorded) = host.recorded().map(|addr| local(addr.port()))
-        && check(recorded).await == Local::Ours
-    {
-        return Ok(recorded);
-    }
+    // The record is only a hint, and only of a port: the window loads 127.0.0.1.
+    let elsewhere = || {
+        host.recorded()
+            .map(|addr| local(addr.port()))
+            .filter(|addr| addr.port() != DEFAULT_PORT && addr.port() != 0)
+    };
     let addr = local(DEFAULT_PORT);
-    match check(addr).await {
-        Local::Ours => return Ok(addr),
-        Local::Stranger => return Err(StartError::Stranger(addr)),
-        Local::Nothing => {}
+    let at_default = check(addr).await?;
+    if at_default == Local::Ours {
+        return Ok(addr);
     }
-    host.setup(addr)
-        .await
-        .map_err(|e| StartError::Setup(format!("{e:#}")))?;
+    if let Some(other) = elsewhere()
+        && check(other).await? == Local::Ours
+    {
+        return Ok(other);
+    }
+    if at_default == Local::Stranger {
+        return Err(StartError::Stranger(addr));
+    }
+    let setup = host.setup(addr).await;
+    // A service that was already set up is started as it is, on whatever port
+    // it was given: once it's up it says where, whatever the setup made of it.
     let deadline = tokio::time::Instant::now() + START_WAIT;
     loop {
-        match check(addr).await {
+        match check(addr).await? {
             Local::Ours => return Ok(addr),
             Local::Stranger => return Err(StartError::Stranger(addr)),
-            Local::Nothing if tokio::time::Instant::now() >= deadline => {
-                return Err(StartError::Silent(addr));
-            }
-            Local::Nothing => tokio::time::sleep(START_POLL).await,
+            Local::Nothing => {}
         }
+        if let Some(other) = elsewhere()
+            && check(other).await? == Local::Ours
+        {
+            return Ok(other);
+        }
+        if let Err(e) = &setup {
+            return Err(StartError::Setup(format!("{e:#}")));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StartError::Silent(addr));
+        }
+        tokio::time::sleep(START_POLL).await;
     }
 }
 
@@ -152,16 +177,20 @@ impl Host for Valk {
     }
 
     async fn setup(&self, addr: SocketAddr) -> Result<()> {
-        let out = tokio::process::Command::new(&self.exe)
-            .args(["setup", "web", "--local", "--listen"])
+        let mut valk = tokio::process::Command::new(&self.exe);
+        valk.args(["setup", "web", "--local", "--listen"])
             .arg(addr.to_string())
             .stdin(std::process::Stdio::null())
-            .output()
+            .kill_on_drop(true);
+        // No console window flashing up beside the app's own.
+        #[cfg(windows)]
+        valk.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let out = tokio::time::timeout(SETUP_WAIT, valk.output())
             .await
+            .map_err(|_| anyhow::anyhow!("{} didn't finish", self.exe.display()))?
             .with_context(|| format!("run {}", self.exe.display()))?;
         if !out.status.success() {
-            let said = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("{}", said.trim().trim_start_matches("Error: "));
+            anyhow::bail!("{}", first_line(&String::from_utf8_lossy(&out.stderr)));
         }
         Ok(())
     }
@@ -169,6 +198,20 @@ impl Host for Valk {
     fn recorded(&self) -> Option<SocketAddr> {
         valkyrie_web::listening()
     }
+}
+
+/// What a failed `valk` said, without the rest: an older one that doesn't know
+/// `--local` prints its whole usage after the line that matters.
+fn first_line(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("it failed");
+    let line = line.trim();
+    line.strip_prefix("Error: ")
+        .or_else(|| line.strip_prefix("error: "))
+        .unwrap_or(line)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -186,6 +229,11 @@ mod tests {
         after_setup: Option<Local>,
         setup_fails: bool,
         setups: Cell<u32>,
+        /// A setup starts a service that was already there, on this port.
+        setup_starts: Option<u16>,
+        /// The check can't be made at all.
+        check_fails: bool,
+        checks: RefCell<Vec<u16>>,
     }
 
     impl Fake {
@@ -200,6 +248,10 @@ mod tests {
     impl Host for Fake {
         async fn check(&self, addr: SocketAddr) -> Result<Local> {
             assert!(addr.ip().is_loopback(), "asked beyond this machine: {addr}");
+            if self.check_fails {
+                anyhow::bail!("refusing to use /state/web: must be a directory with mode 0700");
+            }
+            self.checks.borrow_mut().push(addr.port());
             Ok(*self
                 .ports
                 .borrow()
@@ -209,6 +261,9 @@ mod tests {
 
         async fn setup(&self, addr: SocketAddr) -> Result<()> {
             self.setups.set(self.setups.get() + 1);
+            if let Some(port) = self.setup_starts {
+                self.ports.borrow_mut().insert(port, Local::Ours);
+            }
             if self.setup_fails {
                 anyhow::bail!("no systemd user session");
             }
@@ -241,10 +296,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_record_falls_back_to_the_default_port() {
-        let mut host = Fake::with(&[(DEFAULT_PORT, Local::Ours), (9001, Local::Stranger)]);
+    async fn the_default_port_comes_before_a_record() {
+        // A `valk web` tried out on another port wrote the record last; the
+        // service on the default port is still the one the window is paired with.
+        let mut host = Fake::with(&[(DEFAULT_PORT, Local::Ours), (9001, Local::Ours)]);
         host.recorded = Some("127.0.0.1:9001".parse().unwrap());
         assert_eq!(ensure(&host).await.unwrap(), local(DEFAULT_PORT));
+        assert_eq!(*host.checks.borrow(), [DEFAULT_PORT]);
+    }
+
+    #[tokio::test]
+    async fn a_record_that_proves_nothing_is_no_way_round_a_stranger() {
+        let mut host = Fake::with(&[(DEFAULT_PORT, Local::Stranger), (9001, Local::Stranger)]);
+        host.recorded = Some("127.0.0.1:9001".parse().unwrap());
+        let err = ensure(&host).await.unwrap_err();
+        assert!(matches!(err, StartError::Stranger(_)), "{err}");
+        assert_eq!(host.setups.get(), 0);
+        // A record of the default port, or of no port, isn't asked again.
+        for record in ["127.0.0.1:8790", "127.0.0.1:0"] {
+            let mut host = Fake::with(&[(DEFAULT_PORT, Local::Stranger)]);
+            host.recorded = Some(record.parse().unwrap());
+            ensure(&host).await.unwrap_err();
+            assert_eq!(*host.checks.borrow(), [DEFAULT_PORT]);
+        }
+    }
+
+    /// The user's service is set up on another port and stopped. The setup
+    /// starts it as it is, then fails: nothing answers on the port it was asked
+    /// for. The service is up all the same, and said where.
+    #[tokio::test]
+    async fn a_stopped_service_on_another_port_is_found_once_started() {
+        let mut host = Fake::with(&[]);
+        host.recorded = Some("127.0.0.1:9001".parse().unwrap());
+        host.setup_starts = Some(9001);
+        host.setup_fails = true;
+        assert_eq!(ensure(&host).await.unwrap(), local(9001));
+        assert_eq!(host.setups.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_check_that_cant_be_made_says_so_and_touches_nothing() {
+        let mut host = Fake::with(&[]);
+        host.check_fails = true;
+        let err = ensure(&host).await.unwrap_err();
+        assert!(matches!(err, StartError::Check(_)), "{err}");
+        assert!(err.to_string().contains("mode 0700"), "{err}");
+        assert_eq!(host.setups.get(), 0);
+    }
+
+    #[test]
+    fn a_failed_setup_is_told_in_one_line() {
+        assert_eq!(
+            first_line("Error: something already listens on 127.0.0.1:8790\n\nCaused by:\n  x"),
+            "something already listens on 127.0.0.1:8790"
+        );
+        assert_eq!(
+            first_line("error: unexpected argument '--local' found\n\nUsage: valk setup web"),
+            "unexpected argument '--local' found"
+        );
+        assert_eq!(first_line(""), "it failed");
     }
 
     #[tokio::test]
