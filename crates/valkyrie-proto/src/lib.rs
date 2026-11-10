@@ -645,7 +645,7 @@ pub enum Reply {
         clients: Vec<ConnectedClient>,
     },
     Session {
-        info: SessionInfo,
+        info: Box<SessionInfo>,
     },
     Sessions {
         sessions: Vec<SessionInfo>,

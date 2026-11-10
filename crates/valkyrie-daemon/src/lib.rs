@@ -1565,7 +1565,9 @@ fn spawn_with(
     registry.sessions.lock().unwrap().insert(id, session);
     registry.host.changed.notify_one();
     tracing::info!(session = id, command = ?info.command, "spawned");
-    Ok(Reply::Session { info })
+    Ok(Reply::Session {
+        info: Box::new(info),
+    })
 }
 
 /// Pushes the queue to one connection: the current one, then every change, and the

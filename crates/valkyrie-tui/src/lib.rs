@@ -8165,7 +8165,9 @@ mod tests {
                 let answer = match msg {
                     ClientMsg::Spawn { req, .. } => ServerMsg::Ok {
                         req,
-                        reply: Reply::Session { info: info(7) },
+                        reply: Reply::Session {
+                            info: Box::new(info(7)),
+                        },
                     },
                     ClientMsg::AttachPanes { req, .. } => ServerMsg::Ok {
                         req,
