@@ -32,7 +32,7 @@ pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 30;
+pub const PROTOCOL: u32 = 31;
 
 /// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
 /// something that needs you, `done` for something that finished.
@@ -213,6 +213,11 @@ pub struct SessionInfo {
     /// web app's Chat view reads it (DESIGN §8.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<PathBuf>,
+    /// One line when another live agent in the same repository has changed the
+    /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
+    /// 31). Shown beside the state, which it never changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -680,7 +685,7 @@ pub enum Reply {
         clients: Vec<ConnectedClient>,
     },
     Session {
-        info: SessionInfo,
+        info: Box<SessionInfo>,
     },
     Sessions {
         sessions: Vec<SessionInfo>,

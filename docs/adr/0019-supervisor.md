@@ -18,6 +18,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
    - **PR red** (#67): failed checks on an item's open PR.
    - **PR conflicting** (this ADR's phase 1): GitHub reports the item's open PR `CONFLICTING` with its base. The flag reads "PR #N conflicts with main", or "PR #N conflicts with main; CI red: <checks>" when both are true. `UNKNOWN` counts as nothing yet, because GitHub works mergeability out lazily after the base moves, so the next poll picks it up.
    - **Unordered work** (phase 2): three or more items land in one repository within a day, or a note on an item names a build order (several `#N` in sequence). The user can also ask at any time with `valk todo plan [-C DIR]` (and a board button).
+   - **Edit overlap** (phase 6): two live agent sessions in one repository have changed the same file, which would conflict once their pull requests meet. Each gets a one-line note, "overlaps session X on src/foo.rs", shown beside its state. Unlike the flags above it isn't *blocked* and doesn't wait for the session to go idle: the agents are still working, so it's a note on the row (`SessionInfo.overlap`), and it clears when the overlap does. It offers no step. The check is `git diff <merge-base with the default branch>` per session, plus untracked files, on the poll. Committed and uncommitted work both count, merging the default branch in doesn't, and two sessions in one checkout are never compared. A file watch would need a watcher per worktree and ignores for build output, and would still have to diff to learn what differs from the base.
    - **Item ready** (phase 4): an open item nobody's on whose blockers have all shipped or been dropped.
 
    Both PR watchers ride the existing 5-minute poll, which already makes one `gh pr view` call per item. They share its rules: an item's sessions of this daemon boot (sessions with no item, or from before a restart, are found by their branch, §7), only `idle` or `done`, and a flag that was seen isn't raised again until the session goes idle again or the reason changes. A session still showing the poll's own flag takes the new reason (red CI, then main moves), and it shows as news again. A session blocked by anything else keeps what it shows.
@@ -53,6 +54,8 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 3. **Learning** (#77): `supervisor.jsonl`, policy proposals from accepted steps, automatic steps, health.
 4. **Dispatch** (#78): the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
 5. **Sessions with a PR and no item** (#80): the branch watch (§7), the PR author guard, and `via` in the records with health's comparison.
+
+6. **Agents editing the same files** (phase 6, backlog #107): the overlap watcher, `SessionInfo.overlap` (protocol 31) and its note in the TUI and web session lists.
 
 ## Consequences
 - **No standing supervisor session.** No agent sits in a loop reading the queue. It's watchers and a picker in the daemon, plus a few model calls on flags. That's cheaper, can be audited, and can't drift, at the price of DESIGN §7's open-ended "dispatch tasks" being only what the action list names. A case that needs more joins the list as a new template, as policies do.

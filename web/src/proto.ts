@@ -42,6 +42,8 @@ export interface SessionInfo {
   status: AgentStatus;
   /** The agent's own transcript, when known: the Chat view reads it. */
   chat?: string;
+  /** Another live agent in the repository changed the same files (protocol 31). */
+  overlap?: string;
 }
 
 export interface QueueItem {

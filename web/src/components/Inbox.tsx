@@ -478,6 +478,9 @@ function SessionRow({
               : STATE_LABEL[state]}
             {s.status.summary ? ` · ${s.status.summary}` : ""}
           </span>
+          {s.overlap ? (
+            <span className="row-sub row-overlap">⚠ {s.overlap}</span>
+          ) : null}
         </span>
         <span className="row-age">{age(s.status.since_ms, now)}</span>
         <Chevron />

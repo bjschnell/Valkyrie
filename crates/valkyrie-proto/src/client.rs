@@ -250,7 +250,7 @@ impl Client {
 
     pub async fn spawn(&self, spec: SpawnSpec) -> Result<SessionInfo> {
         match self.request(|req| ClientMsg::Spawn { req, spec }).await? {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -283,7 +283,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -568,7 +568,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(Some(info)),
+            Reply::Session { info } => Ok(Some(*info)),
             Reply::Text { .. } => Ok(None),
             other => bail!("unexpected reply: {other:?}"),
         }
@@ -756,7 +756,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }

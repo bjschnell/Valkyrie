@@ -13,6 +13,7 @@ mod foreground;
 mod guard;
 mod habit;
 mod order;
+mod overlap;
 mod pairing;
 mod pty;
 mod quota;
@@ -963,9 +964,10 @@ async fn watch_stale(registry: Arc<Registry>) {
 /// How often backlog items' pull requests are read for a merge (ADR-0015 §2).
 const PRS_EVERY: Duration = Duration::from_secs(300);
 
-/// Ships items whose PRs merged. Only items with a PR are asked about, so with
-/// none open this costs nothing. Then the supervisor's watch on the branches of
-/// sessions no item covers (`branches`), once `gh` says who the user is.
+/// Notes agents that changed the same files (`overlap`), then ships items whose
+/// PRs merged. Only items with a PR are asked about, so with none open this costs
+/// nothing. Then the supervisor's watch on the branches of sessions no item covers
+/// (`branches`), once `gh` says who the user is.
 async fn watch_prs(registry: Arc<Registry>) {
     let lookup: work::PrLookup = Arc::new(|dir, url| work::gh_pr(dir, url, work::GH_TIMEOUT));
     // In a debug build, `$VALK_PRS_EVERY_MS` for trying the watchers out.
@@ -979,6 +981,8 @@ async fn watch_prs(registry: Arc<Registry>) {
     let mut me: Option<String> = None;
     loop {
         interval.tick().await;
+        // Local git only, so it comes before the calls to `gh` that can be slow.
+        registry.watch_overlaps().await;
         registry.ship_merged_prs(lookup.clone()).await;
         if me.is_none() {
             me = tokio::task::spawn_blocking(branches::me)
@@ -1581,7 +1585,9 @@ fn spawn_with(
     registry.sessions.lock().unwrap().insert(id, session);
     registry.host.changed.notify_one();
     tracing::info!(session = id, command = ?info.command, "spawned");
-    Ok(Reply::Session { info })
+    Ok(Reply::Session {
+        info: Box::new(info),
+    })
 }
 
 /// Pushes the queue to one connection: the current one, then every change, and the

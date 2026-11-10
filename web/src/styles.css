@@ -634,6 +634,10 @@ code {
   white-space: nowrap;
 }
 
+.row-overlap {
+  color: var(--interrupted);
+}
+
 .row-age {
   font-size: 12.5px;
 }
