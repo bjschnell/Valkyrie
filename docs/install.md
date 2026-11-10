@@ -249,8 +249,10 @@ service running while you're logged out. To run it by hand instead: `valk web`.
   `sudo tailscale set --operator=$USER` once.
 - **Your own proxy or tunnel.** Forward HTTPS to `127.0.0.1:8790`, keep the `Host`
   header (or set `X-Forwarded-Host`), and pass the public address with `--url` so the
-  QR code points there. Anyone who can reach that address can try to pair, so put
-  it somewhere only you can reach.
+  QR code points there. `valk web` answers only to names it knows: an IP address,
+  `localhost`, the `--url` address and this machine's tailnet name. Reaching it by
+  any other name (a LAN hostname, say) needs that name as `--url`. Anyone who can
+  reach that address can try to pair, so put it somewhere only you can reach.
 
 Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
 prints another. A paired device stays paired until you revoke it. To use the web
