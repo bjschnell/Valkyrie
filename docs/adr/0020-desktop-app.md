@@ -45,24 +45,38 @@ not.
    installer stays small and no Node runtime ships with it. Electron would bundle
    a second Chromium to show a page the server already serves.
 3. **The window loads the local server.** The shell opens `valk web`'s local
-   address in its webview, not an asset bundle. Build checks, the reload after an
-   upgrade, and the service worker then behave exactly as in a browser, and an
-   upgrade of `valk` updates the desktop UI with no release of the shell.
-4. **The shell sets up what it needs.** On start it makes sure the daemon is
-   running and `valk web` answers on localhost. If not, it installs and starts the
-   service as `valk setup web` does, bound to localhost only. A desktop install
-   never opens a port beyond the machine by itself.
-5. **It pairs like `valk web open`.** On first launch, or when the page reports
-   it isn't paired, the shell mints a pairing link with the same library call
-   (`valkyrie_web::pairing_link`) and loads it in its own webview. The webview
-   keeps its device token in its own storage, so it stays paired across launches
-   and shows in `valk web devices` as one device that `valk web revoke` can
-   remove. No new token kind or trust rule.
-6. **Native only where the web can't reach.** The shell owns: the window and its
-   keyboard shortcuts (no browser taking Ctrl+W or Ctrl+T), a tray icon with the
-   queue's count, native notifications for sessions that need you, starting at
-   login, and updating itself. Everything a user sees inside the window stays in
-   the web app.
+   address in its webview, not an asset bundle. Build checks and the reload after
+   an upgrade then work as in a browser, and an upgrade of `valk` updates the
+   desktop UI with no release of the shell. The address is always
+   `http://127.0.0.1:<port>`, never `localhost`, because the device token lives in
+   per-origin `localStorage`; a different spelling or port means pairing again.
+   The shell injects a flag that tells the page it's in the desktop app, and the
+   page then turns off web push (it may not deliver in a system webview, and it
+   would double the shell's own notifications).
+4. **The shell starts what it needs, locally.** On start it makes sure the daemon
+   is running and `valk web` answers. If not, it runs `valk setup web --local` as
+   a separate process: the same service, bound to 127.0.0.1, without
+   `tailscale serve` and without printing a pairing code. A desktop install never
+   opens the server beyond the machine. Before trusting what answers on the port,
+   the shell checks it's `valk web` run by this user, not whatever grabbed the
+   port first: it writes a random nonce to a file only the user can read and asks
+   the server to prove it read it. A process that can read that file can already
+   write `devices.json`.
+5. **It pairs like `valk web open`, vouched.** Pairing goes through the daemon's
+   `vouch` first, exactly as `valk web open` does ("pairing the desktop app"), so
+   an agent that starts the app gets no paired device. Only then does the shell
+   mint a link with `valkyrie_web::pairing_link` and load it in its webview. It
+   mints on first launch, or when the page reports it isn't paired, at most once
+   per launch, so a page can't pull codes on demand. The token then persists in
+   the webview's storage, and the app shows in `valk web devices` as one device
+   that `valk web revoke` can remove. No new token kind.
+6. **Native only where the web can't reach.** The shell owns the window, a tray
+   icon with the queue's count, native notifications for sessions that need you,
+   and starting at login. For the count and the notifications it is its own
+   daemon client over the socket, like the TUI, rather than a bridge from the
+   page. Its own shortcuts are Alt/Option chords (decision #5). Ctrl-letters go
+   to the page, so the terminal gets Ctrl+W as delete-word, not a closed window.
+   Everything a user sees inside the window stays in the web app.
 
 ## Phases
 
@@ -81,8 +95,11 @@ Each phase is its own backlog item and PR.
    WebSocket's behaviour there are not yet measured.
 4. **Installers and updates.** `.dmg`, `.msi` and a Linux package (AppImage or
    `.deb`) built in release CI from the release-please tags (published `v*` tags
-   never move), with Tauri's updater pointed at them. An installer puts `valk` on
-   the PATH too, so the CLI, hooks and app run one binary.
+   never move). One updater per binary: the installer puts `valk` where
+   `install.sh` does, and `valk`'s own update path keeps owning it. Tauri's
+   updater updates only the shell, which carries no daemon code, so the two
+   never fight over the binary the daemon runs. Uninstalling revokes the app's
+   device.
 
 ## Consequences
 
@@ -90,7 +107,10 @@ Each phase is its own backlog item and PR.
   every phone change shows on the desktop.
 - The desktop app can't run without `valk web`. That's by design (decision 3),
   but it means the shell has to own starting that server and saying clearly when
-  it can't.
+  it can't. It finds the address from how the service was set up; a user who
+  changes the port pairs the window again.
+- `valk setup web` gains `--local` (no Tailscale, no printed code), and the
+  server gains a way to prove it's the user's own (decision 4).
 - The desktop UI depends on each OS's webview: WebView2 on Windows, WKWebView on
   macOS, WebKitGTK on Linux. A rendering or input bug on one of them is a web app
   bug to fix or work around, never a reason to fork.
