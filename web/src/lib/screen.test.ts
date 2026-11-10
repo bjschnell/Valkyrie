@@ -18,6 +18,10 @@ describe("charWidth", () => {
     for (const cp of [0x301, 0x200d, 0xfe0f, 0xfe0e, 0x200b, 0x20e3, 0xe0100]) expect(charWidth(cp)).toBe(0);
   });
 
+  it("is two for the one character the crate calls three", () => {
+    expect(charWidth(0x17d8)).toBe(2);
+  });
+
   it("counts a flag's letters one each, as the terminal does", () => {
     expect(charWidth(0x1f1fa)).toBe(1);
   });

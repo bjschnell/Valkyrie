@@ -3,8 +3,8 @@
 //! crate. This keeps the two from drifting when the crate is updated.
 //!
 //! To make the table again: for U+0080 to U+3FFFF, list the ranges where
-//! `char::width()` is 0 (`ZERO`) and where it is 2 (`WIDE`), as pairs of first and
-//! last code point.
+//! `char::width()` is 0 (`ZERO`) and where it is 2 or more (`WIDE`), as pairs of
+//! first and last code point.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -60,11 +60,9 @@ fn web_widths_match_the_terminals() {
             continue;
         };
         let Some(width) = c.width() else { continue };
-        // The crate's one three-column character (a Khmer sign): a terminal's
-        // cells are one or two columns, and the table has it as one.
-        if width > 2 {
-            continue;
-        }
+        // The crate gives one character (a Khmer sign) three columns. The terminal
+        // writes anything that isn't one column as a wide character: two.
+        let width = width.min(2);
         let web = web_width(&zero, &wide, cp);
         if web != width {
             wrong.push(format!("U+{cp:04X}: terminal {width}, web {web}"));
