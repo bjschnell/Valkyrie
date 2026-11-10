@@ -2,8 +2,9 @@
 // counts them with the unicode-width crate (0.2.3). Each array is pairs of first
 // and last code point, in order, for U+0080 to U+3FFFF; anything in neither is one
 // column. The crate gives U+17D8 three; the terminal has no cell that wide and
-// writes it as a wide character, so it is listed as two. `web_widths_match_the_terminals` in crates/valkyrie-tui checks this file
-// against the crate, and says how to make it again when the crate moves on.
+// writes it as a wide character, so it is listed as two.
+// `web_widths_match_the_terminals` in crates/valkyrie-tui checks this file against
+// the crate, and says how to make it again when the crate moves on.
 
 /** Marks that sit on the character before them and take no column. */
 export const ZERO: readonly number[] = [
