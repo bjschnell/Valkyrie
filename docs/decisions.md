@@ -77,6 +77,10 @@ hooks in Claude Code's own settings (`~/.claude/settings.json`). They do nothing
 outside a Valkyrie session, and they give a typed `claude` the same state tracking,
 correction reading and sibling notes as a session Valkyrie started.
 
+It also sits in front of your Claude status line, which runs as before, to read how
+much of your plan is used. The home screens show it, so you know there's room
+before starting a long session.
+
 To switch context off, use the **Context** row in the settings (`,`), set
 `context = off` in `settings.toml`, or set `VALK_PROJECT_CONTEXT=off`.
 `valk setup claude --remove` takes the hooks out of Claude's settings, and

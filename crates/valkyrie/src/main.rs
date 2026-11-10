@@ -7,6 +7,7 @@ mod mcp;
 mod pane;
 mod pings;
 mod service;
+mod statusline;
 mod todo;
 mod tools;
 mod update;
@@ -129,6 +130,13 @@ enum Cmd {
         /// Run from the user's own settings: quiet where the session already has it.
         #[arg(long)]
         ambient: bool,
+    },
+    /// Claude Code's status line, as Valkyrie sets it: tells the daemon how much of
+    /// the plan is used, then runs `--then`, the user's own status line.
+    #[command(hide = true)]
+    Statusline {
+        #[arg(long)]
+        then: Option<String>,
     },
     /// Record a project decision that every agent in this repo gets from now on. Run
     /// by an agent, it is only proposed, for you to accept.
@@ -384,6 +392,25 @@ fn main() -> Result<()> {
             hook::drain();
             return Ok(());
         }
+        // Nor may the status line stop drawing the user's own.
+        // Only as the settings run it, and not when asked for help.
+        Err(e)
+            if std::env::args().nth(1).as_deref() == Some("statusline")
+                && !matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            let args: Vec<String> = std::env::args().collect();
+            let then = args
+                .iter()
+                .position(|a| a == "--then")
+                .and_then(|i| args.get(i + 1));
+            statusline::run(
+                &valkyrie_proto::default_socket_path(),
+                then.map(String::as_str),
+            )
+        }
         Err(e) => e.exit(),
     };
     // Hooks report to the daemon that owns VALK_SESSION, which VALK_SOCKET names,
@@ -398,6 +425,12 @@ fn main() -> Result<()> {
     if let Some(Cmd::ContextHook { agent, ambient }) = &cli.cmd {
         context::hook(agent, *ambient);
         return Ok(());
+    }
+    if let Some(Cmd::Statusline { then }) = &cli.cmd {
+        let socket = cli
+            .socket
+            .unwrap_or_else(valkyrie_proto::default_socket_path);
+        statusline::run(&socket, then.as_deref());
     }
     let socket = valkyrie_proto::daemon_socket(cli.socket);
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
@@ -655,7 +688,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             client.list().await.map(drop)
         }
         Some(Cmd::Pane { action }) => pane::run(&connect(&socket).await?.0, action).await,
-        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. }) => {
+        Some(Cmd::Hook { .. } | Cmd::ContextHook { .. } | Cmd::Statusline { .. }) => {
             unreachable!("handled before the runtime starts")
         }
         Some(Cmd::Decide {

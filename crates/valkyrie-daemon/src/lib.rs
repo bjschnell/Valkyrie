@@ -15,6 +15,7 @@ mod habit;
 mod order;
 mod pairing;
 mod pty;
+mod quota;
 mod restore;
 mod session;
 mod supervise;
@@ -185,6 +186,10 @@ struct Registry {
     /// connection, for `valk upgrade` to name the ones left on an old build.
     clients: Mutex<HashMap<u64, ClientBuild>>,
     next_conn: AtomicU64,
+    /// The plan's quota as Claude Code's status line last said it (protocol 30),
+    /// pushed with the queue, and where it's kept.
+    quota: watch::Sender<quota::Held>,
+    quota_file: PathBuf,
 }
 
 impl Registry {
@@ -547,6 +552,8 @@ fn new_registry(
             "dispatch",
         ))),
         dispatch_kick: Notify::new(),
+        quota: watch::Sender::new(quota::load(&quota::file(state_dir))),
+        quota_file: quota::file(state_dir),
         supervisor: Mutex::new(supervise::Supervisor::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -1104,6 +1111,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 }
                 continue;
             }
+            ClientMsg::Quota { quota } => {
+                registry.set_quota(quota);
+                continue;
+            }
             ClientMsg::TermColors { session, colors } => {
                 // One session's colors don't become the default: a phone's palette
                 // must not recolor what the desktop spawns next.
@@ -1159,19 +1170,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::WatchQueue { req } => {
                 reply(&out, req, Ok(Reply::Done)).await;
                 if queue_watch.is_none() {
-                    let rx = registry.queue.subscribe();
-                    let proposals = registry.proposals.subscribe();
-                    let items = registry.items.subscribe();
-                    let orders = registry.orders.subscribe();
-                    let launches = registry.launches.subscribe();
                     // Proposals as `Decisions` gives them: an agent sees their titles.
                     let agent = registry.caller(peer).agent.is_some();
                     queue_watch = Some(tokio::spawn(forward_queue(
-                        rx,
-                        proposals,
-                        items,
-                        orders,
-                        launches,
+                        registry.clone(),
                         agent,
                         out.clone(),
                     )));
@@ -1585,15 +1587,14 @@ fn spawn_with(
 /// Pushes the queue to one connection: the current one, then every change, and the
 /// decisions waiting on review likewise. Only the latest of each matters, so a slow
 /// client simply skips intermediate ones.
-async fn forward_queue(
-    mut rx: watch::Receiver<Queue>,
-    mut proposals: watch::Receiver<Proposals>,
-    mut backlog: watch::Receiver<backlog::Items>,
-    mut orders: watch::Receiver<order::Orders>,
-    mut launches: watch::Receiver<dispatch::Launches>,
-    agent: bool,
-    out: Out,
-) {
+async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
+    let mut rx = registry.queue.subscribe();
+    let mut proposals = registry.proposals.subscribe();
+    let mut backlog = registry.items.subscribe();
+    let mut orders = registry.orders.subscribe();
+    let mut launches = registry.launches.subscribe();
+    let mut quota = registry.quota.subscribe();
+    drop(registry);
     let send = async |msg| out.send(Arc::new(msg)).await.is_ok();
     let held = |mut items: Vec<valkyrie_proto::Decision>| {
         if agent {
@@ -1621,6 +1622,12 @@ async fn forward_queue(
     if !send(both(&mut backlog, &mut orders, &mut launches)).await {
         return;
     }
+    let reading = |quota: &mut watch::Receiver<quota::Held>| ServerMsg::Quota {
+        quota: quota.borrow_and_update().as_deref().cloned(),
+    };
+    if !send(reading(&mut quota)).await {
+        return;
+    }
     loop {
         let msg = tokio::select! {
             changed = rx.changed() => match changed {
@@ -1641,6 +1648,10 @@ async fn forward_queue(
             },
             changed = launches.changed() => match changed {
                 Ok(()) => both(&mut backlog, &mut orders, &mut launches),
+                Err(_) => return,
+            },
+            changed = quota.changed() => match changed {
+                Ok(()) => reading(&mut quota),
                 Err(_) => return,
             },
         };
