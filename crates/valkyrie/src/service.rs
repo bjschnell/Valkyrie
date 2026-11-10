@@ -100,6 +100,28 @@ pub fn run(setup: Setup) -> Result<()> {
         println!("# {}\n{text}", file.display());
         return Ok(());
     }
+    // The desktop app asks for this whenever nothing answers. A service that's
+    // already set up, for phones over the tailnet say, is the user's: it is
+    // started again as it is, never rewritten into a local one.
+    if setup.local && file.exists() {
+        if !platform.running(&setup.name) {
+            platform.start(&setup.name, &file)?;
+        }
+        if !wait_for(setup.listen, Duration::from_secs(10)) {
+            bail!(
+                "{} is already set up ({}) and nothing answers on {}; {}",
+                setup.name,
+                file.display(),
+                setup.listen,
+                platform.logs(&setup.name)
+            );
+        }
+        println!(
+            "{} was already set up; left as it is, running on {}",
+            setup.name, setup.listen
+        );
+        return Ok(());
+    }
     // A `valk web` left running in a terminal would hold the port, and the service
     // would fail to start over and over.
     if !platform.running(&setup.name) && std::net::TcpListener::bind(setup.listen).is_err() {

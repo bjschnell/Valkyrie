@@ -832,10 +832,21 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             remove,
             name,
         })) => {
+            // The desktop app's own call prints no pairing code and changes no
+            // service that's already there, so nobody has to vouch for it. Taking
+            // a service away, or naming the binary one runs, is still the user's.
+            let unasked = local && !remove && (exe.is_none() || dry_run);
             let exe = match exe {
                 Some(exe) => std::path::absolute(exe)?,
                 None => service::default_exe()?,
             };
+            if !unasked {
+                connect(&socket)
+                    .await?
+                    .0
+                    .vouch("setting up the web app")
+                    .await?;
+            }
             let url = if local {
                 // The desktop app keeps its device token under this exact address
                 // (ADR-0020 §3): another spelling would mean pairing again.
@@ -844,12 +855,6 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 }
                 Some(format!("http://{listen}"))
             } else {
-                // It ends by printing a pairing code.
-                connect(&socket)
-                    .await?
-                    .0
-                    .vouch("setting up the web app")
-                    .await?;
                 url
             };
             service::run(service::Setup {
