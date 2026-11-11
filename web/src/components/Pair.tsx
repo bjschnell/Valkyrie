@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { DEV_TOKEN, parseCode } from "../lib/pair";
+import { inDesktopApp } from "../lib/push";
 import { saveToken, useApp } from "../store";
 import { Wordmark } from "./Logo";
 
 /** A name for this device in `valk web devices`: the platform, roughly. */
 function deviceName(): string {
+  if (inDesktopApp()) return "Desktop app";
   const ua = navigator.userAgent;
   if (/iPhone/.test(ua)) return "iPhone";
   if (/iPad/.test(ua)) return "iPad";
@@ -14,6 +16,9 @@ function deviceName(): string {
   if (/Linux/.test(ua)) return "Linux";
   return "browser";
 }
+
+/** The desktop app was told this page isn't paired (this tab's life). */
+const ASKED_KEY = "valk.desktopAsked";
 
 /** A mouse, not a camera: say how to pair from this computer instead. */
 function onDesktop(): boolean {
@@ -54,6 +59,21 @@ export function Pair() {
     return () => {
       live = false;
     };
+  }, [code]);
+
+  // In the desktop app, the app pairs its own window: it is told, once, that
+  // this page isn't paired, by a navigation it catches and never loads. It asks
+  // whoever is at the window, and comes back with a pairing link or not at all;
+  // the code field below stays for when it doesn't.
+  useEffect(() => {
+    if (!inDesktopApp() || code) return;
+    try {
+      if (sessionStorage.getItem(ASKED_KEY)) return;
+      sessionStorage.setItem(ASKED_KEY, "1");
+    } catch {
+      /* asked again on the next load; the app answers a launch once anyway */
+    }
+    location.href = "valk-desktop://pair";
   }, [code]);
 
   const pasted = parseCode(typed);

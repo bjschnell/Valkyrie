@@ -801,6 +801,7 @@ mod tests {
                 agent: None,
                 session: None,
                 bridge: false,
+                desktop: false,
             }))
         });
         let ids: Vec<u32> = (1..=4)

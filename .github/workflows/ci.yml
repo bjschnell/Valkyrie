@@ -86,6 +86,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --locked
 
+  # The desktop app (ADR-0020) is behind a feature the jobs above leave off: it
+  # needs a system webview, and a newer Rust than the workspace promises.
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - name: WebKitGTK and the tray's library
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop
+      - run: cargo clippy -p valkyrie-desktop --features window --all-targets --locked -- -D warnings
+      - run: cargo test -p valkyrie-desktop --features window --locked --no-fail-fast
+
   web:
     runs-on: ubuntu-latest
     defaults:
@@ -118,7 +141,7 @@ jobs:
   ci-pass:
     name: CI Pass
     if: always()
-    needs: [commits, rust, msrv, web]
+    needs: [commits, rust, msrv, desktop, web]
     runs-on: ubuntu-latest
     steps:
       - name: Every job passed (commits may skip outside pull requests)

@@ -540,6 +540,7 @@ mod tests {
                 agent: Some("claude".into()),
                 session: None,
                 bridge: false,
+                desktop: false,
             }))
         });
         let refused = registry
@@ -554,6 +555,7 @@ mod tests {
                 agent: None,
                 session: None,
                 bridge: false,
+                desktop: false,
             }))
         });
         let stale = registry

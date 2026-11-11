@@ -1385,6 +1385,7 @@ mod tests {
                 agent: None,
                 session: None,
                 bridge: false,
+                desktop: false,
             }))
         });
         registry.ship_merged_prs(conflicting.clone()).await;
