@@ -224,11 +224,11 @@ impl Docs {
         // unread past its file's own mtime. Unread is a nudge, not a guarantee: an
         // agent writing the file itself can say `by: human`.
         let mut docs: Vec<(u128, Doc)> = self
-            .index(&root)
+            .keyed(&root)
             .into_iter()
-            .map(|(path, c)| {
+            .map(|(path, c, key)| {
                 let mut d = doc(&root, &path, &c.front, String::new());
-                d.key = key(&c.front, &d.path);
+                d.key = key;
                 let mtime = u64::try_from(c.stamp.0 / 1_000_000_000).unwrap_or(u64::MAX);
                 d.unread = c.front.agent_at().min(mtime) > seen;
                 (c.stamp.0, d)
@@ -275,16 +275,67 @@ impl Docs {
             .collect()
     }
 
+    /// The index with each file's key. A `valk-id` two files carry (a copy, or an
+    /// Obsidian Sync conflict) belongs to neither: each gets its path's handle, so
+    /// the web app opens the one you tapped, never whichever sorts first.
+    fn keyed(&mut self, root: &Path) -> Vec<(PathBuf, Cached, String)> {
+        let index = self.index(root);
+        let mut count = BTreeMap::<u32, usize>::new();
+        for (_, c) in &index {
+            if let Some(id) = c.front.id_opt() {
+                *count.entry(id).or_default() += 1;
+            }
+        }
+        index
+            .into_iter()
+            .map(|(path, c)| {
+                let rel = slashed(path.strip_prefix(root).unwrap_or(&path));
+                let shared = c.front.id_opt().is_some_and(|id| count[&id] > 1);
+                let key = match shared {
+                    true => format!("p{}", hash(&rel)),
+                    false => key(&c.front, &rel),
+                };
+                (path, c, key)
+            })
+            .collect()
+    }
+
+    /// The one file carrying `id`; refused when two do, naming both.
+    fn by_id(&mut self, root: &Path, id: u32) -> Result<PathBuf> {
+        let mut found: Vec<PathBuf> = self
+            .index(root)
+            .into_iter()
+            .filter(|(_, c)| c.front.id_opt() == Some(id))
+            .map(|(p, _)| p)
+            .collect();
+        match found.len() {
+            0 => bail!("no doc {id} under {}", root.display()),
+            1 => Ok(found.remove(0)),
+            _ => {
+                let names: Vec<String> = found
+                    .iter()
+                    .map(|p| slashed(p.strip_prefix(root).unwrap_or(p)))
+                    .collect();
+                bail!(
+                    "doc {id} is on {} files ({}), a copy or a sync conflict: read one by its path, \
+                     or take the valk-id line out of the copy so it gets its own id",
+                    found.len(),
+                    names.join(", ")
+                )
+            }
+        }
+    }
+
     /// The web app's read (ADR-0021 §5): a doc by the key a list gave out, its
     /// `valk-id` or the handle of one of the user's own. Never a path, and never
     /// a write: a doc with no id is sent as it is.
     pub fn open(&mut self, key_: &str) -> Result<Doc> {
         let root = self.real_root()?;
-        let found = self.index(&root).into_iter().find(|(path, c)| {
-            let rel = slashed(path.strip_prefix(&root).unwrap_or(path));
-            !key_.is_empty() && key(&c.front, &rel) == key_
-        });
-        let Some((path, _)) = found else {
+        let found = self
+            .keyed(&root)
+            .into_iter()
+            .find(|(_, _, key)| !key_.is_empty() && key == key_);
+        let Some((path, _, key)) = found else {
             bail!("no doc {key_} under {}", root.display());
         };
         // Between the scan and now the file could have become a symlink, or grown.
@@ -306,7 +357,7 @@ impl Docs {
         let text = String::from_utf8(bytes).context("the doc isn't UTF-8 text")?;
         let front = Front::parse(&text).0.unwrap_or_else(|| Front::bare(&path));
         let mut d = doc(&root, &path, &front, text);
-        d.key = key(&front, &d.path);
+        d.key = key;
         Ok(d)
     }
 
@@ -336,12 +387,7 @@ impl Docs {
 
     fn find(&mut self, root: &Path, which: &str) -> Result<PathBuf> {
         if let Ok(id) = which.trim_start_matches('#').parse::<u32>() {
-            return self
-                .index(root)
-                .into_iter()
-                .find(|(_, c)| c.front.id_opt() == Some(id))
-                .map(|(p, _)| p)
-                .with_context(|| format!("no doc {id} under {}", root.display()));
+            return self.by_id(root, id);
         }
         let path = root.join(which);
         if path.extension().is_none_or(|e| e != "md") {
@@ -948,6 +994,42 @@ mod tests {
         assert!(f.docs.list().unwrap().iter().any(|d| d.id == 97));
         let err = f.docs.open("97").unwrap_err().to_string();
         assert!(err.contains("over 2 MB"), "{err}");
+    }
+
+    #[test]
+    fn an_id_on_two_files_opens_neither_by_id() {
+        let mut f = Fixture::new("dup");
+        let root = f.docs.real_root().unwrap();
+        let first = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let text = first.text.clone().unwrap();
+        // Obsidian Sync's copy sorts before the original.
+        let copy = format!("{} (conflict 1).md", first.path.trim_end_matches(".md"));
+        std::fs::write(root.join(&copy), text.replace("# Plan", "# Copy")).unwrap();
+        std::fs::write(root.join("0-early.md"), &text).unwrap();
+
+        let listed = f.docs.list().unwrap();
+        let keys: Vec<&str> = listed.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.iter().all(|k| k.starts_with('p')), "{keys:?}");
+        // Each opens as itself.
+        for d in &listed {
+            assert_eq!(f.docs.open(&d.key).unwrap().path, d.path);
+        }
+        assert!(f.docs.open(&first.id.to_string()).is_err());
+        let err = f.docs.read(&first.id.to_string()).unwrap_err().to_string();
+        assert!(
+            err.contains("on 3 files") && err.contains("0-early.md"),
+            "{err}"
+        );
+        assert!(f.docs.edit(first.id, "x", "y", &claude(), NOV_9).is_err());
+        // Read by path still works, and taking the copy's id away settles it.
+        assert_eq!(f.docs.read(&copy).unwrap().id, first.id);
+        std::fs::remove_file(root.join("0-early.md")).unwrap();
+        std::fs::remove_file(root.join(&copy)).unwrap();
+        assert_eq!(f.docs.open(&first.id.to_string()).unwrap().path, first.path);
     }
 
     #[test]
