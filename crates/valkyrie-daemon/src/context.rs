@@ -56,8 +56,9 @@ impl Caller {
     pub(crate) fn vouch_in_person(&self, what: &str) -> Result<()> {
         // The desktop app has no terminal to be at. It asks only after someone
         // pressed Pair in its window, and an agent above it was ruled out when
-        // the caller was worked out.
-        if self.desktop {
+        // the caller was worked out. For its own pairing and nothing else: a
+        // `valk web pair` run under the app's name gets no code this way.
+        if self.desktop && what == valkyrie_proto::VOUCH_DESKTOP_PAIRING {
             return Ok(());
         }
         if let Some(agent) = &self.agent {
@@ -564,12 +565,21 @@ mod tests {
     /// terminal, or at the desktop app's window, and to nothing else.
     #[test]
     fn a_pairing_is_vouched_for_at_a_terminal_or_the_desktop_apps_window() {
-        let what = "pairing the desktop app";
+        let what = valkyrie_proto::VOUCH_DESKTOP_PAIRING;
         assert!(caller(None, false, false).vouch_in_person(what).is_ok());
         // The app from a dock: no terminal, but someone pressed Pair in it.
         let app = caller(Some("the desktop app"), false, true);
         assert!(app.vouch_in_person(what).is_ok());
-        // That makes it no human for anything else: decisions stay the user's.
+        // Its own pairing only: not a phone's, not a browser's, not the setup's.
+        for other in [
+            "pairing a phone",
+            "pairing this browser",
+            "setting up the web app",
+        ] {
+            let refused = app.vouch_in_person(other).unwrap_err().to_string();
+            assert!(refused.contains("not the desktop app"), "{refused}");
+        }
+        // And it is no human for anything else: decisions stay the user's.
         let refused = app.vouch("reviewing decisions").unwrap_err().to_string();
         assert!(refused.contains("not the desktop app"), "{refused}");
         for other in [

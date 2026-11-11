@@ -75,9 +75,16 @@ not.
    shell shows a native dialog, "Pair this app with Valkyrie on this computer?",
    and asks the daemon only once Pair is pressed. The daemon vouches for the
    desktop app by name (as it knows the `valk web` bridge by its command line)
-   when it has no terminal and no agent above it, and for nothing but a
-   pairing. An agent that starts the app is still refused, by the agent above
-   it; one that hides that still has a dialog it can't press. The token then persists in
+   when it has no terminal and no agent above it, and only for "pairing the
+   desktop app": a phone's or a browser's pairing code is still for a terminal.
+
+   What this guards: an agent that starts the app, as agents that mean no harm
+   do, is refused by the agent above it, and the app it started shows a dialog
+   it can't press. It is not a boundary against a process that sets out to get
+   round it. The name can be taken by any program, and such a program, running
+   as the user, could write `devices.json` or put itself on a terminal of its
+   own as easily. The dialog is the human step for the real app; the daemon's
+   check keeps honest launchers honest. The token then persists in
    the webview's storage, and the app shows in `valk web devices` as one device
    that `valk web revoke` can remove. No new token kind.
 6. **Native only where the web can't reach.** The shell owns the window, a tray

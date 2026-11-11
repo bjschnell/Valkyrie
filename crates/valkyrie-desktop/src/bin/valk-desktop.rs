@@ -62,7 +62,15 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .setup(|app| {
-            tray(app.handle())?;
+            // On Linux the tray's library is loaded as the icon is made, and a
+            // machine without it panics there. The app is worth having without
+            // a tray: a second launch still brings the window back.
+            let handle = app.handle().clone();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tray(&handle))) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("no tray icon: {e}"),
+                Err(_) => tracing::warn!("no tray icon: its library isn't installed"),
+            }
             let app = app.handle().clone();
             // Finding `valk web`, or setting it up, can take a while: the tray is
             // there meanwhile, and the window comes when there is a page for it.
@@ -85,7 +93,15 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("the desktop app failed to start")
         // Closing the window leaves the tray, its count and its notifications.
-        .run(|_app, _event| {});
+        .run(|app, event| {
+            // A click on the Dock icon, with the window closed.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 /// `valk web` answers on `addr` and proved it's the user's: open the window on
@@ -138,12 +154,12 @@ fn window(app: &AppHandle, addr: SocketAddr) -> tauri::Result<()> {
                 return true;
             }
             // A link out of the app belongs in the browser, not in this window.
-            let _ = navigator.opener().open_url(to.as_str(), None::<&str>);
+            outside(&navigator, to);
             false
         })
         .on_new_window(move |to, _features| {
             if !ours(&to, addr) {
-                let _ = opener.opener().open_url(to.as_str(), None::<&str>);
+                outside(&opener, &to);
             }
             NewWindowResponse::Deny
         })
@@ -156,6 +172,22 @@ fn window(app: &AppHandle, addr: SocketAddr) -> tauri::Result<()> {
         }
     });
     Ok(())
+}
+
+/// Hands a web link to the browser. Only a web link: any other scheme would go
+/// to whatever the system has for it (a file, a network share, a program's own
+/// handler), with no browser in between to ask.
+fn outside(app: &AppHandle, url: &Url) {
+    if !matches!(url.scheme(), "http" | "https") {
+        tracing::warn!(
+            scheme = url.scheme(),
+            "not opening a link that isn't a web address"
+        );
+        return;
+    }
+    if let Err(e) = app.opener().open_url(url.as_str(), None::<&str>) {
+        tracing::warn!("open {url}: {e}");
+    }
 }
 
 /// The web app's own pages: the one address the window was opened on.
@@ -233,7 +265,15 @@ async fn paired(app: &AppHandle) {
             let _ = window.eval(format!("location.replace({link}); location.reload();"));
         }
         // This launch had its answer: the page's own pairing screen is what's left.
-        Ok(None) => {}
+        Ok(None) => {
+            app.dialog()
+                .message(
+                    "This app already asked to pair since it was opened. Quit it from the \
+                     tray and open it again, or type a code from `valk web pair`.",
+                )
+                .title(NAME)
+                .show(|_| {});
+        }
         Err(e) => {
             tracing::warn!("pairing: {e:#}");
             app.dialog()

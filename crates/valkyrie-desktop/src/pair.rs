@@ -13,7 +13,7 @@ use std::path::Path;
 use valkyrie_proto::client::Client;
 
 /// What the daemon is asked to vouch for; it names this in its refusal.
-const WHAT: &str = "pairing the desktop app";
+const WHAT: &str = valkyrie_proto::VOUCH_DESKTOP_PAIRING;
 
 /// One launch's right to pair.
 #[derive(Default)]

@@ -87,7 +87,9 @@ jobs:
       - run: cargo check --workspace --locked
 
   # The desktop app (ADR-0020) is behind a feature the jobs above leave off: it
-  # needs a system webview, and a newer Rust than the workspace promises.
+  # needs a system webview, and a newer Rust than the workspace promises. Not one
+  # of CI Pass's needs until the app ships (phase 4): a release of `valk` doesn't
+  # wait on three builds of an app that isn't in it. A red run still shows.
   desktop:
     strategy:
       fail-fast: false
@@ -141,7 +143,7 @@ jobs:
   ci-pass:
     name: CI Pass
     if: always()
-    needs: [commits, rust, msrv, desktop, web]
+    needs: [commits, rust, msrv, web]
     runs-on: ubuntu-latest
     steps:
       - name: Every job passed (commits may skip outside pull requests)

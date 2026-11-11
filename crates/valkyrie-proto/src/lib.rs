@@ -36,6 +36,11 @@ pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Sty
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
 pub const PROTOCOL: u32 = 32;
 
+/// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
+/// the one thing the daemon vouches for a process with no terminal for, once
+/// someone has pressed Pair in the app's window (ADR-0020 §5).
+pub const VOUCH_DESKTOP_PAIRING: &str = "pairing the desktop app";
+
 /// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
 /// something that needs you, `done` for something that finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
