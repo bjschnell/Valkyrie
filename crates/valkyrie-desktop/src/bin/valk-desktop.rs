@@ -17,6 +17,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt as _;
 use tauri_plugin_opener::OpenerExt as _;
+use tauri_plugin_updater::UpdaterExt as _;
 use valkyrie_desktop::install;
 use valkyrie_desktop::pair::Pairing;
 use valkyrie_desktop::start::{self, Valk};
@@ -62,6 +63,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // On Linux the tray's library is loaded as the icon is made, and a
             // machine without it panics there. The app is worth having without
@@ -71,6 +73,10 @@ fn main() {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!("no tray icon: {e}"),
                 Err(_) => tracing::warn!("no tray icon: its library isn't installed"),
+            }
+            if updatable() {
+                let app = app.handle().clone();
+                tauri::async_runtime::spawn(async move { update(&app, false).await });
             }
             let app = app.handle().clone();
             // Finding `valk web`, or setting it up, can take a while: the tray is
@@ -313,8 +319,13 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
         app.autolaunch().is_enabled().unwrap_or(false),
         None::<&str>,
     )?;
+    let check = MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &login, &quit])?;
+    let menu = if updatable() {
+        Menu::with_items(app, &[&open, &login, &check, &quit])?
+    } else {
+        Menu::with_items(app, &[&open, &login, &quit])?
+    };
     let icon = tauri::image::Image::from_bytes(include_bytes!("../../icons/tray.png"))?;
     TrayIconBuilder::with_id(TRAY)
         .icon(icon)
@@ -336,6 +347,10 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
                 }
                 let _ = login.set_checked(launch.is_enabled().unwrap_or(false));
             }
+            "update" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { update(&app, true).await });
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -351,6 +366,94 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// The app updates itself only as an install that can replace itself: an
+/// AppImage, an .msi or a macOS .app. A .deb is its package manager's, and a
+/// build from source is its checkout's. Only the app: `valk` keeps its own
+/// update path (`install`), so the two never fight over the daemon's binary.
+fn updatable() -> bool {
+    use tauri::utils::config::BundleType;
+    match tauri::utils::platform::bundle_type() {
+        Some(BundleType::AppImage | BundleType::Msi) => true,
+        // Every macOS build says it's an .app, `cargo run` too.
+        Some(BundleType::App) => std::env::current_exe().is_ok_and(|exe| in_app_bundle(&exe)),
+        _ => false,
+    }
+}
+
+fn in_app_bundle(exe: &std::path::Path) -> bool {
+    exe.parent()
+        .is_some_and(|macos| macos.ends_with("Contents/MacOS"))
+        && exe
+            .ancestors()
+            .nth(3)
+            .and_then(|app| app.extension())
+            .is_some_and(|ext| ext == "app")
+}
+
+/// Looks for a newer app and offers it; nothing installs until Update is
+/// pressed. `asked` is the tray's "Check for updates": it also says when
+/// there's nothing new, or the check failed. At launch only an update speaks.
+async fn update(app: &AppHandle, asked: bool) {
+    let found = match app.updater() {
+        Ok(updater) => updater.check().await,
+        Err(e) => Err(e),
+    };
+    let update = match found {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            tracing::info!("the app is up to date");
+            if asked {
+                say(
+                    app,
+                    &format!("{NAME} {} is the newest.", app.package_info().version),
+                );
+            }
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("checking for an update: {e}");
+            if asked {
+                say(app, &format!("Couldn't check for an update: {e}"));
+            }
+            return;
+        }
+    };
+    tracing::info!(version = %update.version, "an update is out");
+    let app = app.clone();
+    app.clone()
+        .dialog()
+        .message(format!(
+            "{NAME} {} is out; this is {}. Update and restart the app?\n\n\
+             Only the app updates: `valk` keeps its own updates (`valk upgrade`), \
+             and your sessions keep running.",
+            update.version, update.current_version
+        ))
+        .title(NAME)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Update".into(),
+            "Not now".into(),
+        ))
+        .show(move |yes| {
+            if !yes {
+                return;
+            }
+            tauri::async_runtime::spawn(async move {
+                // On Windows the installer takes over and closes the app itself.
+                match update.download_and_install(|_, _| {}, || {}).await {
+                    Ok(()) => app.restart(),
+                    Err(e) => {
+                        tracing::warn!("updating: {e}");
+                        say(&app, &format!("Couldn't update the app: {e}"));
+                    }
+                }
+            });
+        });
+}
+
+fn say(app: &AppHandle, what: &str) {
+    app.dialog().message(what).title(NAME).show(|_| {});
 }
 
 /// What the daemon's watcher said, on the tray and as a notification.
@@ -417,5 +520,36 @@ mod tests {
         assert!(!at("https://github.com/bjschnell/Valkyrie"));
         assert!(!at("valk-desktop://pair"));
         assert!(!at("file:///etc/passwd"));
+    }
+
+    /// The updater plugin reads this at start, and an app without it doesn't start.
+    #[test]
+    fn the_updater_is_configured_as_the_plugin_reads_it() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(!updater.pubkey.is_empty());
+        assert_eq!(
+            updater
+                .endpoints
+                .iter()
+                .map(|u| u.as_str())
+                .collect::<Vec<_>>(),
+            ["https://github.com/bjschnell/Valkyrie/releases/latest/download/latest.json"]
+        );
+    }
+
+    #[test]
+    fn only_an_installed_mac_app_counts_as_one() {
+        let at = |path: &str| in_app_bundle(std::path::Path::new(path));
+        assert!(at("/Applications/Valkyrie.app/Contents/MacOS/valk-desktop"));
+        assert!(at(
+            "/Users/me/Applications/Valkyrie.app/Contents/MacOS/valk-desktop"
+        ));
+        // `cargo run`, and a binary that only looks the part.
+        assert!(!at("/Users/me/src/Valkyrie/target/release/valk-desktop"));
+        assert!(!at("/tmp/Contents/MacOS/valk-desktop"));
+        assert!(!at("valk-desktop"));
     }
 }

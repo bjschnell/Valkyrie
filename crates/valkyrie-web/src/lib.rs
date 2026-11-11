@@ -292,6 +292,11 @@ async fn known_host(
         .into_response()
 }
 
+/// The name the desktop app's page pairs under (`deviceName` in
+/// `web/src/components/Pair.tsx`). Its installers' uninstall hooks revoke it with
+/// `valk web revoke`, and the app revokes it before it pairs again (ADR-0020).
+pub const DESKTOP_DEVICE: &str = "Desktop app";
+
 /// A link that pairs whichever browser opens it, once, with a fresh code.
 pub fn pairing_link(store: &auth::Store, url: &str) -> Result<String> {
     let code = store.new_code()?;

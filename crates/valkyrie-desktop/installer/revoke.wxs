@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The .msi's uninstall hook (ADR-0020, phase 4): removing the app revokes its
+  device, so the token left in its WebView2 data stops working. It runs the
+  `valk` the app installs (install.rs, install.ps1's place) as the user who
+  uninstalls, and only on a real uninstall: an update replaces the app through
+  a major upgrade, which sets UPGRADINGPRODUCTCODE, and keeps the device.
+  Return="ignore": a missing or failing `valk` never stops the uninstall.
+
+  Tauri links a fragment only through a reference, so tauri.bundle.conf.json
+  names the component below in `componentRefs`.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="RevokeDesktopDevice" Guid="5b7a8f0e-3c41-4a3e-9d2b-8e6f1c0a7d52">
+        <RegistryValue Root="HKLM" Key="Software\Valkyrie\Desktop" Name="RevokeOnUninstall"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <CustomAction Id="RevokeDesktopDevice" Directory="INSTALLDIR" Execute="deferred"
+                  Impersonate="yes" Return="ignore"
+                  ExeCommand="&quot;[LocalAppDataFolder]Programs\Valkyrie\valk.exe&quot; web revoke &quot;Desktop app&quot;" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RevokeDesktopDevice" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

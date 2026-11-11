@@ -66,6 +66,10 @@ jobs:
     with:
       release: ${{ needs.release.outputs.tag }}
       ref: ${{ needs.release.outputs.tag }}
+    # The app's updater signing key (desktop.yml).
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
   installers:
     needs: [release, build]
