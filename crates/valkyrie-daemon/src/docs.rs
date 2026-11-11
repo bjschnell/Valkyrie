@@ -59,9 +59,17 @@ impl Registry {
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
-    pub(crate) fn docs(&self) -> Result<Reply> {
+    pub(crate) fn docs(&self, count_only: bool) -> Result<Reply> {
         let mut docs = self.docs.lock().unwrap();
         let at = now_secs();
+        if count_only {
+            return Ok(Reply::Docs {
+                unread: docs.unread_count()?,
+                docs: Vec::new(),
+                root: docs.root(),
+                at,
+            });
+        }
         let list = docs.list()?;
         Ok(Reply::Docs {
             unread: valkyrie_context::docs::Docs::unread(&list),

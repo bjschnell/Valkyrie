@@ -1117,7 +1117,10 @@ mod tests {
             root: Some("/home/me/.ssh".into()),
         }));
         assert!(allowed(&ClientMsg::DocsRoot { req: 1, root: None }));
-        assert!(allowed(&ClientMsg::Docs { req: 1 }));
+        assert!(allowed(&ClientMsg::Docs {
+            req: 1,
+            count_only: true,
+        }));
         assert!(allowed(&ClientMsg::DocsSeen { req: 1, at: 0 }));
         assert!(allowed(&ClientMsg::OpenDoc {
             req: 1,
