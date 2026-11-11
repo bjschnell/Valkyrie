@@ -630,10 +630,15 @@ export function docsSeen(at: number): void {
   void conn?.request({ t: "docs_seen", at }).catch(() => undefined);
 }
 
-/** Asks how many docs are unread, for the Inbox's count. */
+/** Asks how many docs are unread, for the Inbox's count: the count alone, not the list. */
 export async function refreshUnreadDocs(): Promise<void> {
-  const got = await allDocs();
-  if (got) set({ unreadDocs: got.unread });
+  try {
+    if (!conn) return;
+    const reply = await conn.request({ t: "docs", count_only: true });
+    if (reply.t === "docs") set({ unreadDocs: reply.unread ?? 0 });
+  } catch {
+    // Not connected, or the daemon can't be asked: keep the last count.
+  }
 }
 
 /** The choices on the open session's screen right now. */

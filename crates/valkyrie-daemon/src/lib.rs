@@ -1377,7 +1377,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 base,
                 body,
             } => (req, registry.edit_doc(id, &base, &body, peer)),
-            ClientMsg::Docs { req } => (req, registry.docs()),
+            ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::OpenDoc { req, key } => (req, registry.open_doc(&key)),
             ClientMsg::DocsSeen { req, at } => (req, registry.docs_seen(at, peer)),
             ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),

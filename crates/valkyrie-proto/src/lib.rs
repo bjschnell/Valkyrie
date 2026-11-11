@@ -614,9 +614,13 @@ pub enum ClientMsg {
         base: String,
         body: String,
     },
-    /// Every doc, newest first, without their text. Replies `Docs`.
+    /// Every doc, newest first, without their text. Replies `Docs`; with
+    /// `count_only`, with no docs, just the unread count (the Inbox's poll),
+    /// which the daemon may answer from a count up to 30 s old.
     Docs {
         req: ReqId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        count_only: bool,
     },
     /// The web app's read (ADR-0021 §5, protocol 33): a doc by the `key` a list
     /// gave it, never by path, and never writing to the file (a doc with no id

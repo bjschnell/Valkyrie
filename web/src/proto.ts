@@ -478,7 +478,8 @@ export type Request =
     }
   | { t: "decisions"; cwd: string | null }
   /** Every doc, newest first; replies `docs`. */
-  | { t: "docs" }
+  /** `count_only`: no docs, just the unread count (the Inbox's poll). */
+  | { t: "docs"; count_only?: boolean }
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
   | { t: "open_doc"; key: string }
   /** The Docs list was opened: what agents wrote until now is read. */
