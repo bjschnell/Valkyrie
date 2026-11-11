@@ -439,7 +439,13 @@ impl Client {
 
     /// Every doc, newest first, and the docs folder.
     pub async fn docs(&self) -> Result<(Vec<crate::Doc>, PathBuf)> {
-        match self.request(|req| ClientMsg::Docs { req }).await? {
+        match self
+            .request(|req| ClientMsg::Docs {
+                req,
+                count_only: false,
+            })
+            .await?
+        {
             Reply::Docs { docs, root, .. } => Ok((docs, root)),
             other => bail!("unexpected reply: {other:?}"),
         }

@@ -23,6 +23,10 @@ const MAX_FOLDER: usize = 40;
 const MAX_HEAD: u64 = 64 * 1024;
 /// The largest file the web app is sent: a vault can hold anything.
 pub const MAX_OPEN: u64 = 2 * 1024 * 1024;
+/// How long an unread count stands before the folder is walked again. Writes
+/// through the daemon clear it at once; this only bounds a file an agent wrote
+/// to disk itself.
+const COUNT_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Who wrote or edited a doc, as the daemon worked it out (never the client).
 #[derive(Debug, Clone, Default)]
@@ -59,6 +63,8 @@ pub struct Docs {
     /// hold (ADR-0021 §5): listing and finding by id stat files instead of
     /// reading them.
     cache: BTreeMap<PathBuf, Cached>,
+    /// The last unread count and when it was taken, for the Inbox's poll.
+    count: Option<(std::time::Instant, u32)>,
 }
 
 #[derive(Clone)]
@@ -79,6 +85,7 @@ impl Docs {
             state,
             config,
             cache: BTreeMap::new(),
+            count: None,
         }
     }
 
@@ -128,6 +135,7 @@ impl Docs {
         };
         self.config.root = root;
         self.cache.clear();
+        self.count = None;
         self.save()?;
         Ok(self.root())
     }
@@ -197,6 +205,7 @@ impl Docs {
         let text = front.render(&body);
         let stem = format!("{}-{}", &rfc3339(now)[..10], slug(&title));
         let path = create_new(&dir, &stem, &text)?;
+        self.count = None;
         Ok(doc(&root, &path, &front, text))
     }
 
@@ -235,7 +244,19 @@ impl Docs {
             })
             .collect();
         docs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
-        Ok(docs.into_iter().map(|(_, d)| d).collect())
+        let docs: Vec<Doc> = docs.into_iter().map(|(_, d)| d).collect();
+        self.count = Some((std::time::Instant::now(), Self::unread(&docs)));
+        Ok(docs)
+    }
+
+    /// How many docs are unread, for a poll: the last count while it's fresh
+    /// and nothing was written through the daemon since, so polling devices
+    /// don't each walk the whole folder.
+    pub fn unread_count(&mut self) -> Result<u32> {
+        match self.count {
+            Some((at, n)) if at.elapsed() < COUNT_FOR => Ok(n),
+            _ => Ok(Self::unread(&self.list()?)),
+        }
     }
 
     /// How many docs an agent wrote or edited since the list was last opened.
@@ -246,6 +267,7 @@ impl Docs {
     /// The user opened the Docs list as it was at `at`: what agents wrote until
     /// then is read, not what came in while it loaded.
     pub fn seen(&mut self, at: u64, now: u64) -> Result<()> {
+        self.count = None;
         self.config.seen = self.config.seen.max(at.min(now));
         self.save()
     }
@@ -380,6 +402,7 @@ impl Docs {
                 }
                 let text = front.render(body);
                 write_atomic(&path, &text)?;
+                self.count = None;
                 Ok(doc(&root, &path, &front, text))
             }
         }
@@ -430,6 +453,7 @@ impl Docs {
         });
         let text = front.render(&body);
         write_atomic(&path, &text)?;
+        self.count = None;
         Ok(doc(&root, &path, &front, text))
     }
 
@@ -1030,6 +1054,36 @@ mod tests {
         std::fs::remove_file(root.join("0-early.md")).unwrap();
         std::fs::remove_file(root.join(&copy)).unwrap();
         assert_eq!(f.docs.open(&first.id.to_string()).unwrap().path, first.path);
+    }
+
+    #[test]
+    fn the_unread_count_stands_until_the_daemon_writes() {
+        let mut f = Fixture::new("count");
+        let root = f.docs.real_root().unwrap();
+        f.docs
+            .write(&f.new_doc("One", true), &claude(), NOV_9)
+            .unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 1);
+        // Written behind the daemon's back: the count stands until it's stale.
+        std::fs::write(
+            root.join("sneaky.md"),
+            "---\nvalk-id: 40\nby: codex\ncreated: 2026-11-09T22:00:00Z\n---\n",
+        )
+        .unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 1);
+        // As if it were taken long ago (or dropped, on a clock too young for that).
+        f.docs.count = f.docs.count.and_then(|(at, n)| {
+            at.checked_sub(COUNT_FOR + std::time::Duration::from_secs(1))
+                .map(|at| (at, n))
+        });
+        assert_eq!(f.docs.unread_count().unwrap(), 2);
+        // A write through the daemon, or the list being opened, counts again now.
+        f.docs
+            .write(&f.new_doc("Two", true), &claude(), NOV_9 + 5)
+            .unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 3);
+        f.docs.seen(u64::MAX, NOV_9 + 1_000_000_000).unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 0);
     }
 
     #[test]
