@@ -378,7 +378,8 @@ mod tests {
         AS_CALLER.with(|c| *c.borrow_mut() = None);
         author.kill();
         other.kill();
-        std::fs::remove_dir_all(&dir).unwrap();
+        // On Windows a killed session can still hold its files a moment (#113).
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -432,6 +433,7 @@ mod tests {
         );
         AS_CALLER.with(|c| *c.borrow_mut() = None);
         author.kill();
-        std::fs::remove_dir_all(&dir).unwrap();
+        // On Windows a killed session can still hold its files a moment (#113).
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
