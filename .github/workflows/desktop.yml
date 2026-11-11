@@ -70,15 +70,18 @@ jobs:
         env:
           VALK: ${{ matrix.valk }}
         run: |
+          # sha256sum on Linux and in Git Bash on Windows; macOS has shasum.
+          sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
           mkdir -p download crates/valkyrie-desktop/resources
           # shellcheck disable=SC2086
           gh release download $TAG --repo "$GITHUB_REPOSITORY" --dir download \
             --pattern "$VALK" --pattern "$VALK.sha256"
           # The Windows build writes its hash file with a CR at the end of the
           # line, which shasum would take for part of the file's name.
-          (cd download && tr -d '\r' < "$VALK.sha256" | shasum -a 256 -c -)
+          (cd download && tr -d '\r' < "$VALK.sha256" | sha256 -c -)
           case "$VALK" in
-            *.zip) unzip -o "download/$VALK" -d crates/valkyrie-desktop/resources ;;
+            # Git Bash has no unzip; PowerShell has.
+            *.zip) pwsh -NoProfile -Command "Expand-Archive -Force -Path 'download/$VALK' -DestinationPath 'crates/valkyrie-desktop/resources'" ;;
             *) tar -xzf "download/$VALK" -C crates/valkyrie-desktop/resources ;;
           esac
           ls -l crates/valkyrie-desktop/resources
@@ -91,12 +94,14 @@ jobs:
         run: cargo tauri build --features window --config tauri.bundle.conf.json --bundles "${{ matrix.bundles }}" -- --locked
       - name: publish
         run: |
+          # sha256sum on Linux and in Git Bash on Windows; macOS has shasum.
+          sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
           shopt -s nullglob
           files=(target/release/bundle/deb/*.deb target/release/bundle/appimage/*.AppImage
                  target/release/bundle/dmg/*.dmg target/release/bundle/msi/*.msi)
           [ "${#files[@]}" -gt 0 ] || { echo "::error::no installer was built"; exit 1; }
           for file in "${files[@]}"; do
-            (cd "$(dirname "$file")" && shasum -a 256 "$(basename "$file")" > "$(basename "$file").sha256")
+            (cd "$(dirname "$file")" && sha256 "$(basename "$file")" > "$(basename "$file").sha256")
             ls -l "$file"
           done
           if [ -z "$TAG" ]; then
