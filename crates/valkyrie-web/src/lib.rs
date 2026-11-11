@@ -702,7 +702,9 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// out, never by path, and writes nothing. `ReadDoc` takes a path and gives an
 /// id-less doc an id (a write into the user's file), so it's the CLI's only.
 /// Comments (§6) go through: they're the user's, kept beside the doc, not in it.
-/// Writing, editing and moving the folder wait for the web app's editor (#135).
+/// So do the editor's save, restore and delete (§7), by key, which the daemon
+/// takes from a human only. `WriteDoc` and `EditDoc` are the agents' path, and
+/// moving the folder is the CLI's.
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
@@ -1091,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_reads_docs_by_key_and_writes_none() {
+    fn a_browser_reads_docs_by_key_and_edits_only_by_key() {
         let read = ClientMsg::ReadDoc {
             req: 1,
             which: "repos/valkyrie/notes.md".into(),
@@ -1143,6 +1145,33 @@ mod tests {
             req: 1,
             key: "3".into(),
             comment: 1,
+        }));
+        // The editor (ADR-0021 §7): by key, with the hash it loaded.
+        assert!(allowed(&ClientMsg::SaveDoc {
+            req: 1,
+            key: "3".into(),
+            base: "abc".into(),
+            body: "x".into(),
+        }));
+        assert!(allowed(&ClientMsg::DocHistory {
+            req: 1,
+            key: "3".into(),
+            version: None,
+        }));
+        assert!(allowed(&ClientMsg::RestoreDoc {
+            req: 1,
+            key: "3".into(),
+            base: "abc".into(),
+            version: "1".into(),
+        }));
+        assert!(allowed(&ClientMsg::DeleteDoc {
+            req: 1,
+            key: "3".into(),
+            base: "abc".into(),
+        }));
+        assert!(allowed(&ClientMsg::UndeleteDoc {
+            req: 1,
+            token: "1".into(),
         }));
     }
 

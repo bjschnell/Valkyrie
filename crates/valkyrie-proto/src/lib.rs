@@ -28,13 +28,13 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
-pub use docs::{CommentState, Doc, DocComment, DocKind, NewDoc};
+pub use docs::{CommentState, Doc, DocComment, DocKind, DocVersion, NewDoc};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 34;
+pub const PROTOCOL: u32 = 35;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -657,6 +657,46 @@ pub enum ClientMsg {
         key: String,
         comment: u32,
     },
+    /// The user's save from the web app's editor (ADR-0021 §7, protocol 35): the
+    /// doc with this key gets `body`, if `base` is still the hash of what's on
+    /// disk; the version replaced is kept. One of the user's own docs gets a
+    /// `valk-id` here. Replies `DocSaved`, refused (`conflict`) with what's on
+    /// disk now if anyone saved in between.
+    SaveDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+        body: String,
+    },
+    /// A doc's past versions, newest first (ADR-0021 §4); with `version`, that
+    /// one's text too. Replies `DocHistory`.
+    DocHistory {
+        req: ReqId,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
+    /// The user puts a past version back, under the same rule as a save; the
+    /// version it replaces is kept, so a restore can be undone. Replies `DocSaved`.
+    RestoreDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+        version: String,
+    },
+    /// The user deletes a doc, if `base` is still what's on disk. A copy is kept
+    /// so it can be put back (`UndeleteDoc`). Replies `DocDeleted`, or
+    /// `DocSaved` with `conflict` if it changed.
+    DeleteDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+    },
+    /// Puts a doc the user deleted back where it was. Replies `Doc`.
+    UndeleteDoc {
+        req: ReqId,
+        token: String,
+    },
     /// Where docs go; with `root`, sets it first (the user only; `""` goes back
     /// to the default). Replies `Text` with the folder.
     DocsRoot {
@@ -790,6 +830,23 @@ pub enum Reply {
     },
     Doc {
         doc: Box<Doc>,
+    },
+    /// A save or restore from the web app: the doc as written, or, with
+    /// `conflict`, as it is on disk now, unchanged by this request.
+    DocSaved {
+        doc: Box<Doc>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        conflict: bool,
+    },
+    DocHistory {
+        versions: Vec<DocVersion>,
+        /// The asked-for version's whole text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// A doc was deleted; `token` puts it back with `UndeleteDoc`.
+    DocDeleted {
+        token: String,
     },
     DocComments {
         comments: Vec<DocComment>,

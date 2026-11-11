@@ -112,6 +112,17 @@ export interface Doc {
   text?: string;
 }
 
+/** One of a doc's past versions (ADR-0021 §4): the file as it was before an edit replaced it. */
+export interface DocVersion {
+  /** What `doc_history` and `restore_doc` name it by. */
+  version: string;
+  /** When it was replaced, in seconds. */
+  at: number;
+  /** Who wrote it. */
+  by: string;
+  size: number;
+}
+
 /** Where a comment on a doc stands (ADR-0021 §6). */
 export type CommentState = "open" | "sent" | "answered" | "resolved";
 
@@ -507,6 +518,16 @@ export type Request =
   | { t: "resolve_comment"; key: string; comment: number }
   /** The Docs list was opened: what agents wrote until now is read. */
   | { t: "docs_seen"; at: number }
+  /** The user's save from the editor, if `base` is still on disk; replies `doc_saved`. */
+  | { t: "save_doc"; key: string; base: string; body: string }
+  /** A doc's past versions, and `version`'s text when given; replies `doc_history`. */
+  | { t: "doc_history"; key: string; version?: string }
+  /** Puts a past version back, under the same rule as a save; replies `doc_saved`. */
+  | { t: "restore_doc"; key: string; base: string; version: string }
+  /** Deletes a doc, keeping a copy; replies `doc_deleted`, or `doc_saved` with `conflict`. */
+  | { t: "delete_doc"; key: string; base: string }
+  /** Puts a deleted doc back; replies `doc`. */
+  | { t: "undelete_doc"; token: string }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
@@ -576,6 +597,10 @@ export type Reply =
   /** `to`: on a new comment, the running session that hears it at its next prompt. */
   | { t: "doc_comments"; comments: DocComment[]; to?: string }
   | { t: "docs"; docs: Doc[]; root: string; unread?: number; at?: number }
+  /** `conflict`: refused, and `doc` is what's on disk now. */
+  | { t: "doc_saved"; doc: Doc; conflict?: boolean }
+  | { t: "doc_history"; versions: DocVersion[]; text?: string }
+  | { t: "doc_deleted"; token: string }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }

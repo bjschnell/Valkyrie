@@ -1,8 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CommentState, Doc, DocComment } from "../proto";
-import { body, countByQuote, grouped, resolver, validKey } from "../lib/docs";
+import type { CommentState, Doc, DocComment, DocVersion } from "../proto";
+import { body, countByQuote, grouped, onlyIn, resolver, validKey } from "../lib/docs";
 import { clock } from "../lib/chat";
-import { allDocs, commentDoc, docComments, docsSeen, openDoc, resolveComment, toast, useApp } from "../store";
+import {
+  allDocs,
+  commentDoc,
+  deleteDoc,
+  docComments,
+  docHistory,
+  docsSeen,
+  openDoc,
+  resolveComment,
+  restoreDoc,
+  saveDoc,
+  toast,
+  undeleteDoc,
+  useApp,
+} from "../store";
 import { Back } from "./icons";
 import { Markdown, type BlockComments } from "./Markdown";
 
@@ -118,10 +132,14 @@ function when(secs: number): string {
 /** The comment being written: on a block, by its quote, or on the whole doc. */
 type Draft = { quote: string | null };
 
+/** What the doc page shows under the doc's header. */
+type Mode = "read" | "edit" | "history";
+
 /**
- * One doc, read-only, with `[[wikilinks]]` to the others. A doc with a valk-id
- * takes comments (ADR-0021 §6): tap a block, or comment on the whole doc, and
- * the session that wrote it hears it at its next prompt.
+ * One doc, with `[[wikilinks]]` to the others. A doc with a valk-id takes
+ * comments (ADR-0021 §6): tap a block, or comment on the whole doc, and the
+ * session that wrote it hears it at its next prompt. Light editing, history and
+ * delete (§7): heavy editing belongs in Obsidian.
  */
 export function DocView({ docKey }: { docKey: string }) {
   const status = useApp((s) => s.status);
@@ -130,7 +148,8 @@ export function DocView({ docKey }: { docKey: string }) {
   const [error, setError] = useState<string | null>(null);
   const [comments, setComments] = useState<DocComment[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
-  useBack("#/docs");
+  const [mode, setMode] = useState<Mode>("read");
+  useBack(mode === "read" ? "#/docs" : `#/docs/${encodeURIComponent(docKey)}`);
 
   useEffect(() => {
     if (status !== "open") return;
@@ -143,6 +162,7 @@ export function DocView({ docKey }: { docKey: string }) {
     setError(null);
     setComments([]);
     setDraft(null);
+    setMode("read");
     openDoc(docKey).then(
       (d) => {
         if (!live) return;
@@ -173,10 +193,42 @@ export function DocView({ docKey }: { docKey: string }) {
       }
     : undefined;
 
+  /** A doc the daemon wrote: shown, and under its new key if it got an id. */
+  const written = (d: Doc) => {
+    setDoc(d);
+    setMode("read");
+    if (d.key && d.key !== docKey) location.replace(`#/docs/${encodeURIComponent(d.key)}`);
+  };
+
+  const remove = async () => {
+    if (!doc?.hash) return;
+    try {
+      const got = await deleteDoc(docKey, doc.hash);
+      if ("conflict" in got) {
+        setDoc(got.conflict);
+        toast("It changed since you opened it. This is the new version: delete again to delete it.");
+        return;
+      }
+      const title = doc.title || doc.path;
+      go("#/docs");
+      toast(`Deleted “${title}”.`, {
+        label: "Undo",
+        run: () =>
+          void undeleteDoc(got.token).then(
+            (d) => go(`#/docs/${encodeURIComponent(d.key || "")}`),
+            (e: Error) => toast(`Couldn't put it back: ${e.message}`),
+          ),
+      });
+    } catch (e) {
+      toast(`Couldn't delete it: ${(e as Error).message}`);
+    }
+  };
+
+  const back = () => (mode === "read" ? go("#/docs") : setMode("read"));
   return (
     <div className="page">
       <header className="topbar">
-        <button className="icon-btn" aria-label="Back to docs" onClick={() => go("#/docs")}>
+        <button className="icon-btn" aria-label={mode === "read" ? "Back to docs" : "Back to the doc"} onClick={back}>
           <Back />
         </button>
         <div className="title">
@@ -194,13 +246,52 @@ export function DocView({ docKey }: { docKey: string }) {
               {doc.item ? <span>backlog #{doc.item}</span> : null}
               {doc.commit ? <code>{doc.commit.slice(0, 8)}</code> : null}
               <span className="doc-path">{doc.path}</span>
-              {doc.id === 0 && <span>yours, read-only</span>}
-              {canComment && (
-                <button className="ghost doc-comment-all" onClick={() => setDraft({ quote: null })}>
-                  Comment on the doc
-                </button>
+              {doc.id === 0 && <span>yours</span>}
+              {mode === "read" && (
+                <span className="doc-actions">
+                  {canComment && (
+                    <button className="ghost" onClick={() => setDraft({ quote: null })}>
+                      Comment
+                    </button>
+                  )}
+                  <button className="ghost" disabled={!doc.hash} onClick={() => setMode("edit")}>
+                    Edit
+                  </button>
+                  {canComment && (
+                    <button className="ghost" onClick={() => setMode("history")}>
+                      History
+                    </button>
+                  )}
+                  <button className="ghost danger" disabled={!doc.hash} onClick={() => void remove()}>
+                    Delete
+                  </button>
+                </span>
               )}
             </div>
+            {mode === "edit" && (
+              <Editor
+                doc={doc}
+                docKey={docKey}
+                wiki={wiki}
+                onDone={(d) => (d ? written(d) : setMode("read"))}
+              />
+            )}
+            {mode === "history" && (
+              <History
+                doc={doc}
+                docKey={docKey}
+                onRestored={(d) => {
+                  written(d);
+                  toast("Restored. What it replaced is in its history.");
+                }}
+                onChanged={(d) => {
+                  setDoc(d);
+                  toast("It changed since you opened it: this is the new version.");
+                }}
+              />
+            )}
+            {mode === "read" && (
+              <>
             {doc.edited?.length ? <div className="doc-edited">edited by {doc.edited.join("; ")}</div> : null}
             {canComment && comments.length === 0 && !draft && (
               <div className="doc-hint">Tap a heading, paragraph, list item or code block to comment on it.</div>
@@ -236,6 +327,8 @@ export function DocView({ docKey }: { docKey: string }) {
                   }
                 }}
               />
+            )}
+              </>
             )}
           </>
         )}
@@ -326,6 +419,244 @@ function CommentList({ comments, onResolve }: { comments: DocComment[]; onResolv
           <div className="doc-comment-text">{c.text}</div>
         </div>
       ))}
+    </section>
+  );
+}
+
+/** A body as lines, the ones `other` lacks marked. */
+function Lines({ text, other }: { text: string; other: string }) {
+  const marked = useMemo(() => onlyIn(text, other), [text, other]);
+  return (
+    <pre className="doc-side-text">
+      {text.split("\n").map((line, i) => (
+        <div key={i} className={marked.has(i) ? "doc-line-new" : undefined}>
+          {line || "\u00a0"}
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+/**
+ * Light editing (ADR-0021 §7): the body in a textarea, with a preview, saved
+ * with the hash it loaded. If an agent or Obsidian saved in between, the save
+ * is refused and both versions are shown side by side.
+ */
+function Editor({
+  doc,
+  docKey,
+  wiki,
+  onDone,
+}: {
+  doc: Doc;
+  docKey: string;
+  wiki: (target: string) => string | null;
+  onDone: (written: Doc | null) => void;
+}) {
+  const loaded = useMemo(() => body(doc.text ?? ""), [doc]);
+  const [text, setText] = useState(loaded);
+  const [base, setBase] = useState(doc.hash ?? "");
+  const [preview, setPreview] = useState(false);
+  const [theirs, setTheirs] = useState<Doc | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+  const dirty = text !== loaded;
+
+  const save = async (over: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const got = await saveDoc(docKey, over, text);
+      if (got.conflict) {
+        setTheirs(got.doc);
+        setPreview(false);
+      } else {
+        toast("Saved.");
+        onDone(got.doc);
+      }
+    } catch (e) {
+      toast(`Couldn't save: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (theirs) {
+    const now = body(theirs.text ?? "");
+    return (
+      <section className="doc-editor" aria-label="Both versions">
+        <div className="doc-conflict-note">
+          Someone saved this doc since you opened it ({lastEdit(theirs)}). Yours wasn't saved. Lines one side has and
+          the other doesn't are marked.
+        </div>
+        <div className="doc-sides">
+          <div className="doc-side">
+            <h3 className="section-title">Yours</h3>
+            <Lines text={text} other={now} />
+          </div>
+          <div className="doc-side">
+            <h3 className="section-title">On disk now</h3>
+            <Lines text={now} other={text} />
+          </div>
+        </div>
+        <div className="doc-composer-actions">
+          <button className="ghost" onClick={() => onDone(theirs)}>
+            Use theirs
+          </button>
+          <button
+            className="ghost"
+            onClick={() => {
+              setBase(theirs.hash ?? "");
+              setTheirs(null);
+            }}
+          >
+            Keep editing
+          </button>
+          <button className="primary" disabled={busy} onClick={() => void save(theirs.hash ?? "")}>
+            Save mine over it
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="doc-editor" aria-label="Edit">
+      <div className="doc-editor-tabs" role="tablist">
+        <button role="tab" aria-selected={!preview} className={!preview ? "on" : ""} onClick={() => setPreview(false)}>
+          Write
+        </button>
+        <button role="tab" aria-selected={preview} className={preview ? "on" : ""} onClick={() => setPreview(true)}>
+          Preview
+        </button>
+      </div>
+      {preview ? (
+        <Markdown text={text} className="doc-body doc-preview" wiki={wiki} />
+      ) : (
+        <div className="field">
+          <textarea
+            ref={ref}
+            className="doc-textarea"
+            value={text}
+            spellCheck
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                if (dirty) void save(base);
+              }
+            }}
+          />
+        </div>
+      )}
+      <div className="doc-composer-actions">
+        <span className="doc-editor-hint">The properties stay as they are. Big edits: Obsidian.</span>
+        <button className="ghost" onClick={() => onDone(null)}>
+          {dirty ? "Discard" : "Cancel"}
+        </button>
+        <button className="primary" disabled={!dirty || busy} onClick={() => void save(base)}>
+          Save
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Who last touched a doc, from its `edited` lines, or its author. */
+function lastEdit(d: Doc): string {
+  const last = d.edited?.[d.edited.length - 1];
+  const who = (last ?? d.by ?? "").split(", ")[0];
+  return who === "human" || !who ? "you, maybe in Obsidian" : who;
+}
+
+/** A size, short. */
+function kb(bytes: number): string {
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+/**
+ * A doc's past versions (ADR-0021 §4), newest first: each is the file as it was
+ * before an edit replaced it. Tap one to see it; Restore puts it back, and what
+ * it replaces joins the list, so a restore is undone the same way.
+ */
+function History({
+  doc,
+  docKey,
+  onRestored,
+  onChanged,
+}: {
+  doc: Doc;
+  docKey: string;
+  onRestored: (d: Doc) => void;
+  onChanged: (d: Doc) => void;
+}) {
+  const [versions, setVersions] = useState<DocVersion[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ version: string; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    docHistory(docKey).then(
+      (got) => live && setVersions(got.versions),
+      (e: Error) => live && setError(e.message),
+    );
+    return () => {
+      live = false;
+    };
+  }, [docKey, doc.hash]);
+
+  const peek = (version: string) => {
+    if (open?.version === version) return setOpen(null);
+    docHistory(docKey, version).then(
+      (got) => setOpen({ version, text: body(got.text ?? "") }),
+      (e: Error) => toast(`Couldn't open it: ${e.message}`),
+    );
+  };
+
+  const restore = async (version: string) => {
+    if (busy || !doc.hash) return;
+    setBusy(true);
+    try {
+      const got = await restoreDoc(docKey, doc.hash, version);
+      if (got.conflict) onChanged(got.doc);
+      else onRestored(got.doc);
+    } catch (e) {
+      toast(`Couldn't restore it: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="doc-history" aria-label="History">
+      <h2 className="section-title">
+        History <span className="count">{versions?.length ?? ""}</span>
+      </h2>
+      {error && <div className="empty">{error}</div>}
+      {!versions && !error && <div className="empty">Loading…</div>}
+      {versions?.length === 0 && (
+        <div className="empty">No past versions yet. Each edit keeps the one it replaces, for 30 days.</div>
+      )}
+      <div className="list">
+        {versions?.map((v) => (
+          <div key={v.version} className="doc-version">
+            <button className="row doc-version-row" aria-expanded={open?.version === v.version} onClick={() => peek(v.version)}>
+              <span className="row-main">
+                <span className="row-name">{when(v.at)}</span>
+                <span className="row-sub">
+                  {v.by === "human" || !v.by ? "you" : v.by} · {kb(v.size)}
+                </span>
+              </span>
+            </button>
+            <button className="ghost" disabled={busy} onClick={() => void restore(v.version)}>
+              Restore
+            </button>
+            {open?.version === v.version && <pre className="doc-side-text doc-version-text">{open.text}</pre>}
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

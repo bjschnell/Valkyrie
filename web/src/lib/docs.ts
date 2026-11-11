@@ -92,3 +92,14 @@ export function countByQuote(comments: { quote?: string; state: string }[]): Map
   }
   return out;
 }
+
+/** The lines of `text`, by index, that `other` has nowhere: what to mark when two
+ * versions of a doc are shown side by side. Blank lines are never marked. */
+export function onlyIn(text: string, other: string): Set<number> {
+  const theirs = new Set(other.split("\n"));
+  const out = new Set<number>();
+  text.split("\n").forEach((line, i) => {
+    if (line.trim() && !theirs.has(line)) out.add(i);
+  });
+  return out;
+}

@@ -89,6 +89,22 @@ pub struct Doc {
     pub text: Option<String>,
 }
 
+/// One of a doc's past versions (ADR-0021 §4): the file as it was before an edit
+/// replaced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocVersion {
+    /// What `DocHistory` and `RestoreDoc` name it by.
+    pub version: String,
+    /// When it was replaced, in seconds.
+    pub at: u64,
+    /// Who wrote it: its last `edited` line, or its author.
+    #[serde(default)]
+    pub by: String,
+    /// Its size in bytes.
+    #[serde(default)]
+    pub size: u64,
+}
+
 /// Where a comment on a doc stands (ADR-0021 §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
