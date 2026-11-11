@@ -27,7 +27,8 @@ function useBack(to: string) {
 
 /** Who wrote it and from where, in a line. */
 function byline(d: Doc): string {
-  return [d.by === "human" ? "you" : d.by, d.session, clock(d.created) || null].filter(Boolean).join(" · ");
+  const who = d.id === 0 ? "yours" : d.by === "human" || !d.by ? "you" : d.by;
+  return [who, d.session, clock(d.created) || null].filter(Boolean).join(" · ");
 }
 
 /**
@@ -49,7 +50,7 @@ export function DocsList() {
       if (!got) return;
       // The marks show what was new before this visit; then it's all read.
       setDocs(got.docs);
-      docsSeen();
+      docsSeen(got.at);
     });
     return () => {
       live = false;

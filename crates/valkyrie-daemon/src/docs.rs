@@ -61,18 +61,20 @@ impl Registry {
 
     pub(crate) fn docs(&self) -> Result<Reply> {
         let mut docs = self.docs.lock().unwrap();
+        let at = now_secs();
         let list = docs.list()?;
         Ok(Reply::Docs {
             unread: valkyrie_context::docs::Docs::unread(&list),
             docs: list,
             root: docs.root(),
+            at,
         })
     }
 
     /// The user opened the Docs list: what agents wrote until now counts as read.
-    pub(crate) fn docs_seen(&self, peer: Option<Peer>) -> Result<Reply> {
+    pub(crate) fn docs_seen(&self, at: u64, peer: Option<Peer>) -> Result<Reply> {
         self.vouch(peer, "marking docs read")?;
-        self.docs.lock().unwrap().seen(now_secs())?;
+        self.docs.lock().unwrap().seen(at, now_secs())?;
         Ok(Reply::Done)
     }
 

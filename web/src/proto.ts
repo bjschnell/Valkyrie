@@ -482,7 +482,7 @@ export type Request =
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
   | { t: "open_doc"; key: string }
   /** The Docs list was opened: what agents wrote until now is read. */
-  | { t: "docs_seen" }
+  | { t: "docs_seen"; at: number }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
@@ -549,7 +549,7 @@ export type Reply =
   | { t: "decision"; decision: Decision }
   | { t: "decisions"; decisions: Decision[] }
   | { t: "doc"; doc: Doc }
-  | { t: "docs"; docs: Doc[]; root: string; unread?: number }
+  | { t: "docs"; docs: Doc[]; root: string; unread?: number; at?: number }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }

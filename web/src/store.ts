@@ -605,11 +605,11 @@ export async function allDecisions(): Promise<Decision[] | null> {
 
 /** Every doc, newest first, and how many an agent wrote since the list was last
  * opened (ADR-0021 §5); null when it can't be asked. */
-export async function allDocs(): Promise<{ docs: Doc[]; unread: number } | null> {
+export async function allDocs(): Promise<{ docs: Doc[]; unread: number; at: number } | null> {
   try {
     if (!conn) throw new Error("not connected");
     const reply = await conn.request({ t: "docs" });
-    return reply.t === "docs" ? { docs: reply.docs, unread: reply.unread ?? 0 } : null;
+    return reply.t === "docs" ? { docs: reply.docs, unread: reply.unread ?? 0, at: reply.at ?? 0 } : null;
   } catch {
     return null;
   }
@@ -623,10 +623,11 @@ export async function openDoc(key: string): Promise<Doc> {
   return reply.doc;
 }
 
-/** The Docs list is open: clear the Inbox's unread count. */
-export function docsSeen(): void {
+/** The Docs list listed `at` is open: clear the Inbox's unread count. What came
+ * in after `at` stays unread, since the list didn't show it. */
+export function docsSeen(at: number): void {
   set({ unreadDocs: 0 });
-  void conn?.request({ t: "docs_seen" }).catch(() => undefined);
+  void conn?.request({ t: "docs_seen", at }).catch(() => undefined);
 }
 
 /** Asks how many docs are unread, for the Inbox's count. */

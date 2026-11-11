@@ -220,13 +220,17 @@ impl Docs {
     pub fn list(&mut self) -> Result<Vec<Doc>> {
         let root = self.real_root()?;
         let seen = self.config.seen;
+        // Front matter is the writer's word: a date in the future can't pin a doc
+        // unread past its file's own mtime. Unread is a nudge, not a guarantee: an
+        // agent writing the file itself can say `by: human`.
         let mut docs: Vec<(u128, Doc)> = self
             .index(&root)
             .into_iter()
             .map(|(path, c)| {
                 let mut d = doc(&root, &path, &c.front, String::new());
                 d.key = key(&c.front, &d.path);
-                d.unread = c.front.agent_at() > seen;
+                let mtime = u64::try_from(c.stamp.0 / 1_000_000_000).unwrap_or(u64::MAX);
+                d.unread = c.front.agent_at().min(mtime) > seen;
                 (c.stamp.0, d)
             })
             .collect();
@@ -239,9 +243,10 @@ impl Docs {
         docs.iter().filter(|d| d.unread).count() as u32
     }
 
-    /// The user opened the Docs list at `now`.
-    pub fn seen(&mut self, now: u64) -> Result<()> {
-        self.config.seen = now;
+    /// The user opened the Docs list as it was at `at`: what agents wrote until
+    /// then is read, not what came in while it loaded.
+    pub fn seen(&mut self, at: u64, now: u64) -> Result<()> {
+        self.config.seen = self.config.seen.max(at.min(now));
         self.save()
     }
 
@@ -1003,7 +1008,7 @@ mod tests {
             t
         };
         assert_eq!(unread(&mut f.docs), ["Old"]);
-        f.docs.seen(NOV_9 + 10).unwrap();
+        f.docs.seen(NOV_9 + 10, NOV_9 + 10).unwrap();
         assert!(unread(&mut f.docs).is_empty());
 
         let new = f
@@ -1018,7 +1023,7 @@ mod tests {
             .edit(old.id, &base, "changed", &claude(), NOV_9 + 40)
             .unwrap();
         assert_eq!(unread(&mut f.docs), ["New", "Old"]);
-        f.docs.seen(NOV_9 + 50).unwrap();
+        f.docs.seen(NOV_9 + 50, NOV_9 + 50).unwrap();
         let base = f.docs.read(&new.id.to_string()).unwrap().hash.unwrap();
         f.docs
             .edit(new.id, &base, "mine now", &human, NOV_9 + 60)
@@ -1027,6 +1032,40 @@ mod tests {
         // Kept across a restart.
         let mut again = Docs::new(f.base.join("state"));
         assert!(unread(&mut again).is_empty());
+    }
+
+    #[test]
+    fn a_future_date_cant_pin_a_doc_unread_and_late_docs_stay_unread() {
+        let mut f = Fixture::new("unread-edges");
+        let root = f.docs.real_root().unwrap();
+        std::fs::write(
+            root.join("pinned.md"),
+            "---\nvalk-id: 5\nby: claude\ncreated: 2100-01-01T00:00:00Z\n---\nhi\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(Docs::unread(&f.docs.list().unwrap()), 1);
+        f.docs.seen(now + 1, now + 1).unwrap();
+        assert_eq!(
+            Docs::unread(&f.docs.list().unwrap()),
+            0,
+            "cleared by its mtime"
+        );
+        // The list was stamped before a doc came in: that one stays unread.
+        f.docs.seen(NOV_9, now + 1).unwrap();
+        assert_eq!(f.docs.config.seen, now + 1, "never goes back");
+        let mut g = Fixture::new("unread-late");
+        g.docs.seen(NOV_9 + 5, NOV_9 + 99).unwrap();
+        g.docs
+            .write(&g.new_doc("Late", true), &claude(), NOV_9 + 10)
+            .unwrap();
+        assert_eq!(Docs::unread(&g.docs.list().unwrap()), 1);
+        // A client can't mark the future read.
+        g.docs.seen(u64::MAX, NOV_9 + 6).unwrap();
+        assert_eq!(g.docs.config.seen, NOV_9 + 6);
     }
 
     #[test]

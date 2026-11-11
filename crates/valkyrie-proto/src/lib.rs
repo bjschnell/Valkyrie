@@ -625,10 +625,11 @@ pub enum ClientMsg {
         req: ReqId,
         key: String,
     },
-    /// The user opened the Docs list: what agents wrote before now is read.
-    /// Replies `Done`.
+    /// The user opened the Docs list the `Docs` reply stamped `at`: what agents
+    /// wrote until then is read. Replies `Done`.
     DocsSeen {
         req: ReqId,
+        at: u64,
     },
     /// Where docs go; with `root`, sets it first (the user only; `""` goes back
     /// to the default). Replies `Text` with the folder.
@@ -771,6 +772,9 @@ pub enum Reply {
         /// How many an agent wrote or edited since the list was last opened.
         #[serde(default)]
         unread: u32,
+        /// When it was listed, in seconds, for `DocsSeen`.
+        #[serde(default)]
+        at: u64,
     },
     Item {
         item: Box<Item>,

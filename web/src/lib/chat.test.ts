@@ -191,6 +191,14 @@ describe("markdown for docs", () => {
     ]);
   });
 
+  it("reads a long run of brackets in linear time", () => {
+    for (const run of ["[".repeat(200_000), "[[a|".repeat(50_000), "[x".repeat(100_000)]) {
+      const start = performance.now();
+      parseInline(run);
+      expect(performance.now() - start).toBeLessThan(500);
+    }
+  });
+
   it("opens only http(s) links; HTML and other schemes stay text", () => {
     expect(parseInline("[x](javascript:alert(1))")).toEqual([{ t: "text", v: "x" }, { t: "text", v: ")" }]);
     expect(parseInline("[x](data:text/html,hi)")).toEqual([{ t: "text", v: "x" }]);

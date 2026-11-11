@@ -303,7 +303,9 @@ export type Inline =
   /** `[[target]]` or `[[target|label]]`: a link to another doc, if one goes by that name. */
   | { t: "wiki"; v: string; target: string };
 
-const INLINE = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]|`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\w*])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?![\w*])|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+// No class here takes a `[`, so a long run of them can't make the match re-scan
+// from every position (a doc can be one 2 MB line).
+const INLINE = /\[\[([^[\]|\n]+)(?:\|([^[\]\n]+))?\]\]|`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\w*])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?![\w*])|\[([^[\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
 
 export function parseInline(src: string): Inline[] {
   const out: Inline[] = [];
