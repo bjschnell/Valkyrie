@@ -39,6 +39,17 @@ pub struct Author {
     pub item: Option<u32>,
 }
 
+/// Who wrote a doc, as its front matter says.
+#[derive(Debug, Clone, Default)]
+pub struct Origin {
+    pub id: u32,
+    pub title: String,
+    /// The agent, or `human`.
+    pub by: String,
+    pub session: Option<String>,
+    pub conversation: Option<String>,
+}
+
 /// What the daemon keeps about docs in `<state dir>/docs.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Config {
@@ -95,6 +106,11 @@ impl Docs {
             &self.state.join("docs.json"),
             &serde_json::to_string_pretty(&self.config)?,
         )
+    }
+
+    /// The comments on docs (ADR-0021 §6), kept beside them in the state dir.
+    pub fn comments(&self) -> crate::comments::Comments {
+        crate::comments::Comments::new(&self.state)
     }
 
     /// Where docs live now.
@@ -381,6 +397,23 @@ impl Docs {
         let mut d = doc(&root, &path, &front, text);
         d.key = key;
         Ok(d)
+    }
+
+    /// Where the doc with this key came from, for its comments (ADR-0021 §6): a
+    /// doc without a `valk-id` can't take any.
+    pub fn origin(&mut self, key: &str) -> Result<Origin> {
+        let doc = self.open(key)?;
+        if doc.id == 0 {
+            bail!("only a doc with a valk-id takes comments: read it once through valk first");
+        }
+        let front = Front::parse(doc.text.as_deref().unwrap_or_default()).0;
+        Ok(Origin {
+            id: doc.id,
+            title: doc.title,
+            by: doc.by,
+            session: doc.session,
+            conversation: front.and_then(|f| f.conversation),
+        })
     }
 
     /// A doc by its `valk-id`, or by its path under the root. A file without an id

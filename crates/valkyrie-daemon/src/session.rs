@@ -1485,6 +1485,16 @@ impl Session {
         self.state.lock().unwrap().activity.take_accepted()
     }
 
+    /// See `Activity::commented`.
+    pub fn doc_commented(&self, doc: u32, comment: u32) {
+        self.state.lock().unwrap().activity.commented(doc, comment)
+    }
+
+    /// See `Activity::take_comments`.
+    pub fn take_comments(&self) -> Vec<(u32, u32)> {
+        self.state.lock().unwrap().activity.take_comments()
+    }
+
     /// See `Activity::merged`.
     pub fn merged_news(&self, line: String) {
         self.state.lock().unwrap().activity.merged(line)

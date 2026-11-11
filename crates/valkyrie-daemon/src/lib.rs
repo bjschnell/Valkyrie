@@ -1379,6 +1379,19 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             } => (req, registry.edit_doc(id, &base, &body, peer)),
             ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::OpenDoc { req, key } => (req, registry.open_doc(&key)),
+            ClientMsg::DocComments { req, key } => (req, registry.doc_comments(&key)),
+            ClientMsg::CommentDoc {
+                req,
+                key,
+                quote,
+                text,
+            } => (
+                req,
+                registry.comment_doc(&key, quote.as_deref(), &text, peer),
+            ),
+            ClientMsg::ResolveComment { req, key, comment } => {
+                (req, registry.resolve_comment(&key, comment, peer))
+            }
             ClientMsg::DocsSeen { req, at } => (req, registry.docs_seen(at, peer)),
             ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (

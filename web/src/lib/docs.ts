@@ -66,3 +66,29 @@ export function resolver(docs: Doc[]): (target: string) => string | null {
 export function validKey(key: string): boolean {
   return /^(\d{1,10}|p[0-9a-f]{16})$/.test(key);
 }
+
+/** Longest quote the daemon keeps, in characters. */
+const MAX_QUOTE = 500;
+
+/**
+ * A block's text as a comment quotes it, the way the daemon keeps it: hidden
+ * characters out, on one line, cut at 500 characters. The same block gives the
+ * same quote, so a comment finds its block again while the block reads the same.
+ */
+export function quoteOf(text: string): string {
+  // Control characters and bidi overrides, as the daemon drops them.
+  const shown = text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ");
+  const line = shown.split(/\s+/).filter(Boolean).join(" ");
+  const chars = [...line];
+  return chars.length > MAX_QUOTE ? chars.slice(0, MAX_QUOTE).join("") + "…" : line;
+}
+
+/** How many comments each quote has, not counting closed ones. */
+export function countByQuote(comments: { quote?: string; state: string }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const c of comments) {
+    if (!c.quote || c.state === "resolved") continue;
+    out.set(c.quote, (out.get(c.quote) ?? 0) + 1);
+  }
+  return out;
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Doc } from "../proto";
-import { body, grouped, groupOf, resolver, validKey } from "./docs";
+import { body, countByQuote, grouped, groupOf, quoteOf, resolver, validKey } from "./docs";
 
 const doc = (path: string, key: string, title = ""): Doc => ({
   id: /^\d+$/.test(key) ? Number(key) : 0,
@@ -49,5 +49,34 @@ describe("docs", () => {
     expect(validKey("12")).toBe(true);
     expect(validKey("p0123456789abcdef")).toBe(true);
     for (const bad of ["", "notes.md", "../x", "p123", "1/2", "%2e%2e"]) expect(validKey(bad)).toBe(false);
+  });
+});
+
+describe("quoteOf", () => {
+  it("keeps a block on one line, as the daemon does", () => {
+    expect(quoteOf("Ship it\n  on **Friday**.\n")).toBe("Ship it on **Friday**.");
+    expect(quoteOf("a‮b\u0007c")).toBe("a b c");
+  });
+
+  it("cuts a long block at 500 characters", () => {
+    const q = quoteOf("é".repeat(600));
+    expect([...q].length).toBe(501);
+    expect(q.endsWith("…")).toBe(true);
+  });
+});
+
+describe("countByQuote", () => {
+  it("counts comments per block, not the whole doc's or closed ones", () => {
+    const counts = countByQuote([
+      { quote: "A", state: "open" },
+      { quote: "A", state: "answered" },
+      { quote: "A", state: "resolved" },
+      { state: "open" },
+      { quote: "B", state: "sent" },
+    ]);
+    expect([...counts.entries()]).toEqual([
+      ["A", 2],
+      ["B", 1],
+    ]);
   });
 });

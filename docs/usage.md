@@ -68,3 +68,12 @@ The web app's **Docs** page (the page icon on the home screen) lists them, with 
 count of the ones an agent wrote since you last looked. It shows them read-only,
 with tables, task lists and `[[wikilinks]]` to other docs. It never writes to a
 file, so your own docs stay as you left them.
+
+To comment on a doc, tap a heading, paragraph, list item or code block, or use
+**Comment on the doc**. If the session that wrote it is still running, its agent
+gets your comment at its next prompt, with the text you tapped. The comment shows
+as *sent* until that session edits the doc, and then as *answered*. If the
+session is gone, the comment stays *open* on the doc. **Resolve** closes a
+comment. Comments are kept beside the docs in `<state dir>/docs/comments/`, not
+in the files, so Obsidian never sees them. Only Claude sessions get comments for
+now.
