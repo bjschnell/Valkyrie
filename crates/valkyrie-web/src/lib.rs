@@ -697,6 +697,11 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// agent's hooks, and taking a backlog item (or adding one taken), which links
 /// the session the caller runs in: here that's `valk web`'s own, if it was started
 /// in one.
+///
+/// Docs (ADR-0021 §5): the web app reads with `OpenDoc`, by the key a list gave
+/// out, never by path, and writes nothing. `ReadDoc` takes a path and gives an
+/// id-less doc an id (a write into the user's file), so it's the CLI's only.
+/// Writing, editing and moving the folder wait for the web app's editor (#135).
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
@@ -705,6 +710,10 @@ fn allowed(msg: &ClientMsg) -> bool {
             | ClientMsg::Clients { .. }
             | ClientMsg::TakeItem { .. }
             | ClientMsg::AddItem { take: true, .. }
+            | ClientMsg::ReadDoc { .. }
+            | ClientMsg::WriteDoc { .. }
+            | ClientMsg::EditDoc { .. }
+            | ClientMsg::DocsRoot { root: Some(_), .. }
     )
 }
 
@@ -1078,6 +1087,42 @@ mod tests {
             only: Some(vec![1]),
         };
         assert!(allowed(&ship));
+    }
+
+    #[test]
+    fn a_browser_reads_docs_by_key_and_writes_none() {
+        let read = ClientMsg::ReadDoc {
+            req: 1,
+            which: "repos/valkyrie/notes.md".into(),
+        };
+        assert!(!allowed(&read), "ReadDoc takes a path and assigns ids");
+        assert!(!allowed(&ClientMsg::WriteDoc {
+            req: 1,
+            doc: valkyrie_proto::NewDoc {
+                cwd: "/".into(),
+                title: "x".into(),
+                kind: Default::default(),
+                global: true,
+                body: String::new(),
+            },
+        }));
+        assert!(!allowed(&ClientMsg::EditDoc {
+            req: 1,
+            id: 1,
+            base: String::new(),
+            body: String::new(),
+        }));
+        assert!(!allowed(&ClientMsg::DocsRoot {
+            req: 1,
+            root: Some("/home/me/.ssh".into()),
+        }));
+        assert!(allowed(&ClientMsg::DocsRoot { req: 1, root: None }));
+        assert!(allowed(&ClientMsg::Docs { req: 1 }));
+        assert!(allowed(&ClientMsg::DocsSeen { req: 1, at: 0 }));
+        assert!(allowed(&ClientMsg::OpenDoc {
+            req: 1,
+            key: "3".into(),
+        }));
     }
 
     #[test]

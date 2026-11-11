@@ -7,6 +7,7 @@ import type { Mismatch } from "./lib/protocol";
 import { termColors } from "./lib/theme";
 import type {
   Decision,
+  Doc,
   Item,
   ItemChange,
   ItemFacts,
@@ -72,6 +73,8 @@ interface State {
   queue: QueueItem[];
   /** Decisions agents proposed, waiting on the human (ADR-0007). */
   proposals: Decision[];
+  /** Docs an agent wrote since the Docs list was last opened (ADR-0021 §5): a count, never cards. */
+  unreadDocs: number;
   /** The backlog (DESIGN §8.12), as the daemon pushes it. */
   items: Item[];
   /** Build orders waiting on the user (ADR-0019 §2), pushed with the items. */
@@ -106,6 +109,7 @@ export const useApp = create<State>(() => ({
   sessions: [],
   queue: [],
   proposals: [],
+  unreadDocs: 0,
   items: [],
   orders: [],
   launches: [],
@@ -597,6 +601,39 @@ export async function allDecisions(): Promise<Decision[] | null> {
   } catch {
     return null;
   }
+}
+
+/** Every doc, newest first, and how many an agent wrote since the list was last
+ * opened (ADR-0021 §5); null when it can't be asked. */
+export async function allDocs(): Promise<{ docs: Doc[]; unread: number; at: number } | null> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const reply = await conn.request({ t: "docs" });
+    return reply.t === "docs" ? { docs: reply.docs, unread: reply.unread ?? 0, at: reply.at ?? 0 } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One doc's text, by the key its list entry carries. Throws with the daemon's reason. */
+export async function openDoc(key: string): Promise<Doc> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "open_doc", key });
+  if (reply.t !== "doc") throw new Error("unexpected reply");
+  return reply.doc;
+}
+
+/** The Docs list listed `at` is open: clear the Inbox's unread count. What came
+ * in after `at` stays unread, since the list didn't show it. */
+export function docsSeen(at: number): void {
+  set({ unreadDocs: 0 });
+  void conn?.request({ t: "docs_seen", at }).catch(() => undefined);
+}
+
+/** Asks how many docs are unread, for the Inbox's count. */
+export async function refreshUnreadDocs(): Promise<void> {
+  const got = await allDocs();
+  if (got) set({ unreadDocs: got.unread });
 }
 
 /** The choices on the open session's screen right now. */

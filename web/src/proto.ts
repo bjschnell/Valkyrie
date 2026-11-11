@@ -87,6 +87,31 @@ export interface Flag {
 }
 
 /** A project decision (ADR-0007). */
+export type DocKind = "plan" | "research" | "report" | "note";
+
+/** A doc in the docs folder (ADR-0021). `key` is what it's opened by: its
+ * `valk-id`, or a handle the daemon made for one of the user's own; never a path. */
+export interface Doc {
+  id: number;
+  kind: DocKind;
+  title: string;
+  /** Relative to the docs folder, '/'-separated. */
+  path: string;
+  key?: string;
+  /** An agent wrote or edited it since the Docs list was last opened. */
+  unread?: boolean;
+  by: string;
+  created: string;
+  session?: string;
+  commit?: string;
+  item?: number;
+  repo?: string;
+  edited?: string[];
+  hash?: string;
+  /** The whole file, front matter and all; only when opened. */
+  text?: string;
+}
+
 export type DecisionKind =
   "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
 export const DECISION_KINDS: DecisionKind[] = [
@@ -452,6 +477,12 @@ export type Request =
       seen: number;
     }
   | { t: "decisions"; cwd: string | null }
+  /** Every doc, newest first; replies `docs`. */
+  | { t: "docs" }
+  /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
+  | { t: "open_doc"; key: string }
+  /** The Docs list was opened: what agents wrote until now is read. */
+  | { t: "docs_seen"; at: number }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
@@ -517,6 +548,8 @@ export type Reply =
   | { t: "text"; text: string }
   | { t: "decision"; decision: Decision }
   | { t: "decisions"; decisions: Decision[] }
+  | { t: "doc"; doc: Doc }
+  | { t: "docs"; docs: Doc[]; root: string; unread?: number; at?: number }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }

@@ -34,7 +34,7 @@ pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 32;
+pub const PROTOCOL: u32 = 33;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -618,6 +618,19 @@ pub enum ClientMsg {
     Docs {
         req: ReqId,
     },
+    /// The web app's read (ADR-0021 §5, protocol 33): a doc by the `key` a list
+    /// gave it, never by path, and never writing to the file (a doc with no id
+    /// stays without one). Replies `Doc`.
+    OpenDoc {
+        req: ReqId,
+        key: String,
+    },
+    /// The user opened the Docs list the `Docs` reply stamped `at`: what agents
+    /// wrote until then is read. Replies `Done`.
+    DocsSeen {
+        req: ReqId,
+        at: u64,
+    },
     /// Where docs go; with `root`, sets it first (the user only; `""` goes back
     /// to the default). Replies `Text` with the folder.
     DocsRoot {
@@ -756,6 +769,12 @@ pub enum Reply {
         docs: Vec<Doc>,
         /// The docs folder.
         root: PathBuf,
+        /// How many an agent wrote or edited since the list was last opened.
+        #[serde(default)]
+        unread: u32,
+        /// When it was listed, in seconds, for `DocsSeen`.
+        #[serde(default)]
+        at: u64,
     },
     Item {
         item: Box<Item>,

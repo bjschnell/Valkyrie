@@ -53,12 +53,29 @@ impl Registry {
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
+    /// The web app's read: by the key a list gave out, writing nothing (ADR-0021 §5).
+    pub(crate) fn open_doc(&self, key: &str) -> Result<Reply> {
+        let doc = self.docs.lock().unwrap().open(key)?;
+        Ok(Reply::Doc { doc: Box::new(doc) })
+    }
+
     pub(crate) fn docs(&self) -> Result<Reply> {
-        let docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.lock().unwrap();
+        let at = now_secs();
+        let list = docs.list()?;
         Ok(Reply::Docs {
-            docs: docs.list()?,
+            unread: valkyrie_context::docs::Docs::unread(&list),
+            docs: list,
             root: docs.root(),
+            at,
         })
+    }
+
+    /// The user opened the Docs list: what agents wrote until now counts as read.
+    pub(crate) fn docs_seen(&self, at: u64, peer: Option<Peer>) -> Result<Reply> {
+        self.vouch(peer, "marking docs read")?;
+        self.docs.lock().unwrap().seen(at, now_secs())?;
+        Ok(Reply::Done)
     }
 
     /// Where docs go. Setting it is the user's (ADR-0021 §1): an agent that could
