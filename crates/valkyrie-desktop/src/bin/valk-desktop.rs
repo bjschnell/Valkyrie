@@ -22,6 +22,7 @@ use valkyrie_desktop::install;
 use valkyrie_desktop::pair::Pairing;
 use valkyrie_desktop::start::{self, Valk};
 use valkyrie_desktop::watch::{self, Event};
+use valkyrie_proto::SessionId;
 
 const WINDOW: &str = "main";
 const TRAY: &str = "valkyrie";
@@ -78,6 +79,15 @@ fn main() {
                 let app = app.handle().clone();
                 tauri::async_runtime::spawn(async move { update(&app, false).await });
             }
+            // A click on a notification brings the window up on its session.
+            // Registered before the first one is shown: those shown before a
+            // handler exists report nothing.
+            let clicked = app.handle().clone();
+            app.notification().on_action(move |performed| {
+                if performed.action_id() == "tap" {
+                    open(&clicked, session_of(performed));
+                }
+            })?;
             let app = app.handle().clone();
             // Finding `valk web`, or setting it up, can take a while: the tray is
             // there meanwhile, and the window comes when there is a page for it.
@@ -456,6 +466,28 @@ fn say(app: &AppHandle, what: &str) {
     app.dialog().message(what).title(NAME).show(|_| {});
 }
 
+/// Where a notification keeps the session it is about, for its click.
+const SESSION: &str = "session";
+
+/// The session a clicked notification is about, if it is about one.
+fn session_of(performed: &tauri_plugin_notification::ActionPerformed) -> Option<SessionId> {
+    let session = performed.notification()?.extra().get(SESSION)?;
+    SessionId::try_from(session.as_u64()?).ok()
+}
+
+/// Brings the window up, on `session` when there is one. The page routes by its
+/// hash (`#/s/12`), so it opens the session as a link to it would. Before the
+/// page has loaded there is nothing to route, and the window just comes up.
+fn open(app: &AppHandle, session: Option<SessionId>) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        show(&app);
+        if let (Some(session), Some(window)) = (session, app.get_webview_window(WINDOW)) {
+            let _ = window.eval(format!("location.hash = '#/s/{session}';"));
+        }
+    });
+}
+
 /// What the daemon's watcher said, on the tray and as a notification.
 fn told(app: &AppHandle, event: Event) {
     let tray = app.tray_by_id(TRAY);
@@ -476,12 +508,15 @@ fn told(app: &AppHandle, event: Event) {
         Event::Count(0) => label(format!("{NAME}: nothing needs you"), None),
         Event::Count(n) => label(format!("{NAME}: {n} need you"), Some(n.to_string())),
         Event::Notify(note) => {
-            let shown = app
+            let mut builder = app
                 .notification()
                 .builder()
                 .title(note.title)
-                .body(note.body)
-                .show();
+                .body(note.body);
+            if let Some(session) = note.session {
+                builder = builder.extra(SESSION, session);
+            }
+            let shown = builder.show();
             if let Err(e) = shown {
                 tracing::warn!("notification: {e}");
             }
@@ -502,6 +537,41 @@ fn fail(app: &AppHandle, why: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the plugin hands the handler for a click: the notification as it was
+    /// shown (its `NotificationData`, serialized), under the action.
+    fn clicked(extra: serde_json::Value) -> tauri_plugin_notification::ActionPerformed {
+        serde_json::from_value(serde_json::json!({
+            "actionId": "tap",
+            "inputValue": null,
+            "notification": { "id": 0, "title": "proj12", "body": "needs you", "extra": extra },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_clicked_notification_names_its_session() {
+        assert_eq!(
+            session_of(&clicked(serde_json::json!({ "session": 12 }))),
+            Some(12)
+        );
+        // `valk notify` says something about no session: the window just comes up.
+        assert_eq!(session_of(&clicked(serde_json::json!({}))), None);
+        assert_eq!(
+            session_of(&clicked(serde_json::json!({ "session": "12" }))),
+            None
+        );
+        assert_eq!(
+            session_of(&clicked(serde_json::json!({ "session": -1 }))),
+            None
+        );
+        assert_eq!(
+            session_of(&clicked(
+                serde_json::json!({ "session": u64::from(u32::MAX) + 1 })
+            )),
+            None
+        );
+    }
 
     #[test]
     fn only_the_web_apps_own_address_loads_in_the_window() {
