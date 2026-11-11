@@ -105,6 +105,18 @@ pub struct DocVersion {
     pub size: u64,
 }
 
+/// A doc the user deleted, kept so it can be put back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedDoc {
+    /// What `UndeleteDoc` takes.
+    pub token: String,
+    /// When it was deleted, in seconds.
+    pub at: u64,
+    /// Where it was, relative to the docs folder.
+    pub path: String,
+    pub title: String,
+}
+
 /// Where a comment on a doc stands (ADR-0021 §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

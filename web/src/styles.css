@@ -3785,6 +3785,19 @@ button.as-text {
   flex-basis: 100%;
 }
 
+.doc-deleted {
+  margin-top: 18px;
+}
+
+.doc-deleted summary {
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.doc-deleted .list {
+  margin-top: 8px;
+}
+
 .doc-hint {
   margin-bottom: 8px;
   font-size: 12.5px;

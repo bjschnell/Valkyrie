@@ -123,6 +123,16 @@ export interface DocVersion {
   size: number;
 }
 
+/** A doc the user deleted, kept so it can be put back. */
+export interface DeletedDoc {
+  /** What `undelete_doc` takes. */
+  token: string;
+  /** When it was deleted, in seconds. */
+  at: number;
+  path: string;
+  title: string;
+}
+
 /** Where a comment on a doc stands (ADR-0021 §6). */
 export type CommentState = "open" | "sent" | "answered" | "resolved";
 
@@ -528,6 +538,8 @@ export type Request =
   | { t: "delete_doc"; key: string; base: string }
   /** Puts a deleted doc back; replies `doc`. */
   | { t: "undelete_doc"; token: string }
+  /** Deleted docs that can still be put back, newest first; replies `deleted_docs`. */
+  | { t: "deleted_docs" }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
@@ -601,6 +613,7 @@ export type Reply =
   | { t: "doc_saved"; doc: Doc; conflict?: boolean }
   | { t: "doc_history"; versions: DocVersion[]; text?: string }
   | { t: "doc_deleted"; token: string }
+  | { t: "deleted_docs"; docs: DeletedDoc[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }

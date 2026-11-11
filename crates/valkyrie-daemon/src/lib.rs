@@ -1411,6 +1411,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 (req, registry.delete_doc(&key, &base, peer))
             }
             ClientMsg::UndeleteDoc { req, token } => (req, registry.undelete_doc(&token, peer)),
+            ClientMsg::DeletedDocs { req } => (req, registry.deleted_docs()),
             ClientMsg::DocsSeen { req, at } => (req, registry.docs_seen(at, peer)),
             ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (
