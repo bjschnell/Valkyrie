@@ -95,8 +95,8 @@ any error.
    AppImage, a `.dmg`, an `.msi`) around that release's `valk` and adds them to
    the release. The release is published without waiting for them, so a failure
    there doesn't hold back `valk`: re-run the failed `desktop` jobs. They aren't
-   signed for the operating system (macOS asks for a right-click Open, Windows
-   shows a SmartScreen prompt). To try the installer build without a release,
+   signed with a certificate (the macOS app is signed ad hoc and has to be
+   allowed once in System Settings; Windows shows a SmartScreen prompt). To try the installer build without a release,
    run it by hand: `gh workflow run desktop.yml` builds them around the latest
    release's `valk` and uploads nothing.
 
