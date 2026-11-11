@@ -18,6 +18,7 @@ window = [
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-updater",
     "dep:tracing-subscriber",
 ]
 
@@ -43,6 +44,7 @@ tauri-plugin-notification = { version = "2", optional = true }
 tauri-plugin-autostart = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
 serde_json = { workspace = true, optional = true }
 
 [build-dependencies]
