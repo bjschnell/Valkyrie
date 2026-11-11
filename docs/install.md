@@ -298,16 +298,17 @@ the first one after 0.4.0 on:
 | macOS (Apple silicon) | `Valkyrie_<version>_aarch64.dmg` |
 | Windows (x64) | `Valkyrie_<version>_x64_en-US.msi` |
 
-The installers aren't signed for the operating system yet. On macOS, right-click
-the app and choose Open the first time. On Windows, choose More info, then Run
-anyway.
+The installers aren't signed with a certificate yet. On macOS, open the app
+once, then allow it under System Settings, Privacy & Security, Open Anyway. On
+Windows, choose More info, then Run anyway.
 
 You don't need `valk` installed first: the app carries the `valk` of its release
 and, on a machine with none, puts it where the install scripts do
 (`~/.local/bin/valk`, or `%LOCALAPPDATA%\Programs\Valkyrie\valk.exe`). It is
-then an ordinary install: `valk upgrade` updates it, and the app never replaces
-a `valk` that is already there. Add that directory to your PATH to use `valk` in
-a terminal too.
+then yours: `valk upgrade` updates it, and the app never replaces a `valk` that
+is already there, cargo's (`~/.cargo/bin`) included. Only the binary is placed:
+to use `valk` in a terminal too, add that directory to your PATH, or run the
+install script, which also sets up Windows Terminal.
 
 On first launch the app finds your `valk web`, or sets one up for this machine
 only, and asks to pair: press Pair. Closing the window keeps it in the tray;

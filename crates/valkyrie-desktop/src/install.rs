@@ -2,9 +2,11 @@
 //!
 //! The app's installers carry the `valk` of their release. On its first launch
 //! the app puts that binary where `install.sh` and `install.ps1` would have, and
-//! only if no `valk` is installed yet. From then on it is an ordinary install:
+//! only if no `valk` is installed yet. From then on it is the user's install:
 //! `valk upgrade` and `valk`'s own update path own it, and the app's updater
 //! never touches it, so the two never fight over the binary the daemon runs.
+//! Only the binary is placed: the scripts' extras (a PATH entry and a Windows
+//! Terminal profile on Windows) are for someone who works in a terminal.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -34,11 +36,33 @@ pub fn on_path() -> Option<PathBuf> {
         .find(|file| file.is_file())
 }
 
+/// Where `cargo install` puts `valk`, which is what `install.sh` does from a
+/// checkout: `$CARGO_HOME/bin`, by default `~/.cargo/bin`. An app started from a
+/// dock doesn't have it on its PATH.
+pub fn cargo_bin() -> Option<PathBuf> {
+    let cargo = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+            Some(PathBuf::from(std::env::var_os(home)?).join(".cargo"))
+        })?;
+    Some(cargo.join("bin").join(name()))
+}
+
+/// A `valk` installed somewhere other than the installers' place: on the PATH,
+/// or cargo's. A second one beside it would be a second build for the daemon
+/// and the terminal to disagree over.
+pub fn elsewhere() -> Option<PathBuf> {
+    on_path().or_else(|| cargo_bin().filter(|file| file.is_file()))
+}
+
 /// Puts the `bundled` valk at `home` when no valk is installed: none there, and
 /// none `elsewhere` (the PATH's). Says whether it did. A valk that is already
 /// installed is never replaced, however old: updating it is its own business.
 pub fn place(bundled: &Path, home: &Path, elsewhere: Option<&Path>) -> Result<bool> {
-    if home.exists() || elsewhere.is_some() || !bundled.is_file() {
+    // Anything by that name counts, a link whose target is gone too: a
+    // developer's link into a build tree is theirs to mend, not to write over.
+    if home.symlink_metadata().is_ok() || elsewhere.is_some() || !bundled.is_file() {
         return Ok(false);
     }
     let dir = home.parent().context("the install directory")?;
@@ -53,6 +77,15 @@ pub fn place(bundled: &Path, home: &Path, elsewhere: Option<&Path>) -> Result<bo
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755))?;
     }
+    // Copied out of an app that was downloaded, the file carries the mark macOS
+    // puts on downloads, and would be refused when run. The app it came in is
+    // the one the user allowed.
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(&partial)
+        .stderr(std::process::Stdio::null())
+        .status();
     std::fs::rename(&partial, home).with_context(|| format!("install {}", home.display()))?;
     Ok(true)
 }
@@ -110,6 +143,20 @@ mod tests {
         let other = dir.join("other").join(name());
         assert!(!place(&bundled, &other, Some(&home)).unwrap());
         assert!(!other.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_whose_target_is_gone_is_still_someones_valk() {
+        let dir = scratch("link");
+        let bundled = dir.join("bundled");
+        std::fs::write(&bundled, "the release's valk").unwrap();
+        let home = dir.join("bin").join(name());
+        std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(dir.join("build").join("valk"), &home).unwrap();
+        assert!(!place(&bundled, &home, None).unwrap());
+        assert!(home.symlink_metadata().unwrap().file_type().is_symlink());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

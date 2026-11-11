@@ -4,8 +4,11 @@
 # run: it builds the installers around the latest release's `valk` and uploads
 # nothing.
 #
-# Nothing here is signed for the operating system: macOS asks for a right-click
-# Open the first time, and Windows shows a SmartScreen prompt.
+# Nothing here is signed with a certificate. The macOS app is signed ad hoc (an
+# unsigned one is refused outright as damaged on Apple silicon) and still has to
+# be allowed once in System Settings; Windows shows a SmartScreen prompt. The
+# hash check below catches a broken download, not a tampered release: the hash
+# comes from the same release as the file.
 name: desktop
 
 on:
@@ -71,17 +74,21 @@ jobs:
           # shellcheck disable=SC2086
           gh release download $TAG --repo "$GITHUB_REPOSITORY" --dir download \
             --pattern "$VALK" --pattern "$VALK.sha256"
-          (cd download && shasum -a 256 -c "$VALK.sha256")
+          # The Windows build writes its hash file with a CR at the end of the
+          # line, which shasum would take for part of the file's name.
+          (cd download && tr -d '\r' < "$VALK.sha256" | shasum -a 256 -c -)
           case "$VALK" in
             *.zip) unzip -o "download/$VALK" -d crates/valkyrie-desktop/resources ;;
             *) tar -xzf "download/$VALK" -C crates/valkyrie-desktop/resources ;;
           esac
           ls -l crates/valkyrie-desktop/resources
+      # The version the bundle settings were tried with, not whatever is newest
+      # on the day of a release.
       - name: Tauri's bundler
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version "=2.12.4" --locked
       - name: bundle
         working-directory: crates/valkyrie-desktop
-        run: cargo tauri build --features window --config tauri.bundle.conf.json --bundles "${{ matrix.bundles }}"
+        run: cargo tauri build --features window --config tauri.bundle.conf.json --bundles "${{ matrix.bundles }}" -- --locked
       - name: publish
         run: |
           shopt -s nullglob

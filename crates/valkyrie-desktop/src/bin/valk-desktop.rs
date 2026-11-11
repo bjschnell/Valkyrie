@@ -114,7 +114,7 @@ fn bundled_valk(app: &AppHandle) {
         return;
     };
     let bundled = resources.join("resources").join(install::name());
-    match install::place(&bundled, &home, install::on_path().as_deref()) {
+    match install::place(&bundled, &home, install::elsewhere().as_deref()) {
         Ok(true) => tracing::info!(valk = %home.display(), "installed the valk this app came with"),
         Ok(false) => {}
         Err(e) => tracing::warn!("couldn't install valk: {e:#}"),

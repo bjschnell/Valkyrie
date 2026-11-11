@@ -141,15 +141,17 @@ pub struct Valk {
 }
 
 impl Valk {
-    /// The `valk` the installer put beside this app, else the one where
-    /// `install.sh` and `install.ps1` put it, else whatever `valk` the PATH has.
+    /// The `valk` beside this app, else the one where `install.sh` and
+    /// `install.ps1` put a release, else cargo's, else whatever the PATH has.
     /// An app started from a dock or a menu has a bare PATH, so that comes last.
     pub fn find() -> Self {
         let name = crate::install::name();
         let beside = std::env::current_exe()
             .ok()
             .and_then(|exe| Some(exe.parent()?.join(&name)));
-        let exe = [beside, crate::install::home()]
+        // Cargo's last: `install.sh` from a checkout puts it there, where a
+        // dock's PATH doesn't reach.
+        let exe = [beside, crate::install::home(), crate::install::cargo_bin()]
             .into_iter()
             .flatten()
             .find(|path| path.is_file())
