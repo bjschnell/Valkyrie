@@ -372,8 +372,11 @@ impl Docs {
         let front = Front::parse(&found.text)
             .0
             .unwrap_or_else(|| Front::bare(&found.path));
+        // Always the hash, even of an empty file, so it can still be deleted.
+        let h = hash(&found.text);
         let mut d = doc(&found.root, &found.path, &front, found.text);
         d.key = found.key;
+        d.hash = Some(h);
         Ok(d)
     }
 
@@ -561,9 +564,22 @@ impl Docs {
         what: Option<&str>,
         now: u64,
     ) -> Result<Saved> {
-        let had_id = Front::parse(&found.text)
-            .0
-            .is_some_and(|f| f.id_opt().is_some());
+        let front = Front::parse(&found.text).0;
+        // A copy carrying another file's id is listed by a path handle; its
+        // history would mix with the other's, so, as an agent's edit is, it's
+        // refused until the copy loses the id (ADR-0021 §5).
+        if found.key.starts_with('p') && front.as_ref().is_some_and(|f| f.id_opt().is_some()) {
+            bail!(
+                "this doc shares its valk-id with another file (a copy or a sync conflict): \
+                 take the valk-id line out of one in Obsidian first"
+            );
+        }
+        if !plain_front(&found.text) {
+            bail!(
+                "this doc's properties aren't in a form valk can keep (Windows line ends, or a \
+                 `---` with spaces after it): edit it in Obsidian"
+            );
+        }
         let mut d = self.replace(
             &found.root,
             &found.path,
@@ -573,11 +589,7 @@ impl Docs {
             what,
             now,
         )?;
-        // A handle for a shared id stays the handle; a new id becomes the key.
-        d.key = match had_id {
-            true => found.key,
-            false => d.id.to_string(),
-        };
+        d.key = d.id.to_string();
         Ok(Saved::Done(d))
     }
 
@@ -651,7 +663,7 @@ impl Docs {
         if hash(&found.text) != base.trim() {
             return Ok(Saved::Conflict(self.open(key)?));
         }
-        let body = Front::parse(&old).1.to_owned();
+        let body = clean_body(Front::parse(&old).1)?;
         let at = version
             .split('-')
             .next()
@@ -794,6 +806,30 @@ struct Trashed {
     /// Where it was, under the root.
     path: String,
     text: String,
+}
+
+/// Whether a file's front matter, if it has one, reads the same to the daemon as
+/// to the web app's editor, which shows only what's after it: an `\n`-only file
+/// whose fences are bare `---` lines. Otherwise a save could drop the user's
+/// properties, or take body lines for them.
+fn plain_front(text: &str) -> bool {
+    if !text.starts_with("---") {
+        return true;
+    }
+    let Some(after) = text.strip_prefix("---\n") else {
+        return false;
+    };
+    if text.contains('\r') {
+        return false;
+    }
+    let head = match after.find("\n---\n") {
+        Some(end) => &after[..end],
+        None => match after.strip_suffix("\n---") {
+            Some(head) => head,
+            None => return false,
+        },
+    };
+    !head.lines().any(|line| line.trim() == "---")
 }
 
 /// Whether `name` is what `keep` and `delete` name files: seconds, maybe `-n`.
@@ -1737,6 +1773,77 @@ mod tests {
             f.docs.version_text("1", &versions[0].version).unwrap(),
             "eggs\n"
         );
+    }
+
+    #[test]
+    fn a_web_save_never_drops_properties_it_cant_read_the_way_the_app_does() {
+        let mut f = Fixture::new("save-crlf");
+        let root = f.docs.real_root().unwrap();
+        let cases = [
+            ("crlf.md", "---\r\ntags: [x]\r\n---\r\nhello\r\n"),
+            ("spaces.md", "---\ntags: [x]\n---  \nhello\n\n---\n\nmore\n"),
+        ];
+        for (name, text) in cases {
+            std::fs::write(root.join(name), text).unwrap();
+        }
+        for d in f.docs.list().unwrap() {
+            let open = f.docs.open(&d.key).unwrap();
+            let err = f
+                .docs
+                .save_body(
+                    &d.key,
+                    open.hash.as_deref().unwrap(),
+                    "hello\n",
+                    &you(),
+                    NOV_9,
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("edit it in Obsidian"), "{err}");
+        }
+        for (name, text) in cases {
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text);
+        }
+        assert!(plain_front("no properties\n---\nrule\n"));
+        assert!(plain_front("---\ntags: [x]\n---\n\nbody\n\n---\n\nmore\n"));
+    }
+
+    #[test]
+    fn a_copy_sharing_an_id_is_refused_but_an_empty_file_can_go() {
+        let mut f = Fixture::new("save-shared");
+        let d = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let root = f.docs.real_root().unwrap();
+        std::fs::write(root.join("copy.md"), d.text.as_deref().unwrap()).unwrap();
+        std::fs::write(root.join("empty.md"), "").unwrap();
+        let docs = f.docs.list().unwrap();
+        let copy = docs.iter().find(|x| x.path == "copy.md").unwrap();
+        let open = f.docs.open(&copy.key).unwrap();
+        let err = f
+            .docs
+            .save_body(
+                &copy.key,
+                open.hash.as_deref().unwrap(),
+                "x\n",
+                &you(),
+                NOV_9,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("shares its valk-id"), "{err}");
+        // Deleting the copy is how it's dealt with.
+        assert!(matches!(
+            f.docs
+                .delete(&copy.key, open.hash.as_deref().unwrap(), NOV_9),
+            Ok(Deleted::Done(_))
+        ));
+        let empty = docs.iter().find(|x| x.path == "empty.md").unwrap();
+        let open = f.docs.open(&empty.key).unwrap();
+        assert_eq!(open.hash, Some(hash("")));
+        assert!(matches!(
+            f.docs.delete(&empty.key, &hash(""), NOV_9 + 1),
+            Ok(Deleted::Done(_))
+        ));
     }
 
     #[test]

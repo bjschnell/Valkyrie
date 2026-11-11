@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CommentState, Doc, DocComment, DocVersion } from "../proto";
 import { body, countByQuote, grouped, onlyIn, resolver, validKey } from "../lib/docs";
 import { clock } from "../lib/chat";
@@ -24,14 +24,15 @@ const go = (hash: string) => {
   location.hash = hash;
 };
 
-/** q or Esc goes to `to`, when you aren't typing. */
-function useBack(to: string) {
+/** q or Esc goes to `to` (a hash, or a step back within the page), when you aren't typing. */
+function useBack(to: string | (() => void)) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === "q" || e.key === "Escape") {
         e.preventDefault();
-        go(to);
+        if (typeof to === "string") go(to);
+        else to();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -149,7 +150,9 @@ export function DocView({ docKey }: { docKey: string }) {
   const [comments, setComments] = useState<DocComment[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [mode, setMode] = useState<Mode>("read");
-  useBack(mode === "read" ? "#/docs" : `#/docs/${encodeURIComponent(docKey)}`);
+  // In the editor or history, back is the doc itself: the hash stays the same.
+  const toRead = useCallback(() => setMode("read"), []);
+  useBack(mode === "read" ? "#/docs" : toRead);
 
   useEffect(() => {
     if (status !== "open") return;
