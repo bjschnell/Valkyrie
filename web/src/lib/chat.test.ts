@@ -97,7 +97,7 @@ describe("markdown", () => {
       { t: "p", text: "It works:" },
       { t: "list", ordered: false, items: ["one", "two\ncontinued"] },
       { t: "code", lang: "rust", text: "fn main() {}" },
-      { t: "pre", text: "| a | b |\n|---|---|" },
+      { t: "table", head: ["a", "b"], align: [null, null], rows: [] },
       { t: "quote", text: "quoted" },
     ]);
   });
@@ -150,5 +150,50 @@ describe("markdown", () => {
       { t: "text", v: "." },
     ]);
     expect(parseInline("a * b * c")).toEqual([{ t: "text", v: "a * b * c" }]);
+  });
+});
+
+describe("markdown for docs", () => {
+  it("reads a table with its alignment, padding short rows", () => {
+    const md = ["| name | n | note |", "|:--|--:|:-:|", "| `a\\|b` | 1 | **x** |", "| c | 2 |"].join("\n");
+    expect(parseMarkdown(md)).toEqual([
+      {
+        t: "table",
+        head: ["name", "n", "note"],
+        align: ["left", "right", "center"],
+        rows: [
+          ["`a|b`", "1", "**x**"],
+          ["c", "2", ""],
+        ],
+      },
+    ]);
+  });
+
+  it("keeps pipe lines with no separator row as text", () => {
+    expect(parseMarkdown("| just | pipes |\n| more |")).toEqual([{ t: "pre", text: "| just | pipes |\n| more |" }]);
+  });
+
+  it("reads task boxes, and leaves a list without any alone", () => {
+    expect(parseMarkdown("- [x] done\n- [ ] todo\n- plain")).toEqual([
+      { t: "list", ordered: false, items: ["done", "todo", "plain"], checks: [true, false, null] },
+    ]);
+    expect(parseMarkdown("- [link](https://x.dev)")).toEqual([
+      { t: "list", ordered: false, items: ["[link](https://x.dev)"] },
+    ]);
+  });
+
+  it("reads wikilinks, with a label after the bar", () => {
+    expect(parseInline("see [[Docs plan]] and [[repos/valk/notes|the notes]]")).toEqual([
+      { t: "text", v: "see " },
+      { t: "wiki", v: "Docs plan", target: "Docs plan" },
+      { t: "text", v: " and " },
+      { t: "wiki", v: "the notes", target: "repos/valk/notes" },
+    ]);
+  });
+
+  it("opens only http(s) links; HTML and other schemes stay text", () => {
+    expect(parseInline("[x](javascript:alert(1))")).toEqual([{ t: "text", v: "x" }, { t: "text", v: ")" }]);
+    expect(parseInline("[x](data:text/html,hi)")).toEqual([{ t: "text", v: "x" }]);
+    expect(parseInline('<img src=x onerror="alert(1)">')).toEqual([{ t: "text", v: '<img src=x onerror="alert(1)">' }]);
   });
 });

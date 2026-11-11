@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Backlog, ItemEditor } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
+import { DocView, DocsList } from "./components/Docs";
 import { Inbox } from "./components/Inbox";
 import { Launcher } from "./components/Launcher";
 import { Outdated } from "./components/Outdated";
@@ -22,6 +23,8 @@ type Route =
   | { page: "settings" }
   | { page: "backlog" }
   | { page: "decisions" }
+  | { page: "docs" }
+  | { page: "doc"; key: string }
   | { page: "item"; id: number | null }
   | { page: "session"; id: number }
   | { page: "review"; id: number };
@@ -29,7 +32,8 @@ type Route =
 /**
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
- * writing an item down and changing item 3, `#/decisions` every active decision.
+ * writing an item down and changing item 3, `#/decisions` every active decision,
+ * `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
@@ -38,6 +42,10 @@ function route(): Route {
   if (location.hash === "#/settings") return { page: "settings" };
   if (location.hash === "#/backlog") return { page: "backlog" };
   if (location.hash === "#/decisions") return { page: "decisions" };
+  if (location.hash === "#/docs") return { page: "docs" };
+  const d = /^#\/docs\/([^/]+)$/.exec(location.hash);
+  // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
+  if (d) return { page: "doc", key: d[1] };
   const b = /^#\/backlog\/(new|\d+)$/.exec(location.hash);
   if (b) return { page: "item", id: b[1] === "new" ? null : Number(b[1]) };
   return { page: "inbox" };
@@ -146,6 +154,8 @@ export function App() {
       {at.page === "settings" && <Settings />}
       {at.page === "backlog" && <Backlog />}
       {at.page === "decisions" && <DecisionList />}
+      {at.page === "docs" && <DocsList />}
+      {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}
       {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}
       {at.page === "session" && <SessionView id={at.id} />}
       {at.page === "review" && <ReviewView id={at.id} />}

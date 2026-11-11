@@ -63,3 +63,8 @@ one says which agent, session, commit and backlog item it came from. Agents can
 edit any doc, yours too, but only from the version on disk: if you saved in
 between, their edit is refused and they fold your change in first. Every version
 an edit replaces is kept.
+
+The web app's **Docs** page (the page icon on the home screen) lists them, with a
+count of the ones an agent wrote since you last looked. It shows them read-only,
+with tables, task lists and `[[wikilinks]]` to other docs. It never writes to a
+file, so your own docs stay as you left them.

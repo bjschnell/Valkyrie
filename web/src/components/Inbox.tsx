@@ -8,10 +8,10 @@ import {
 } from "../proto";
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
-import { answer, answerAll, kill, takeStep, useApp } from "../store";
+import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
 import { hasRain, useLook } from "../lib/theme";
-import { Chevron, Gear, List, Pin, Plus } from "./icons";
+import { Chevron, Gear, List, Page, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyHint } from "./Notify";
@@ -30,6 +30,15 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
   const openItems = useApp(
     (s) => s.items.filter((i) => i.status === "open").length,
   );
+  // Docs agents wrote since you last looked: a count, never a card (ADR-0021 §5).
+  const unreadDocs = useApp((s) => s.unreadDocs);
+  const status = useApp((s) => s.status);
+  useEffect(() => {
+    if (status !== "open") return;
+    void refreshUnreadDocs();
+    const every = setInterval(() => void refreshUnreadDocs(), 60_000);
+    return () => clearInterval(every);
+  }, [status]);
   const look = useLook();
   const working = sessions.filter(
     (s) => s.exited === null && s.status.state === "working",
@@ -100,6 +109,15 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         >
           <List />
           {openItems > 0 && <span className="icon-badge">{openItems}</span>}
+        </button>
+        <button
+          className="icon-btn"
+          aria-label={unreadDocs > 0 ? `Docs, ${unreadDocs} unread` : "Docs"}
+          title="Docs"
+          onClick={() => (location.hash = "#/docs")}
+        >
+          <Page />
+          {unreadDocs > 0 && <span className="icon-badge">{unreadDocs}</span>}
         </button>
         <button
           className="icon-btn"

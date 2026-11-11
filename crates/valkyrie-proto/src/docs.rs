@@ -56,6 +56,15 @@ pub struct Doc {
     pub title: String,
     /// Relative to the docs folder.
     pub path: String,
+    /// What the web app opens it by (ADR-0021 §5): its `valk-id`, or for one of the
+    /// user's own docs with no id, a handle the daemon made from its path. Never a
+    /// path itself. Only in a list or a web read.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// An agent wrote or edited it since the user last opened the Docs list. Only
+    /// in a list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
     /// The agent that wrote it, or `human`.
     #[serde(default)]
     pub by: String,

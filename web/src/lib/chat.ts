@@ -145,14 +145,41 @@ export type MdBlock =
   | { t: "p"; text: string }
   | { t: "h"; level: number; text: string }
   | { t: "code"; lang: string; text: string }
-  /** Tables, kept as their text in a monospace block: readable, and scrolls sideways. */
+  /** A table: a header row, the `|---|:-:|` row under it, then its rows. Cells are inline markdown. */
+  | { t: "table"; head: string[]; align: Align[]; rows: string[][] }
+  /** Pipe lines that aren't a table (no separator row), kept as their text in a monospace block. */
   | { t: "pre"; text: string }
-  /** `start` is an ordered list's first number, so steps split by a heading still count on. */
-  | { t: "list"; ordered: boolean; items: string[]; start?: number }
+  /** `start` is an ordered list's first number, so steps split by a heading still count on.
+   * `checks`: a task list's boxes (`- [x] done`), null for an item without one; shown, never ticked. */
+  | { t: "list"; ordered: boolean; items: string[]; start?: number; checks?: (boolean | null)[] }
   | { t: "quote"; text: string }
   | { t: "hr" };
 
+export type Align = "left" | "center" | "right" | null;
+
 const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
+
+/** A table row's cells: `| a | b |` or `a | b`, with `\|` kept in a cell. */
+function cells(line: string): string[] {
+  let row = line.trim();
+  if (row.startsWith("|")) row = row.slice(1);
+  if (row.endsWith("|") && !row.endsWith("\\|")) row = row.slice(0, -1);
+  return row.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+}
+
+/** The `|---|:--:|` row under a table's header, as each column's alignment; null if it isn't one. */
+function separator(line: string | undefined): Align[] | null {
+  if (line === undefined || !line.includes("-")) return null;
+  const parts = cells(line);
+  if (!parts.every((c) => /^:?-+:?$/.test(c))) return null;
+  return parts.map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : null));
+}
+
+/** A task list item's box, and the text after it. */
+function task(item: string): [boolean | null, string] {
+  const m = /^\[([ xX])\]\s+(.*)$/s.exec(item);
+  return m ? [m[1] !== " ", m[2]] : [null, item];
+}
 
 /** A line that starts a block of its own, so it can't continue a list item. */
 function startsBlock(line: string): boolean {
@@ -203,7 +230,12 @@ export function parseMarkdown(src: string): MdBlock[] {
       const rows: string[] = [];
       for (; i < lines.length && lines[i].trimStart().startsWith("|"); i++) rows.push(lines[i].trim());
       i--;
-      out.push({ t: "pre", text: rows.join("\n") });
+      const align = separator(rows[1]);
+      if (align) {
+        const width = align.length;
+        const fit = (r: string[]) => Array.from({ length: width }, (_, k) => r[k] ?? "");
+        out.push({ t: "table", head: fit(cells(rows[0])), align, rows: rows.slice(2).map((r) => fit(cells(r))) });
+      } else out.push({ t: "pre", text: rows.join("\n") });
       continue;
     }
     const item = LIST_ITEM.exec(line);
@@ -237,7 +269,15 @@ export function parseMarkdown(src: string): MdBlock[] {
         } else break;
       }
       i--;
-      out.push(ordered ? { t: "list", ordered, items, start: parseInt(item[1], 10) } : { t: "list", ordered, items });
+      const list: MdBlock & { t: "list" } = ordered
+        ? { t: "list", ordered, items, start: parseInt(item[1], 10) }
+        : { t: "list", ordered, items };
+      const boxes = items.map(task);
+      if (boxes.some(([c]) => c !== null)) {
+        list.items = boxes.map(([, text]) => text);
+        list.checks = boxes.map(([c]) => c);
+      }
+      out.push(list);
       continue;
     }
     if (line.startsWith(">")) {
@@ -259,23 +299,26 @@ export type Inline =
   | { t: "code"; v: string }
   | { t: "b"; v: string }
   | { t: "i"; v: string }
-  | { t: "a"; v: string; href: string };
+  | { t: "a"; v: string; href: string }
+  /** `[[target]]` or `[[target|label]]`: a link to another doc, if one goes by that name. */
+  | { t: "wiki"; v: string; target: string };
 
-const INLINE = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\w*])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?![\w*])|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+const INLINE = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]|`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\w*])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?![\w*])|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
 
 export function parseInline(src: string): Inline[] {
   const out: Inline[] = [];
   let last = 0;
   for (const m of src.matchAll(INLINE)) {
     if (m.index > last) out.push({ t: "text", v: src.slice(last, m.index) });
-    if (m[1] !== undefined) out.push({ t: "code", v: m[1] });
-    else if (m[2] !== undefined) out.push({ t: "b", v: m[2] });
-    else if (m[3] !== undefined) out.push({ t: "i", v: m[3] });
-    else if (m[4] !== undefined) {
+    if (m[1] !== undefined) out.push({ t: "wiki", v: (m[2] ?? m[1]).trim(), target: m[1].trim() });
+    else if (m[3] !== undefined) out.push({ t: "code", v: m[3] });
+    else if (m[4] !== undefined) out.push({ t: "b", v: m[4] });
+    else if (m[5] !== undefined) out.push({ t: "i", v: m[5] });
+    else if (m[6] !== undefined) {
       // Only web links open; a file path stays text.
-      if (/^https?:\/\//.test(m[5])) out.push({ t: "a", v: m[4], href: m[5] });
-      else out.push({ t: "text", v: m[4] });
-    } else out.push({ t: "a", v: m[6], href: m[6] });
+      if (/^https?:\/\//i.test(m[7])) out.push({ t: "a", v: m[6], href: m[7] });
+      else out.push({ t: "text", v: m[6] });
+    } else out.push({ t: "a", v: m[8], href: m[8] });
     last = m.index + m[0].length;
   }
   if (last < src.length) out.push({ t: "text", v: src.slice(last) });
