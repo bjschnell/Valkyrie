@@ -2,6 +2,7 @@
 // `screen` pushes (the same full-then-diff updates the TUI applies), and turned
 // into lines to show, either as the grid or reflowed to the phone's width.
 
+import { WIDE, ZERO } from "./widths";
 import {
   BOLD,
   DIM,
@@ -46,23 +47,29 @@ export function apply(prev: Screen | null, update: ScreenUpdate): Screen {
   };
 }
 
-/** Terminal columns a character takes: 2 for wide CJK and most emoji. */
+/** Whether `cp` is in one of the ranges of `table` (pairs of first and last). */
+function within(table: readonly number[], cp: number): boolean {
+  let lo = 0;
+  let hi = table.length / 2 - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (cp < table[mid * 2]) hi = mid - 1;
+    else if (cp > table[mid * 2 + 1]) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
+/**
+ * Terminal columns a character takes, as the daemon's terminal counts them: 0
+ * for a mark on the character before it (a combining accent, the joiner in an
+ * emoji sequence, a variation selector), 2 for wide CJK and emoji, 1 otherwise.
+ */
 export function charWidth(cp: number): number {
-  if (cp < 0x1100) return 1;
-  if (
-    (cp >= 0x1100 && cp <= 0x115f) ||
-    (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
-    (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xfe30 && cp <= 0xfe4f) ||
-    (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0xffe0 && cp <= 0xffe6) ||
-    (cp >= 0x1f300 && cp <= 0x1f64f) ||
-    (cp >= 0x1f900 && cp <= 0x1f9ff) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
-  )
-    return 2;
-  return 1;
+  if (cp < 0xad) return 1;
+  if (cp > 0x3ffff) return cp >= 0xe0000 && cp <= 0xe0fff ? 0 : 1;
+  if (within(ZERO, cp)) return 0;
+  return within(WIDE, cp) ? 2 : 1;
 }
 
 export function textWidth(text: string): number {
