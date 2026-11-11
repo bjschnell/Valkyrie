@@ -522,6 +522,24 @@ mod tests {
         assert!(!at("file:///etc/passwd"));
     }
 
+    /// The updater plugin reads this at start, and an app without it doesn't start.
+    #[test]
+    fn the_updater_is_configured_as_the_plugin_reads_it() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(!updater.pubkey.is_empty());
+        assert_eq!(
+            updater
+                .endpoints
+                .iter()
+                .map(|u| u.as_str())
+                .collect::<Vec<_>>(),
+            ["https://github.com/bjschnell/Valkyrie/releases/latest/download/latest.json"]
+        );
+    }
+
     #[test]
     fn only_an_installed_mac_app_counts_as_one() {
         let at = |path: &str| in_app_bundle(std::path::Path::new(path));
