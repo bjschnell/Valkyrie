@@ -155,6 +155,13 @@ impl Registry {
         }
     }
 
+    /// The docs the user deleted that can still be put back.
+    pub(crate) fn deleted_docs(&self) -> Result<Reply> {
+        Ok(Reply::DeletedDocs {
+            docs: self.docs.lock().unwrap().deleted(),
+        })
+    }
+
     /// Puts a doc the user deleted back.
     pub(crate) fn undelete_doc(&self, token: &str, peer: Option<Peer>) -> Result<Reply> {
         self.vouch(peer, "putting back a deleted doc")?;

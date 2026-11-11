@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use valkyrie_proto::{Doc, DocKind, DocVersion, NewDoc};
+use valkyrie_proto::{DeletedDoc, Doc, DocKind, DocVersion, NewDoc};
 
 /// Longest title, in characters.
 const MAX_TITLE: usize = 120;
@@ -702,6 +702,30 @@ impl Docs {
         self.count = None;
         trim(&dir, "json", now);
         Ok(Deleted::Done(token))
+    }
+
+    /// The docs the user deleted that can still be put back, newest first
+    /// (`delete` keeps the last 50, for 30 days).
+    pub fn deleted(&self) -> Vec<DeletedDoc> {
+        stamped(&self.state.join("docs-trash"), "json")
+            .into_iter()
+            .filter_map(|(at, path)| {
+                let token = path.file_stem()?.to_str()?.to_owned();
+                let trashed: Trashed =
+                    serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+                let title = Front::parse(&trashed.text)
+                    .0
+                    .map(|f| f.title)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| Front::bare(Path::new(&trashed.path)).title);
+                Some(DeletedDoc {
+                    token,
+                    at,
+                    path: trashed.path,
+                    title,
+                })
+            })
+            .collect()
     }
 
     /// Puts a deleted doc back where it was, or beside it (`-2`) if a file has
@@ -1971,7 +1995,18 @@ mod tests {
         assert!(!path.exists());
         assert!(f.docs.list().unwrap().is_empty());
 
+        let gone = f.docs.deleted();
+        assert_eq!(gone.len(), 1);
+        assert_eq!(
+            (
+                gone[0].token.as_str(),
+                gone[0].path.as_str(),
+                gone[0].title.as_str()
+            ),
+            (token.as_str(), d.path.as_str(), "Plan")
+        );
         let back = f.docs.undelete(&token).unwrap();
+        assert!(f.docs.deleted().is_empty(), "put back, out of the list");
         assert_eq!(back.path, d.path);
         assert_eq!(back.key, key);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);

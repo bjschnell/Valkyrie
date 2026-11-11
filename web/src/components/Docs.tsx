@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CommentState, Doc, DocComment, DocVersion } from "../proto";
+import type { CommentState, DeletedDoc, Doc, DocComment, DocVersion } from "../proto";
 import { body, countByQuote, grouped, onlyIn, resolver, validKey } from "../lib/docs";
 import { clock } from "../lib/chat";
 import {
   allDocs,
   commentDoc,
   deleteDoc,
+  deletedDocs,
   docComments,
   docHistory,
   docsSeen,
@@ -54,6 +55,7 @@ export function DocsList() {
   const status = useApp((s) => s.status);
   const [docs, setDocs] = useState<Doc[] | null>(null);
   const [failed, setFailed] = useState(false);
+  const [gone, setGone] = useState<DeletedDoc[]>([]);
   useBack("#/");
 
   useEffect(() => {
@@ -67,6 +69,7 @@ export function DocsList() {
       setDocs(got.docs);
       docsSeen(got.at);
     });
+    void deletedDocs().then((ds) => live && setGone(ds));
     return () => {
       live = false;
     };
@@ -112,8 +115,52 @@ export function DocsList() {
             </div>
           </section>
         ))}
+        {gone.length > 0 && <Deleted gone={gone} />}
       </main>
     </div>
+  );
+}
+
+/**
+ * Docs you deleted here, kept for 30 days (the last 50), newest first: folded
+ * away, with Put back on each, so a missed Undo isn't the end of it.
+ */
+function Deleted({ gone }: { gone: DeletedDoc[] }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const putBack = async (d: DeletedDoc) => {
+    setBusy(d.token);
+    try {
+      const back = await undeleteDoc(d.token);
+      toast(back.path === d.path ? `Put back “${d.title}”.` : `Put back as ${back.path}: a file took its name.`);
+      go(`#/docs/${encodeURIComponent(back.key || "")}`);
+    } catch (e) {
+      toast(`Couldn't put it back: ${(e as Error).message}`);
+      setBusy(null);
+    }
+  };
+  return (
+    <details className="doc-deleted">
+      <summary className="section-title">
+        Recently deleted <span className="count">{gone.length}</span>
+      </summary>
+      <div className="list">
+        {gone.map((d) => (
+          <div key={d.token} className="doc-version">
+            <span className="row doc-version-row">
+              <span className="row-main">
+                <span className="row-name">{d.title || d.path}</span>
+                <span className="row-sub">
+                  {d.path} · deleted {when(d.at)}
+                </span>
+              </span>
+            </span>
+            <button className="ghost" disabled={busy !== null} onClick={() => void putBack(d)}>
+              Put back
+            </button>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 

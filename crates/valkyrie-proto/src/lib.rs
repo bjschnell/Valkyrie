@@ -28,13 +28,13 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
-pub use docs::{CommentState, Doc, DocComment, DocKind, DocVersion, NewDoc};
+pub use docs::{CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, NewDoc};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 35;
+pub const PROTOCOL: u32 = 36;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -697,6 +697,11 @@ pub enum ClientMsg {
         req: ReqId,
         token: String,
     },
+    /// Docs the user deleted that can still be put back, newest first
+    /// (protocol 36). Replies `DeletedDocs`.
+    DeletedDocs {
+        req: ReqId,
+    },
     /// Where docs go; with `root`, sets it first (the user only; `""` goes back
     /// to the default). Replies `Text` with the folder.
     DocsRoot {
@@ -847,6 +852,9 @@ pub enum Reply {
     /// A doc was deleted; `token` puts it back with `UndeleteDoc`.
     DocDeleted {
         token: String,
+    },
+    DeletedDocs {
+        docs: Vec<DeletedDoc>,
     },
     DocComments {
         comments: Vec<DocComment>,

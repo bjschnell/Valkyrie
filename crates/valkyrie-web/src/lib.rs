@@ -1173,6 +1173,7 @@ mod tests {
             req: 1,
             token: "1".into(),
         }));
+        assert!(allowed(&ClientMsg::DeletedDocs { req: 1 }));
     }
 
     #[test]

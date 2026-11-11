@@ -8,6 +8,7 @@ import { termColors } from "./lib/theme";
 import type {
   Decision,
   Doc,
+  DeletedDoc,
   DocComment,
   DocVersion,
   Item,
@@ -691,6 +692,17 @@ export async function deleteDoc(key: string, base: string): Promise<{ token: str
   if (reply.t === "doc_deleted") return { token: reply.token };
   if (reply.t === "doc_saved") return { conflict: reply.doc };
   throw new Error("unexpected reply");
+}
+
+/** Deleted docs that can still be put back, newest first; none when it can't be asked. */
+export async function deletedDocs(): Promise<DeletedDoc[]> {
+  try {
+    if (!conn) return [];
+    const reply = await conn.request({ t: "deleted_docs" });
+    return reply.t === "deleted_docs" ? reply.docs : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Puts a deleted doc back where it was. */
