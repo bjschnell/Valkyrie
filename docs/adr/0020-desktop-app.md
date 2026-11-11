@@ -118,6 +118,15 @@ Each phase is its own backlog item and PR.
    never fight over the binary the daemon runs. Uninstalling revokes the app's
    device.
 
+   Amended 2026-11-10 (phase 4, part 2): the shell's updater updates the
+   AppImage, the `.msi` and the macOS `.app`, asking before it installs; a
+   `.deb` is its package manager's. Uninstalling the `.msi` (a custom action)
+   or the `.deb` (its prerm, for each user with the app's data) runs `valk web
+   revoke "Desktop app"`. macOS and the AppImage have no uninstall step, so the
+   app also revokes its earlier device each time it pairs: the page asks only
+   when it holds no token, so an earlier "Desktop app" belongs to an install
+   that is gone.
+
 ## Consequences
 
 - One UI to design: every desktop improvement lands in the browser as well, and

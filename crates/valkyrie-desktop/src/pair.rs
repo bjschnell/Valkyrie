@@ -43,9 +43,23 @@ impl Pairing {
         let client = daemon(socket).await?;
         *asked = true;
         client.vouch(WHAT).await?;
-        let store = valkyrie_web::store()?;
-        Ok(Some(valkyrie_web::pairing_link(&store, url)?))
+        Ok(Some(fresh_link(&valkyrie_web::store()?, url)?))
     }
+}
+
+/// A pairing link for the window, once the app's earlier devices are gone.
+///
+/// The page asks to pair only when its storage has no token, so a "Desktop app"
+/// device already in the list belongs to an install that's gone or was reset:
+/// a reinstall on macOS, which has no uninstall hook, or an AppImage that was
+/// deleted. Its token may still sit in the old webview data, so it goes before
+/// the new one comes. There is one desktop app per user on a machine.
+fn fresh_link(store: &valkyrie_web::auth::Store, url: &str) -> Result<String> {
+    let gone = store.revoke(valkyrie_web::DESKTOP_DEVICE)?;
+    if gone > 0 {
+        tracing::info!(gone, "revoked the desktop app's earlier device");
+    }
+    valkyrie_web::pairing_link(store, url)
 }
 
 /// The daemon, once it has said it speaks this app's protocol.
@@ -81,5 +95,32 @@ mod tests {
             );
         }
         assert!(!*pairing.asked.lock().await);
+    }
+
+    #[test]
+    fn pairing_again_revokes_the_apps_earlier_device_only() {
+        let dir = std::env::temp_dir().join(format!("valk-desktop-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = valkyrie_web::auth::Store::open(&dir).unwrap();
+        let code = |link: String| link.split("#pair=").nth(1).unwrap().to_owned();
+        let url = "http://127.0.0.1:8790";
+        let old = store
+            .pair(
+                &code(fresh_link(&store, url).unwrap()),
+                valkyrie_web::DESKTOP_DEVICE,
+            )
+            .unwrap();
+        let phone = store.pair(&store.new_code().unwrap(), "iPhone").unwrap();
+
+        // A reinstalled app pairs again: the token in its old webview data dies.
+        let link = fresh_link(&store, url).unwrap();
+        assert!(link.starts_with("http://127.0.0.1:8790/#pair="));
+        assert!(store.check(&old).is_none());
+        assert!(store.check(&phone).is_some(), "other devices stay paired");
+        let new = store
+            .pair(&code(link), valkyrie_web::DESKTOP_DEVICE)
+            .unwrap();
+        assert!(store.check(&new).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -100,6 +100,15 @@ any error.
    run it by hand: `gh workflow run desktop.yml` builds them around the latest
    release's `valk` and uploads nothing.
 
+   The app's updater reads `latest.json` from the latest release. `desktop.yml`
+   writes it from the update files' signatures, signed with the
+   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets;
+   the public half is `plugins.updater.pubkey` in
+   `crates/valkyrie-desktop/tauri.conf.json`. Without the secrets the installers
+   still build, with no update. Losing the private key means no app update can
+   be signed again: every installed app would need a manual reinstall to take a
+   new key, so keep a copy somewhere safe.
+
 A tag is never moved or reused once it is published. A fix after a release is the
 next patch version.
 
