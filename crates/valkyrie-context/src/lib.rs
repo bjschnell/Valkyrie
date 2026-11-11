@@ -1188,16 +1188,87 @@ pub(crate) fn shown(text: &str, multiline: bool) -> String {
     }
 }
 
+/// Writes `text` to `path` through a temp file beside it and a rename. The temp
+/// file is made new (`O_EXCL`) under a name nobody can guess, so a symlink
+/// planted where it goes is never followed: in the docs folder, anything that can
+/// write there could otherwise aim the daemon's write at another file (#154).
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
-    Ok(())
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut attempt = 0;
+    let (tmp, mut file) = loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp-{}-{n}-{nanos:08x}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => {
+                attempt += 1;
+            }
+            Err(e) => return Err(e).with_context(|| format!("write {}", tmp.display())),
+        }
+    };
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("write {}", tmp.display()));
+    drop(file);
+    let renamed = written.and_then(|()| {
+        std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))
+    });
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_never_follows_a_planted_temp_symlink() {
+        let dir = std::env::temp_dir().join(format!("valk-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep me\n").unwrap();
+        let doc = dir.join("doc.md");
+        // The old temp name, and a spread of guesses at the new one's prefix.
+        std::os::unix::fs::symlink(
+            &victim,
+            doc.with_extension(format!("tmp-{}", std::process::id())),
+        )
+        .unwrap();
+        for n in 0..4 {
+            let _ = std::os::unix::fs::symlink(
+                &victim,
+                doc.with_extension(format!("tmp-{}-{n}", std::process::id())),
+            );
+        }
+        write_atomic(&doc, "new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n");
+        // No temp file is left behind.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.contains(".tmp-") && !e.file_type().unwrap().is_symlink()
+            })
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     struct Fixture {
         base: PathBuf,

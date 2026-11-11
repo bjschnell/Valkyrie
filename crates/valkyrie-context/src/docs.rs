@@ -736,6 +736,12 @@ impl Docs {
         std::fs::create_dir_all(&dir)?;
         inside(&root, &dir)?;
         let path = create_new(&dir, &stem.to_string_lossy(), &trashed.text)?;
+        // A folder swapped for a symlink since the check above would have put it
+        // outside the root (#154). O_EXCL means it overwrote nothing: take it back.
+        if inside(&root, &path).is_err() {
+            let _ = std::fs::remove_file(&path);
+            bail!("{} moved outside the docs folder", trashed.path);
+        }
         let _ = std::fs::remove_file(&file);
         self.count = None;
         let rel = slashed(path.strip_prefix(&root).unwrap_or(&path));
