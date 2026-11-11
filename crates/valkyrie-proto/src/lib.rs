@@ -28,13 +28,13 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
-pub use docs::{Doc, DocKind, NewDoc};
+pub use docs::{CommentState, Doc, DocComment, DocKind, NewDoc};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 33;
+pub const PROTOCOL: u32 = 34;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -635,6 +635,28 @@ pub enum ClientMsg {
         req: ReqId,
         at: u64,
     },
+    /// The comments on the doc with this `key` (ADR-0021 §6, protocol 34).
+    /// Replies `DocComments`.
+    DocComments {
+        req: ReqId,
+        key: String,
+    },
+    /// The user comments on a doc, on the block `quote` reads, or the whole doc
+    /// with none; the session that wrote it hears it at its next prompt. Only a
+    /// human comments. Replies `DocComments`.
+    CommentDoc {
+        req: ReqId,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quote: Option<String>,
+        text: String,
+    },
+    /// The user closes comment `comment` on a doc. Replies `DocComments`.
+    ResolveComment {
+        req: ReqId,
+        key: String,
+        comment: u32,
+    },
     /// Where docs go; with `root`, sets it first (the user only; `""` goes back
     /// to the default). Replies `Text` with the folder.
     DocsRoot {
@@ -768,6 +790,13 @@ pub enum Reply {
     },
     Doc {
         doc: Box<Doc>,
+    },
+    DocComments {
+        comments: Vec<DocComment>,
+        /// On a new comment: the running session it will be told to at its next
+        /// prompt; none when the session that wrote the doc is gone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
     },
     Docs {
         docs: Vec<Doc>,

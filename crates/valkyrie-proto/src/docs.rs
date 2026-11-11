@@ -88,3 +88,40 @@ pub struct Doc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
+
+/// Where a comment on a doc stands (ADR-0021 §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentState {
+    /// Not yet told to the session that wrote the doc: it's gone, or hasn't
+    /// prompted since.
+    #[default]
+    Open,
+    /// Told to that session at its prompt; waiting on it to edit the doc.
+    Sent,
+    /// That session edited the doc after it was told.
+    Answered,
+    /// The user closed it.
+    Resolved,
+}
+
+/// A comment the user left on a doc, or on one block of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocComment {
+    /// Its number within the doc, from 1.
+    pub id: u32,
+    /// When it was left, in seconds.
+    pub at: u64,
+    /// The block it's about, as it read then; none for the whole doc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub state: CommentState,
+    /// The session it was told to, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_to: Option<String>,
+    /// When it last changed state, in seconds.
+    #[serde(default)]
+    pub changed: u64,
+}

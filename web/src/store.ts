@@ -8,6 +8,7 @@ import { termColors } from "./lib/theme";
 import type {
   Decision,
   Doc,
+  DocComment,
   Item,
   ItemChange,
   ItemFacts,
@@ -621,6 +622,35 @@ export async function openDoc(key: string): Promise<Doc> {
   const reply = await conn.request({ t: "open_doc", key });
   if (reply.t !== "doc") throw new Error("unexpected reply");
   return reply.doc;
+}
+
+/** A doc's comments (ADR-0021 §6); none on one without a valk-id. Throws with the daemon's reason. */
+export async function docComments(key: string): Promise<DocComment[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "doc_comments", key });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return reply.comments;
+}
+
+/** Comments on a doc, or on the block `quote` reads. Returns them all, and the
+ * running session that hears it at its next prompt, if any. */
+export async function commentDoc(
+  key: string,
+  quote: string | null,
+  text: string,
+): Promise<{ comments: DocComment[]; to?: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "comment_doc", key, text, ...(quote ? { quote } : {}) });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return { comments: reply.comments, to: reply.to };
+}
+
+/** Closes a comment; returns the doc's comments. */
+export async function resolveComment(key: string, comment: number): Promise<DocComment[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "resolve_comment", key, comment });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return reply.comments;
 }
 
 /** The Docs list listed `at` is open: clear the Inbox's unread count. What came

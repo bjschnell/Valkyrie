@@ -701,6 +701,7 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// Docs (ADR-0021 §5): the web app reads with `OpenDoc`, by the key a list gave
 /// out, never by path, and writes nothing. `ReadDoc` takes a path and gives an
 /// id-less doc an id (a write into the user's file), so it's the CLI's only.
+/// Comments (§6) go through: they're the user's, kept beside the doc, not in it.
 /// Writing, editing and moving the folder wait for the web app's editor (#135).
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
@@ -1125,6 +1126,23 @@ mod tests {
         assert!(allowed(&ClientMsg::OpenDoc {
             req: 1,
             key: "3".into(),
+        }));
+        // Comments are the user's (ADR-0021 §6): the daemon checks the bridge is
+        // a human's, so they go through.
+        assert!(allowed(&ClientMsg::DocComments {
+            req: 1,
+            key: "3".into(),
+        }));
+        assert!(allowed(&ClientMsg::CommentDoc {
+            req: 1,
+            key: "3".into(),
+            quote: None,
+            text: "why?".into(),
+        }));
+        assert!(allowed(&ClientMsg::ResolveComment {
+            req: 1,
+            key: "3".into(),
+            comment: 1,
         }));
     }
 

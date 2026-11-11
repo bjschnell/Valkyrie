@@ -40,6 +40,9 @@ pub struct Activity {
     /// Pull requests merged in this repository since its last prompt, one line
     /// each, until its agent is told (backlog #121).
     merged: Vec<String>,
+    /// Comments the user left on docs this session wrote, as (doc, comment),
+    /// until its agent is told on its next prompt (ADR-0021 §6).
+    comments: Vec<(u32, u32)>,
 }
 
 impl Activity {
@@ -136,6 +139,18 @@ impl Activity {
     /// The merges to tell the agent of, once, oldest first.
     pub fn take_merged(&mut self) -> Vec<String> {
         std::mem::take(&mut self.merged)
+    }
+
+    /// Remembers to tell the agent of comment `comment` on its doc `doc`.
+    pub fn commented(&mut self, doc: u32, comment: u32) {
+        if !self.comments.contains(&(doc, comment)) {
+            self.comments.push((doc, comment));
+        }
+    }
+
+    /// The comments to tell the agent of, once, oldest first.
+    pub fn take_comments(&mut self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.comments)
     }
 
     /// The items to tell the agent the user accepted, once, oldest first.

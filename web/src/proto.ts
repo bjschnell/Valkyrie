@@ -112,6 +112,23 @@ export interface Doc {
   text?: string;
 }
 
+/** Where a comment on a doc stands (ADR-0021 §6). */
+export type CommentState = "open" | "sent" | "answered" | "resolved";
+
+/** A comment the user left on a doc, or on one block of it. */
+export interface DocComment {
+  id: number;
+  /** When it was left, in seconds. */
+  at: number;
+  /** The block it's about, as it read then, on one line; none for the whole doc. */
+  quote?: string;
+  text: string;
+  state: CommentState;
+  /** The session it was told to. */
+  sent_to?: string;
+  changed: number;
+}
+
 export type DecisionKind =
   "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
 export const DECISION_KINDS: DecisionKind[] = [
@@ -482,6 +499,12 @@ export type Request =
   | { t: "docs"; count_only?: boolean }
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
   | { t: "open_doc"; key: string }
+  /** A doc's comments; replies `doc_comments`. */
+  | { t: "doc_comments"; key: string }
+  /** The user comments on a doc, or the block `quote` reads; replies `doc_comments`. */
+  | { t: "comment_doc"; key: string; quote?: string; text: string }
+  /** The user closes a comment; replies `doc_comments`. */
+  | { t: "resolve_comment"; key: string; comment: number }
   /** The Docs list was opened: what agents wrote until now is read. */
   | { t: "docs_seen"; at: number }
   | { t: "add_item"; item: NewItem }
@@ -550,6 +573,8 @@ export type Reply =
   | { t: "decision"; decision: Decision }
   | { t: "decisions"; decisions: Decision[] }
   | { t: "doc"; doc: Doc }
+  /** `to`: on a new comment, the running session that hears it at its next prompt. */
+  | { t: "doc_comments"; comments: DocComment[]; to?: string }
   | { t: "docs"; docs: Doc[]; root: string; unread?: number; at?: number }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
