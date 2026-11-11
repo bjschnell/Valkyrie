@@ -46,7 +46,7 @@ tauri-plugin-opener = { version = "2", optional = true }
 serde_json = { workspace = true, optional = true }
 
 [build-dependencies]
-tauri-build = { version = "2.7", optional = true }
+tauri-build = { version = "2.7", optional = true , features = [] }
 
 [dev-dependencies]
 # Paused time, for the wait on a service that never answers.

@@ -2,3 +2,4 @@
 target/
 .claude/scheduled_tasks.lock
 crates/valkyrie-desktop/gen/
+crates/valkyrie-desktop/resources/

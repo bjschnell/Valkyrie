@@ -145,24 +145,11 @@ impl Valk {
     /// `install.sh` and `install.ps1` put it, else whatever `valk` the PATH has.
     /// An app started from a dock or a menu has a bare PATH, so that comes last.
     pub fn find() -> Self {
-        let name = format!("valk{}", std::env::consts::EXE_SUFFIX);
+        let name = crate::install::name();
         let beside = std::env::current_exe()
             .ok()
             .and_then(|exe| Some(exe.parent()?.join(&name)));
-        let home = std::env::var_os(if cfg!(windows) {
-            "LOCALAPPDATA"
-        } else {
-            "HOME"
-        })
-        .map(PathBuf::from)
-        .map(|home| {
-            if cfg!(windows) {
-                home.join("Programs").join("Valkyrie").join(&name)
-            } else {
-                home.join(".local").join("bin").join(&name)
-            }
-        });
-        let exe = [beside, home]
+        let exe = [beside, crate::install::home()]
             .into_iter()
             .flatten()
             .find(|path| path.is_file())

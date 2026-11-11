@@ -17,6 +17,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt as _;
 use tauri_plugin_opener::OpenerExt as _;
+use valkyrie_desktop::install;
 use valkyrie_desktop::pair::Pairing;
 use valkyrie_desktop::start::{self, Valk};
 use valkyrie_desktop::watch::{self, Event};
@@ -75,6 +76,7 @@ fn main() {
             // Finding `valk web`, or setting it up, can take a while: the tray is
             // there meanwhile, and the window comes when there is a page for it.
             tauri::async_runtime::spawn(async move {
+                bundled_valk(&app);
                 let valk = Valk::find();
                 tracing::info!(valk = %valk.exe.display(), "looking for valk web");
                 match start::ensure(&valk).await {
@@ -102,6 +104,21 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
         });
+}
+
+/// An installed app carries its release's `valk`. On a machine with none, it is
+/// put where the installers put it, and is an ordinary install from then on
+/// (`install`). An app run from source carries none, and this does nothing.
+fn bundled_valk(app: &AppHandle) {
+    let (Ok(resources), Some(home)) = (app.path().resource_dir(), install::home()) else {
+        return;
+    };
+    let bundled = resources.join("resources").join(install::name());
+    match install::place(&bundled, &home, install::on_path().as_deref()) {
+        Ok(true) => tracing::info!(valk = %home.display(), "installed the valk this app came with"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("couldn't install valk: {e:#}"),
+    }
 }
 
 /// `valk web` answers on `addr` and proved it's the user's: open the window on

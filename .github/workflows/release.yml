@@ -57,6 +57,16 @@ jobs:
       release: ${{ needs.release.outputs.tag }}
       ref: ${{ needs.release.outputs.tag }}
 
+  # The desktop app's installers, around the `valk` the build above uploaded. The
+  # release is published without waiting for them: they are added to it as they
+  # finish, and a failure here doesn't hold back `valk`.
+  desktop:
+    needs: [release, build]
+    uses: ./.github/workflows/desktop.yml
+    with:
+      release: ${{ needs.release.outputs.tag }}
+      ref: ${{ needs.release.outputs.tag }}
+
   installers:
     needs: [release, build]
     runs-on: ubuntu-latest

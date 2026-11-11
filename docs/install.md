@@ -285,18 +285,39 @@ app not open. Notifications need the HTTPS address, and `valk web` has to keep r
 them.
 
 
-## The desktop app (from source, for now)
+## The desktop app
 
 A native window around the web app, with a tray icon that counts the sessions
-that need you and notifications for them. There is no installer yet:
+that need you and notifications for them. Each release carries installers, from
+the first one after 0.4.0 on:
+
+| System | File on the release page |
+|---|---|
+| Debian, Ubuntu | `Valkyrie_<version>_amd64.deb` |
+| Any Linux (x86_64) | `Valkyrie_<version>_amd64.AppImage` |
+| macOS (Apple silicon) | `Valkyrie_<version>_aarch64.dmg` |
+| Windows (x64) | `Valkyrie_<version>_x64_en-US.msi` |
+
+The installers aren't signed for the operating system yet. On macOS, right-click
+the app and choose Open the first time. On Windows, choose More info, then Run
+anyway.
+
+You don't need `valk` installed first: the app carries the `valk` of its release
+and, on a machine with none, puts it where the install scripts do
+(`~/.local/bin/valk`, or `%LOCALAPPDATA%\Programs\Valkyrie\valk.exe`). It is
+then an ordinary install: `valk upgrade` updates it, and the app never replaces
+a `valk` that is already there. Add that directory to your PATH to use `valk` in
+a terminal too.
+
+On first launch the app finds your `valk web`, or sets one up for this machine
+only, and asks to pair: press Pair. Closing the window keeps it in the tray;
+Quit is in the tray's menu.
+
+From source it needs Rust 1.90 or newer and, on Linux, the WebKitGTK 4.1 and
+appindicator development packages (`webkit2gtk-4.1` and `libayatana-appindicator`
+on Arch; `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev` on Debian and
+Ubuntu):
 
 ```sh
 cargo run --release -p valkyrie-desktop --features window
 ```
-
-It needs `valk` installed, Rust 1.90 or newer, and on Linux the WebKitGTK 4.1 and
-appindicator development packages (`webkit2gtk-4.1` and `libayatana-appindicator`
-on Arch; `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev` on Debian and
-Ubuntu). On first launch it finds your `valk web`, or sets one up for this
-machine only, and asks to pair: press Pair. Closing the window keeps it in the
-tray; Quit is in the tray's menu.
