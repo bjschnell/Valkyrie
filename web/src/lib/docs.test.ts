@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Doc } from "../proto";
-import { body, countByQuote, grouped, groupOf, quoteOf, resolver, validKey } from "./docs";
+import { body, countByQuote, grouped, groupOf, onlyIn, quoteOf, resolver, validKey } from "./docs";
 
 const doc = (path: string, key: string, title = ""): Doc => ({
   id: /^\d+$/.test(key) ? Number(key) : 0,
@@ -78,5 +78,15 @@ describe("countByQuote", () => {
       ["A", 2],
       ["B", 1],
     ]);
+  });
+});
+
+describe("onlyIn", () => {
+  it("marks the lines the other version lacks, never blank ones", () => {
+    const mine = "# Plan\n\nShip Monday.\nThen rest.\n";
+    const theirs = "# Plan\n\nShip Friday.\nThen rest.\n";
+    expect([...onlyIn(mine, theirs)]).toEqual([2]);
+    expect([...onlyIn(theirs, mine)]).toEqual([2]);
+    expect([...onlyIn("a\n\n\n", "a")]).toEqual([]);
   });
 });

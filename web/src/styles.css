@@ -1207,6 +1207,23 @@ button.title-name {
   transform: translate(-50%, 0);
 }
 
+.toast.show.with-action {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toast-action {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
 @keyframes turn {
   to {
     transform: rotate(360deg);
@@ -3652,9 +3669,120 @@ button.as-text {
   }
 }
 
-.doc-comment-all {
+.doc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
   margin-left: auto;
+}
+
+.doc-actions .ghost {
   padding: 4px 10px;
+}
+
+.ghost.danger {
+  color: var(--blocked);
+}
+
+.ghost:disabled {
+  opacity: 0.5;
+}
+
+/* Light editing, history and delete (ADR-0021 §7). */
+.doc-editor,
+.doc-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-editor-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.doc-editor-tabs button {
+  padding: 5px 12px;
+  border-radius: 999px;
+  color: var(--soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.doc-editor-tabs button.on {
+  background: var(--raised);
+  color: var(--fg);
+}
+
+.doc-textarea {
+  width: 100%;
+  min-height: 55vh;
+  resize: vertical;
+  font: 13.5px/1.5 var(--mono);
+}
+
+.doc-preview {
+  min-height: 30vh;
+}
+
+.doc-editor-hint {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.doc-conflict-note {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--needs) 50%, transparent);
+  background: color-mix(in srgb, var(--needs) 8%, transparent);
+  font-size: 13px;
+}
+
+/* Side by side even on a phone, as asked: each side scrolls on its own. */
+.doc-sides {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.doc-side {
+  min-width: 0;
+}
+
+.doc-side-text {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.doc-line-new {
+  margin: 0 -10px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--needs) 14%, transparent);
+}
+
+.doc-version {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.doc-version-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-version-text {
+  flex-basis: 100%;
 }
 
 .doc-hint {

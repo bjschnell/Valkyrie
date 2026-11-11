@@ -7,8 +7,34 @@ use crate::session::Session;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use valkyrie_context::docs::{Author, Origin};
+use valkyrie_context::docs::{Author, Deleted, Origin, Saved};
 use valkyrie_proto::{NewDoc, Reply};
+
+/// The user, writing from the web app. Vouched for, so not an agent; and not
+/// the session `valk web` happens to run in, which would claim the edit.
+fn you() -> Author {
+    Author {
+        by: "human".into(),
+        ..Author::default()
+    }
+}
+
+/// A save's reply, logged when it wrote.
+fn saved_reply(saved: Saved, what: &str) -> Reply {
+    match saved {
+        Saved::Done(doc) => {
+            tracing::info!(id = doc.id, path = doc.path, "{what}");
+            Reply::DocSaved {
+                doc: Box::new(doc),
+                conflict: false,
+            }
+        }
+        Saved::Conflict(doc) => Reply::DocSaved {
+            doc: Box::new(doc),
+            conflict: true,
+        },
+    }
+}
 
 impl Registry {
     /// Who is writing, from the connecting process: never from what it claims.
@@ -66,6 +92,74 @@ impl Registry {
                 Err(e) => tracing::warn!(id, "doc comments: {e:#}"),
             }
         }
+        Ok(Reply::Doc { doc: Box::new(doc) })
+    }
+
+    /// The user's save from the web app's editor (ADR-0021 §7). Only a human
+    /// saves this way; agents edit by id with a base hash (`edit_doc`).
+    pub(crate) fn save_doc(
+        &self,
+        key: &str,
+        base: &str,
+        body: &str,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        self.vouch(peer, "saving a doc from the web app")?;
+        let author = you();
+        let saved = self
+            .docs
+            .lock()
+            .unwrap()
+            .save_body(key, base, body, &author, now_secs())?;
+        Ok(saved_reply(saved, "doc saved"))
+    }
+
+    /// A doc's past versions, and one's text when asked.
+    pub(crate) fn doc_history(&self, key: &str, version: Option<&str>) -> Result<Reply> {
+        let mut docs = self.docs.lock().unwrap();
+        let versions = docs.versions(key)?;
+        let text = version.map(|v| docs.version_text(key, v)).transpose()?;
+        Ok(Reply::DocHistory { versions, text })
+    }
+
+    /// The user puts a past version back.
+    pub(crate) fn restore_doc(
+        &self,
+        key: &str,
+        base: &str,
+        version: &str,
+        peer: Option<Peer>,
+    ) -> Result<Reply> {
+        self.vouch(peer, "restoring a doc")?;
+        let author = you();
+        let saved = self
+            .docs
+            .lock()
+            .unwrap()
+            .restore(key, base, version, &author, now_secs())?;
+        Ok(saved_reply(saved, "doc restored"))
+    }
+
+    /// The user deletes a doc; the daemon never does on its own (ADR-0021 §4).
+    pub(crate) fn delete_doc(&self, key: &str, base: &str, peer: Option<Peer>) -> Result<Reply> {
+        self.vouch(peer, "deleting a doc")?;
+        match self.docs.lock().unwrap().delete(key, base, now_secs())? {
+            Deleted::Done(token) => {
+                tracing::info!(key, token, "doc deleted");
+                Ok(Reply::DocDeleted { token })
+            }
+            Deleted::Conflict(doc) => Ok(Reply::DocSaved {
+                doc,
+                conflict: true,
+            }),
+        }
+    }
+
+    /// Puts a doc the user deleted back.
+    pub(crate) fn undelete_doc(&self, token: &str, peer: Option<Peer>) -> Result<Reply> {
+        self.vouch(peer, "putting back a deleted doc")?;
+        let doc = self.docs.lock().unwrap().undelete(token)?;
+        tracing::info!(token, path = doc.path, "doc put back");
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
@@ -434,6 +528,98 @@ mod tests {
         AS_CALLER.with(|c| *c.borrow_mut() = None);
         author.kill();
         // On Windows a killed session can still hold its files a moment (#113).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_user_saves_restores_and_deletes_from_the_web_app() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-doc-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        as_caller(Some("claude"), None);
+        let new = NewDoc {
+            cwd: dir.clone(),
+            title: "Notes".into(),
+            kind: DocKind::Note,
+            global: true,
+            body: "first\n".into(),
+        };
+        let Reply::Doc { doc } = registry.write_doc(new, None).unwrap() else {
+            panic!("no doc");
+        };
+        let (key, base) = (doc.id.to_string(), doc.hash.clone().unwrap());
+        for refused in [
+            registry.save_doc(&key, &base, "agent\n", None),
+            registry.restore_doc(&key, &base, "1", None),
+            registry.delete_doc(&key, &base, None),
+            registry.undelete_doc("1", None),
+        ] {
+            assert!(
+                refused.is_err_and(|e| e.to_string().contains("is for the user")),
+                "an agent got through"
+            );
+        }
+
+        as_caller(None, None);
+        let Reply::DocSaved { doc, conflict } =
+            registry.save_doc(&key, &base, "mine\n", None).unwrap()
+        else {
+            panic!("no save");
+        };
+        assert!(!conflict);
+        assert!(
+            doc.edited.iter().any(|e| e.starts_with("human, ")),
+            "{:?}",
+            doc.edited
+        );
+        // The stale hash is now a conflict, with what's on disk.
+        let Reply::DocSaved { doc: now, conflict } =
+            registry.save_doc(&key, &base, "again\n", None).unwrap()
+        else {
+            panic!("no save");
+        };
+        assert!(conflict);
+        assert_eq!(now.hash, doc.hash);
+
+        let Reply::DocHistory { versions, text } = registry.doc_history(&key, None).unwrap() else {
+            panic!("no history");
+        };
+        assert_eq!(versions.len(), 1);
+        assert!(text.is_none());
+        let Reply::DocSaved { doc, conflict } = registry
+            .restore_doc(
+                &key,
+                doc.hash.as_deref().unwrap(),
+                &versions[0].version,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("no restore");
+        };
+        assert!(!conflict);
+        assert!(doc.text.unwrap().ends_with("first\n"));
+
+        let Reply::DocDeleted { token } = registry
+            .delete_doc(&key, doc.hash.as_deref().unwrap(), None)
+            .unwrap()
+        else {
+            panic!("no delete");
+        };
+        let Reply::Doc { doc: back } = registry.undelete_doc(&token, None).unwrap() else {
+            panic!("not put back");
+        };
+        assert_eq!(back.key, key);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

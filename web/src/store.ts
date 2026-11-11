@@ -9,6 +9,7 @@ import type {
   Decision,
   Doc,
   DocComment,
+  DocVersion,
   Item,
   ItemChange,
   ItemFacts,
@@ -94,7 +95,8 @@ interface State {
   chat: Chat | null;
   /** Choices on the screens of queued sessions, by session, for the inbox. */
   prompts: Record<SessionId, Prompt>;
-  toast: { text: string; at: number } | null;
+  /** `action`: a button on it, such as Undo; the toast stays longer. */
+  toast: { text: string; at: number; action?: { label: string; run: () => void } } | null;
   now: number;
   push: PushState;
   /** Turning notifications on: the browser's push service can take a while. */
@@ -133,8 +135,8 @@ const get = useApp.getState;
 let conn: Conn | null = null;
 let listTimer: number | null = null;
 
-export function toast(text: string): void {
-  set({ toast: { text, at: Date.now() } });
+export function toast(text: string, action?: { label: string; run: () => void }): void {
+  set({ toast: { text, at: Date.now(), action } });
 }
 
 export function saveToken(token: string): void {
@@ -651,6 +653,52 @@ export async function resolveComment(key: string, comment: number): Promise<DocC
   const reply = await conn.request({ t: "resolve_comment", key, comment });
   if (reply.t !== "doc_comments") throw new Error("unexpected reply");
   return reply.comments;
+}
+
+/** A save or restore: the doc as written, or with `conflict`, as it is on disk now. */
+export type Saved = { doc: Doc; conflict: boolean };
+
+/** The user's save from the editor (ADR-0021 §7), over the version whose hash
+ * `base` is. Throws with the daemon's reason. */
+export async function saveDoc(key: string, base: string, body: string): Promise<Saved> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "save_doc", key, base, body });
+  if (reply.t !== "doc_saved") throw new Error("unexpected reply");
+  return { doc: reply.doc, conflict: !!reply.conflict };
+}
+
+/** A doc's past versions, newest first, and one's whole text when asked. */
+export async function docHistory(key: string, version?: string): Promise<{ versions: DocVersion[]; text?: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "doc_history", key, ...(version ? { version } : {}) });
+  if (reply.t !== "doc_history") throw new Error("unexpected reply");
+  return { versions: reply.versions, text: reply.text };
+}
+
+/** Puts a past version back over the version whose hash `base` is. */
+export async function restoreDoc(key: string, base: string, version: string): Promise<Saved> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "restore_doc", key, base, version });
+  if (reply.t !== "doc_saved") throw new Error("unexpected reply");
+  return { doc: reply.doc, conflict: !!reply.conflict };
+}
+
+/** Deletes a doc if `base` is still on disk: the token that puts it back, or
+ * the doc as it is now if someone saved since. */
+export async function deleteDoc(key: string, base: string): Promise<{ token: string } | { conflict: Doc }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "delete_doc", key, base });
+  if (reply.t === "doc_deleted") return { token: reply.token };
+  if (reply.t === "doc_saved") return { conflict: reply.doc };
+  throw new Error("unexpected reply");
+}
+
+/** Puts a deleted doc back where it was. */
+export async function undeleteDoc(token: string): Promise<Doc> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "undelete_doc", token });
+  if (reply.t !== "doc") throw new Error("unexpected reply");
+  return reply.doc;
 }
 
 /** The Docs list listed `at` is open: clear the Inbox's unread count. What came

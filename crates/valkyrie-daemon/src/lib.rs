@@ -1392,6 +1392,25 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::ResolveComment { req, key, comment } => {
                 (req, registry.resolve_comment(&key, comment, peer))
             }
+            ClientMsg::SaveDoc {
+                req,
+                key,
+                base,
+                body,
+            } => (req, registry.save_doc(&key, &base, &body, peer)),
+            ClientMsg::DocHistory { req, key, version } => {
+                (req, registry.doc_history(&key, version.as_deref()))
+            }
+            ClientMsg::RestoreDoc {
+                req,
+                key,
+                base,
+                version,
+            } => (req, registry.restore_doc(&key, &base, &version, peer)),
+            ClientMsg::DeleteDoc { req, key, base } => {
+                (req, registry.delete_doc(&key, &base, peer))
+            }
+            ClientMsg::UndeleteDoc { req, token } => (req, registry.undelete_doc(&token, peer)),
             ClientMsg::DocsSeen { req, at } => (req, registry.docs_seen(at, peer)),
             ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (
