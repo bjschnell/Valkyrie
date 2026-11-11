@@ -1379,6 +1379,7 @@ mod tests {
                         agent: agent.clone(),
                         session: None,
                         bridge: false,
+                        desktop: false,
                     }))
                 });
             };
@@ -1563,6 +1564,7 @@ mod tests {
                     agent: Some("claude".into()),
                     session: Some(Arc::clone(&s2)),
                     bridge: false,
+                    desktop: false,
                 }
             }))
         });
@@ -1651,6 +1653,7 @@ mod tests {
                 agent: None,
                 session: None,
                 bridge: false,
+                desktop: false,
             }))
         });
         let accept = || ItemChange::Status {

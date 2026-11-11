@@ -36,6 +36,10 @@ pub(crate) struct Caller {
     pub(crate) session: Option<Arc<Session>>,
     /// A human only as the `valk web` bridge: for its paired devices, not itself.
     pub(crate) bridge: bool,
+    /// The desktop app, started from a dock or a menu: no terminal, and no agent
+    /// above it. Not a human for anything but pairing its own window, which it
+    /// asks for only once someone has pressed Pair in it (ADR-0020 §5).
+    pub(crate) desktop: bool,
 }
 
 impl Caller {
@@ -47,11 +51,31 @@ impl Caller {
         Ok(())
     }
 
+    /// Refuses `what` unless a person is at this very process: at its terminal,
+    /// or at the desktop app's window.
+    pub(crate) fn vouch_in_person(&self, what: &str) -> Result<()> {
+        // The desktop app has no terminal to be at. It asks only after someone
+        // pressed Pair in its window, and an agent above it was ruled out when
+        // the caller was worked out. For its own pairing and nothing else: a
+        // `valk web pair` run under the app's name gets no code this way.
+        if self.desktop && what == valkyrie_proto::VOUCH_DESKTOP_PAIRING {
+            return Ok(());
+        }
+        if let Some(agent) = &self.agent {
+            bail!("{what} is for the user, not {agent}: run it from your own terminal");
+        }
+        if self.bridge {
+            bail!("{what} is for the user, not a detached process: run it from your own terminal");
+        }
+        Ok(())
+    }
+
     fn agent(name: &str) -> Caller {
         Caller {
             agent: Some(name.into()),
             session: None,
             bridge: false,
+            desktop: false,
         }
     }
 }
@@ -133,6 +157,7 @@ impl Registry {
             session = sessions.iter().find(|s| s.tty() == Some(tty)).cloned();
         }
         let mut bridge = false;
+        let mut desktop = false;
         let agent = match &session {
             Some(s) => seen_agent.or_else(|| s.agent_behind()),
             None if seen_agent.is_some() => seen_agent,
@@ -142,6 +167,10 @@ impl Registry {
                 bridge = true;
                 None
             }
+            None if foreground::is_desktop_app(peer.pid) => {
+                desktop = true;
+                Some("the desktop app".into())
+            }
             // No terminal and no session: daemonized, so whoever started it is unknown.
             None => Some("detached".into()),
         };
@@ -149,6 +178,7 @@ impl Registry {
             agent,
             session,
             bridge,
+            desktop,
         }
     }
 
@@ -226,14 +256,7 @@ impl Registry {
     /// itself: one started detached (`setsid valk web`) has no terminal and no
     /// agent above it, yet anyone may have started it.
     pub(crate) fn vouch_in_person(&self, peer: Option<Peer>, what: &str) -> Result<()> {
-        let caller = self.caller(peer);
-        if let Some(agent) = caller.agent {
-            bail!("{what} is for the user, not {agent}: run it from your own terminal");
-        }
-        if caller.bridge {
-            bail!("{what} is for the user, not a detached process: run it from your own terminal");
-        }
-        Ok(())
+        self.caller(peer).vouch_in_person(what)
     }
 
     pub(crate) fn review(
@@ -526,6 +549,45 @@ mod tests {
             withhold(&mut d);
             assert_eq!(d.body, "1. run it");
             assert_eq!(d.status, DecisionStatus::parse(status).unwrap());
+        }
+    }
+
+    fn caller(agent: Option<&str>, bridge: bool, desktop: bool) -> Caller {
+        Caller {
+            agent: agent.map(str::to_owned),
+            session: None,
+            bridge,
+            desktop,
+        }
+    }
+
+    /// A pairing code goes to a person at the process that asked: at its
+    /// terminal, or at the desktop app's window, and to nothing else.
+    #[test]
+    fn a_pairing_is_vouched_for_at_a_terminal_or_the_desktop_apps_window() {
+        let what = valkyrie_proto::VOUCH_DESKTOP_PAIRING;
+        assert!(caller(None, false, false).vouch_in_person(what).is_ok());
+        // The app from a dock: no terminal, but someone pressed Pair in it.
+        let app = caller(Some("the desktop app"), false, true);
+        assert!(app.vouch_in_person(what).is_ok());
+        // Its own pairing only: not a phone's, not a browser's, not the setup's.
+        for other in [
+            "pairing a phone",
+            "pairing this browser",
+            "setting up the web app",
+        ] {
+            let refused = app.vouch_in_person(other).unwrap_err().to_string();
+            assert!(refused.contains("not the desktop app"), "{refused}");
+        }
+        // And it is no human for anything else: decisions stay the user's.
+        let refused = app.vouch("reviewing decisions").unwrap_err().to_string();
+        assert!(refused.contains("not the desktop app"), "{refused}");
+        for other in [
+            caller(Some("claude"), false, false),
+            caller(Some("detached"), false, false),
+            caller(None, true, false),
+        ] {
+            assert!(other.vouch_in_person(what).is_err());
         }
     }
 }

@@ -283,3 +283,20 @@ Settings (the gear) in the app and turn notifications on. You'll get one when an
 finishes or stops while you're away: no typing at any session for 90 seconds, and the
 app not open. Notifications need the HTTPS address, and `valk web` has to keep running to send
 them.
+
+
+## The desktop app (from source, for now)
+
+A native window around the web app, with a tray icon that counts the sessions
+that need you and notifications for them. There is no installer yet:
+
+```sh
+cargo run --release -p valkyrie-desktop --features window
+```
+
+It needs `valk` installed, Rust 1.90 or newer, and on Linux the WebKitGTK 4.1 and
+appindicator development packages (`webkit2gtk-4.1` and `libayatana-appindicator`
+on Arch; `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev` on Debian and
+Ubuntu). On first launch it finds your `valk web`, or sets one up for this
+machine only, and asks to pair: press Pair. Closing the window keeps it in the
+tray; Quit is in the tray's menu.

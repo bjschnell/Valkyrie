@@ -62,12 +62,29 @@ not.
    port first: it writes a random nonce to a file only the user can read and asks
    the server to prove it read it. A process that can read that file can already
    write `devices.json`.
-5. **It pairs like `valk web open`, vouched.** Pairing goes through the daemon's
-   `vouch` first, exactly as `valk web open` does ("pairing the desktop app"), so
-   an agent that starts the app gets no paired device. Only then does the shell
-   mint a link with `valkyrie_web::pairing_link` and load it in its webview. It
-   mints on first launch, or when the page reports it isn't paired, at most once
-   per launch, so a page can't pull codes on demand. The token then persists in
+5. **It pairs like `valk web open`, vouched, after someone presses Pair.**
+   Pairing goes through the daemon's `vouch` first ("pairing the desktop app"),
+   so an agent that starts the app gets no paired device. Only then does the
+   shell mint a link with `valkyrie_web::pairing_link` and load it in its
+   webview. It asks when the page reports it isn't paired, at most once per
+   launch, so a page can't pull codes on demand.
+
+   Amended 2026-11-10: `valk web open` is vouched for because it runs at a
+   terminal of its own, and an app started from a dock or a menu has none, so
+   the daemon refused it as detached. The human step is now in the window: the
+   shell shows a native dialog, "Pair this app with Valkyrie on this computer?",
+   and asks the daemon only once Pair is pressed. The daemon vouches for the
+   desktop app by name (as it knows the `valk web` bridge by its command line)
+   when it has no terminal and no agent above it, and only for "pairing the
+   desktop app": a phone's or a browser's pairing code is still for a terminal.
+
+   What this guards: an agent that starts the app, as agents that mean no harm
+   do, is refused by the agent above it, and the app it started shows a dialog
+   it can't press. It is not a boundary against a process that sets out to get
+   round it. The name can be taken by any program, and such a program, running
+   as the user, could write `devices.json` or put itself on a terminal of its
+   own as easily. The dialog is the human step for the real app; the daemon's
+   check keeps honest launchers honest. The token then persists in
    the webview's storage, and the app shows in `valk web devices` as one device
    that `valk web revoke` can remove. No new token kind.
 6. **Native only where the web can't reach.** The shell owns the window, a tray
