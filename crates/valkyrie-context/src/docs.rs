@@ -217,6 +217,7 @@ impl Docs {
             repo: repo.as_ref().map(|r| r.display().to_string()),
             edited: Vec::new(),
             rest: Vec::new(),
+            kind_kept: false,
         };
         let text = front.render(&body);
         let stem = format!("{}-{}", &rfc3339(now)[..10], slug(&title));
@@ -898,6 +899,9 @@ struct Front {
     edited: Vec<String>,
     /// Lines Valkyrie doesn't know (the user's own properties), kept as they were.
     rest: Vec<String>,
+    /// The file's own `kind` line didn't name a kind valk knows: it's kept in
+    /// `rest` as written, and valk writes none of its own (#155).
+    kind_kept: bool,
 }
 
 impl Front {
@@ -935,7 +939,9 @@ impl Front {
         let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
         let mut out = String::from("---\n");
         out += &format!("valk-id: {}\n", self.id);
-        out += &format!("kind: {}\n", self.kind.as_str());
+        if !self.kind_kept {
+            out += &format!("kind: {}\n", self.kind.as_str());
+        }
         out += &format!("title: {}\n", q(&self.title));
         if !self.created.is_empty() {
             out += &format!("created: {}\n", self.created);
@@ -1005,7 +1011,14 @@ impl Front {
             let opt = |v: &str| Some(unq(v)).filter(|v| !v.is_empty());
             match key.trim() {
                 "valk-id" => front.id = value.trim().parse().unwrap_or(0),
-                "kind" => front.kind = DocKind::parse(&unq(value)).unwrap_or_default(),
+                // A value valk can't read stays as the user wrote it (#155).
+                "kind" => match DocKind::parse(&unq(value)) {
+                    Some(kind) => front.kind = kind,
+                    None => {
+                        front.kind_kept = true;
+                        front.rest.push(line.to_owned());
+                    }
+                },
                 "title" => front.title = unq(value),
                 "created" => front.created = unq(value),
                 "by" => front.by = unq(value),
@@ -1013,8 +1026,17 @@ impl Front {
                 "conversation" => front.conversation = opt(value),
                 "commit" => front.commit = opt(value),
                 "repo" => front.repo = opt(value),
-                "item" => front.item = value.trim().parse().ok(),
-                "edited" => in_edited = true,
+                "item" => match value.trim().parse() {
+                    Ok(item) => front.item = Some(item),
+                    Err(_) => front.rest.push(line.to_owned()),
+                },
+                // A one-line `edited: …` is its first entry, not lost.
+                "edited" => {
+                    in_edited = true;
+                    if !value.trim().is_empty() {
+                        front.edited.push(unq(value));
+                    }
+                }
                 _ => front.rest.push(line.to_owned()),
             }
         }
@@ -2017,6 +2039,26 @@ mod tests {
         assert!(text.starts_with("---\nvalk-id: 1\nkind: note\ntitle: \"notes\"\nby: \"human\"\ntags: [homelab]\n---\n\nmy notes\n"), "{text}");
         let b = f.docs.read("bare.md").unwrap();
         assert_eq!((b.id, b.title.as_str()), (2, "bare"));
+
+        // Values valk can't read in its own keys stay as written (#155), and the
+        // file keeps one `kind` line.
+        std::fs::write(
+            root.join("odd.md"),
+            "---\nkind: idea\nitem: later\nedited: 2026-01-01 by me\n---\nhm\n",
+        )
+        .unwrap();
+        let o = f.docs.read("odd.md").unwrap();
+        let text = o.text.unwrap();
+        assert!(text.contains("kind: idea\n"), "{text}");
+        assert_eq!(text.matches("kind:").count(), 1, "{text}");
+        assert!(text.contains("item: later\n"), "{text}");
+        assert!(
+            text.contains("edited:\n  - \"2026-01-01 by me\"\n"),
+            "{text}"
+        );
+        // And they stay through a second render.
+        let again = f.docs.read("#3").unwrap().text.unwrap();
+        assert_eq!(again, text);
         assert!(b.text.unwrap().ends_with("---\n\njust text\n"));
         // By id from now on.
         assert_eq!(f.docs.read("#1").unwrap().path, "notes.md");
