@@ -1,6 +1,6 @@
 # ADR-0022: Valkyrie is the harness over the agents, not an editor or an agent manager
 
-Status: proposed (2026-11-10)
+Status: accepted (2026-11-11), the direction decision #62 records
 Date: 2026-11-10
 
 ## Context

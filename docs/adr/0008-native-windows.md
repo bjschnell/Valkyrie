@@ -1,5 +1,7 @@
 # ADR-0008: Native Windows support
 
+Status: accepted (2026-10-09), shipped with it in f54d134
+
 ## Decision
 
 Windows x64 uses the same protocol and terminal engine as Linux and macOS, with
