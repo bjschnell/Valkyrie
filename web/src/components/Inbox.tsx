@@ -11,7 +11,7 @@ import { age } from "../lib/time";
 import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
 import { hasRain, useLook } from "../lib/theme";
-import { Chevron, Gear, List, Page, Pin, Plus } from "./icons";
+import { Chevron, Clock, Gear, List, Page, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyHint } from "./Notify";
@@ -74,6 +74,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         n: () => (location.hash = "#/new"),
         b: () => (location.hash = "#/backlog"),
         d: () => (location.hash = "#/decisions"),
+        a: () => (location.hash = "#/digest"),
         ",": () => (location.hash = "#/settings"),
         j: () => pick(sel + 1),
         k: () => pick(sel - 1),
@@ -118,6 +119,14 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         >
           <Page />
           {unreadDocs > 0 && <span className="icon-badge">{unreadDocs}</span>}
+        </button>
+        <button
+          className="icon-btn"
+          aria-label="Away digest"
+          title="While you were gone"
+          onClick={() => (location.hash = "#/digest")}
+        >
+          <Clock />
         </button>
         <button
           className="icon-btn"

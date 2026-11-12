@@ -254,7 +254,9 @@ pub fn item_for<'a>(run: &Run, items: &'a [Item]) -> Option<&'a Item> {
 /// `#123` for a pull request URL, else the URL.
 pub fn pr_label(url: &str) -> String {
     match url.rsplit_once("/pull/") {
-        Some((_, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => format!("PR #{n}"),
+        Some((_, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            format!("PR #{n}")
+        }
         _ => format!("PR {url}"),
     }
 }
@@ -301,7 +303,10 @@ pub fn classify(
         match run.state.as_deref() {
             Some("working") => return (Outcome::Working, "working".into()),
             Some("needs_input") => {
-                return (Outcome::Stuck, format!("needs you: {}", said("waiting on you")));
+                return (
+                    Outcome::Stuck,
+                    format!("needs you: {}", said("waiting on you")),
+                );
             }
             Some("blocked") => {
                 let why = run.flag.clone().unwrap_or_else(|| said("blocked"));
@@ -313,7 +318,9 @@ pub fn classify(
         }
     }
     if run.work.as_deref() == Some("pr-red") {
-        let on = pr.map(|p| format!(" on {}", pr_label(p))).unwrap_or_default();
+        let on = pr
+            .map(|p| format!(" on {}", pr_label(p)))
+            .unwrap_or_default();
         return (Outcome::Stuck, format!("CI red{on}"));
     }
     if let Some(pr) = pr {
@@ -337,7 +344,10 @@ pub fn classify(
             return (Outcome::Abandoned, format!("ended with {short}"));
         }
         if idle >= ABANDONED_MS {
-            return (Outcome::Abandoned, format!("idle {} with {short}", span(idle)));
+            return (
+                Outcome::Abandoned,
+                format!("idle {} with {short}", span(idle)),
+            );
         }
         return (Outcome::Stuck, format!("stopped with {short}"));
     }
@@ -362,8 +372,10 @@ pub fn repo_name(cwd: Option<&Path>, roots: &[PathBuf]) -> String {
         return "unknown".into();
     };
     let name = |p: &Path| {
-        p.file_name()
-            .map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
+        p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
     };
     if cwd.exists() {
         return name(&project::root(cwd));
@@ -639,7 +651,8 @@ mod tests {
     }
 
     fn tempdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("valkyrie-digest-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("valkyrie-digest-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -670,7 +683,12 @@ mod tests {
                 hook(NOON - 5 * H, "/r/app", "UserPromptSubmit", Some("old ask")),
                 json!({"k": "work", "t": NOON - 4 * H, "off": 0, "state": "clean", "branch": "feat/x", "pr": "https://github.com/o/r/pull/12"}),
                 json!({"k": "out", "t": NOON - H, "off": 0}),
-                hook(NOON - H, "/r/app", "UserPromptSubmit", Some("fix   the\nflaky test")),
+                hook(
+                    NOON - H,
+                    "/r/app",
+                    "UserPromptSubmit",
+                    Some("fix   the\nflaky test"),
+                ),
                 hook(NOON - H + 1, "/r/app", "UserPromptSubmit", Some("and push")),
                 state(NOON - H + 2, "review_ready", Some("Pushed the fix."), false),
                 json!({"k": "topic", "t": NOON - H + 3, "off": 0, "topic": "Flaky test"}),
@@ -694,7 +712,10 @@ mod tests {
         assert_eq!(run.last_ms, NOON - H + 3);
 
         let quiet = read_run(&path, NOON - 30 * 60_000, NOON).unwrap();
-        assert_eq!(quiet.first_ms, None, "nothing happened in the last half hour");
+        assert_eq!(
+            quiet.first_ms, None,
+            "nothing happened in the last half hour"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -738,12 +759,18 @@ mod tests {
             c(&run("exited", None, None), Some(&shipped), &none, false).0,
             Outcome::Shipped
         );
-        assert_eq!(c(&run("working", None, None), None, &none, true).0, Outcome::Working);
+        assert_eq!(
+            c(&run("working", None, None), None, &none, true).0,
+            Outcome::Working
+        );
         let mut asking = run("needs_input", None, None);
         asking.status_summary = Some("Permission: Bash rm -rf target".into());
         assert_eq!(
             c(&asking, None, &none, true),
-            (Outcome::Stuck, "needs you: Permission: Bash rm -rf target".into())
+            (
+                Outcome::Stuck,
+                "needs you: Permission: Bash rm -rf target".into()
+            )
         );
         let mut flagged = run("blocked", Some("pr-red"), Some(pr));
         flagged.flag = Some("CI red on PR #12: lint".into());
@@ -762,11 +789,22 @@ mod tests {
         let mut closed = item(6, ItemStatus::Open, Some(pr));
         closed.pr_closed = true;
         assert_eq!(
-            c(&run("idle", Some("clean"), None), Some(&closed), &none, true).0,
+            c(
+                &run("idle", Some("clean"), None),
+                Some(&closed),
+                &none,
+                true
+            )
+            .0,
             Outcome::Abandoned
         );
         assert_eq!(
-            c(&run("exited", Some("uncommitted"), None), None, &none, false),
+            c(
+                &run("exited", Some("uncommitted"), None),
+                None,
+                &none,
+                false
+            ),
             (Outcome::Abandoned, "ended with uncommitted changes".into())
         );
         let mut idle = run("review_ready", Some("unpushed"), None);
@@ -856,7 +894,12 @@ mod tests {
             away: true,
             by: DigestGroup::Repo,
             entries: vec![
-                entry(Outcome::Waiting, "valkyrie", NOON - H, Some("Opened PR #12.")),
+                entry(
+                    Outcome::Waiting,
+                    "valkyrie",
+                    NOON - H,
+                    Some("Opened PR #12."),
+                ),
                 entry(Outcome::Waiting, "dotfiles", NOON - 20 * H, None),
             ],
             markdown: String::new(),
@@ -879,7 +922,10 @@ mod tests {
         digest.by = DigestGroup::Repo;
         digest.entries[0].first_ms = NOON - 13 * H;
         let md = render(&digest, &TimeZone::UTC);
-        assert!(md.contains("(claude, Mon 9 Nov 23:00 – Tue 10 Nov 11:00)"), "{md}");
+        assert!(
+            md.contains("(claude, Mon 9 Nov 23:00 – Tue 10 Nov 11:00)"),
+            "{md}"
+        );
         digest.entries.clear();
         assert!(render(&digest, &TimeZone::UTC).ends_with("No agent did anything in that time.\n"));
     }
@@ -888,7 +934,10 @@ mod tests {
     fn presence_knows_when_you_left() {
         let mut p = Presence::default();
         assert_eq!(p.since(NOON), None);
-        assert!(p.typed(NOON - 10 * H), "the first keystroke is written down");
+        assert!(
+            p.typed(NOON - 10 * H),
+            "the first keystroke is written down"
+        );
         assert!(!p.typed(NOON - 10 * H + 1000), "not every keystroke");
         // Gone for 9 hours, back at NOON - H.
         assert!(p.typed(NOON - H), "coming back is written down");
@@ -908,8 +957,15 @@ mod tests {
         assert_eq!(parse_since("today", NOON, &tz).unwrap(), NOON - 12 * H);
         assert_eq!(parse_since("yesterday", NOON, &tz).unwrap(), NOON - 36 * H);
         assert_eq!(parse_since("2026-11-09", NOON, &tz).unwrap(), NOON - 36 * H);
-        assert_eq!(parse_since("2026-11-10 09:30", NOON, &tz).unwrap(), NOON - 150 * 60_000);
-        assert_eq!(parse_since("2027-01-01", NOON, &tz).unwrap(), NOON, "never past now");
+        assert_eq!(
+            parse_since("2026-11-10 09:30", NOON, &tz).unwrap(),
+            NOON - 150 * 60_000
+        );
+        assert_eq!(
+            parse_since("2027-01-01", NOON, &tz).unwrap(),
+            NOON,
+            "never past now"
+        );
         assert!(parse_since("last tuesday", NOON, &tz).is_err());
     }
 
@@ -921,6 +977,9 @@ mod tests {
         assert_eq!(span(2 * H + 10 * 60_000), "2h 10m");
         assert_eq!(span(76 * H), "3d 4h");
         assert_eq!(pr_label("https://github.com/o/r/pull/170"), "PR #170");
-        assert_eq!(pr_label("https://x/merge_requests/3"), "PR https://x/merge_requests/3");
+        assert_eq!(
+            pr_label("https://x/merge_requests/3"),
+            "PR https://x/merge_requests/3"
+        );
     }
 }

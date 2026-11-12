@@ -174,7 +174,10 @@ mod tests {
         .map(line)
         .collect();
         std::fs::write(
-            state.join(format!("sessions/{}-1.events.jsonl", (now - 60_000) * 1_000_000)),
+            state.join(format!(
+                "sessions/{}-1.events.jsonl",
+                (now - 60_000) * 1_000_000
+            )),
             log,
         )
         .unwrap();
@@ -186,15 +189,26 @@ mod tests {
         assert!(!digest.away, "nothing typed yet: the last day");
         assert_eq!(digest.entries.len(), 1);
         let e = &digest.entries[0];
-        assert_eq!((e.outcome, e.detail.as_str()), (Outcome::Waiting, "PR #3 open"));
+        assert_eq!(
+            (e.outcome, e.detail.as_str()),
+            (Outcome::Waiting, "PR #3 open")
+        );
         assert_eq!(e.what, "tidy the readme");
-        assert!(digest.markdown.contains("PR #3 open"), "{}", digest.markdown);
+        assert!(
+            digest.markdown.contains("PR #3 open"),
+            "{}",
+            digest.markdown
+        );
 
         // Typed long ago, then again now: the digest starts where you left.
         registry.presence.lock().unwrap().typed(now - 3 * 3_600_000);
         registry.you_typed();
         let saved = super::load(&super::file(&state));
-        assert_eq!(saved.left_ms, Some(now - 3 * 3_600_000), "written down on coming back");
+        assert_eq!(
+            saved.left_ms,
+            Some(now - 3 * 3_600_000),
+            "written down on coming back"
+        );
         let Reply::Digest { digest } = registry.digest(None, DigestGroup::Day).await.unwrap()
         else {
             panic!("not a digest");

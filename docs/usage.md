@@ -9,6 +9,7 @@ valk ls                    # list sessions, with their state
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk notify "deploy done" --sound done   # a toast, ping and desktop notification
 valk pings                 # where agents stopped and waited on you, last 30 days
+valk digest                # what every agent did while you were gone, as markdown
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v
 ```
@@ -45,6 +46,23 @@ valk pane resize 4 30 · valk pane close 4
 ```
 
 Agents learn of it from their session-start context.
+
+## What happened while you were gone
+
+`valk digest` gives a line for each agent session since you were last away, grouped
+by repository: shipped, stuck, abandoned, waiting on PR/CI, still working or
+done, with why ("PR #12 merged", "CI red on PR #9", "ended with uncommitted
+changes") and the agent's own last line. It counts you as gone after 30
+minutes without typing into any session. It's markdown, so you can paste it as
+a standup.
+
+```sh
+valk digest                       # since you were last gone
+valk digest --since yesterday --by day
+valk digest --since 12h --json
+```
+
+The web app has the same view: the clock on the home screen, with a Copy button.
 
 ## Docs for you to read
 

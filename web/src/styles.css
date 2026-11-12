@@ -3937,3 +3937,50 @@ button.as-text {
   color: var(--muted);
   text-decoration: underline dotted;
 }
+
+/* The away digest (backlog #105): where each session's work ended up. */
+.outcome-stuck { --kind: var(--needs); }
+.outcome-abandoned { --kind: var(--blocked); }
+.outcome-waiting { --kind: var(--interrupted); }
+.outcome-working { --kind: var(--working); }
+.outcome-shipped { --kind: var(--done); }
+.outcome-done { --kind: var(--soft); }
+
+.digest-about {
+  margin: 4px 2px 12px;
+  color: var(--soft);
+  font-size: 13.5px;
+}
+
+/* The chip on its own line, so titles line up and wrap instead of being cut. */
+.digest-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  text-align: left;
+}
+
+.digest-row .kind-chip {
+  align-self: flex-start;
+}
+
+.digest-row .row-name {
+  white-space: normal;
+  overflow: visible;
+}
+
+.digest-detail {
+  display: block;
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+.digest-said {
+  display: block;
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+  font-size: 12.5px;
+  color: var(--soft);
+  overflow-wrap: anywhere;
+}
