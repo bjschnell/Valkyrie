@@ -36,32 +36,39 @@ pub struct Link {
     pub matched: bool,
 }
 
-/// What tells a note's session apart from another's: its conversation (unique),
-/// else its Valkyrie session's name. A note written outside any session has
-/// neither and doesn't count.
-fn session_key(n: &Note) -> Option<&str> {
-    n.conversation
-        .as_deref()
-        .filter(|c| !c.is_empty())
-        .or_else(|| (n.session != "none" && !n.session.is_empty()).then_some(n.session.as_str()))
-}
-
-/// How many separate sessions wrote `cluster`.
+/// How many separate sessions wrote `cluster`. A conversation is one session; a
+/// note without one counts by its Valkyrie session's name, unless a note with a
+/// conversation already came from that session (its id may not have been known
+/// yet). A note written outside any session doesn't count.
 pub fn sessions(cluster: &[&Note]) -> usize {
-    cluster
+    let named =
+        |n: &Note| (n.session != "none" && !n.session.is_empty()).then(|| n.session.clone());
+    let mut conversations = HashSet::new();
+    let mut with_conversation = HashSet::new();
+    for n in cluster {
+        if let Some(c) = n.conversation.as_deref().filter(|c| !c.is_empty()) {
+            conversations.insert(c.to_owned());
+            with_conversation.extend(named(n));
+        }
+    }
+    let bare: HashSet<String> = cluster
         .iter()
-        .filter_map(|n| session_key(n))
-        .collect::<HashSet<_>>()
-        .len()
+        .filter(|n| n.conversation.as_deref().is_none_or(str::is_empty))
+        .filter_map(|n| named(n))
+        .filter(|s| !with_conversation.contains(s))
+        .collect();
+    conversations.len() + bare.len()
 }
 
 /// The clusters among `notes`, each oldest first: two notes are in one when they
 /// share a signature or most of their words, and so is anything either is in one
-/// with. Only live notes not known to be stale are counted.
+/// with. Live notes, stale ones too, and promoted ones are clustered, so a note
+/// that joins a proposed cluster is still found to belong to it after the notes
+/// it matched go stale or are promoted; [`ready`] counts only the live, fresh ones.
 pub fn clusters(notes: &[Note]) -> Vec<Vec<&Note>> {
     let notes: Vec<&Note> = notes
         .iter()
-        .filter(|n| n.status == NoteStatus::Live && n.stale.is_none())
+        .filter(|n| matches!(n.status, NoteStatus::Live | NoteStatus::Promoted))
         .collect();
     let words: Vec<BTreeSet<String>> = notes.iter().map(|n| extract::words(&n.text)).collect();
     let mut parent: Vec<usize> = (0..notes.len()).collect();
@@ -96,24 +103,80 @@ pub fn clusters(notes: &[Note]) -> Vec<Vec<&Note>> {
         .collect()
 }
 
+/// The decision id a link records when the model, asked to draft, said the
+/// cluster was already known without naming which decision: it holds the
+/// cluster for good, and promotes nothing.
+pub const KNOWN: u32 = 0;
+
+/// Each note's newest link, among links that still hold: to a decision that
+/// exists, or [`KNOWN`].
+fn held<'a>(links: &'a [Link], decisions: &[Decision]) -> BTreeMap<u32, &'a Link> {
+    let exists: HashSet<u32> = decisions.iter().map(|d| d.id).collect();
+    let mut out = BTreeMap::new();
+    for l in links
+        .iter()
+        .filter(|l| l.decision == KNOWN || exists.contains(&l.decision))
+    {
+        for n in &l.notes {
+            out.insert(*n, l);
+        }
+    }
+    out
+}
+
+/// Live notes that joined a cluster already proposed, matched or known, and
+/// aren't recorded with it yet: each as (decision, matched, notes) to record, so
+/// the cluster stays held once the notes it was proposed from go stale or are
+/// deleted, and accepting a waiting proposal promotes the notes that joined it
+/// too. A note that joins after the proposal was accepted or rejected is only
+/// held (`matched`), never promoted by it.
+pub fn joined(
+    notes: &[Note],
+    links: &[Link],
+    decisions: &[Decision],
+) -> Vec<(u32, bool, Vec<u32>)> {
+    use valkyrie_proto::DecisionStatus;
+    let held = held(links, decisions);
+    let mut out = Vec::new();
+    for c in clusters(notes) {
+        let Some(link) = c.iter().rev().find_map(|n| held.get(&n.id)) else {
+            continue;
+        };
+        let new: Vec<u32> = c
+            .iter()
+            .filter(|n| n.status == NoteStatus::Live && !held.contains_key(&n.id))
+            .map(|n| n.id)
+            .collect();
+        if new.is_empty() {
+            continue;
+        }
+        let waiting = decisions
+            .iter()
+            .any(|d| d.id == link.decision && d.status == DecisionStatus::Proposed);
+        out.push((link.decision, link.matched || !waiting, new));
+    }
+    out
+}
+
 /// The cluster to propose now, if any: the one from the most sessions that
-/// reached [`SESSIONS`], with none of its notes already in a proposal that's
-/// waiting, rejected, accepted or matched (`links`, against `decisions`). A link
-/// to a decision that no longer exists doesn't hold its notes back.
+/// reached [`SESSIONS`] counting only its live notes not known to be stale, with
+/// none of its notes already in a proposal that's waiting, rejected, accepted or
+/// matched (`links`, against `decisions`). A link to a decision that no longer
+/// exists doesn't hold its notes back. Returns the live, fresh notes.
 pub fn ready<'a>(
     notes: &'a [Note],
     links: &[Link],
     decisions: &[Decision],
 ) -> Option<Vec<&'a Note>> {
-    let exists: HashSet<u32> = decisions.iter().map(|d| d.id).collect();
-    let held: HashSet<u32> = links
-        .iter()
-        .filter(|l| exists.contains(&l.decision))
-        .flat_map(|l| l.notes.iter().copied())
-        .collect();
+    let held = held(links, decisions);
     clusters(notes)
         .into_iter()
-        .filter(|c| !c.iter().any(|n| held.contains(&n.id)))
+        .filter(|c| !c.iter().any(|n| held.contains_key(&n.id)))
+        .map(|c| {
+            c.into_iter()
+                .filter(|n| n.status == NoteStatus::Live && n.stale.is_none())
+                .collect::<Vec<_>>()
+        })
         .filter(|c| sessions(c) >= SESSIONS)
         .max_by_key(|c| (sessions(c), c.last().map(|n| n.created)))
 }
@@ -197,14 +260,39 @@ pub fn prompt(project: &str, known: &[Decision], cluster: &[&Note]) -> String {
     out
 }
 
-/// The proposal in the model's reply: a `gotcha` or a `fix`, whatever kind it
-/// named; `None` when it gave none.
-pub fn parse_reply(reply: &str) -> Option<extract::Found> {
-    let mut f = extract::reply_list(reply).iter().find_map(extract::found)?;
-    if f.kind != DecisionKind::Fix {
-        f.kind = DecisionKind::Gotcha;
+/// What the model replied for a cluster.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reply {
+    /// Its draft: a `gotcha` or a `fix`, whatever kind it named.
+    Draft(extract::Found),
+    /// An empty list: what the notes say is already in `<known>`.
+    Known,
+    /// Nothing that parses.
+    Garbled,
+}
+
+pub fn parse_reply(reply: &str) -> Reply {
+    let (Some(start), Some(end)) = (reply.find('{'), reply.rfind('}')) else {
+        return Reply::Garbled;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&reply[start..=end.max(start)]) else {
+        return Reply::Garbled;
+    };
+    let Some(list) = v["decisions"].as_array() else {
+        return Reply::Garbled;
+    };
+    if list.is_empty() {
+        return Reply::Known;
     }
-    Some(f)
+    match list.iter().find_map(extract::found) {
+        Some(mut f) => {
+            if f.kind != DecisionKind::Fix {
+                f.kind = DecisionKind::Gotcha;
+            }
+            Reply::Draft(f)
+        }
+        None => Reply::Garbled,
+    }
 }
 
 /// A signature the cluster's notes carry, as the retro records it.
@@ -641,6 +729,123 @@ mod tests {
         );
     }
 
+    /// What the daemon does first on each check: records notes that joined.
+    fn settle(store: &Store, repo: &Path) {
+        let known = store.load(repo);
+        let links = store.promotion_links(repo);
+        for (d, matched, ids) in joined(&store.notes(repo), &links, &known) {
+            store.record_promotion(repo, d, &ids, matched, 9).unwrap();
+        }
+    }
+
+    fn due(store: &Store, repo: &Path) -> bool {
+        settle(store, repo);
+        let notes = store.notes(repo);
+        ready(&notes, &store.promotion_links(repo), &store.load(repo)).is_some()
+    }
+
+    #[test]
+    fn a_rejected_cluster_stays_held_after_its_first_notes_are_gone() {
+        let (_d, store, repo) = store();
+        for (i, t) in FLAKY.iter().enumerate() {
+            write(&store, &repo, t, Some(&format!("c{i}")), None, i as u64);
+        }
+        let d = propose(&store, &repo, "Something worded otherwise entirely");
+        store
+            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .unwrap();
+        store
+            .review(
+                &repo,
+                d.id,
+                &valkyrie_proto::ReviewAction::Reject,
+                None,
+                None,
+                6,
+            )
+            .unwrap();
+        for i in 4..7u64 {
+            write(
+                &store,
+                &repo,
+                FLAKY[i as usize % 3],
+                Some(&format!("n{i}")),
+                None,
+                i,
+            );
+            assert!(!due(&store, &repo));
+        }
+        for id in 1..=3 {
+            store.rm_note(&repo, id, "user", None, 8).unwrap();
+        }
+        assert!(!due(&store, &repo), "the notes that joined carry the hold");
+    }
+
+    #[test]
+    fn notes_that_join_a_waiting_proposal_are_promoted_with_it() {
+        let (_d, store, repo) = store();
+        for (i, t) in FLAKY.iter().enumerate() {
+            write(&store, &repo, t, Some(&format!("c{i}")), None, i as u64);
+        }
+        let d = propose(&store, &repo, FLAKY[2]);
+        store
+            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .unwrap();
+        write(&store, &repo, FLAKY[0], Some("c7"), None, 7);
+        assert!(!due(&store, &repo));
+        store
+            .review(
+                &repo,
+                d.id,
+                &valkyrie_proto::ReviewAction::Accept,
+                None,
+                None,
+                8,
+            )
+            .unwrap();
+        assert!(
+            store
+                .notes(&repo)
+                .iter()
+                .all(|n| n.status == NoteStatus::Promoted)
+        );
+        // One joining after the accept is held, not promoted by it.
+        write(&store, &repo, FLAKY[1], Some("c8"), None, 9);
+        assert!(!due(&store, &repo));
+        assert_eq!(store.notes(&repo).last().unwrap().status, NoteStatus::Live);
+        let known = store.load(&repo);
+        assert_eq!(store.heal_promotions(&repo, &known).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_session_counts_once_before_and_after_its_conversation_is_known() {
+        let mk = |id, session: &str, conv: Option<&str>| Note {
+            id,
+            project: "/r".into(),
+            text: "t".into(),
+            status: NoteStatus::Live,
+            created: 1,
+            by: "agent".into(),
+            session: session.into(),
+            conversation: conv.map(str::to_owned),
+            commit: None,
+            cwd: None,
+            anchors: vec![],
+            sig: None,
+            replaces: None,
+            replaced_by: None,
+            stale: None,
+        };
+        let (a, b, c) = (
+            mk(1, "claude", None),
+            mk(2, "claude", Some("c1")),
+            mk(3, "none", None),
+        );
+        assert_eq!(sessions(&[&a, &b, &c]), 1);
+        let d = mk(4, "other", None);
+        assert_eq!(sessions(&[&a, &b, &d]), 2);
+    }
+
     #[test]
     fn a_lost_promotion_is_healed_from_the_link() {
         let (_d, store, repo) = store();
@@ -709,12 +914,20 @@ mod tests {
 
     #[test]
     fn the_model_reply_is_a_gotcha_or_a_fix() {
-        let r =
-            r#"{"decisions":[{"kind":"constraint","title":"Rerun net::retry once","body":"b"}]}"#;
-        assert_eq!(parse_reply(r).unwrap().kind, DecisionKind::Gotcha);
+        let kind = |r: &str| match parse_reply(r) {
+            Reply::Draft(f) => Some(f.kind),
+            _ => None,
+        };
+        let r = r#"{"decisions":[{"kind":"constraint","title":"Rerun it once","body":"b"}]}"#;
+        assert_eq!(kind(r), Some(DecisionKind::Gotcha));
         let r = r#"ok {"decisions":[{"kind":"fix","title":"Pin the test clock","body":"b"}]}"#;
-        assert_eq!(parse_reply(r).unwrap().kind, DecisionKind::Fix);
-        assert!(parse_reply(r#"{"decisions":[]}"#).is_none());
+        assert_eq!(kind(r), Some(DecisionKind::Fix));
+        assert_eq!(parse_reply(r#"{"decisions":[]}"#), Reply::Known);
+        assert_eq!(parse_reply("sorry, I can't"), Reply::Garbled);
+        assert_eq!(
+            parse_reply(r#"{"decisions":[{"body":"no title"}]}"#),
+            Reply::Garbled
+        );
     }
 
     #[test]

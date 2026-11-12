@@ -69,6 +69,12 @@ async fn check(
         Ok(notes) => notes,
         Err(_) => return,
     };
+    let now = now_secs();
+    // Notes that joined a cluster already proposed are recorded with it, so it
+    // stays held after the notes it came from go stale or are deleted.
+    for (decision, matched, ids) in promote::joined(&notes, &links, &known) {
+        record(registry, &root, decision, &ids, matched, now);
+    }
     let Some(cluster) = promote::ready(&notes, &links, &known) else {
         return;
     };
@@ -76,7 +82,6 @@ async fn check(
     let Some(plain) = promote::plain(&cluster) else {
         return;
     };
-    let now = now_secs();
     // Said already (any status, so a rejected one isn't made again): the cluster
     // is held by that decision, without asking the model.
     if let Some(d) = matching(&plain.title, &known) {
@@ -101,7 +106,18 @@ async fn check(
         })
         .await;
         match asked.map_err(anyhow::Error::from).and_then(|r| r) {
-            Ok(reply) => found = promote::parse_reply(&reply),
+            Ok(reply) => match promote::parse_reply(&reply) {
+                promote::Reply::Draft(f) => found = Some(f),
+                // The model found it already known: held, not proposed.
+                promote::Reply::Known => {
+                    tracing::info!(project = %root.display(), notes = ?ids, "recurring notes already known");
+                    record(registry, &root, promote::KNOWN, &ids, true, now);
+                    return;
+                }
+                promote::Reply::Garbled => {
+                    tracing::warn!(project = %root.display(), "drafting from notes gave nothing usable")
+                }
+            },
             Err(e) => {
                 tracing::warn!(project = %root.display(), "drafting from notes failed: {e:#}")
             }
@@ -136,23 +152,24 @@ async fn check(
         commit: None,
         cwd: Some(root.clone()),
     };
-    let decided = registry
-        .context
-        .lock()
-        .unwrap()
-        .decide(&new, provenance, now);
-    match decided {
-        Ok(d) => {
-            tracing::info!(project = %root.display(), id = d.id, notes = ?ids, "proposed from recurring notes");
-            record(registry, &root, d.id, &ids, false, now);
+    // The proposal and its link under one lock, so nobody accepts it before the
+    // link says which notes it promotes.
+    let decided = {
+        let store = registry.context.lock().unwrap();
+        store.decide(&new, provenance, now).map(|d| {
+            let linked = store.record_promotion(&root, d.id, &ids, false, now);
             // So ADR-0011 §6 can tell whether it worked, like the retro's.
-            if let Some(sig) = sig
-                && let Err(e) = registry
-                    .context
-                    .lock()
-                    .unwrap()
-                    .record_proposal(&root, sig, d.id, now)
-            {
+            let sig = sig.map(|sig| store.record_proposal(&root, sig, d.id, now));
+            (d, linked, sig)
+        })
+    };
+    match decided {
+        Ok((d, linked, sig)) => {
+            tracing::info!(project = %root.display(), id = d.id, notes = ?ids, "proposed from recurring notes");
+            if let Err(e) = linked {
+                tracing::warn!(id = d.id, "couldn't record the notes' proposal: {e:#}");
+            }
+            if let Some(Err(e)) = sig {
                 tracing::warn!(id = d.id, "couldn't record the proposal: {e:#}");
             }
             registry.refresh_proposals();

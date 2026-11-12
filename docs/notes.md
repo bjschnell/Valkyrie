@@ -43,10 +43,11 @@ Transcripts are files Claude Code keeps in `~/.claude/projects/` (or `$CLAUDE_CO
 
 When agents in three separate sessions write notes about the same trap, Valkyrie proposes it as one `gotcha` or `fix` for you to review. Notes belong together when they share a failure signature or mostly the same words, the test that keeps a rejected decision from being proposed again. Sessions are told apart by their conversation, or by the session's name when there's no conversation. A note written outside any session doesn't count. Neither do replaced, deleted or stale notes.
 
-- **Who drafts it.** With `valk decisions auto` on, the same locked-down model that drafts rules from corrections writes it from the notes. With auto off, the newest note's text is used as it is: its first line is the title.
+- **Who drafts it.** With `valk decisions auto` on, the same locked-down model that drafts rules from corrections writes it from the notes. If the model finds it already covered by a decision, nothing is proposed and the cluster is held. With auto off, the newest note's text is used as it is: its first line is the title.
 - **What it cites.** The body lists every note it came from, with its session and commit.
 - **Accepted:** its notes become `promoted` and drop out of search, because the decision now carries what they said.
 - **Rejected:** the notes stay live and searchable, and that cluster isn't proposed again, even when a new note joins it.
-- **One at a time.** While a cluster's proposal waits, no second one is made from it.
+- **One at a time.** While a cluster's proposal waits, no second one is made from it. A note that joins it meanwhile is promoted with it if you accept.
+- **A cluster stays held** after the notes it was proposed from go stale or are deleted: the notes that joined it carry the hold.
 
 Which notes went into which proposal is kept in `notes/promotions.jsonl`. A check runs each time a note is written.
