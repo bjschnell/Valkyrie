@@ -1,6 +1,6 @@
 # ADR-0013: Valkyrie learns your routine replies to agents' stops and, once you accept, answers them through the hooks
 
-Status: proposed (2026-11-01)
+Status: accepted (2026-11-11); all five phases shipped (#34, #36, #37, #38, #42); Codex's hooks are #43
 Date: 2026-11-01
 Amends: [ADR-0011](0011-learning-loops.md) §5 (a new signal: your replies), DESIGN §7 (the supervisor's first jobs move into the hooks)
 

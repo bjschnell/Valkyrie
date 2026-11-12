@@ -1,6 +1,6 @@
 # ADR-0017: Agents keep unreviewed notes below decisions; notes are only searched, never injected, and recurring ones become proposals
 
-Status: proposed (2026-11-02)
+Status: accepted (2026-11-11); not built yet, only the ADR text merged (#24)
 Date: 2026-11-02
 Amends: [ADR-0011](0011-learning-loops.md) §1 (the retro writes notes instead of proposing), [ADR-0014](0014-serve-decisions-by-relevance.md) §5 (the serve log also records notes)
 

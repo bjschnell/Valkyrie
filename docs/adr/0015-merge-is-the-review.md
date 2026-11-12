@@ -1,6 +1,6 @@
 # ADR-0015: A merged pull request ships its backlog item, and merging stays the user's
 
-Status: proposed (2026-11-02)
+Status: accepted (2026-11-11); shipped in #39, #40, #41; Codex's hooks are #43
 Date: 2026-11-02
 Amends: [ADR-0012](0012-agents-track-their-own-work.md) §3 (what counts as the user's confirm)
 

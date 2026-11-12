@@ -1,6 +1,6 @@
 # ADR-0020: The desktop app is a native window around the web app
 
-Status: proposed (2026-11-09)
+Status: accepted (2026-11-11); all four phases shipped (#124, #125, #126/#140/#142, #127/#148)
 Date: 2026-11-09
 
 ## Context
