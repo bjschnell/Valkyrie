@@ -109,8 +109,9 @@ pub enum Change {
 }
 
 /// Whether `anchors` (files under `root`) changed enough since `commit` to doubt
-/// what was said about them: one deleted, or [`CHURN_LINES`] lines changed. Runs
-/// `git` in `root`. Shared by decisions and agent notes (ADR-0017 §6).
+/// what was said about them: one deleted, or [`CHURN_LINES`] lines changed on
+/// `root`'s side since it and `commit` forked. Runs `git` in `root`. Shared by
+/// decisions and agent notes (ADR-0017 §6).
 pub fn changed(root: &Path, anchors: &[String], commit: Option<&str>) -> Option<Change> {
     if anchors.is_empty() {
         return None;
@@ -119,16 +120,14 @@ pub fn changed(root: &Path, anchors: &[String], commit: Option<&str>) -> Option<
         return Some(Change::Gone(gone.clone()));
     }
     let commit = commit.filter(|c| valid_commit(c))?;
+    // From where `commit` and `root`'s `HEAD` forked (`A...B`), not from `commit`
+    // itself: a text written in a worktree records that worktree's `HEAD`, and
+    // its branch's own unmerged edits aren't changes since (#169). On `root`'s
+    // own history the fork point is `commit`, so nothing else changes.
+    let range = format!("{commit}...HEAD");
     let out = Command::new("git")
         .no_window()
-        .args([
-            "diff",
-            "--numstat",
-            "--end-of-options",
-            commit,
-            "HEAD",
-            "--",
-        ])
+        .args(["diff", "--numstat", "--end-of-options", &range, "--"])
         .args(anchors)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -307,5 +306,48 @@ mod tests {
             "b.rs no longer exists"
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// #169: a decision written in a worktree records that worktree's `HEAD`, but
+    /// staleness runs in the main checkout. Only what changed on the main
+    /// checkout's side since the two forked counts, not the branch's own work.
+    #[test]
+    fn a_worktrees_own_unmerged_work_isnt_churn() {
+        let base = std::env::temp_dir().join(format!("valk-churn-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, wt) = (base.join("repo"), base.join("repo-feat"));
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.rs"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "one"]);
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+        );
+        // The branch rewrites a.rs, and the decision is written there.
+        std::fs::write(wt.join("a.rs"), "branch\n".repeat(200)).unwrap();
+        git(&wt, &["commit", "-qam", "branch work"]);
+        let at = git(&wt, &["rev-parse", "--short", "HEAD"]);
+        let d = decision(
+            Freshness {
+                anchors: vec!["a.rs".into()],
+                ..Freshness::default()
+            },
+            Some(&at),
+        );
+        assert_eq!(churn(&root, &d), None, "the branch's own edits");
+        // Merged: still the same work, not a change since.
+        git(&root, &["merge", "-q", "--no-ff", "-m", "merge", "feat"]);
+        assert_eq!(churn(&root, &d), None, "merged as it was");
+        // Main then rewrites it: that counts.
+        std::fs::write(root.join("a.rs"), "main\n".repeat(200)).unwrap();
+        git(&root, &["commit", "-qam", "main work"]);
+        let why = churn(&root, &d).unwrap();
+        assert!(
+            why.starts_with("a.rs changed a lot since it was confirmed (+200/-200)"),
+            "{why}"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
