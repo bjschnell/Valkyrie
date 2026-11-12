@@ -104,7 +104,7 @@ impl Registry {
         body: &str,
         peer: Option<Peer>,
     ) -> Result<Reply> {
-        self.vouch(peer, "saving a doc from the web app")?;
+        self.vouch(peer, "saving a doc")?;
         let author = you();
         let saved = self
             .docs

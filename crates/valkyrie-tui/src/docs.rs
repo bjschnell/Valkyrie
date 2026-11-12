@@ -2,12 +2,14 @@
 //! agents wrote, agent-level ones first, then each repository's, newest first,
 //! with what an agent wrote since you last looked marked unread. `↩` reads one,
 //! drawn as markdown; links in it open on a click, and `c` shows its comments
-//! and leaves new ones (`comments.rs`).
+//! and leaves new ones (`comments.rs`); `e` edits it in your editor, and a
+//! save that finds it changed shows both versions (`conflict.rs`).
 
 use std::cell::{Cell, RefCell};
 
 use crate::backlog::fit_hints;
 use crate::comments::{self, Comments};
+use crate::conflict::{Choice, Conflict};
 use crate::markdown::{self, Rendered};
 use crate::next_key;
 use crate::theme::Theme;
@@ -42,6 +44,19 @@ pub(crate) enum Do {
         key: String,
         id: u32,
     },
+    /// Edit `body` in your editor, then save it over the version `base` names.
+    Edit {
+        key: String,
+        base: String,
+        body: String,
+        title: String,
+    },
+    /// Save `body` over the version `base` names.
+    Save {
+        key: String,
+        base: String,
+        body: String,
+    },
 }
 
 /// A line of the list: a group's heading, or a doc (its index in the listing).
@@ -67,6 +82,8 @@ struct Reader {
     /// The body drawn at a width, kept until the width changes.
     drawn: RefCell<Option<(u16, Rendered)>>,
     comments: Comments,
+    /// A save found it changed: yours and theirs, until you choose.
+    conflict: Option<Conflict>,
 }
 
 /// The open page: the list, and the doc being read over it, if any.
@@ -223,6 +240,27 @@ impl Page {
         self.docs().nth(self.cursor)
     }
 
+    /// A save went through: the reader shows the doc as written. One of your own
+    /// docs gets an id, and so a new key, the first time it's saved.
+    pub(crate) fn saved(&mut self, key: &str, doc: Doc) {
+        let Some(reader) = self.reader.as_mut().filter(|r| r.key == key) else {
+            return;
+        };
+        if !doc.key.is_empty() {
+            reader.key = doc.key.clone();
+        }
+        reader.doc = Some(doc);
+        reader.conflict = None;
+        *reader.drawn.borrow_mut() = None;
+    }
+
+    /// A save found the doc changed since it was opened; nothing was written.
+    pub(crate) fn conflict(&mut self, key: &str, mine: String, theirs: Doc) {
+        if let Some(reader) = self.reader.as_mut().filter(|r| r.key == key) {
+            reader.conflict = Some(Conflict { mine, theirs });
+        }
+    }
+
     /// Whether a doc is open over the list.
     #[cfg(test)]
     pub(crate) fn reading(&self) -> bool {
@@ -280,6 +318,42 @@ impl Page {
     /// `y` copies the doc's markdown; `r` reads it again; Esc or `q` goes back.
     fn reader_key(&mut self, key: &[u8], whole: bool, out: &mut Vec<Do>) {
         if let Some(reader) = &mut self.reader
+            && let Some(c) = &reader.conflict
+        {
+            let doc = reader.key.clone();
+            let base = c.theirs.hash.clone().unwrap_or_default();
+            match c.key(key) {
+                Some(Choice::Theirs) => {
+                    let theirs = c.theirs.clone();
+                    self.saved(&doc, theirs);
+                }
+                Some(Choice::Edit) => {
+                    let title = c.theirs.title.clone();
+                    let body = c.mine.clone();
+                    out.push(Do::Edit {
+                        key: doc,
+                        base,
+                        body,
+                        title,
+                    });
+                }
+                Some(Choice::Mine) => {
+                    let body = c.mine.clone();
+                    out.push(Do::Save {
+                        key: doc,
+                        base,
+                        body,
+                    });
+                }
+                // Yours isn't saved anywhere else: no key leaves without a choice.
+                None if matches!(key, b"\x1b" | b"q") || (whole && key == b"\x1b") => out.push(Do::Say(
+                    "yours isn't saved: t takes theirs, e edits yours again, s saves yours over it".into(),
+                )),
+                None => {}
+            }
+            return;
+        }
+        if let Some(reader) = &mut self.reader
             && reader.comments.is_open()
         {
             let text = &reader.doc;
@@ -319,6 +393,16 @@ impl Page {
                     "it takes comments once it has a valk-id: an agent reading it gives it one"
                         .into(),
                 )),
+                None => {}
+            },
+            b"e" => match &reader.doc {
+                Some(d) if d.hash.is_some() && d.text.is_some() => out.push(Do::Edit {
+                    key: reader.key.clone(),
+                    base: d.hash.clone().unwrap_or_default(),
+                    body: body(d.text.as_deref().unwrap_or_default()),
+                    title: d.title.clone(),
+                }),
+                Some(_) => out.push(Do::Say("it can't be edited from here".into())),
                 None => {}
             },
             b"y" => match &reader.doc {
@@ -516,11 +600,22 @@ impl Page {
             } else {
                 Vec::new()
             },
+            hint(" e ", "edit ", t),
             hint(" y ", "copy ", t),
             hint(" r ", "reload ", t),
             hint(" esc ", "back ", t),
         ]
         .concat();
+        let hints = if r.conflict.is_some() {
+            [
+                hint(" t ", "use theirs ", t),
+                hint(" e ", "keep editing ", t),
+                hint(" s ", "save mine over it ", t),
+            ]
+            .concat()
+        } else {
+            hints
+        };
         let inner_w = rect.width.saturating_sub(4);
         let hints = fit_hints(hints, inner_w as usize);
         let block = page_block(format!(" {} ", fit(&title, inner_w as usize)), hints, t);
@@ -572,6 +667,10 @@ impl Page {
         .intersection(inner);
         frame.render_widget(Paragraph::new(head), inner);
 
+        if let Some(c) = &r.conflict {
+            c.draw(frame, text_area, t);
+            return;
+        }
         let body_text = match (&r.doc, &r.failed) {
             (_, Some(e)) => {
                 let line = format!("Couldn't read it: {e}");
@@ -905,6 +1004,84 @@ mod tests {
             matches!(got.as_slice(), [Do::Say(s)] if s.contains("valk-id")),
             "{got:?}"
         );
+    }
+
+    fn reading(key: &str, text: &str) -> Page {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![doc(key, "a.md", false)])));
+        page.keys(b"\r");
+        let mut read = doc(key, "a.md", false);
+        read.text = Some(text.into());
+        read.hash = Some("h1".into());
+        page.opened(key, Ok(read));
+        page
+    }
+
+    #[test]
+    fn e_edits_the_body_from_the_version_read() {
+        let mut page = reading("7", "---\nvalk-id: 7\n---\n\nHello\n");
+        assert_eq!(
+            page.keys(b"e"),
+            vec![Do::Edit {
+                key: "7".into(),
+                base: "h1".into(),
+                body: "Hello\n".into(),
+                title: "title 7".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_conflict_waits_for_a_choice() {
+        let mut page = reading("7", "Hello\n");
+        let mut theirs = doc("7", "a.md", false);
+        theirs.text = Some("Hello there\n".into());
+        theirs.hash = Some("h2".into());
+        page.conflict("7", "Hello, mine\n".into(), theirs.clone());
+        let shown = screen(&page, 120, 24);
+        assert!(
+            shown.contains("Yours")
+                && shown.contains("On disk now")
+                && shown.contains("Hello, mine"),
+            "{shown}"
+        );
+        // Esc doesn't drop yours.
+        assert!(matches!(page.keys(b"\x1b").as_slice(), [Do::Say(_)]));
+        assert!(page.reading());
+        assert_eq!(
+            page.keys(b"s"),
+            vec![Do::Save {
+                key: "7".into(),
+                base: "h2".into(),
+                body: "Hello, mine\n".into()
+            }]
+        );
+        assert_eq!(
+            page.keys(b"e"),
+            vec![Do::Edit {
+                key: "7".into(),
+                base: "h2".into(),
+                body: "Hello, mine\n".into(),
+                title: "title 7".into()
+            }]
+        );
+        assert_eq!(page.keys(b"t"), vec![]);
+        let r = page.reader.as_ref().unwrap();
+        assert!(r.conflict.is_none());
+        assert_eq!(r.doc.as_ref().unwrap().hash.as_deref(), Some("h2"));
+    }
+
+    #[test]
+    fn a_first_save_moves_your_own_doc_to_its_new_key() {
+        let mut page = reading("p0123456789abcdef", "mine\n");
+        let mut written = doc("12", "a.md", false);
+        written.text = Some("---\nvalk-id: 12\n---\nmine, edited\n".into());
+        page.saved("p0123456789abcdef", written);
+        assert_eq!(page.reader.as_ref().unwrap().key, "12");
+        // Later answers come by the new key.
+        page.comments("12", Ok(vec![]), false);
+        assert_eq!(page.keys(b"c"), vec![]);
+        assert!(page.reader.as_ref().unwrap().comments.is_open());
     }
 
     #[test]

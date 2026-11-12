@@ -8,6 +8,7 @@ mod backlog;
 mod blocks;
 mod clip;
 mod comments;
+mod conflict;
 mod digest;
 mod docs;
 mod edit;
@@ -247,6 +248,8 @@ struct App {
     digest: Option<digest::Page>,
     /// The Docs page is open (`D` on the home screen).
     docs: Option<docs::Page>,
+    /// A doc open in your editor, in a session of its own.
+    editing: Option<Editing>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -414,6 +417,7 @@ impl App {
             keys_page: None,
             digest: None,
             docs: None,
+            editing: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
@@ -525,6 +529,8 @@ impl App {
                 }
                 _ = tick.tick() => {
                     self.refresh().await;
+                    // An editor that ended while you were elsewhere.
+                    self.finish_edit().await;
                     self.update_preview().await;
                     if let Some(newer) = self.newer_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                         self.newer = newer;
@@ -754,7 +760,8 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
-        if self.docs.is_some() {
+        // Over a session, the Docs page waits: your editor on a doc is one.
+        if self.docs_shown() {
             return self.docs_keys(&bytes).await;
         }
         if self.backlog.is_some() {
@@ -1689,6 +1696,13 @@ impl App {
         let alone = self.others.is_empty();
         let next = self.beside(id);
         self.refresh().await;
+        // Your editor on a doc: back to the doc, saved.
+        if self.editing.as_ref().is_some_and(|e| e.session == id) {
+            if self.view.as_ref().is_some_and(|v| v.id == id) {
+                self.detach().await;
+            }
+            return self.finish_edit().await;
+        }
         if alone && !self.sessions.iter().any(|s| s.id == id) {
             self.leave(id, next).await;
         }
@@ -2619,6 +2633,12 @@ impl App {
         }
     }
 
+    /// Whether the Docs page is on screen: it's open, and you're home, not in a
+    /// session (your editor on a doc, say).
+    fn docs_shown(&self) -> bool {
+        self.docs.is_some() && self.view.is_none()
+    }
+
     async fn open_docs(&mut self) {
         self.docs = Some(docs::Page::default());
         self.load_docs().await;
@@ -2707,11 +2727,106 @@ impl App {
                     Err(e) => self.say(format!("couldn't close it: {e}")),
                 }
             }
+            docs::Do::Edit {
+                key,
+                base,
+                body,
+                title,
+            } => self.start_edit(key, base, body, title).await,
+            docs::Do::Save { key, base, body } => self.save_doc(key, base, body).await,
             docs::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
                 Ok(()) => self.say("copied the doc as markdown".into()),
                 Err(e) => self.say(format!("couldn't copy: {e}")),
             },
             docs::Do::Say(text) => self.say(text),
+        }
+    }
+
+    /// Opens a doc's body in your editor (`$VISUAL`, else `$EDITOR`, else `vi`),
+    /// in a session of its own, and attaches to it. When it ends, what you wrote
+    /// is saved (`finish_edit`).
+    async fn start_edit(&mut self, key: String, base: String, body: String, title: String) {
+        if self.editing.is_some() {
+            return self.say("a doc is already open in your editor".into());
+        }
+        let path = match edit_file(&body) {
+            Ok(path) => path,
+            Err(e) => return self.say(format!("couldn't make a file to edit: {e}")),
+        };
+        let mut command = editor_command();
+        command.push(path.display().to_string());
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let spec = SpawnSpec {
+            command,
+            cwd: None,
+            name: Some(format!("edit {}", fit(&title, 30))),
+            size,
+            env: valkyrie_proto::login_env(),
+            worktree: None,
+            hidden: false,
+        };
+        match self.client.spawn(spec).await {
+            Ok(info) => {
+                self.editing = Some(Editing {
+                    session: info.id,
+                    key,
+                    base,
+                    path,
+                    body,
+                });
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                self.say(format!("couldn't start your editor: {e:#}"));
+            }
+        }
+    }
+
+    /// Once the editor's session has ended: saves what you wrote, if anything.
+    async fn finish_edit(&mut self) {
+        let Some(e) = &self.editing else { return };
+        let running = self
+            .sessions
+            .iter()
+            .any(|s| s.id == e.session && s.exited.is_none());
+        if running {
+            return;
+        }
+        let Some(e) = self.editing.take() else { return };
+        let written = std::fs::read_to_string(&e.path);
+        let _ = std::fs::remove_file(&e.path);
+        match written {
+            Ok(text) if text == e.body => self.say("no changes".into()),
+            Ok(text) => self.save_doc(e.key, e.base, text).await,
+            Err(err) => self.say(format!("couldn't read what you wrote: {err}")),
+        }
+    }
+
+    /// Saves `body` over the version `base` names. On a conflict the reader shows
+    /// both; on an error, yours goes to a file so it isn't lost.
+    async fn save_doc(&mut self, key: String, base: String, body: String) {
+        match self.client.save_doc(key.clone(), base, body.clone()).await {
+            Ok((doc, false)) => {
+                if let Some(page) = &mut self.docs {
+                    page.saved(&key, doc);
+                }
+                self.say("Saved.".into());
+            }
+            Ok((theirs, true)) => {
+                if let Some(page) = &mut self.docs {
+                    page.conflict(&key, body, theirs);
+                }
+                self.say("It changed since you opened it: yours isn't saved yet.".into());
+            }
+            Err(err) => match edit_file(&body) {
+                Ok(kept) => self.say(format!(
+                    "couldn't save: {err}; yours is in {}",
+                    kept.display()
+                )),
+                Err(_) => self.say(format!("couldn't save: {err}")),
+            },
         }
     }
 
@@ -3191,7 +3306,7 @@ impl App {
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
                         && self.digest.is_none()
-                        && self.docs.is_none()
+                        && !self.docs_shown()
                         && self.backlog.is_none()
                         && !self.mini_open()
                         && !self.rail_open();
@@ -3232,7 +3347,7 @@ impl App {
             if let Some(page) = &self.digest {
                 page.draw(frame, self.settings.theme);
             }
-            if let Some(page) = &self.docs {
+            if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, self.settings.theme);
             }
             if let Some(page) = &self.backlog {
@@ -5878,6 +5993,44 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
         i += 1;
     }
     keys
+}
+
+/// A doc open in your editor (`App::start_edit`).
+#[derive(Debug)]
+struct Editing {
+    session: SessionId,
+    key: String,
+    /// The hash of the version it started from, which the save names.
+    base: String,
+    path: PathBuf,
+    /// The body as it went in, to tell whether you changed it.
+    body: String,
+}
+
+/// Your editor as a command: `$VISUAL`, else `$EDITOR` (either may carry
+/// arguments, as `code -w` does), else `vi`.
+fn editor_command() -> Vec<String> {
+    ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|v| v.split_whitespace().map(String::from).collect::<Vec<_>>())
+        .find(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["vi".into()])
+}
+
+/// A new file holding `body`, readable only by you, for your editor.
+fn edit_file(body: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!("valk-doc-{}-{nanos}.md", std::process::id()));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+    open.open(&path)?.write_all(body.as_bytes())?;
+    Ok(path)
 }
 
 /// Whether `dir` is in a git repository (as the CLI and daemon see it).
