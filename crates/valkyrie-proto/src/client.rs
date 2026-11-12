@@ -405,6 +405,30 @@ impl Client {
         }
     }
 
+    pub async fn note(&self, note: crate::NewNote) -> Result<crate::Note> {
+        match self.request(|req| ClientMsg::Note { req, note }).await? {
+            Reply::Note { note } => Ok(*note),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn notes(&self, cwd: PathBuf) -> Result<crate::NotesListing> {
+        match self.request(|req| ClientMsg::Notes { req, cwd }).await? {
+            Reply::Notes { listing } => Ok(listing),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn note_rm(&self, cwd: PathBuf, id: u32) -> Result<crate::Tombstone> {
+        match self
+            .request(|req| ClientMsg::NoteRm { req, cwd, id })
+            .await?
+        {
+            Reply::Tombstone { tombstone } => Ok(tombstone),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn write_doc(&self, doc: crate::NewDoc) -> Result<crate::Doc> {
         match self.request(|req| ClientMsg::WriteDoc { req, doc }).await? {
             Reply::Doc { doc } => Ok(*doc),

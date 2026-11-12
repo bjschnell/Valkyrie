@@ -5,6 +5,7 @@ mod doc;
 mod guard;
 mod hook;
 mod mcp;
+mod notes;
 mod pane;
 mod pings;
 mod service;
@@ -198,6 +199,24 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<context::DecisionsCmd>,
     },
+    /// Write an agent note: one short finding about this repository (a flaky test,
+    /// a slow build, an environment trap) that any agent can look up later. Not
+    /// reviewed, never injected; where it came from is recorded with it.
+    Note {
+        /// At most 1,000 characters; `-` reads it from stdin.
+        text: String,
+        /// The note this one corrects: it's marked replaced and never served again.
+        #[arg(long, value_name = "ID")]
+        replaces: Option<u32>,
+        /// Write it even though it matches a deleted note. For you, not agents.
+        #[arg(long)]
+        force: bool,
+    },
+    /// This repository's agent notes: list, show, delete, and their health.
+    Notes {
+        #[command(subcommand)]
+        action: Option<notes::NotesCmd>,
+    },
     /// The backlog: bugs, features and chores written down for later, each of
     /// which can start an agent on itself. Lists the open ones without a command.
     Todo {
@@ -273,6 +292,10 @@ enum Cmd {
         /// Print JSON, with every stop listed.
         #[arg(long)]
         json: bool,
+        /// Also count stops that asked what an earlier session had asked and had
+        /// answered (rough word matching; ADR-0017's baseline).
+        #[arg(long)]
+        repeats: bool,
     },
     /// Whether the supervisor offers and takes steps on flagged sessions
     /// (ADR-0019): on (the default) or off. Off, the PR poll still flags them.
@@ -810,6 +833,12 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
         }
         Some(Cmd::Doc(cmd)) => doc::run(&connect(&socket).await?.0, cmd).await,
+        Some(Cmd::Note {
+            text,
+            replaces,
+            force,
+        }) => notes::write(&connect(&socket).await?.0, text, replaces, force).await,
+        Some(Cmd::Notes { action }) => notes::run(&connect(&socket).await?.0, action).await,
         Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
         Some(Cmd::Decisions { all, user, action }) => {
             context::decisions(&connect(&socket).await?.0, all, user, action).await
@@ -895,17 +924,36 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             print!("{}", tools::replay_report(&events, labels.as_deref())?);
             Ok(())
         }
-        Some(Cmd::Pings { days, repo, json }) => {
+        Some(Cmd::Pings {
+            days,
+            repo,
+            json,
+            repeats,
+        }) => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u64;
             let since = now.saturating_sub(days.saturating_mul(86_400_000));
             let dir = valkyrie_proto::state_dir().join("sessions");
-            let pings = pings::collect(&dir, since, repo.as_deref())?;
+            // With --repeats, earlier sessions' answers may predate the window.
+            let from = match repeats {
+                true => since.saturating_sub(pings::REPEAT_LOOKBACK_DAYS * 86_400_000),
+                false => since,
+            };
+            let pool = pings::collect(&dir, from, repo.as_deref())?;
+            let at = pool.partition_point(|p| p.t < since);
+            let pings = &pool[at..];
             if json {
-                println!("{}", pings::json(&pings, days, since, now));
+                let mut out = pings::json(pings, days, since, now);
+                if repeats {
+                    out["asked_again"] = pings::repeats_json(&pool, since);
+                }
+                println!("{out}");
             } else {
-                print!("{}", pings::report(&pings, days, since, now)?);
+                print!("{}", pings::report(pings, days, since, now)?);
+                if repeats {
+                    print!("{}", pings::repeats_report(&pool, since)?);
+                }
             }
             Ok(())
         }

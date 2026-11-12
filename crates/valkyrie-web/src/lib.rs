@@ -705,6 +705,10 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// So do the editor's save, restore and delete (§7), by key, which the daemon
 /// takes from a human only. `WriteDoc` and `EditDoc` are the agents' path, and
 /// moving the folder is the CLI's.
+///
+/// Agent notes (ADR-0017): the web app has no notes view yet, and the bridge
+/// counts as the user, so writing (`--force` past a tombstone included) and
+/// deleting stay the CLI's until it does. Listing is read-only and goes through.
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
@@ -717,6 +721,8 @@ fn allowed(msg: &ClientMsg) -> bool {
             | ClientMsg::WriteDoc { .. }
             | ClientMsg::EditDoc { .. }
             | ClientMsg::DocsRoot { root: Some(_), .. }
+            | ClientMsg::Note { .. }
+            | ClientMsg::NoteRm { .. }
     )
 }
 
@@ -1090,6 +1096,28 @@ mod tests {
             only: Some(vec![1]),
         };
         assert!(allowed(&ship));
+    }
+
+    #[test]
+    fn a_browser_lists_notes_but_neither_writes_nor_deletes_one() {
+        assert!(allowed(&ClientMsg::Notes {
+            req: 1,
+            cwd: "/r".into(),
+        }));
+        assert!(!allowed(&ClientMsg::Note {
+            req: 1,
+            note: valkyrie_proto::NewNote {
+                cwd: "/r".into(),
+                text: "x".into(),
+                replaces: None,
+                force: true,
+            },
+        }));
+        assert!(!allowed(&ClientMsg::NoteRm {
+            req: 1,
+            cwd: "/r".into(),
+            id: 1,
+        }));
     }
 
     #[test]

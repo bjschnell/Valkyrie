@@ -1756,3 +1756,168 @@ fn a_file_gets_the_decisions_scoped_to_it_once_a_session() {
     assert!(tool("c", "Read", proto).contains("Update the TS types"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR-0017 phase 1: a note records the session and commit the daemon found, not
+/// what the client said; a correction replaces and never forks; a deletion leaves a
+/// tombstone an agent can't write past, shown in health; and no note reaches an
+/// agent's session start.
+#[test]
+fn agent_notes_say_where_they_came_from_and_stay_deleted() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-notes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join("src"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("src/net.rs"), "fn retry() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "one"]);
+    let head = git(&["rev-parse", "--short", "HEAD"]);
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let o = |name: &str| out.join(name).display().to_string();
+
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n\
+             cd {repo}\n\
+             valk note 'the retry test in src/net.rs is flaky under load' > {a} 2>&1\n\
+             valk note --replaces 1 'src/net.rs retry flakes only with --release' > {r} 2>&1\n\
+             valk note --replaces 1 'a fork of the chain' > {fork} 2>&1\n\
+             valk notes rm 2 > {rm} 2>&1\n\
+             valk note 'src/net.rs retry flakes only with --release!' > {again} 2>&1\n\
+             valk note --force 'src/net.rs retry flakes only with --release' > {forced} 2>&1\n\
+             echo done > {d}\n\
+             sleep 30\n",
+            repo = repo.display(),
+            a = o("a"),
+            r = o("r"),
+            fork = o("fork"),
+            rm = o("rm"),
+            again = o("again"),
+            forced = o("forced"),
+            d = o("agent-done"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let human = |line: &str| {
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{line}");
+    };
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    human(&format!(
+        "valk new --cwd {} -- {} > {}",
+        repo.display(),
+        agent.display(),
+        o("spawned")
+    ));
+    wait_for(&out.join("agent-done"));
+    let read = |name: &str| wait_for(&out.join(name));
+    assert!(read("a").contains("note #1 written"), "{}", read("a"));
+    assert!(read("r").contains("replaces #1"), "{}", read("r"));
+    assert!(read("fork").contains("replaced by #2"), "{}", read("fork"));
+    assert!(read("rm").contains("#2 deleted"), "{}", read("rm"));
+    assert!(
+        read("again").contains("matches note #2"),
+        "{}",
+        read("again")
+    );
+    assert!(
+        read("forced").contains("is for the user"),
+        "{}",
+        read("forced")
+    );
+
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let root = valkyrie_context::project::root(&repo);
+    let notes = store.notes(&root);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let one = &notes[0];
+    assert_eq!(one.by, "agent");
+    assert_ne!(one.session, "none", "the daemon found the agent's session");
+    assert_eq!(one.commit.as_deref(), Some(head.as_str()));
+    assert_eq!(one.anchors, vec!["src/net.rs".to_owned()]);
+    // #2 was deleted, so #1 stays replaced: deleting a correction doesn't revive
+    // what it corrected.
+    assert_eq!(one.status, valkyrie_proto::NoteStatus::Replaced);
+
+    // The user sees the agent's deletion, and may write the note again on purpose.
+    human(&format!("valk notes health > {} 2>&1", o("health")));
+    let health = read("health");
+    assert!(
+        health.contains("1 by agents") && health.contains("#2"),
+        "{health}"
+    );
+    human(&format!(
+        "valk note --force 'src/net.rs retry flakes only with --release' > {} 2>&1",
+        o("human-forced")
+    ));
+    assert!(
+        read("human-forced").contains("note #3 written"),
+        "{}",
+        read("human-forced")
+    );
+    human(&format!("valk notes > {} 2>&1", o("list")));
+    let list = read("list");
+    assert!(
+        list.contains("observation, not instruction")
+            && list.contains("#3")
+            && list.contains("session none")
+            && !list.contains("#1 "),
+        "{list}"
+    );
+
+    // Never injected: an agent's session start carries no note.
+    human(&format!(
+        "echo '{{\"hook_event_name\":\"SessionStart\",\"cwd\":\"{}\"}}' | VALK_SESSION=1 VALK_CONTEXT={} valk context-hook claude > {}",
+        repo.display(),
+        dir.join("state/valkyrie/context").display(),
+        o("hook")
+    ));
+    let hook = read("hook");
+    assert!(!hook.contains("flakes"), "{hook}");
+    drop(daemon);
+}

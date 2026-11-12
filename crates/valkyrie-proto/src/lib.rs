@@ -13,6 +13,7 @@ pub mod digest;
 pub mod docs;
 pub mod ipc;
 pub mod layout;
+pub mod notes;
 pub mod pastes;
 pub mod quota;
 pub mod screen;
@@ -34,11 +35,12 @@ pub use docs::{
     CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, NewDoc,
 };
 pub use layout::{Axis, Pane, Side};
+pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 37;
+pub const PROTOCOL: u32 = 38;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -722,6 +724,24 @@ pub enum ClientMsg {
         #[serde(default)]
         by: DigestGroup,
     },
+    /// Writes an agent note (ADR-0017, protocol 38). Replies `Note`.
+    Note {
+        req: ReqId,
+        note: NewNote,
+    },
+    /// The notes of the project holding `cwd`, every status, each live one's
+    /// staleness worked out, with the tombstones. Replies `Notes`.
+    Notes {
+        req: ReqId,
+        cwd: PathBuf,
+    },
+    /// Deletes a note and leaves a tombstone (ADR-0017 rule 4). Anyone may.
+    /// Replies `Tombstone`.
+    NoteRm {
+        req: ReqId,
+        cwd: PathBuf,
+        id: u32,
+    },
 }
 
 fn yes() -> bool {
@@ -933,6 +953,15 @@ pub enum Reply {
     },
     Digest {
         digest: Box<Digest>,
+    },
+    Note {
+        note: Box<Note>,
+    },
+    Notes {
+        listing: NotesListing,
+    },
+    Tombstone {
+        tombstone: Tombstone,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

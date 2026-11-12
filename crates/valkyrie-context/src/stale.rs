@@ -99,16 +99,26 @@ pub fn valid_commit(commit: &str) -> bool {
     (4..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Why an active decision's files suggest it may no longer hold: one deleted, or
-/// many lines changed since the commit it was confirmed at. Runs `git` in `root`.
-pub fn churn(root: &Path, d: &Decision) -> Option<String> {
-    if d.status != DecisionStatus::Active || d.fresh.anchors.is_empty() {
+/// How the files a text names have changed since `commit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// One of them no longer exists.
+    Gone(String),
+    /// Lines added and removed in them, [`CHURN_LINES`] or more in all.
+    Churn { added: u64, removed: u64 },
+}
+
+/// Whether `anchors` (files under `root`) changed enough since `commit` to doubt
+/// what was said about them: one deleted, or [`CHURN_LINES`] lines changed. Runs
+/// `git` in `root`. Shared by decisions and agent notes (ADR-0017 §6).
+pub fn changed(root: &Path, anchors: &[String], commit: Option<&str>) -> Option<Change> {
+    if anchors.is_empty() {
         return None;
     }
-    if let Some(gone) = d.fresh.anchors.iter().find(|a| !root.join(a).exists()) {
-        return Some(format!("{gone} no longer exists"));
+    if let Some(gone) = anchors.iter().find(|a| !root.join(a).exists()) {
+        return Some(Change::Gone(gone.clone()));
     }
-    let commit = d.provenance.commit.as_deref().filter(|c| valid_commit(c))?;
+    let commit = commit.filter(|c| valid_commit(c))?;
     let out = Command::new("git")
         .no_window()
         .args([
@@ -119,7 +129,7 @@ pub fn churn(root: &Path, d: &Decision) -> Option<String> {
             "HEAD",
             "--",
         ])
-        .args(&d.fresh.anchors)
+        .args(anchors)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stderr(Stdio::null())
@@ -132,12 +142,22 @@ pub fn churn(root: &Path, d: &Decision) -> Option<String> {
         added += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         removed += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     }
-    (added + removed >= CHURN_LINES).then(|| {
-        format!(
+    (added + removed >= CHURN_LINES).then_some(Change::Churn { added, removed })
+}
+
+/// Why an active decision's files suggest it may no longer hold: one deleted, or
+/// many lines changed since the commit it was confirmed at. Runs `git` in `root`.
+pub fn churn(root: &Path, d: &Decision) -> Option<String> {
+    if d.status != DecisionStatus::Active {
+        return None;
+    }
+    match changed(root, &d.fresh.anchors, d.provenance.commit.as_deref())? {
+        Change::Gone(gone) => Some(format!("{gone} no longer exists")),
+        Change::Churn { added, removed } => Some(format!(
             "{} changed a lot since it was confirmed (+{added}/-{removed})",
             d.fresh.anchors.join(", ")
-        )
-    })
+        )),
+    }
 }
 
 /// Why `d` should be looked at again, if it should.

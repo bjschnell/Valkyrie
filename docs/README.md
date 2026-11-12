@@ -6,6 +6,7 @@
 - [Settings](settings.md): themes, tabs, sounds, where settings are kept
 - [The phone app](phone.md): `valk web`, pairing, devices
 - [Project decisions](decisions.md): rules and skills agents start with, and how they're learned
+- [Agent notes](notes.md): unreviewed findings agents leave for each other, never injected
 - [Policies](policies.md): ship, ci-fix and the merge guard
 - [The supervisor](supervisor.md): red and conflicting PRs, starting ready work
 - [Backlog](backlog.md): items, the board, launching agents

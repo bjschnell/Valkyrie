@@ -245,6 +245,79 @@ impl Registry {
         })
     }
 
+    /// Writes an agent note (ADR-0017). Where it came from is worked out here,
+    /// from the connecting process and the checkout's `HEAD`, never the client.
+    pub(crate) fn note(&self, new: valkyrie_proto::NewNote, peer: Option<Peer>) -> Result<Reply> {
+        let caller = self.caller(peer);
+        let provenance = Provenance {
+            // Fail closed, as for decisions: anything not shown to be a human's is
+            // an agent's.
+            by: if caller.agent.is_some() {
+                "agent"
+            } else {
+                "user"
+            }
+            .into(),
+            session: caller.session.as_ref().map(|s| s.info().name),
+            conversation: caller.session.as_ref().and_then(|s| s.conversation()),
+            // Before taking the lock: it runs `git`.
+            commit: valkyrie_context::project::head(&new.cwd),
+            cwd: Some(new.cwd.clone()),
+        };
+        let note = self
+            .context
+            .lock()
+            .unwrap()
+            .note(&new, provenance, None, now_secs())?;
+        tracing::info!(
+            id = note.id,
+            project = %note.project.display(),
+            by = note.by,
+            replaces = note.replaces,
+            "note written"
+        );
+        Ok(Reply::Note {
+            note: Box::new(note),
+        })
+    }
+
+    /// A project's notes, each live one's staleness worked out, with the
+    /// tombstones.
+    pub(crate) fn notes(&self, cwd: &Path) -> Reply {
+        let root = valkyrie_context::project::root(cwd);
+        let (mut notes, deleted) = {
+            let store = self.context.lock().unwrap();
+            (store.notes(&root), store.deleted_notes(&root))
+        };
+        // After the lock: it runs `git` once per note with anchors.
+        for n in &mut notes {
+            n.stale = valkyrie_context::notes::staleness(&root, n);
+        }
+        Reply::Notes {
+            listing: valkyrie_proto::NotesListing { notes, deleted },
+        }
+    }
+
+    /// Deletes a note, leaving a tombstone. Anyone may (notes are unreviewed); an
+    /// agent's deletion is shown to the user in `valk notes health`.
+    pub(crate) fn note_rm(&self, cwd: &Path, id: u32, peer: Option<Peer>) -> Result<Reply> {
+        let caller = self.caller(peer);
+        let root = valkyrie_context::project::root(cwd);
+        let by = if caller.agent.is_some() {
+            "agent"
+        } else {
+            "user"
+        };
+        let session = caller.session.as_ref().map(|s| s.info().name);
+        let tombstone = self
+            .context
+            .lock()
+            .unwrap()
+            .rm_note(&root, id, by, session, now_secs())?;
+        tracing::info!(id, project = %root.display(), by, "note deleted");
+        Ok(Reply::Tombstone { tombstone })
+    }
+
     /// Only a human may act on decisions; through the `valk web` bridge, that is
     /// one of the devices they paired.
     pub(crate) fn vouch(&self, peer: Option<Peer>, what: &str) -> Result<()> {
