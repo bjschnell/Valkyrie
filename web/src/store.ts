@@ -7,6 +7,10 @@ import type { Mismatch } from "./lib/protocol";
 import { termColors } from "./lib/theme";
 import type {
   Decision,
+  Doc,
+  DeletedDoc,
+  DocComment,
+  DocVersion,
   Item,
   ItemChange,
   ItemFacts,
@@ -72,6 +76,8 @@ interface State {
   queue: QueueItem[];
   /** Decisions agents proposed, waiting on the human (ADR-0007). */
   proposals: Decision[];
+  /** Docs an agent wrote since the Docs list was last opened (ADR-0021 §5): a count, never cards. */
+  unreadDocs: number;
   /** The backlog (DESIGN §8.12), as the daemon pushes it. */
   items: Item[];
   /** Build orders waiting on the user (ADR-0019 §2), pushed with the items. */
@@ -90,7 +96,8 @@ interface State {
   chat: Chat | null;
   /** Choices on the screens of queued sessions, by session, for the inbox. */
   prompts: Record<SessionId, Prompt>;
-  toast: { text: string; at: number } | null;
+  /** `action`: a button on it, such as Undo; the toast stays longer. */
+  toast: { text: string; at: number; action?: { label: string; run: () => void } } | null;
   now: number;
   push: PushState;
   /** Turning notifications on: the browser's push service can take a while. */
@@ -106,6 +113,7 @@ export const useApp = create<State>(() => ({
   sessions: [],
   queue: [],
   proposals: [],
+  unreadDocs: 0,
   items: [],
   orders: [],
   launches: [],
@@ -128,8 +136,8 @@ const get = useApp.getState;
 let conn: Conn | null = null;
 let listTimer: number | null = null;
 
-export function toast(text: string): void {
-  set({ toast: { text, at: Date.now() } });
+export function toast(text: string, action?: { label: string; run: () => void }): void {
+  set({ toast: { text, at: Date.now(), action } });
 }
 
 export function saveToken(token: string): void {
@@ -596,6 +604,130 @@ export async function allDecisions(): Promise<Decision[] | null> {
     return reply.t === "decisions" ? reply.decisions : null;
   } catch {
     return null;
+  }
+}
+
+/** Every doc, newest first, and how many an agent wrote since the list was last
+ * opened (ADR-0021 §5); null when it can't be asked. */
+export async function allDocs(): Promise<{ docs: Doc[]; unread: number; at: number } | null> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const reply = await conn.request({ t: "docs" });
+    return reply.t === "docs" ? { docs: reply.docs, unread: reply.unread ?? 0, at: reply.at ?? 0 } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One doc's text, by the key its list entry carries. Throws with the daemon's reason. */
+export async function openDoc(key: string): Promise<Doc> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "open_doc", key });
+  if (reply.t !== "doc") throw new Error("unexpected reply");
+  return reply.doc;
+}
+
+/** A doc's comments (ADR-0021 §6); none on one without a valk-id. Throws with the daemon's reason. */
+export async function docComments(key: string): Promise<DocComment[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "doc_comments", key });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return reply.comments;
+}
+
+/** Comments on a doc, or on the block `quote` reads. Returns them all, and the
+ * running session that hears it at its next prompt, if any. */
+export async function commentDoc(
+  key: string,
+  quote: string | null,
+  text: string,
+): Promise<{ comments: DocComment[]; to?: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "comment_doc", key, text, ...(quote ? { quote } : {}) });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return { comments: reply.comments, to: reply.to };
+}
+
+/** Closes a comment; returns the doc's comments. */
+export async function resolveComment(key: string, comment: number): Promise<DocComment[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "resolve_comment", key, comment });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return reply.comments;
+}
+
+/** A save or restore: the doc as written, or with `conflict`, as it is on disk now. */
+export type Saved = { doc: Doc; conflict: boolean };
+
+/** The user's save from the editor (ADR-0021 §7), over the version whose hash
+ * `base` is. Throws with the daemon's reason. */
+export async function saveDoc(key: string, base: string, body: string): Promise<Saved> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "save_doc", key, base, body });
+  if (reply.t !== "doc_saved") throw new Error("unexpected reply");
+  return { doc: reply.doc, conflict: !!reply.conflict };
+}
+
+/** A doc's past versions, newest first, and one's whole text when asked. */
+export async function docHistory(key: string, version?: string): Promise<{ versions: DocVersion[]; text?: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "doc_history", key, ...(version ? { version } : {}) });
+  if (reply.t !== "doc_history") throw new Error("unexpected reply");
+  return { versions: reply.versions, text: reply.text };
+}
+
+/** Puts a past version back over the version whose hash `base` is. */
+export async function restoreDoc(key: string, base: string, version: string): Promise<Saved> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "restore_doc", key, base, version });
+  if (reply.t !== "doc_saved") throw new Error("unexpected reply");
+  return { doc: reply.doc, conflict: !!reply.conflict };
+}
+
+/** Deletes a doc if `base` is still on disk: the token that puts it back, or
+ * the doc as it is now if someone saved since. */
+export async function deleteDoc(key: string, base: string): Promise<{ token: string } | { conflict: Doc }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "delete_doc", key, base });
+  if (reply.t === "doc_deleted") return { token: reply.token };
+  if (reply.t === "doc_saved") return { conflict: reply.doc };
+  throw new Error("unexpected reply");
+}
+
+/** Deleted docs that can still be put back, newest first; none when it can't be asked. */
+export async function deletedDocs(): Promise<DeletedDoc[]> {
+  try {
+    if (!conn) return [];
+    const reply = await conn.request({ t: "deleted_docs" });
+    return reply.t === "deleted_docs" ? reply.docs : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Puts a deleted doc back where it was. */
+export async function undeleteDoc(token: string): Promise<Doc> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "undelete_doc", token });
+  if (reply.t !== "doc") throw new Error("unexpected reply");
+  return reply.doc;
+}
+
+/** The Docs list listed `at` is open: clear the Inbox's unread count. What came
+ * in after `at` stays unread, since the list didn't show it. */
+export function docsSeen(at: number): void {
+  set({ unreadDocs: 0 });
+  void conn?.request({ t: "docs_seen", at }).catch(() => undefined);
+}
+
+/** Asks how many docs are unread, for the Inbox's count: the count alone, not the list. */
+export async function refreshUnreadDocs(): Promise<void> {
+  try {
+    if (!conn) return;
+    const reply = await conn.request({ t: "docs", count_only: true });
+    if (reply.t === "docs") set({ unreadDocs: reply.unread ?? 0 });
+  } catch {
+    // Not connected, or the daemon can't be asked: keep the last count.
   }
 }
 

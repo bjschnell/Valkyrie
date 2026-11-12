@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use valkyrie_proto::{Doc, DocKind, NewDoc};
+use valkyrie_proto::{DeletedDoc, Doc, DocKind, DocVersion, NewDoc};
 
 /// Longest title, in characters.
 const MAX_TITLE: usize = 120;
@@ -19,6 +19,14 @@ const HISTORY_KEEP: usize = 50;
 const HISTORY_DAYS: u64 = 30;
 /// A repository's folder name, before any hash.
 const MAX_FOLDER: usize = 40;
+/// How much of a file listing reads for its front matter.
+const MAX_HEAD: u64 = 64 * 1024;
+/// The largest file the web app is sent: a vault can hold anything.
+pub const MAX_OPEN: u64 = 2 * 1024 * 1024;
+/// How long an unread count stands before the folder is walked again. Writes
+/// through the daemon clear it at once; this only bounds a file an agent wrote
+/// to disk itself.
+const COUNT_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Who wrote or edited a doc, as the daemon worked it out (never the client).
 #[derive(Debug, Clone, Default)]
@@ -29,6 +37,17 @@ pub struct Author {
     pub conversation: Option<String>,
     pub commit: Option<String>,
     pub item: Option<u32>,
+}
+
+/// Who wrote a doc, as its front matter says.
+#[derive(Debug, Clone, Default)]
+pub struct Origin {
+    pub id: u32,
+    pub title: String,
+    /// The agent, or `human`.
+    pub by: String,
+    pub session: Option<String>,
+    pub conversation: Option<String>,
 }
 
 /// What the daemon keeps about docs in `<state dir>/docs.json`.
@@ -43,11 +62,27 @@ struct Config {
     /// The next `valk-id` to give out.
     #[serde(default)]
     next_id: u32,
+    /// When the user last opened the Docs list (ADR-0021 §5), in seconds.
+    #[serde(default)]
+    seen: u64,
 }
 
 pub struct Docs {
     state: PathBuf,
     config: Config,
+    /// Each file's front matter as last read, by path, while its mtime and size
+    /// hold (ADR-0021 §5): listing and finding by id stat files instead of
+    /// reading them.
+    cache: BTreeMap<PathBuf, Cached>,
+    /// The last unread count and when it was taken, for the Inbox's poll.
+    count: Option<(std::time::Instant, u32)>,
+}
+
+#[derive(Clone)]
+struct Cached {
+    /// mtime in nanoseconds, and size.
+    stamp: (u128, u64),
+    front: Front,
 }
 
 impl Docs {
@@ -57,7 +92,12 @@ impl Docs {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        Self { state, config }
+        Self {
+            state,
+            config,
+            cache: BTreeMap::new(),
+            count: None,
+        }
     }
 
     fn save(&self) -> Result<()> {
@@ -66,6 +106,11 @@ impl Docs {
             &self.state.join("docs.json"),
             &serde_json::to_string_pretty(&self.config)?,
         )
+    }
+
+    /// The comments on docs (ADR-0021 §6), kept beside them in the state dir.
+    pub fn comments(&self) -> crate::comments::Comments {
+        crate::comments::Comments::new(&self.state)
     }
 
     /// Where docs live now.
@@ -105,6 +150,8 @@ impl Docs {
             }
         };
         self.config.root = root;
+        self.cache.clear();
+        self.count = None;
         self.save()?;
         Ok(self.root())
     }
@@ -170,19 +217,22 @@ impl Docs {
             repo: repo.as_ref().map(|r| r.display().to_string()),
             edited: Vec::new(),
             rest: Vec::new(),
+            kind_kept: false,
         };
         let text = front.render(&body);
         let stem = format!("{}-{}", &rfc3339(now)[..10], slug(&title));
         let path = create_new(&dir, &stem, &text)?;
+        self.count = None;
         Ok(doc(&root, &path, &front, text))
     }
 
     /// One past the highest id given out or found on disk, so an id is never
     /// given twice even if `docs.json` was lost.
     fn take_id(&mut self, root: &Path) -> Result<u32> {
-        let on_disk = scan(root)
+        let on_disk = self
+            .index(root)
             .iter()
-            .filter_map(|p| Front::parse(&std::fs::read_to_string(p).ok()?).0?.id_opt())
+            .filter_map(|(_, c)| c.front.id_opt())
             .max()
             .unwrap_or(0);
         let id = self.config.next_id.max(on_disk + 1).max(1);
@@ -192,26 +242,196 @@ impl Docs {
     }
 
     /// Every doc under the root, newest first. Files without a `valk-id` (the
-    /// user's own) are listed with id 0.
-    pub fn list(&self) -> Result<Vec<Doc>> {
+    /// user's own) are listed with id 0 and a handle for a key.
+    pub fn list(&mut self) -> Result<Vec<Doc>> {
         let root = self.real_root()?;
-        let mut docs: Vec<(u64, Doc)> = scan(&root)
+        let seen = self.config.seen;
+        // Front matter is the writer's word: a date in the future can't pin a doc
+        // unread past its file's own mtime. Unread is a nudge, not a guarantee: an
+        // agent writing the file itself can say `by: human`.
+        let mut docs: Vec<(u128, Doc)> = self
+            .keyed(&root)
             .into_iter()
-            .filter_map(|path| {
-                let text = std::fs::read_to_string(&path).ok()?;
-                let modified = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs());
-                let front = Front::parse(&text).0.unwrap_or_else(|| Front::bare(&path));
-                let mut d = doc(&root, &path, &front, String::new());
-                d.text = None;
-                Some((modified, d))
+            .map(|(path, c, key)| {
+                let mut d = doc(&root, &path, &c.front, String::new());
+                d.key = key;
+                let mtime = u64::try_from(c.stamp.0 / 1_000_000_000).unwrap_or(u64::MAX);
+                d.unread = c.front.agent_at().min(mtime) > seen;
+                (c.stamp.0, d)
             })
             .collect();
         docs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
-        Ok(docs.into_iter().map(|(_, d)| d).collect())
+        let docs: Vec<Doc> = docs.into_iter().map(|(_, d)| d).collect();
+        self.count = Some((std::time::Instant::now(), Self::unread(&docs)));
+        Ok(docs)
+    }
+
+    /// How many docs are unread, for a poll: the last count while it's fresh
+    /// and nothing was written through the daemon since, so polling devices
+    /// don't each walk the whole folder.
+    pub fn unread_count(&mut self) -> Result<u32> {
+        match self.count {
+            Some((at, n)) if at.elapsed() < COUNT_FOR => Ok(n),
+            _ => Ok(Self::unread(&self.list()?)),
+        }
+    }
+
+    /// How many docs an agent wrote or edited since the list was last opened.
+    pub fn unread(docs: &[Doc]) -> u32 {
+        docs.iter().filter(|d| d.unread).count() as u32
+    }
+
+    /// The user opened the Docs list as it was at `at`: what agents wrote until
+    /// then is read, not what came in while it loaded.
+    pub fn seen(&mut self, at: u64, now: u64) -> Result<()> {
+        self.count = None;
+        self.config.seen = self.config.seen.max(at.min(now));
+        self.save()
+    }
+
+    /// Every `.md` file under `root` with its front matter, read again only for a
+    /// file whose mtime or size changed since the last call.
+    fn index(&mut self, root: &Path) -> Vec<(PathBuf, Cached)> {
+        let mut fresh = BTreeMap::new();
+        for path in scan(root) {
+            let Some(stamp) = stamp(&path) else { continue };
+            let cached = match self.cache.remove(&path) {
+                Some(c) if c.stamp == stamp => c,
+                _ => {
+                    let Some(head) = read_head(&path) else {
+                        continue;
+                    };
+                    let front = Front::parse(&head).0.unwrap_or_else(|| Front::bare(&path));
+                    Cached { stamp, front }
+                }
+            };
+            fresh.insert(path, cached);
+        }
+        self.cache = fresh;
+        self.cache
+            .iter()
+            .map(|(p, c)| (p.clone(), c.clone()))
+            .collect()
+    }
+
+    /// The index with each file's key. A `valk-id` two files carry (a copy, or an
+    /// Obsidian Sync conflict) belongs to neither: each gets its path's handle, so
+    /// the web app opens the one you tapped, never whichever sorts first.
+    fn keyed(&mut self, root: &Path) -> Vec<(PathBuf, Cached, String)> {
+        let index = self.index(root);
+        let mut count = BTreeMap::<u32, usize>::new();
+        for (_, c) in &index {
+            if let Some(id) = c.front.id_opt() {
+                *count.entry(id).or_default() += 1;
+            }
+        }
+        index
+            .into_iter()
+            .map(|(path, c)| {
+                let rel = slashed(path.strip_prefix(root).unwrap_or(&path));
+                let shared = c.front.id_opt().is_some_and(|id| count[&id] > 1);
+                let key = match shared {
+                    true => format!("p{}", hash(&rel)),
+                    false => key(&c.front, &rel),
+                };
+                (path, c, key)
+            })
+            .collect()
+    }
+
+    /// The one file carrying `id`; refused when two do, naming both.
+    fn by_id(&mut self, root: &Path, id: u32) -> Result<PathBuf> {
+        let mut found: Vec<PathBuf> = self
+            .index(root)
+            .into_iter()
+            .filter(|(_, c)| c.front.id_opt() == Some(id))
+            .map(|(p, _)| p)
+            .collect();
+        match found.len() {
+            0 => bail!("no doc {id} under {}", root.display()),
+            1 => Ok(found.remove(0)),
+            _ => {
+                let names: Vec<String> = found
+                    .iter()
+                    .map(|p| slashed(p.strip_prefix(root).unwrap_or(p)))
+                    .collect();
+                bail!(
+                    "doc {id} is on {} files ({}), a copy or a sync conflict: read one by its path, \
+                     or take the valk-id line out of the copy so it gets its own id",
+                    found.len(),
+                    names.join(", ")
+                )
+            }
+        }
+    }
+
+    /// The web app's read (ADR-0021 §5): a doc by the key a list gave out, its
+    /// `valk-id` or the handle of one of the user's own. Never a path, and never
+    /// a write: a doc with no id is sent as it is.
+    pub fn open(&mut self, key: &str) -> Result<Doc> {
+        let found = self.locate(key)?;
+        let front = Front::parse(&found.text)
+            .0
+            .unwrap_or_else(|| Front::bare(&found.path));
+        // Always the hash, even of an empty file, so it can still be deleted.
+        let h = hash(&found.text);
+        let mut d = doc(&found.root, &found.path, &front, found.text);
+        d.key = found.key;
+        d.hash = Some(h);
+        Ok(d)
+    }
+
+    /// The file a key names, checked to be a plain file under the root, and its
+    /// text. The web app's reads and writes all start here.
+    fn locate(&mut self, key_: &str) -> Result<Located> {
+        let root = self.real_root()?;
+        let found = self
+            .keyed(&root)
+            .into_iter()
+            .find(|(_, _, key)| !key_.is_empty() && key == key_);
+        let Some((path, _, key)) = found else {
+            bail!("no doc {key_} under {}", root.display());
+        };
+        // Between the scan and now the file could have become a symlink, or grown.
+        if !std::fs::symlink_metadata(&path)?.is_file() {
+            bail!("doc {key_} is no longer a file");
+        }
+        inside(&root, &path)?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(std::fs::File::open(&path)?, MAX_OPEN + 1),
+            &mut bytes,
+        )?;
+        if bytes.len() as u64 > MAX_OPEN {
+            bail!(
+                "doc {key_} is over {} MB: open it in your editor",
+                MAX_OPEN >> 20
+            );
+        }
+        let text = String::from_utf8(bytes).context("the doc isn't UTF-8 text")?;
+        Ok(Located {
+            root,
+            path,
+            key,
+            text,
+        })
+    }
+
+    /// Where the doc with this key came from, for its comments (ADR-0021 §6): a
+    /// doc without a `valk-id` can't take any.
+    pub fn origin(&mut self, key: &str) -> Result<Origin> {
+        let doc = self.open(key)?;
+        if doc.id == 0 {
+            bail!("only a doc with a valk-id takes comments: read it once through valk first");
+        }
+        let front = Front::parse(doc.text.as_deref().unwrap_or_default()).0;
+        Ok(Origin {
+            id: doc.id,
+            title: doc.title,
+            by: doc.by,
+            session: doc.session,
+            conversation: front.and_then(|f| f.conversation),
+        })
     }
 
     /// A doc by its `valk-id`, or by its path under the root. A file without an id
@@ -233,22 +453,15 @@ impl Docs {
                 }
                 let text = front.render(body);
                 write_atomic(&path, &text)?;
+                self.count = None;
                 Ok(doc(&root, &path, &front, text))
             }
         }
     }
 
-    fn find(&self, root: &Path, which: &str) -> Result<PathBuf> {
+    fn find(&mut self, root: &Path, which: &str) -> Result<PathBuf> {
         if let Ok(id) = which.trim_start_matches('#').parse::<u32>() {
-            return scan(root)
-                .into_iter()
-                .find(|p| {
-                    std::fs::read_to_string(p)
-                        .ok()
-                        .and_then(|t| Front::parse(&t).0?.id_opt())
-                        == Some(id)
-                })
-                .with_context(|| format!("no doc {id} under {}", root.display()));
+            return self.by_id(root, id);
         }
         let path = root.join(which);
         if path.extension().is_none_or(|e| e != "md") {
@@ -281,17 +494,293 @@ impl Docs {
                 hash(&old)
             );
         }
-        let (Some(mut front), _) = Front::parse(&old) else {
+        if Front::parse(&old).0.is_none() {
             bail!("doc {id} has lost its front matter: read it again");
+        }
+        self.replace(&root, &path, &old, &body, author, None, now)
+    }
+
+    /// Writes `body` over the file at `path`, whose text is `old`, keeping `old`
+    /// in the history and adding who did it (and what, as `what`) to `edited`. A
+    /// file without a `valk-id` gets one, so its history has somewhere to go.
+    #[allow(clippy::too_many_arguments)]
+    fn replace(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        old: &str,
+        body: &str,
+        author: &Author,
+        what: Option<&str>,
+        now: u64,
+    ) -> Result<Doc> {
+        let mut front = Front::parse(old).0.unwrap_or_else(|| Front::bare(path));
+        if front.id_opt().is_none() {
+            front.id = self.take_id(root)?;
+            if front.by.is_empty() {
+                front.by = "human".into();
+            }
+            if front.title.is_empty() {
+                front.title = Front::bare(path).title;
+            }
+        }
+        self.keep(front.id, old, now)?;
+        let mut line = vec![author.by.clone()];
+        line.extend(author.session.clone());
+        line.extend(what.map(str::to_owned));
+        line.push(rfc3339(now));
+        front.edited.push(line.join(", "));
+        let text = front.render(body);
+        write_atomic(path, &text)?;
+        self.count = None;
+        Ok(doc(root, path, &front, text))
+    }
+
+    /// The user's save from the web app (ADR-0021 §7): `body` over the doc with
+    /// this key, if `base` is still the hash of what's on disk. Refused with the
+    /// doc as it is now if anyone saved in between, so both can be shown. One of
+    /// the user's own docs gets a `valk-id` here, and its key becomes that id.
+    pub fn save_body(
+        &mut self,
+        key: &str,
+        base: &str,
+        body: &str,
+        author: &Author,
+        now: u64,
+    ) -> Result<Saved> {
+        let body = clean_body(body)?;
+        let found = self.locate(key)?;
+        if hash(&found.text) != base.trim() {
+            return Ok(Saved::Conflict(self.open(key)?));
+        }
+        self.write_back(found, &body, author, None, now)
+    }
+
+    /// Writes over a located doc and gives it the key it goes by now.
+    fn write_back(
+        &mut self,
+        found: Located,
+        body: &str,
+        author: &Author,
+        what: Option<&str>,
+        now: u64,
+    ) -> Result<Saved> {
+        let front = Front::parse(&found.text).0;
+        // A copy carrying another file's id is listed by a path handle; its
+        // history would mix with the other's, so, as an agent's edit is, it's
+        // refused until the copy loses the id (ADR-0021 §5).
+        if found.key.starts_with('p') && front.as_ref().is_some_and(|f| f.id_opt().is_some()) {
+            bail!(
+                "this doc shares its valk-id with another file (a copy or a sync conflict): \
+                 take the valk-id line out of one in Obsidian first"
+            );
+        }
+        if !plain_front(&found.text) {
+            bail!(
+                "this doc's properties aren't in a form valk can keep (Windows line ends, or a \
+                 `---` with spaces after it): edit it in Obsidian"
+            );
+        }
+        let mut d = self.replace(
+            &found.root,
+            &found.path,
+            &found.text,
+            body,
+            author,
+            what,
+            now,
+        )?;
+        d.key = d.id.to_string();
+        Ok(Saved::Done(d))
+    }
+
+    /// The past versions of the doc with this key, newest first; none for one
+    /// without a `valk-id`.
+    pub fn versions(&mut self, key: &str) -> Result<Vec<DocVersion>> {
+        let found = self.locate(key)?;
+        let Some(id) = Front::parse(&found.text).0.and_then(|f| f.id_opt()) else {
+            return Ok(Vec::new());
         };
-        self.keep(id, &old, now)?;
-        front.edited.push(match &author.session {
-            Some(session) => format!("{}, {session}, {}", author.by, rfc3339(now)),
-            None => format!("{}, {}", author.by, rfc3339(now)),
-        });
-        let text = front.render(&body);
-        write_atomic(&path, &text)?;
-        Ok(doc(&root, &path, &front, text))
+        Ok(self
+            .history(id)
+            .into_iter()
+            .map(|(at, path)| {
+                let front = read_head(&path).and_then(|t| Front::parse(&t).0);
+                let by = front
+                    .map(|f| match f.edited.last() {
+                        Some(line) => line.split(", ").next().unwrap_or_default().to_owned(),
+                        None => f.by,
+                    })
+                    .unwrap_or_default();
+                DocVersion {
+                    version: path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    at,
+                    by,
+                    size: std::fs::metadata(&path).map_or(0, |m| m.len()),
+                }
+            })
+            .collect())
+    }
+
+    /// One past version's whole text, by the name `versions` gave it.
+    pub fn version_text(&mut self, key: &str, version: &str) -> Result<String> {
+        let found = self.locate(key)?;
+        let Some(id) = Front::parse(&found.text).0.and_then(|f| f.id_opt()) else {
+            bail!("doc {key} has no history yet");
+        };
+        let path = self.version_path(id, version)?;
+        std::fs::read_to_string(&path).with_context(|| format!("no version {version} of doc {key}"))
+    }
+
+    /// Where version `version` of doc `id` is kept. A name is the time it was
+    /// replaced, maybe with `-n`: nothing else gets near a path.
+    fn version_path(&self, id: u32, version: &str) -> Result<PathBuf> {
+        if !stamp_name(version) {
+            bail!("{version} isn't a version");
+        }
+        Ok(self
+            .state
+            .join("docs-history")
+            .join(id.to_string())
+            .join(format!("{version}.md")))
+    }
+
+    /// Puts a past version's body back over the doc with this key, under the
+    /// same rule as a save. What it replaces is kept, so a restore is undone by
+    /// restoring again.
+    pub fn restore(
+        &mut self,
+        key: &str,
+        base: &str,
+        version: &str,
+        author: &Author,
+        now: u64,
+    ) -> Result<Saved> {
+        let old = self.version_text(key, version)?;
+        let found = self.locate(key)?;
+        if hash(&found.text) != base.trim() {
+            return Ok(Saved::Conflict(self.open(key)?));
+        }
+        let body = clean_body(Front::parse(&old).1)?;
+        let at = version
+            .split('-')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let what = format!("restored the version from {}", rfc3339(at));
+        self.write_back(found, &body, author, Some(&what), now)
+    }
+
+    /// The user deletes the doc with this key, if `base` is still what's on disk
+    /// (ADR-0021 §4: the daemon never deletes one on its own). The file is kept in
+    /// `<state dir>/docs-trash` first; the token it returns puts it back.
+    pub fn delete(&mut self, key: &str, base: &str, now: u64) -> Result<Deleted> {
+        let found = self.locate(key)?;
+        if hash(&found.text) != base.trim() {
+            return Ok(Deleted::Conflict(Box::new(self.open(key)?)));
+        }
+        let dir = self.state.join("docs-trash");
+        valkyrie_proto::private_dir_all(&dir)?;
+        let mut token = now.to_string();
+        for n in 2.. {
+            if !dir.join(format!("{token}.json")).exists() {
+                break;
+            }
+            token = format!("{now}-{n}");
+        }
+        let trashed = Trashed {
+            path: slashed(found.path.strip_prefix(&found.root).unwrap_or(&found.path)),
+            text: found.text,
+        };
+        write_atomic(
+            &dir.join(format!("{token}.json")),
+            &serde_json::to_string(&trashed)?,
+        )?;
+        std::fs::remove_file(&found.path)?;
+        self.count = None;
+        trim(&dir, "json", now);
+        Ok(Deleted::Done(token))
+    }
+
+    /// The docs the user deleted that can still be put back, newest first
+    /// (`delete` keeps the last 50, for 30 days).
+    pub fn deleted(&self) -> Vec<DeletedDoc> {
+        stamped(&self.state.join("docs-trash"), "json")
+            .into_iter()
+            .filter_map(|(at, path)| {
+                let token = path.file_stem()?.to_str()?.to_owned();
+                let trashed: Trashed =
+                    serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+                let title = Front::parse(&trashed.text)
+                    .0
+                    .map(|f| f.title)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| Front::bare(Path::new(&trashed.path)).title);
+                Some(DeletedDoc {
+                    token,
+                    at,
+                    path: trashed.path,
+                    title,
+                })
+            })
+            .collect()
+    }
+
+    /// Puts a deleted doc back where it was, or beside it (`-2`) if a file has
+    /// taken its name since. Never over a file, and never outside the root.
+    pub fn undelete(&mut self, token: &str) -> Result<Doc> {
+        if !stamp_name(token) {
+            bail!("{token} isn't a deleted doc");
+        }
+        let file = self.state.join("docs-trash").join(format!("{token}.json"));
+        let trashed: Trashed = serde_json::from_str(
+            &std::fs::read_to_string(&file).context("that doc isn't in the trash any more")?,
+        )?;
+        let root = self.real_root()?;
+        let rel = Path::new(&trashed.path);
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            bail!("{} isn't a path under the docs folder", trashed.path);
+        }
+        let (Some(dir), Some(stem)) = (
+            root.join(rel).parent().map(Path::to_path_buf),
+            rel.file_stem(),
+        ) else {
+            bail!("{} isn't a doc's path", trashed.path);
+        };
+        // Its folder may be gone too: check the part that's there before making
+        // the rest, so a symlinked folder can't take a new one outside the root.
+        let there = dir.ancestors().find(|a| a.exists()).unwrap_or(&root);
+        inside(&root, there)?;
+        std::fs::create_dir_all(&dir)?;
+        inside(&root, &dir)?;
+        let path = create_new(&dir, &stem.to_string_lossy(), &trashed.text)?;
+        // A folder swapped for a symlink since the check above would have put it
+        // outside the root (#154). O_EXCL means it overwrote nothing: take it back.
+        if inside(&root, &path).is_err() {
+            let _ = std::fs::remove_file(&path);
+            bail!("{} moved outside the docs folder", trashed.path);
+        }
+        let _ = std::fs::remove_file(&file);
+        self.count = None;
+        let rel = slashed(path.strip_prefix(&root).unwrap_or(&path));
+        let found = self
+            .keyed(&root)
+            .into_iter()
+            .find(|(p, _, _)| *p == path)
+            .map(|(_, _, key)| key);
+        let front = Front::parse(&trashed.text)
+            .0
+            .unwrap_or_else(|| Front::bare(&path));
+        let mut d = doc(&root, &path, &front, trashed.text);
+        d.key = found.unwrap_or_else(|| key(&front, &rel));
+        Ok(d)
     }
 
     /// Saves `text` as one of `id`'s past versions, then trims the history.
@@ -306,49 +795,115 @@ impl Docs {
             name = format!("{now}-{n}.md");
         }
         write_atomic(&dir.join(name), text)?;
-        let mut kept: Vec<(u64, PathBuf)> = std::fs::read_dir(&dir)?
-            .flatten()
-            .filter_map(|e| {
-                let at = e
-                    .file_name()
-                    .to_str()?
-                    .split(['.', '-'])
-                    .next()?
-                    .parse()
-                    .ok()?;
-                Some((at, e.path()))
-            })
-            .collect();
-        kept.sort_by_key(|k| std::cmp::Reverse(k.0));
-        for (i, (at, path)) in kept.iter().enumerate() {
-            let old = now.saturating_sub(*at) > HISTORY_DAYS * 86_400;
-            if i >= HISTORY_KEEP || (i > 0 && old) {
-                let _ = std::fs::remove_file(path);
-            }
-        }
+        trim(&dir, "md", now);
         Ok(())
     }
 
     /// `id`'s past versions, newest first: when each was replaced, and its path.
     pub fn history(&self, id: u32) -> Vec<(u64, PathBuf)> {
-        let dir = self.state.join("docs-history").join(id.to_string());
-        let mut out: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let at = e
-                    .file_name()
-                    .to_str()?
-                    .split(['.', '-'])
-                    .next()?
-                    .parse()
-                    .ok()?;
-                Some((at, e.path()))
-            })
-            .collect();
-        out.sort_by_key(|k| std::cmp::Reverse(k.0));
-        out
+        stamped(&self.state.join("docs-history").join(id.to_string()), "md")
+    }
+}
+
+/// A doc the web app found by its key, and its text as read.
+struct Located {
+    root: PathBuf,
+    path: PathBuf,
+    key: String,
+    text: String,
+}
+
+/// What a save or restore from the web app came to.
+#[derive(Debug)]
+pub enum Saved {
+    /// Written; the doc as it is now.
+    Done(Doc),
+    /// Refused: someone saved since. The doc as it is on disk, unchanged.
+    Conflict(Doc),
+}
+
+/// What a delete came to.
+#[derive(Debug)]
+pub enum Deleted {
+    /// Gone; the token puts it back.
+    Done(String),
+    /// Refused: someone saved since. The doc as it is now.
+    Conflict(Box<Doc>),
+}
+
+/// A deleted doc as kept in `<state dir>/docs-trash/<token>.json`.
+#[derive(Serialize, Deserialize)]
+struct Trashed {
+    /// Where it was, under the root.
+    path: String,
+    text: String,
+}
+
+/// Whether a file's front matter, if it has one, reads the same to the daemon as
+/// to the web app's editor, which shows only what's after it: an `\n`-only file
+/// whose fences are bare `---` lines. Otherwise a save could drop the user's
+/// properties, or take body lines for them.
+fn plain_front(text: &str) -> bool {
+    if !text.starts_with("---") {
+        return true;
+    }
+    let Some(after) = text.strip_prefix("---\n") else {
+        return false;
+    };
+    if text.contains('\r') {
+        return false;
+    }
+    let head = match after.find("\n---\n") {
+        Some(end) => &after[..end],
+        None => match after.strip_suffix("\n---") {
+            Some(head) => head,
+            None => return false,
+        },
+    };
+    !head.lines().any(|line| line.trim() == "---")
+}
+
+/// Whether `name` is what `keep` and `delete` name files: seconds, maybe `-n`.
+fn stamp_name(name: &str) -> bool {
+    let mut parts = name.splitn(2, '-');
+    let digits = |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
+    parts.next().is_some_and(digits) && parts.next().is_none_or(digits)
+}
+
+/// The `<seconds>[-n].<ext>` files in `dir`, newest first: when each was put
+/// there, and its path.
+fn stamped(dir: &Path, ext: &str) -> Vec<(u64, PathBuf)> {
+    let mut out: Vec<(u64, u32, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().is_none_or(|x| x != ext) {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_owned();
+            if !stamp_name(&stem) {
+                return None;
+            }
+            let mut parts = stem.split('-');
+            let at = parts.next()?.parse().ok()?;
+            let n = parts.next().map_or(Some(1), |n| n.parse().ok())?;
+            Some((at, n, path))
+        })
+        .collect();
+    out.sort_by_key(|k| std::cmp::Reverse((k.0, k.1)));
+    out.into_iter().map(|(at, _, p)| (at, p)).collect()
+}
+
+/// Keeps the newest `HISTORY_KEEP` of `dir`'s stamped files, and of those, none
+/// older than `HISTORY_DAYS` but the newest.
+fn trim(dir: &Path, ext: &str, now: u64) {
+    for (i, (at, path)) in stamped(dir, ext).iter().enumerate() {
+        let old = now.saturating_sub(*at) > HISTORY_DAYS * 86_400;
+        if i >= HISTORY_KEEP || (i > 0 && old) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -368,11 +923,29 @@ struct Front {
     edited: Vec<String>,
     /// Lines Valkyrie doesn't know (the user's own properties), kept as they were.
     rest: Vec<String>,
+    /// The file's own `kind` line didn't name a kind valk knows: it's kept in
+    /// `rest` as written, and valk writes none of its own (#155).
+    kind_kept: bool,
 }
 
 impl Front {
     fn id_opt(&self) -> Option<u32> {
         (self.id > 0).then_some(self.id)
+    }
+
+    /// When an agent last wrote or edited it, in seconds; 0 if only people have.
+    /// What makes a doc unread: the user's own saves in Obsidian don't.
+    fn agent_at(&self) -> u64 {
+        let agent = |by: &str| !by.is_empty() && by != "human";
+        let wrote = agent(&self.by)
+            .then(|| parse_rfc3339(&self.created))
+            .flatten();
+        // Each edit is "by, session, when" or "by, when".
+        let edits = self.edited.iter().filter_map(|e| {
+            let by = e.split(',').next()?.trim();
+            agent(by).then(|| parse_rfc3339(e.rsplit(',').next()?))?
+        });
+        wrote.into_iter().chain(edits).max().unwrap_or(0)
     }
 
     /// For a file with no front matter: its name is its title.
@@ -390,7 +963,9 @@ impl Front {
         let q = |s: &str| serde_json::to_string(s).unwrap_or_default();
         let mut out = String::from("---\n");
         out += &format!("valk-id: {}\n", self.id);
-        out += &format!("kind: {}\n", self.kind.as_str());
+        if !self.kind_kept {
+            out += &format!("kind: {}\n", self.kind.as_str());
+        }
         out += &format!("title: {}\n", q(&self.title));
         if !self.created.is_empty() {
             out += &format!("created: {}\n", self.created);
@@ -460,7 +1035,14 @@ impl Front {
             let opt = |v: &str| Some(unq(v)).filter(|v| !v.is_empty());
             match key.trim() {
                 "valk-id" => front.id = value.trim().parse().unwrap_or(0),
-                "kind" => front.kind = DocKind::parse(&unq(value)).unwrap_or_default(),
+                // A value valk can't read stays as the user wrote it (#155).
+                "kind" => match DocKind::parse(&unq(value)) {
+                    Some(kind) => front.kind = kind,
+                    None => {
+                        front.kind_kept = true;
+                        front.rest.push(line.to_owned());
+                    }
+                },
                 "title" => front.title = unq(value),
                 "created" => front.created = unq(value),
                 "by" => front.by = unq(value),
@@ -468,8 +1050,17 @@ impl Front {
                 "conversation" => front.conversation = opt(value),
                 "commit" => front.commit = opt(value),
                 "repo" => front.repo = opt(value),
-                "item" => front.item = value.trim().parse().ok(),
-                "edited" => in_edited = true,
+                "item" => match value.trim().parse() {
+                    Ok(item) => front.item = Some(item),
+                    Err(_) => front.rest.push(line.to_owned()),
+                },
+                // A one-line `edited: …` is its first entry, not lost.
+                "edited" => {
+                    in_edited = true;
+                    if !value.trim().is_empty() {
+                        front.edited.push(unq(value));
+                    }
+                }
                 _ => front.rest.push(line.to_owned()),
             }
         }
@@ -483,6 +1074,8 @@ fn doc(root: &Path, path: &Path, front: &Front, text: String) -> Doc {
         kind: front.kind,
         title: front.title.clone(),
         path: slashed(path.strip_prefix(root).unwrap_or(path)),
+        key: String::new(),
+        unread: false,
         by: front.by.clone(),
         created: front.created.clone(),
         session: front.session.clone(),
@@ -623,6 +1216,42 @@ fn scan(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// What the web app opens a doc by: its id, or `p` and its path's hash for one with
+/// none. The daemon matches it against its own scan, so a client never names a file.
+fn key(front: &Front, rel: &str) -> String {
+    match front.id_opt() {
+        Some(id) => id.to_string(),
+        None => format!("p{}", hash(rel)),
+    }
+}
+
+/// A file's mtime (ns) and size, if it's still a plain file.
+fn stamp(path: &Path) -> Option<(u128, u64)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((mtime, meta.len()))
+}
+
+/// The start of a file, enough for its front matter.
+fn read_head(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_HEAD)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// A file's hash for edits (ADR-0021 §4): it tells versions apart, not secrets.
 pub fn hash(text: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -653,6 +1282,28 @@ pub fn rfc3339(secs: u64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// Seconds from `2026-11-09T21:04:05Z`, the form `rfc3339` writes.
+fn parse_rfc3339(s: &str) -> Option<u64> {
+    let s = s.trim().strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (d.next()??, d.next()??, d.next()??);
+    let mut t = time.splitn(3, ':').map(|p| p.parse::<u64>().ok());
+    let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = u64::try_from(era * 146_097 + doe - 719_468).ok()?;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
 #[cfg(test)]
@@ -712,6 +1363,258 @@ mod tests {
         assert_eq!(rfc3339(NOV_9), "2026-11-09T21:00:00Z");
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        for secs in [0, NOV_9, 951_782_400, 4_102_444_799] {
+            assert_eq!(parse_rfc3339(&rfc3339(secs)), Some(secs));
+        }
+        assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
+        assert_eq!(parse_rfc3339("yesterday"), None);
+    }
+
+    #[test]
+    fn the_web_app_opens_by_key_and_writes_nothing() {
+        let mut f = Fixture::new("open");
+        let root = f.docs.real_root().unwrap();
+        let mine = "---\ntags: [homelab]\n---\nmy notes\n";
+        std::fs::write(root.join("notes.md"), mine).unwrap();
+        let theirs = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+
+        let listed = f.docs.list().unwrap();
+        let own = listed.iter().find(|d| d.path == "notes.md").unwrap();
+        assert_eq!(own.id, 0);
+        assert!(own.key.starts_with('p'), "{own:?}");
+        let agents = listed.iter().find(|d| d.id == theirs.id).unwrap();
+        assert_eq!(agents.key, theirs.id.to_string());
+
+        // The user's own doc is sent as it is: no id written into it.
+        let opened = f.docs.open(&own.key).unwrap();
+        assert_eq!(opened.text.as_deref(), Some(mine));
+        assert_eq!(opened.id, 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.md")).unwrap(),
+            mine
+        );
+        assert_eq!(f.docs.open(&agents.key).unwrap().title, "Plan");
+
+        // Never by path, nor by anything a list didn't give out.
+        for bad in [
+            "notes.md",
+            "../secret.md",
+            "/etc/passwd",
+            "",
+            "p",
+            "#1",
+            "p0000000000000000",
+        ] {
+            assert!(f.docs.open(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_web_app_opens_nothing_outside_the_root_nor_too_big() {
+        let mut f = Fixture::new("open-outside");
+        let root = f.docs.real_root().unwrap();
+        std::fs::write(f.base.join("secret.md"), "---\nvalk-id: 99\n---\nno").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(f.base.join("secret.md"), root.join("link.md")).unwrap();
+            std::os::unix::fs::symlink(&f.base, root.join("up")).unwrap();
+            assert!(f.docs.open("99").is_err());
+        }
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+        std::fs::write(root.join(".obsidian/hidden.md"), "---\nvalk-id: 98\n---\n").unwrap();
+        assert!(f.docs.open("98").is_err());
+        let big = format!("---\nvalk-id: 97\n---\n{}", "x".repeat(MAX_OPEN as usize));
+        std::fs::write(root.join("big.md"), big).unwrap();
+        assert!(f.docs.list().unwrap().iter().any(|d| d.id == 97));
+        let err = f.docs.open("97").unwrap_err().to_string();
+        assert!(err.contains("over 2 MB"), "{err}");
+    }
+
+    #[test]
+    fn an_id_on_two_files_opens_neither_by_id() {
+        let mut f = Fixture::new("dup");
+        let root = f.docs.real_root().unwrap();
+        let first = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let text = first.text.clone().unwrap();
+        // Obsidian Sync's copy sorts before the original.
+        let copy = format!("{} (conflict 1).md", first.path.trim_end_matches(".md"));
+        std::fs::write(root.join(&copy), text.replace("# Plan", "# Copy")).unwrap();
+        std::fs::write(root.join("0-early.md"), &text).unwrap();
+
+        let listed = f.docs.list().unwrap();
+        let keys: Vec<&str> = listed.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.iter().all(|k| k.starts_with('p')), "{keys:?}");
+        // Each opens as itself.
+        for d in &listed {
+            assert_eq!(f.docs.open(&d.key).unwrap().path, d.path);
+        }
+        assert!(f.docs.open(&first.id.to_string()).is_err());
+        let err = f.docs.read(&first.id.to_string()).unwrap_err().to_string();
+        assert!(
+            err.contains("on 3 files") && err.contains("0-early.md"),
+            "{err}"
+        );
+        assert!(f.docs.edit(first.id, "x", "y", &claude(), NOV_9).is_err());
+        // Read by path still works, and taking the copy's id away settles it.
+        assert_eq!(f.docs.read(&copy).unwrap().id, first.id);
+        std::fs::remove_file(root.join("0-early.md")).unwrap();
+        std::fs::remove_file(root.join(&copy)).unwrap();
+        assert_eq!(f.docs.open(&first.id.to_string()).unwrap().path, first.path);
+    }
+
+    #[test]
+    fn the_unread_count_stands_until_the_daemon_writes() {
+        let mut f = Fixture::new("count");
+        let root = f.docs.real_root().unwrap();
+        f.docs
+            .write(&f.new_doc("One", true), &claude(), NOV_9)
+            .unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 1);
+        // Written behind the daemon's back: the count stands until it's stale.
+        std::fs::write(
+            root.join("sneaky.md"),
+            "---\nvalk-id: 40\nby: codex\ncreated: 2026-11-09T22:00:00Z\n---\n",
+        )
+        .unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 1);
+        // As if it were taken long ago (or dropped, on a clock too young for that).
+        f.docs.count = f.docs.count.and_then(|(at, n)| {
+            at.checked_sub(COUNT_FOR + std::time::Duration::from_secs(1))
+                .map(|at| (at, n))
+        });
+        assert_eq!(f.docs.unread_count().unwrap(), 2);
+        // A write through the daemon, or the list being opened, counts again now.
+        f.docs
+            .write(&f.new_doc("Two", true), &claude(), NOV_9 + 5)
+            .unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 3);
+        f.docs.seen(u64::MAX, NOV_9 + 1_000_000_000).unwrap();
+        assert_eq!(f.docs.unread_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn the_list_rereads_a_file_only_when_it_changes() {
+        let mut f = Fixture::new("cache");
+        let root = f.docs.real_root().unwrap();
+        let path = root.join("a.md");
+        std::fs::write(&path, "---\ntitle: one\n---\n").unwrap();
+        assert_eq!(f.docs.list().unwrap()[0].title, "one");
+        // Same mtime and size: the cached front matter stands.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "---\ntitle: two\n---\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(f.docs.list().unwrap()[0].title, "one");
+        // A new mtime: read again.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(f.docs.list().unwrap()[0].title, "two");
+        // Gone from disk, gone from the list.
+        std::fs::remove_file(&path).unwrap();
+        assert!(f.docs.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_doc_an_agent_wrote_or_edited_since_the_list_was_opened_is_unread() {
+        let mut f = Fixture::new("unread");
+        let root = f.docs.real_root().unwrap();
+        let human = Author {
+            by: "human".into(),
+            ..Author::default()
+        };
+        let old = f
+            .docs
+            .write(&f.new_doc("Old", true), &claude(), NOV_9)
+            .unwrap();
+        f.docs
+            .write(&f.new_doc("Mine", true), &human, NOV_9 + 20)
+            .unwrap();
+        std::fs::write(root.join("obsidian.md"), "my own\n").unwrap();
+        let unread = |docs: &mut Docs| {
+            let mut t: Vec<String> = docs
+                .list()
+                .unwrap()
+                .into_iter()
+                .filter(|d| d.unread)
+                .map(|d| d.title)
+                .collect();
+            t.sort();
+            t
+        };
+        assert_eq!(unread(&mut f.docs), ["Old"]);
+        f.docs.seen(NOV_9 + 10, NOV_9 + 10).unwrap();
+        assert!(unread(&mut f.docs).is_empty());
+
+        let new = f
+            .docs
+            .write(&f.new_doc("New", true), &claude(), NOV_9 + 30)
+            .unwrap();
+        assert_eq!(unread(&mut f.docs), ["New"]);
+        assert_eq!(Docs::unread(&f.docs.list().unwrap()), 1);
+        // An agent's edit makes an old one unread again; the user's doesn't.
+        let base = f.docs.read(&old.id.to_string()).unwrap().hash.unwrap();
+        f.docs
+            .edit(old.id, &base, "changed", &claude(), NOV_9 + 40)
+            .unwrap();
+        assert_eq!(unread(&mut f.docs), ["New", "Old"]);
+        f.docs.seen(NOV_9 + 50, NOV_9 + 50).unwrap();
+        let base = f.docs.read(&new.id.to_string()).unwrap().hash.unwrap();
+        f.docs
+            .edit(new.id, &base, "mine now", &human, NOV_9 + 60)
+            .unwrap();
+        assert!(unread(&mut f.docs).is_empty());
+        // Kept across a restart.
+        let mut again = Docs::new(f.base.join("state"));
+        assert!(unread(&mut again).is_empty());
+    }
+
+    #[test]
+    fn a_future_date_cant_pin_a_doc_unread_and_late_docs_stay_unread() {
+        let mut f = Fixture::new("unread-edges");
+        let root = f.docs.real_root().unwrap();
+        std::fs::write(
+            root.join("pinned.md"),
+            "---\nvalk-id: 5\nby: claude\ncreated: 2100-01-01T00:00:00Z\n---\nhi\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(Docs::unread(&f.docs.list().unwrap()), 1);
+        f.docs.seen(now + 1, now + 1).unwrap();
+        assert_eq!(
+            Docs::unread(&f.docs.list().unwrap()),
+            0,
+            "cleared by its mtime"
+        );
+        // The list was stamped before a doc came in: that one stays unread.
+        f.docs.seen(NOV_9, now + 1).unwrap();
+        assert_eq!(f.docs.config.seen, now + 1, "never goes back");
+        let mut g = Fixture::new("unread-late");
+        g.docs.seen(NOV_9 + 5, NOV_9 + 99).unwrap();
+        g.docs
+            .write(&g.new_doc("Late", true), &claude(), NOV_9 + 10)
+            .unwrap();
+        assert_eq!(Docs::unread(&g.docs.list().unwrap()), 1);
+        // A client can't mark the future read.
+        g.docs.seen(u64::MAX, NOV_9 + 6).unwrap();
+        assert_eq!(g.docs.config.seen, NOV_9 + 6);
     }
 
     #[test]
@@ -829,6 +1732,329 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&history[0].1).unwrap(), mine);
     }
 
+    fn you() -> Author {
+        Author {
+            by: "human".into(),
+            ..Author::default()
+        }
+    }
+
+    #[test]
+    fn a_web_save_is_refused_with_both_versions_when_the_file_changed() {
+        let mut f = Fixture::new("save");
+        let d = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let loaded = f.docs.open(&d.id.to_string()).unwrap();
+        let base = loaded.hash.unwrap();
+        let path = f.docs.root().join(&d.path);
+
+        // An agent edits in between: the user's save shows what's there now.
+        let theirs = f
+            .docs
+            .edit(d.id, &base, "# Plan\n\ntheirs\n", &claude(), NOV_9 + 60)
+            .unwrap();
+        let Saved::Conflict(now) = f
+            .docs
+            .save_body(&d.id.to_string(), &base, "mine\n", &you(), NOV_9 + 90)
+            .unwrap()
+        else {
+            panic!("a stale save went through");
+        };
+        assert_eq!(now.text, theirs.text);
+        assert_eq!(now.hash, theirs.hash);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            theirs.text.unwrap()
+        );
+
+        // Saved over what's there now, it goes through and keeps theirs.
+        let Saved::Done(saved) = f
+            .docs
+            .save_body(
+                &d.id.to_string(),
+                now.hash.as_deref().unwrap(),
+                "mine\n",
+                &you(),
+                NOV_9 + 120,
+            )
+            .unwrap()
+        else {
+            panic!("a fresh save was refused");
+        };
+        let text = saved.text.unwrap();
+        assert!(text.ends_with("---\n\nmine\n"), "{text}");
+        assert!(
+            text.contains("  - \"human, 2026-11-09T21:02:00Z\"\n"),
+            "{text}"
+        );
+        assert_eq!(saved.key, d.id.to_string());
+        let versions = f.docs.versions(&d.id.to_string()).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].by, "claude", "theirs, replaced by mine");
+        assert_eq!(versions[0].at, NOV_9 + 120);
+        assert_eq!(versions[1].by, "claude");
+    }
+
+    #[test]
+    fn a_web_save_gives_the_users_own_doc_an_id() {
+        let mut f = Fixture::new("save-own");
+        let root = f.docs.real_root().unwrap();
+        std::fs::write(root.join("shopping.md"), "eggs\n").unwrap();
+        let listed = f.docs.list().unwrap();
+        let key = listed[0].key.clone();
+        assert!(key.starts_with('p'), "{key}");
+        let base = f.docs.open(&key).unwrap().hash.unwrap();
+        let Saved::Done(d) = f
+            .docs
+            .save_body(&key, &base, "eggs\nmilk\n", &you(), NOV_9)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert_eq!(d.id, 1);
+        assert_eq!(d.key, "1");
+        assert_eq!(d.by, "human");
+        assert_eq!(d.title, "shopping");
+        assert!(d.text.unwrap().ends_with("---\n\neggs\nmilk\n"));
+        // What it was before is its first version.
+        let versions = f.docs.versions("1").unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            f.docs.version_text("1", &versions[0].version).unwrap(),
+            "eggs\n"
+        );
+    }
+
+    #[test]
+    fn a_web_save_never_drops_properties_it_cant_read_the_way_the_app_does() {
+        let mut f = Fixture::new("save-crlf");
+        let root = f.docs.real_root().unwrap();
+        let cases = [
+            ("crlf.md", "---\r\ntags: [x]\r\n---\r\nhello\r\n"),
+            ("spaces.md", "---\ntags: [x]\n---  \nhello\n\n---\n\nmore\n"),
+        ];
+        for (name, text) in cases {
+            std::fs::write(root.join(name), text).unwrap();
+        }
+        for d in f.docs.list().unwrap() {
+            let open = f.docs.open(&d.key).unwrap();
+            let err = f
+                .docs
+                .save_body(
+                    &d.key,
+                    open.hash.as_deref().unwrap(),
+                    "hello\n",
+                    &you(),
+                    NOV_9,
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("edit it in Obsidian"), "{err}");
+        }
+        for (name, text) in cases {
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text);
+        }
+        assert!(plain_front("no properties\n---\nrule\n"));
+        assert!(plain_front("---\ntags: [x]\n---\n\nbody\n\n---\n\nmore\n"));
+    }
+
+    #[test]
+    fn a_copy_sharing_an_id_is_refused_but_an_empty_file_can_go() {
+        let mut f = Fixture::new("save-shared");
+        let d = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let root = f.docs.real_root().unwrap();
+        std::fs::write(root.join("copy.md"), d.text.as_deref().unwrap()).unwrap();
+        std::fs::write(root.join("empty.md"), "").unwrap();
+        let docs = f.docs.list().unwrap();
+        let copy = docs.iter().find(|x| x.path == "copy.md").unwrap();
+        let open = f.docs.open(&copy.key).unwrap();
+        let err = f
+            .docs
+            .save_body(
+                &copy.key,
+                open.hash.as_deref().unwrap(),
+                "x\n",
+                &you(),
+                NOV_9,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("shares its valk-id"), "{err}");
+        // Deleting the copy is how it's dealt with.
+        assert!(matches!(
+            f.docs
+                .delete(&copy.key, open.hash.as_deref().unwrap(), NOV_9),
+            Ok(Deleted::Done(_))
+        ));
+        let empty = docs.iter().find(|x| x.path == "empty.md").unwrap();
+        let open = f.docs.open(&empty.key).unwrap();
+        assert_eq!(open.hash, Some(hash("")));
+        assert!(matches!(
+            f.docs.delete(&empty.key, &hash(""), NOV_9 + 1),
+            Ok(Deleted::Done(_))
+        ));
+    }
+
+    #[test]
+    fn a_restore_puts_an_old_body_back_and_can_be_undone() {
+        let mut f = Fixture::new("restore");
+        let d = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let key = d.id.to_string();
+        let first = d.text.clone().unwrap();
+        let e = f
+            .docs
+            .edit(
+                d.id,
+                d.hash.as_deref().unwrap(),
+                "a bad rewrite\n",
+                &claude(),
+                NOV_9 + 60,
+            )
+            .unwrap();
+        let versions = f.docs.versions(&key).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            f.docs.version_text(&key, &versions[0].version).unwrap(),
+            first
+        );
+
+        // A stale base is refused, as a save is.
+        let Saved::Conflict(_) = f
+            .docs
+            .restore(
+                &key,
+                d.hash.as_deref().unwrap(),
+                &versions[0].version,
+                &you(),
+                NOV_9 + 90,
+            )
+            .unwrap()
+        else {
+            panic!("a stale restore went through");
+        };
+        let Saved::Done(r) = f
+            .docs
+            .restore(
+                &key,
+                e.hash.as_deref().unwrap(),
+                &versions[0].version,
+                &you(),
+                NOV_9 + 120,
+            )
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        let text = r.text.unwrap();
+        assert!(
+            text.ends_with("---\n\n# Plan\n\n1. one\n2. two\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\"human, restored the version from 2026-11-09T21:01:00Z, 2026-11-09T21:02:00Z\""
+            ),
+            "{text}"
+        );
+        // The bad rewrite is a version too, so the restore can be undone.
+        let versions = f.docs.versions(&key).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(
+            f.docs
+                .version_text(&key, &versions[0].version)
+                .unwrap()
+                .ends_with("a bad rewrite\n")
+        );
+    }
+
+    #[test]
+    fn a_version_name_is_never_a_path() {
+        let mut f = Fixture::new("version-name");
+        let d = f
+            .docs
+            .write(&f.new_doc("Plan", true), &claude(), NOV_9)
+            .unwrap();
+        let key = d.id.to_string();
+        for bad in [
+            "../../docs.json",
+            "1/../2",
+            "",
+            "-1",
+            "1-",
+            "1.md",
+            "/etc/passwd",
+        ] {
+            assert!(f.docs.version_text(&key, bad).is_err(), "{bad}");
+            assert!(f.docs.undelete(bad).is_err(), "{bad}");
+        }
+        assert!(stamp_name("1794258000") && stamp_name("1794258000-2"));
+    }
+
+    #[test]
+    fn a_delete_keeps_a_copy_that_puts_it_back() {
+        let mut f = Fixture::new("delete");
+        let d = f
+            .docs
+            .write(&f.new_doc("Plan", false), &claude(), NOV_9)
+            .unwrap();
+        let key = d.id.to_string();
+        let path = f.docs.root().join(&d.path);
+        let text = d.text.clone().unwrap();
+
+        // Refused when it changed since the user loaded it.
+        let Deleted::Conflict(_) = f.docs.delete(&key, "stale", NOV_9).unwrap() else {
+            panic!("deleted an unseen version");
+        };
+        assert!(path.exists());
+
+        let Deleted::Done(token) = f
+            .docs
+            .delete(&key, d.hash.as_deref().unwrap(), NOV_9)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        assert!(!path.exists());
+        assert!(f.docs.list().unwrap().is_empty());
+
+        let gone = f.docs.deleted();
+        assert_eq!(gone.len(), 1);
+        assert_eq!(
+            (
+                gone[0].token.as_str(),
+                gone[0].path.as_str(),
+                gone[0].title.as_str()
+            ),
+            (token.as_str(), d.path.as_str(), "Plan")
+        );
+        let back = f.docs.undelete(&token).unwrap();
+        assert!(f.docs.deleted().is_empty(), "put back, out of the list");
+        assert_eq!(back.path, d.path);
+        assert_eq!(back.key, key);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(f.docs.undelete(&token).is_err(), "put back once");
+
+        // A file that took its name since is never written over.
+        let Deleted::Done(token) = f
+            .docs
+            .delete(&key, d.hash.as_deref().unwrap(), NOV_9 + 1)
+            .unwrap()
+        else {
+            panic!("refused");
+        };
+        std::fs::write(&path, "someone else's\n").unwrap();
+        let back = f.docs.undelete(&token).unwrap();
+        assert_ne!(back.path, d.path);
+        assert!(back.path.ends_with("-2.md"), "{}", back.path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "someone else's\n");
+    }
+
     #[test]
     fn the_users_own_doc_gets_an_id_when_read_and_keeps_its_properties() {
         let mut f = Fixture::new("adopt");
@@ -848,6 +2074,26 @@ mod tests {
         assert!(text.starts_with("---\nvalk-id: 1\nkind: note\ntitle: \"notes\"\nby: \"human\"\ntags: [homelab]\n---\n\nmy notes\n"), "{text}");
         let b = f.docs.read("bare.md").unwrap();
         assert_eq!((b.id, b.title.as_str()), (2, "bare"));
+
+        // Values valk can't read in its own keys stay as written (#155), and the
+        // file keeps one `kind` line.
+        std::fs::write(
+            root.join("odd.md"),
+            "---\nkind: idea\nitem: later\nedited: 2026-01-01 by me\n---\nhm\n",
+        )
+        .unwrap();
+        let o = f.docs.read("odd.md").unwrap();
+        let text = o.text.unwrap();
+        assert!(text.contains("kind: idea\n"), "{text}");
+        assert_eq!(text.matches("kind:").count(), 1, "{text}");
+        assert!(text.contains("item: later\n"), "{text}");
+        assert!(
+            text.contains("edited:\n  - \"2026-01-01 by me\"\n"),
+            "{text}"
+        );
+        // And they stay through a second render.
+        let again = f.docs.read("#3").unwrap().text.unwrap();
+        assert_eq!(again, text);
         assert!(b.text.unwrap().ends_with("---\n\njust text\n"));
         // By id from now on.
         assert_eq!(f.docs.read("#1").unwrap().path, "notes.md");

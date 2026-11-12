@@ -314,6 +314,17 @@ On first launch the app finds your `valk web`, or sets one up for this machine
 only, and asks to pair: press Pair. Closing the window keeps it in the tray;
 Quit is in the tray's menu.
 
+The app updates itself: at launch, and from Check for updates in the tray, it
+asks before installing a newer app and restarting. That's the app only; `valk`
+keeps its own updates (`valk upgrade`), and your sessions keep running. The
+AppImage, the `.msi` and the macOS app update this way. The `.deb` doesn't:
+install the new `.deb` over it.
+
+Uninstalling the `.deb` or the `.msi` unpairs the app (`valk web revoke
+"Desktop app"`), so the token left in its data stops working. macOS and the
+AppImage have no uninstall step: there the old device goes when the app pairs
+again, or remove it yourself with `valk web devices` and `valk web revoke`.
+
 From source it needs Rust 1.90 or newer and, on Linux, the WebKitGTK 4.1 and
 appindicator development packages (`webkit2gtk-4.1` and `libayatana-appindicator`
 on Arch; `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev` on Debian and

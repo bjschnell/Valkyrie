@@ -1386,8 +1386,43 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 base,
                 body,
             } => (req, registry.edit_doc(id, &base, &body, peer)),
-            ClientMsg::Docs { req } => (req, registry.docs()),
+            ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
+            ClientMsg::OpenDoc { req, key } => (req, registry.open_doc(&key)),
+            ClientMsg::DocComments { req, key } => (req, registry.doc_comments(&key)),
+            ClientMsg::CommentDoc {
+                req,
+                key,
+                quote,
+                text,
+            } => (
+                req,
+                registry.comment_doc(&key, quote.as_deref(), &text, peer),
+            ),
+            ClientMsg::ResolveComment { req, key, comment } => {
+                (req, registry.resolve_comment(&key, comment, peer))
+            }
+            ClientMsg::SaveDoc {
+                req,
+                key,
+                base,
+                body,
+            } => (req, registry.save_doc(&key, &base, &body, peer)),
+            ClientMsg::DocHistory { req, key, version } => {
+                (req, registry.doc_history(&key, version.as_deref()))
+            }
+            ClientMsg::RestoreDoc {
+                req,
+                key,
+                base,
+                version,
+            } => (req, registry.restore_doc(&key, &base, &version, peer)),
+            ClientMsg::DeleteDoc { req, key, base } => {
+                (req, registry.delete_doc(&key, &base, peer))
+            }
+            ClientMsg::UndeleteDoc { req, token } => (req, registry.undelete_doc(&token, peer)),
+            ClientMsg::DeletedDocs { req } => (req, registry.deleted_docs()),
+            ClientMsg::DocsSeen { req, at } => (req, registry.docs_seen(at, peer)),
             ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (
                 req,

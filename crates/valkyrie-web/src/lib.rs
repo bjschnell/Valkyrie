@@ -292,6 +292,11 @@ async fn known_host(
         .into_response()
 }
 
+/// The name the desktop app's page pairs under (`deviceName` in
+/// `web/src/components/Pair.tsx`). Its installers' uninstall hooks revoke it with
+/// `valk web revoke`, and the app revokes it before it pairs again (ADR-0020).
+pub const DESKTOP_DEVICE: &str = "Desktop app";
+
 /// A link that pairs whichever browser opens it, once, with a fresh code.
 pub fn pairing_link(store: &auth::Store, url: &str) -> Result<String> {
     let code = store.new_code()?;
@@ -692,6 +697,14 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// agent's hooks, and taking a backlog item (or adding one taken), which links
 /// the session the caller runs in: here that's `valk web`'s own, if it was started
 /// in one.
+///
+/// Docs (ADR-0021 §5): the web app reads with `OpenDoc`, by the key a list gave
+/// out, never by path, and writes nothing. `ReadDoc` takes a path and gives an
+/// id-less doc an id (a write into the user's file), so it's the CLI's only.
+/// Comments (§6) go through: they're the user's, kept beside the doc, not in it.
+/// So do the editor's save, restore and delete (§7), by key, which the daemon
+/// takes from a human only. `WriteDoc` and `EditDoc` are the agents' path, and
+/// moving the folder is the CLI's.
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
@@ -700,6 +713,10 @@ fn allowed(msg: &ClientMsg) -> bool {
             | ClientMsg::Clients { .. }
             | ClientMsg::TakeItem { .. }
             | ClientMsg::AddItem { take: true, .. }
+            | ClientMsg::ReadDoc { .. }
+            | ClientMsg::WriteDoc { .. }
+            | ClientMsg::EditDoc { .. }
+            | ClientMsg::DocsRoot { root: Some(_), .. }
     )
 }
 
@@ -1073,6 +1090,90 @@ mod tests {
             only: Some(vec![1]),
         };
         assert!(allowed(&ship));
+    }
+
+    #[test]
+    fn a_browser_reads_docs_by_key_and_edits_only_by_key() {
+        let read = ClientMsg::ReadDoc {
+            req: 1,
+            which: "repos/valkyrie/notes.md".into(),
+        };
+        assert!(!allowed(&read), "ReadDoc takes a path and assigns ids");
+        assert!(!allowed(&ClientMsg::WriteDoc {
+            req: 1,
+            doc: valkyrie_proto::NewDoc {
+                cwd: "/".into(),
+                title: "x".into(),
+                kind: Default::default(),
+                global: true,
+                body: String::new(),
+            },
+        }));
+        assert!(!allowed(&ClientMsg::EditDoc {
+            req: 1,
+            id: 1,
+            base: String::new(),
+            body: String::new(),
+        }));
+        assert!(!allowed(&ClientMsg::DocsRoot {
+            req: 1,
+            root: Some("/home/me/.ssh".into()),
+        }));
+        assert!(allowed(&ClientMsg::DocsRoot { req: 1, root: None }));
+        assert!(allowed(&ClientMsg::Docs {
+            req: 1,
+            count_only: true,
+        }));
+        assert!(allowed(&ClientMsg::DocsSeen { req: 1, at: 0 }));
+        assert!(allowed(&ClientMsg::OpenDoc {
+            req: 1,
+            key: "3".into(),
+        }));
+        // Comments are the user's (ADR-0021 §6): the daemon checks the bridge is
+        // a human's, so they go through.
+        assert!(allowed(&ClientMsg::DocComments {
+            req: 1,
+            key: "3".into(),
+        }));
+        assert!(allowed(&ClientMsg::CommentDoc {
+            req: 1,
+            key: "3".into(),
+            quote: None,
+            text: "why?".into(),
+        }));
+        assert!(allowed(&ClientMsg::ResolveComment {
+            req: 1,
+            key: "3".into(),
+            comment: 1,
+        }));
+        // The editor (ADR-0021 §7): by key, with the hash it loaded.
+        assert!(allowed(&ClientMsg::SaveDoc {
+            req: 1,
+            key: "3".into(),
+            base: "abc".into(),
+            body: "x".into(),
+        }));
+        assert!(allowed(&ClientMsg::DocHistory {
+            req: 1,
+            key: "3".into(),
+            version: None,
+        }));
+        assert!(allowed(&ClientMsg::RestoreDoc {
+            req: 1,
+            key: "3".into(),
+            base: "abc".into(),
+            version: "1".into(),
+        }));
+        assert!(allowed(&ClientMsg::DeleteDoc {
+            req: 1,
+            key: "3".into(),
+            base: "abc".into(),
+        }));
+        assert!(allowed(&ClientMsg::UndeleteDoc {
+            req: 1,
+            token: "1".into(),
+        }));
+        assert!(allowed(&ClientMsg::DeletedDocs { req: 1 }));
     }
 
     #[test]

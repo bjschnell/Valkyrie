@@ -30,13 +30,13 @@ pub use context::{
     ReviewAction,
 };
 pub use digest::{Digest, DigestEntry, DigestGroup, Outcome};
-pub use docs::{Doc, DocKind, NewDoc};
+pub use docs::{CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, NewDoc};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 33;
+pub const PROTOCOL: u32 = 37;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -616,8 +616,92 @@ pub enum ClientMsg {
         base: String,
         body: String,
     },
-    /// Every doc, newest first, without their text. Replies `Docs`.
+    /// Every doc, newest first, without their text. Replies `Docs`; with
+    /// `count_only`, with no docs, just the unread count (the Inbox's poll),
+    /// which the daemon may answer from a count up to 30 s old.
     Docs {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        count_only: bool,
+    },
+    /// The web app's read (ADR-0021 §5, protocol 33): a doc by the `key` a list
+    /// gave it, never by path, and never writing to the file (a doc with no id
+    /// stays without one). Replies `Doc`.
+    OpenDoc {
+        req: ReqId,
+        key: String,
+    },
+    /// The user opened the Docs list the `Docs` reply stamped `at`: what agents
+    /// wrote until then is read. Replies `Done`.
+    DocsSeen {
+        req: ReqId,
+        at: u64,
+    },
+    /// The comments on the doc with this `key` (ADR-0021 §6, protocol 34).
+    /// Replies `DocComments`.
+    DocComments {
+        req: ReqId,
+        key: String,
+    },
+    /// The user comments on a doc, on the block `quote` reads, or the whole doc
+    /// with none; the session that wrote it hears it at its next prompt. Only a
+    /// human comments. Replies `DocComments`.
+    CommentDoc {
+        req: ReqId,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quote: Option<String>,
+        text: String,
+    },
+    /// The user closes comment `comment` on a doc. Replies `DocComments`.
+    ResolveComment {
+        req: ReqId,
+        key: String,
+        comment: u32,
+    },
+    /// The user's save from the web app's editor (ADR-0021 §7, protocol 35): the
+    /// doc with this key gets `body`, if `base` is still the hash of what's on
+    /// disk; the version replaced is kept. One of the user's own docs gets a
+    /// `valk-id` here. Replies `DocSaved`, refused (`conflict`) with what's on
+    /// disk now if anyone saved in between.
+    SaveDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+        body: String,
+    },
+    /// A doc's past versions, newest first (ADR-0021 §4); with `version`, that
+    /// one's text too. Replies `DocHistory`.
+    DocHistory {
+        req: ReqId,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
+    /// The user puts a past version back, under the same rule as a save; the
+    /// version it replaces is kept, so a restore can be undone. Replies `DocSaved`.
+    RestoreDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+        version: String,
+    },
+    /// The user deletes a doc, if `base` is still what's on disk. A copy is kept
+    /// so it can be put back (`UndeleteDoc`). Replies `DocDeleted`, or
+    /// `DocSaved` with `conflict` if it changed.
+    DeleteDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+    },
+    /// Puts a doc the user deleted back where it was. Replies `Doc`.
+    UndeleteDoc {
+        req: ReqId,
+        token: String,
+    },
+    /// Docs the user deleted that can still be put back, newest first
+    /// (protocol 36). Replies `DeletedDocs`.
+    DeletedDocs {
         req: ReqId,
     },
     /// Where docs go; with `root`, sets it first (the user only; `""` goes back
@@ -628,7 +712,7 @@ pub enum ClientMsg {
         root: Option<PathBuf>,
     },
     /// What every agent did since `since_ms`, or since you were last gone
-    /// (backlog #105, protocol 33). Read-only. Replies `Digest`.
+    /// (backlog #105, protocol 37). Read-only. Replies `Digest`.
     Digest {
         req: ReqId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -763,10 +847,43 @@ pub enum Reply {
     Doc {
         doc: Box<Doc>,
     },
+    /// A save or restore from the web app: the doc as written, or, with
+    /// `conflict`, as it is on disk now, unchanged by this request.
+    DocSaved {
+        doc: Box<Doc>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        conflict: bool,
+    },
+    DocHistory {
+        versions: Vec<DocVersion>,
+        /// The asked-for version's whole text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// A doc was deleted; `token` puts it back with `UndeleteDoc`.
+    DocDeleted {
+        token: String,
+    },
+    DeletedDocs {
+        docs: Vec<DeletedDoc>,
+    },
+    DocComments {
+        comments: Vec<DocComment>,
+        /// On a new comment: the running session it will be told to at its next
+        /// prompt; none when the session that wrote the doc is gone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
     Docs {
         docs: Vec<Doc>,
         /// The docs folder.
         root: PathBuf,
+        /// How many an agent wrote or edited since the list was last opened.
+        #[serde(default)]
+        unread: u32,
+        /// When it was listed, in seconds, for `DocsSeen`.
+        #[serde(default)]
+        at: u64,
     },
     Item {
         item: Box<Item>,

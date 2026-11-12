@@ -9,6 +9,13 @@
 # be allowed once in System Settings; Windows shows a SmartScreen prompt. The
 # hash check below catches a broken download, not a tampered release: the hash
 # comes from the same release as the file.
+#
+# The app's own updater (tauri-plugin-updater) is signed, though: with the
+# TAURI_SIGNING_PRIVATE_KEY secret (and its password) set, each runner also
+# builds the files the app updates from and their signatures, and `manifest`
+# writes the release's latest.json, which the app reads from the latest release.
+# Without the secret (a fork) the installers are built as before, with no
+# updates. Only the app updates this way; `valk` keeps its own path.
 name: desktop
 
 on:
@@ -22,6 +29,11 @@ on:
         description: "What to build: a tag or a commit"
         type: string
         required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
   workflow_dispatch:
 
 permissions:
@@ -40,7 +52,8 @@ jobs:
             bundles: deb,appimage
           - os: macos-latest
             valk: valk-aarch64-apple-darwin.tar.gz
-            bundles: dmg
+            # The .app is what the updater replaces; only the .dmg is uploaded.
+            bundles: app,dmg
           - os: windows-latest
             valk: valk-x86_64-pc-windows-msvc.zip
             bundles: msi
@@ -52,6 +65,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       # Empty on a dry run: the latest release's `valk`, and no upload.
       TAG: ${{ inputs.release }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -91,7 +106,14 @@ jobs:
         run: cargo install tauri-cli --version "=2.12.4" --locked
       - name: bundle
         working-directory: crates/valkyrie-desktop
-        run: cargo tauri build --features window --config tauri.bundle.conf.json --bundles "${{ matrix.bundles }}" -- --locked
+        run: |
+          config=tauri.bundle.conf.json
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::no updater signing key: building the installers without updates"
+            jq '.bundle.createUpdaterArtifacts = false' tauri.bundle.conf.json > "$RUNNER_TEMP/bundle.json"
+            config="$RUNNER_TEMP/bundle.json"
+          fi
+          cargo tauri build --features window --config "$config" --bundles "${{ matrix.bundles }}" -- --locked
       - name: publish
         run: |
           # sha256sum on Linux and in Git Bash on Windows; macOS has shasum.
@@ -111,3 +133,52 @@ jobs:
           for file in "${files[@]}"; do
             gh release upload "$TAG" "$file" "$file.sha256" --clobber
           done
+          # What the app's updater downloads, each beside its signature: the
+          # AppImage and the .msi themselves, and the .app as a tarball.
+          updates=(target/release/bundle/appimage/*.AppImage.sig target/release/bundle/macos/*.app.tar.gz.sig
+                   target/release/bundle/msi/*.msi.sig)
+          for sig in "${updates[@]}"; do
+            gh release upload "$TAG" "$sig" --clobber
+            case "$sig" in *.app.tar.gz.sig) gh release upload "$TAG" "${sig%.sig}" --clobber ;; esac
+          done
+
+  # latest.json, from the signatures the runners uploaded: what the app checks
+  # for an update. A platform that failed to build is left out, and an app there
+  # finds no update until the next release.
+  manifest:
+    needs: bundle
+    if: ${{ !cancelled() && inputs.release != '' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.release }}
+    steps:
+      - run: |
+          mkdir sigs
+          cd sigs
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sig'
+          shopt -s nullglob
+          sigs=(*.sig)
+          if [ "${#sigs[@]}" -eq 0 ]; then
+            echo "::warning::no updater signatures in $TAG: no latest.json, so no app update"
+            exit 0
+          fi
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          platforms='{}'
+          for sig in "${sigs[@]}"; do
+            # Each key names its bundle, so an app installed another way (a .deb)
+            # never takes another bundle's file for its own.
+            case "$sig" in
+              *.AppImage.sig) key=linux-x86_64-appimage ;;
+              *.app.tar.gz.sig) key=darwin-aarch64-app ;;
+              *.msi.sig) key=windows-x86_64-msi ;;
+              *) continue ;;
+            esac
+            platforms=$(jq --arg k "$key" --arg url "$base/${sig%.sig}" --rawfile sig "$sig" \
+              '. + {($k): {url: $url, signature: ($sig | rtrimstr("\n"))}}' <<<"$platforms")
+          done
+          jq -n --arg v "${TAG#v}" --arg notes "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson p "$platforms" \
+            '{version: $v, notes: $notes, pub_date: $date, platforms: $p}' > latest.json
+          cat latest.json
+          gh release upload "$TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber

@@ -87,6 +87,69 @@ export interface Flag {
 }
 
 /** A project decision (ADR-0007). */
+export type DocKind = "plan" | "research" | "report" | "note";
+
+/** A doc in the docs folder (ADR-0021). `key` is what it's opened by: its
+ * `valk-id`, or a handle the daemon made for one of the user's own; never a path. */
+export interface Doc {
+  id: number;
+  kind: DocKind;
+  title: string;
+  /** Relative to the docs folder, '/'-separated. */
+  path: string;
+  key?: string;
+  /** An agent wrote or edited it since the Docs list was last opened. */
+  unread?: boolean;
+  by: string;
+  created: string;
+  session?: string;
+  commit?: string;
+  item?: number;
+  repo?: string;
+  edited?: string[];
+  hash?: string;
+  /** The whole file, front matter and all; only when opened. */
+  text?: string;
+}
+
+/** One of a doc's past versions (ADR-0021 §4): the file as it was before an edit replaced it. */
+export interface DocVersion {
+  /** What `doc_history` and `restore_doc` name it by. */
+  version: string;
+  /** When it was replaced, in seconds. */
+  at: number;
+  /** Who wrote it. */
+  by: string;
+  size: number;
+}
+
+/** A doc the user deleted, kept so it can be put back. */
+export interface DeletedDoc {
+  /** What `undelete_doc` takes. */
+  token: string;
+  /** When it was deleted, in seconds. */
+  at: number;
+  path: string;
+  title: string;
+}
+
+/** Where a comment on a doc stands (ADR-0021 §6). */
+export type CommentState = "open" | "sent" | "answered" | "resolved";
+
+/** A comment the user left on a doc, or on one block of it. */
+export interface DocComment {
+  id: number;
+  /** When it was left, in seconds. */
+  at: number;
+  /** The block it's about, as it read then, on one line; none for the whole doc. */
+  quote?: string;
+  text: string;
+  state: CommentState;
+  /** The session it was told to. */
+  sent_to?: string;
+  changed: number;
+}
+
 export type DecisionKind =
   "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
 export const DECISION_KINDS: DecisionKind[] = [
@@ -452,6 +515,31 @@ export type Request =
       seen: number;
     }
   | { t: "decisions"; cwd: string | null }
+  /** Every doc, newest first; replies `docs`. */
+  /** `count_only`: no docs, just the unread count (the Inbox's poll). */
+  | { t: "docs"; count_only?: boolean }
+  /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
+  | { t: "open_doc"; key: string }
+  /** A doc's comments; replies `doc_comments`. */
+  | { t: "doc_comments"; key: string }
+  /** The user comments on a doc, or the block `quote` reads; replies `doc_comments`. */
+  | { t: "comment_doc"; key: string; quote?: string; text: string }
+  /** The user closes a comment; replies `doc_comments`. */
+  | { t: "resolve_comment"; key: string; comment: number }
+  /** The Docs list was opened: what agents wrote until now is read. */
+  | { t: "docs_seen"; at: number }
+  /** The user's save from the editor, if `base` is still on disk; replies `doc_saved`. */
+  | { t: "save_doc"; key: string; base: string; body: string }
+  /** A doc's past versions, and `version`'s text when given; replies `doc_history`. */
+  | { t: "doc_history"; key: string; version?: string }
+  /** Puts a past version back, under the same rule as a save; replies `doc_saved`. */
+  | { t: "restore_doc"; key: string; base: string; version: string }
+  /** Deletes a doc, keeping a copy; replies `doc_deleted`, or `doc_saved` with `conflict`. */
+  | { t: "delete_doc"; key: string; base: string }
+  /** Puts a deleted doc back; replies `doc`. */
+  | { t: "undelete_doc"; token: string }
+  /** Deleted docs that can still be put back, newest first; replies `deleted_docs`. */
+  | { t: "deleted_docs" }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
@@ -517,6 +605,15 @@ export type Reply =
   | { t: "text"; text: string }
   | { t: "decision"; decision: Decision }
   | { t: "decisions"; decisions: Decision[] }
+  | { t: "doc"; doc: Doc }
+  /** `to`: on a new comment, the running session that hears it at its next prompt. */
+  | { t: "doc_comments"; comments: DocComment[]; to?: string }
+  | { t: "docs"; docs: Doc[]; root: string; unread?: number; at?: number }
+  /** `conflict`: refused, and `doc` is what's on disk now. */
+  | { t: "doc_saved"; doc: Doc; conflict?: boolean }
+  | { t: "doc_history"; versions: DocVersion[]; text?: string }
+  | { t: "doc_deleted"; token: string }
+  | { t: "deleted_docs"; docs: DeletedDoc[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
