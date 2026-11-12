@@ -1,11 +1,13 @@
 //! The Docs page (ADR-0021 §5, backlog #164): `D` on the home screen. The docs
 //! agents wrote, agent-level ones first, then each repository's, newest first,
 //! with what an agent wrote since you last looked marked unread. `↩` reads one,
-//! drawn as markdown; links in it open on a click.
+//! drawn as markdown; links in it open on a click, and `c` shows its comments
+//! and leaves new ones (`comments.rs`).
 
 use std::cell::{Cell, RefCell};
 
 use crate::backlog::fit_hints;
+use crate::comments::{self, Comments};
 use crate::markdown::{self, Rendered};
 use crate::next_key;
 use crate::theme::Theme;
@@ -27,6 +29,19 @@ pub(crate) enum Do {
     /// Put this on the clipboard.
     Copy(String),
     Say(String),
+    /// Fetch the comments on the doc with this key.
+    Comments(String),
+    /// Leave a comment on a doc.
+    Comment {
+        key: String,
+        quote: Option<String>,
+        text: String,
+    },
+    /// Close a comment on a doc.
+    Resolve {
+        key: String,
+        id: u32,
+    },
 }
 
 /// A line of the list: a group's heading, or a doc (its index in the listing).
@@ -51,6 +66,7 @@ struct Reader {
     area: Cell<Rect>,
     /// The body drawn at a width, kept until the width changes.
     drawn: RefCell<Option<(u16, Rendered)>>,
+    comments: Comments,
 }
 
 /// The open page: the list, and the doc being read over it, if any.
@@ -154,19 +170,41 @@ impl Page {
             .min(n.saturating_sub(1));
     }
 
-    /// The doc asked for with `Do::Open`.
-    pub(crate) fn opened(&mut self, key: &str, got: Result<Doc, String>) {
-        let Some(reader) = &mut self.reader else {
+    /// The doc asked for with `Do::Open`, and what to fetch next: its comments,
+    /// if it takes them (one with a `valk-id`, as on the web).
+    pub(crate) fn opened(&mut self, key: &str, got: Result<Doc, String>) -> Option<Do> {
+        let reader = self.reader.as_mut().filter(|r| r.key == key)?;
+        *reader.drawn.borrow_mut() = None;
+        match got {
+            Ok(doc) => {
+                let takes = doc.id > 0;
+                reader.doc = Some(doc);
+                takes.then(|| Do::Comments(key.to_string()))
+            }
+            Err(e) => {
+                reader.failed = Some(e);
+                None
+            }
+        }
+    }
+
+    /// The comments on the doc with this key, fetched, or as they are after a
+    /// comment was left or closed (`sent`).
+    pub(crate) fn comments(
+        &mut self,
+        key: &str,
+        got: Result<Vec<valkyrie_proto::DocComment>, String>,
+        sent: bool,
+    ) {
+        let Some(reader) = self.reader.as_mut().filter(|r| r.key == key) else {
             return;
         };
-        if reader.key != key {
-            return;
-        }
         match got {
-            Ok(doc) => reader.doc = Some(doc),
-            Err(e) => reader.failed = Some(e),
+            Ok(list) if sent => reader.comments.sent(list),
+            // A send that failed: the comment stays in its box, to send again.
+            Err(_) if sent => reader.comments.unsent(),
+            got => reader.comments.loaded(got),
         }
-        *reader.drawn.borrow_mut() = None;
     }
 
     fn docs(&self) -> impl Iterator<Item = &Doc> {
@@ -241,7 +279,32 @@ impl Page {
     /// ↑/↓ (j/k) scroll a row, space/PgDn and b/PgUp a page, g/G to the ends;
     /// `y` copies the doc's markdown; `r` reads it again; Esc or `q` goes back.
     fn reader_key(&mut self, key: &[u8], whole: bool, out: &mut Vec<Do>) {
-        let Some(reader) = &self.reader else { return };
+        if let Some(reader) = &mut self.reader
+            && reader.comments.is_open()
+        {
+            let text = &reader.doc;
+            let body = || {
+                body(
+                    text.as_ref()
+                        .and_then(|d| d.text.as_deref())
+                        .unwrap_or_default(),
+                )
+            };
+            let doc = reader.key.clone();
+            match reader.comments.key(key, whole, &body) {
+                Some(comments::Do::Send { quote, text }) => out.push(Do::Comment {
+                    key: doc,
+                    quote,
+                    text,
+                }),
+                Some(comments::Do::Resolve(id)) => out.push(Do::Resolve { key: doc, id }),
+                None => {}
+            }
+            return;
+        }
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
         let page = i32::from(reader.rows.get().saturating_sub(1).max(1));
         match key {
             b"k" | b"\x1b[A" | b"\x1bOA" => reader.scroll(-1),
@@ -250,6 +313,14 @@ impl Page {
             b"b" | b"\x1b[5~" => reader.scroll(-page),
             b"g" | b"\x1b[H" | b"\x1b[1~" => reader.top.set(0),
             b"G" | b"\x1b[F" | b"\x1b[4~" => reader.scroll(i32::from(u16::MAX)),
+            b"c" => match &reader.doc {
+                Some(d) if d.id > 0 => reader.comments.open(),
+                Some(_) => out.push(Do::Say(
+                    "it takes comments once it has a valk-id: an agent reading it gives it one"
+                        .into(),
+                )),
+                None => {}
+            },
             b"y" => match &reader.doc {
                 Some(d) => out.push(Do::Copy(body(d.text.as_deref().unwrap_or_default()))),
                 None => out.push(Do::Say("nothing to copy".into())),
@@ -427,9 +498,24 @@ impl Page {
         let listed = self.docs().find(|d| d.key == r.key);
         let doc = r.doc.as_ref().or(listed);
         let title = doc.map_or_else(|| "Doc".to_string(), |d| d.title.clone());
+        let takes = doc.is_some_and(|d| d.id > 0);
+        let open = r.comments.open_count();
         let hints = [
             hint(" j/k ", "scroll ", t),
             hint(" space ", "page ", t),
+            if takes {
+                hint(
+                    " c ",
+                    if open > 0 {
+                        "comments ●"
+                    } else {
+                        "comments "
+                    },
+                    t,
+                )
+            } else {
+                Vec::new()
+            },
             hint(" y ", "copy ", t),
             hint(" r ", "reload ", t),
             hint(" esc ", "back ", t),
@@ -460,6 +546,9 @@ impl Page {
                 about.push(format!("#{n}"));
             }
             about.push(d.path.clone());
+            if open > 0 {
+                about.push(plural(open, "open comment"));
+            }
             head.push(
                 fit(&about.join(" · "), inner.width as usize)
                     .fg(t.muted)
@@ -529,6 +618,7 @@ impl Page {
                 row,
             );
         }
+        r.comments.draw(frame, rect, t);
     }
 }
 
@@ -769,6 +859,52 @@ mod tests {
         page.wheel(true, 3);
         let r = page.reader.as_ref().unwrap();
         assert_eq!(Some(r.top.get()), r.last.get());
+    }
+
+    #[test]
+    fn a_doc_with_an_id_takes_comments() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![doc("7", "a.md", false)])));
+        page.keys(b"\r");
+        let mut read = doc("7", "a.md", false);
+        read.text = Some("---\nvalk-id: 7\n---\n\n# Plan\n\nStep one.\n".into());
+        assert_eq!(page.opened("7", Ok(read)), Some(Do::Comments("7".into())));
+        page.comments("7", Ok(vec![]), false);
+        // c, n, past the whole doc and the heading to the paragraph, ↩, type, ↩.
+        let got = page.keys(b"cnjj\rok\r");
+        assert_eq!(
+            got,
+            vec![Do::Comment {
+                key: "7".into(),
+                quote: Some("Step one.".into()),
+                text: "ok".into()
+            }]
+        );
+        // Keys go to the panel while it's open, then back to the reader.
+        page.comments("7", Ok(vec![]), true);
+        assert_eq!(page.keys(b"\x1b"), vec![]);
+        assert!(page.reading());
+        assert_eq!(page.keys(b"\x1b"), vec![]);
+        assert!(!page.reading());
+    }
+
+    #[test]
+    fn a_doc_without_an_id_says_why_it_takes_none() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![doc(
+            "p0123456789abcdef",
+            "mine.md",
+            false,
+        )])));
+        page.keys(b"\r");
+        let mut read = doc("p0123456789abcdef", "mine.md", false);
+        read.id = 0;
+        assert_eq!(page.opened("p0123456789abcdef", Ok(read)), None);
+        let got = page.keys(b"c");
+        assert!(
+            matches!(got.as_slice(), [Do::Say(s)] if s.contains("valk-id")),
+            "{got:?}"
+        );
     }
 
     #[test]

@@ -425,7 +425,7 @@ pub(crate) struct OrderView {
 
 /// `bytes` as text after what `partial` holds, keeping a character cut off at the
 /// end for the next read.
-fn decode(partial: &mut Vec<u8>, bytes: &[u8]) -> String {
+pub(crate) fn decode(partial: &mut Vec<u8>, bytes: &[u8]) -> String {
     partial.extend_from_slice(bytes);
     let whole = match std::str::from_utf8(partial) {
         Ok(_) => partial.len(),
