@@ -9,6 +9,7 @@ valk ls                    # list sessions, with their state
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk notify "deploy done" --sound done   # a toast, ping and desktop notification
 valk pings                 # where agents stopped and waited on you, last 30 days
+valk notes                 # findings agents left about this repo (unreviewed, never injected)
 valk digest                # what every agent did while you were gone, as markdown
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v

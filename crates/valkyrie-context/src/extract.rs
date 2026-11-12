@@ -428,12 +428,17 @@ pub fn already_known(title: &str, known: &[Decision]) -> bool {
     if new.is_empty() {
         return true;
     }
-    known.iter().any(|d| {
-        let old = words(&d.title);
-        let shared = new.intersection(&old).count();
-        let all = new.union(&old).count();
-        all > 0 && shared * 10 >= all * 6
-    })
+    known.iter().any(|d| similar(&new, &words(&d.title)))
+}
+
+/// Whether two sets of [`words`] say the same thing: most of them shared.
+pub fn similar<T: Ord>(
+    a: &std::collections::BTreeSet<T>,
+    b: &std::collections::BTreeSet<T>,
+) -> bool {
+    let shared = a.intersection(b).count();
+    let all = a.union(b).count();
+    all > 0 && shared * 10 >= all * 6
 }
 
 /// The words that carry a line's meaning: lowercase, longer than two letters.

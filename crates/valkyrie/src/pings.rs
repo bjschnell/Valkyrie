@@ -542,6 +542,94 @@ pub fn report(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Result<S
     Ok(s)
 }
 
+/// How far before the window `--repeats` looks for an earlier session's answer.
+pub const REPEAT_LOOKBACK_DAYS: u64 = 30;
+
+/// Fewest meaning-carrying words a question needs to be matched at all: shorter
+/// ones ("go on?") match everything.
+const REPEAT_MIN_WORDS: usize = 3;
+
+/// What a stop asked you: a question's text, or a turn end's asking last line.
+fn asked(p: &Ping) -> Option<&str> {
+    match p.kind {
+        "question" => Some(p.summary.as_str()),
+        _ => p.ask.as_deref(),
+    }
+}
+
+/// Stops since `since_ms` that asked what an earlier session had already asked and
+/// had answered (ADR-0017's baseline): rough, by `extract::similar`'s word test.
+/// "Answered" means the earlier session went on to stop again later, so someone
+/// replied and it carried on. Each with the earlier stop it repeats.
+pub fn repeats(pool: &[Ping], since_ms: u64) -> Vec<(&Ping, &Ping)> {
+    use valkyrie_context::extract::{similar, words};
+    let words: Vec<Option<std::collections::BTreeSet<String>>> = pool
+        .iter()
+        .map(|p| asked(p).map(words).filter(|w| w.len() >= REPEAT_MIN_WORDS))
+        .collect();
+    let answered = |i: usize| {
+        let e = &pool[i];
+        pool.iter().any(|q| q.session == e.session && q.t > e.t)
+    };
+    let mut out = Vec::new();
+    for (i, p) in pool.iter().enumerate() {
+        let Some(mine) = words[i].as_ref().filter(|_| p.t >= since_ms) else {
+            continue;
+        };
+        let earlier = (0..pool.len()).find(|&j| {
+            let e = &pool[j];
+            e.session != p.session
+                && e.t < p.t
+                && words[j].as_ref().is_some_and(|w| similar(mine, w))
+                && answered(j)
+        });
+        if let Some(j) = earlier {
+            out.push((p, &pool[j]));
+        }
+    }
+    out
+}
+
+/// `--repeats`' section of the report.
+pub fn repeats_report(pool: &[Ping], since_ms: u64) -> Result<String> {
+    let mut s = String::new();
+    let asking = pool
+        .iter()
+        .filter(|p| p.t >= since_ms && asked(p).is_some())
+        .count();
+    let found = repeats(pool, since_ms);
+    writeln!(
+        s,
+        "\nAsked again: {} of {asking} stops that asked you something repeat what an earlier \
+         session asked and had answered (word match, looking {REPEAT_LOOKBACK_DAYS} days further \
+         back).",
+        found.len()
+    )?;
+    for (p, e) in found.iter().take(EXAMPLES * 3) {
+        writeln!(s, "  {}", clip(asked(p).unwrap_or("")))?;
+        writeln!(s, "    earlier: {}", clip(asked(e).unwrap_or("")))?;
+    }
+    Ok(s)
+}
+
+/// `--repeats`' part of the JSON.
+pub fn repeats_json(pool: &[Ping], since_ms: u64) -> Value {
+    let found = repeats(pool, since_ms);
+    json!({
+        "lookback_days": REPEAT_LOOKBACK_DAYS,
+        "asking": pool.iter().filter(|p| p.t >= since_ms && asked(p).is_some()).count(),
+        "count": found.len(),
+        "repeats": found.iter().map(|(p, e)| json!({
+            "session": p.session,
+            "t": p.t,
+            "asked": asked(p),
+            "earlier_session": e.session,
+            "earlier_t": e.t,
+            "earlier_asked": asked(e),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 pub fn json(pings: &[Ping], days: u64, since_ms: u64, now_ms: u64) -> Value {
     let groups = |texts: Vec<&str>| -> Vec<Value> {
         by_topic(texts.into_iter())
@@ -600,6 +688,76 @@ mod tests {
             payload["transcript_path"] = json!(p);
         }
         json!({"k": "hook", "t": t, "agent": "claude", "payload": payload})
+    }
+
+    fn ping(kind: &'static str, session: &str, t: u64, text: &str) -> Ping {
+        Ping {
+            kind,
+            session: session.into(),
+            t,
+            seen: false,
+            summary: if kind == "question" {
+                text.into()
+            } else {
+                String::new()
+            },
+            ask: (kind != "question").then(|| text.into()),
+            source: None,
+            work: None,
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn a_question_an_earlier_session_had_answered_counts_as_a_repeat() {
+        let pool = vec![
+            // Before the window, answered (the session stopped again after).
+            ping(
+                "question",
+                "a",
+                1,
+                "Should the digest window default to the last day?",
+            ),
+            ping("turn ended", "a", 2, "Done, shipped."),
+            // Asked before but never answered: doesn't count.
+            ping(
+                "question",
+                "b",
+                3,
+                "Which port should the web server listen on?",
+            ),
+            // In the window.
+            ping(
+                "question",
+                "c",
+                10,
+                "Should the digest window default to the last day or week?",
+            ),
+            ping(
+                "turn ended",
+                "d",
+                11,
+                "Which port should the web server listen on?",
+            ),
+            // Too short to match anything.
+            ping("question", "e", 12, "Go on?"),
+            ping("question", "f", 13, "Go on?"),
+            // The same session asking again isn't an earlier session's answer.
+            ping(
+                "question",
+                "a",
+                14,
+                "Should the digest window default to the last day?",
+            ),
+        ];
+        let found: Vec<(&str, &str)> = repeats(&pool, 10)
+            .iter()
+            .map(|(p, e)| (p.session.as_str(), e.session.as_str()))
+            .collect();
+        assert_eq!(found, vec![("c", "a")]);
+        let report = repeats_report(&pool, 10).unwrap();
+        assert!(report.contains("Asked again: 1 of 5"), "{report}");
+        assert_eq!(repeats_json(&pool, 10)["count"], 1);
     }
 
     #[test]
