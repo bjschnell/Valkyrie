@@ -7,6 +7,7 @@
 mod backlog;
 mod clip;
 mod digest;
+mod docs;
 mod edit;
 mod keys;
 mod links;
@@ -242,6 +243,8 @@ struct App {
     keys_page: Option<KeysPage>,
     /// The away digest is open (`w` on the home screen).
     digest: Option<digest::Page>,
+    /// The Docs page is open (`D` on the home screen).
+    docs: Option<docs::Page>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -408,6 +411,7 @@ impl App {
             settings_cursor: None,
             keys_page: None,
             digest: None,
+            docs: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
@@ -748,6 +752,9 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
+        if self.docs.is_some() {
+            return self.docs_keys(&bytes).await;
+        }
         if self.backlog.is_some() {
             // A mouse report cut off by the read isn't typed into a prompt.
             if let Some(cut) = mouse::unfinished(&bytes) {
@@ -820,6 +827,9 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
+        if self.docs.is_some() {
+            return self.docs_keys(&bytes).await;
+        }
         if self.settings_cursor.is_some() {
             return self.settings_keys(&bytes);
         }
@@ -842,6 +852,9 @@ impl App {
     /// does; a chip or the backlog panel does what its key does. The wheel moves the
     /// selection, or scrolls a proposal's text over the preview.
     async fn on_home_mouse(&mut self, m: Mouse) {
+        if self.docs.is_some() {
+            return self.on_docs_mouse(m);
+        }
         if self.keys_page.is_some()
             || self.digest.is_some()
             || self.settings_cursor.is_some()
@@ -2468,6 +2481,7 @@ impl App {
             HomeKey::AddDevice => self.add_device().await,
             HomeKey::Backlog => self.open_backlog().await,
             HomeKey::Digest => self.open_digest().await,
+            HomeKey::Docs => self.open_docs().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
     }
@@ -2600,6 +2614,71 @@ impl App {
                 },
                 digest::Do::Say(text) => self.say(text),
             }
+        }
+    }
+
+    async fn open_docs(&mut self) {
+        self.docs = Some(docs::Page::default());
+        self.load_docs().await;
+    }
+
+    /// Asks the daemon for the docs list. Opening it marks what agents wrote
+    /// until now read, as the web app's list does; this list still shows them
+    /// as new.
+    async fn load_docs(&mut self) {
+        let got = self.client.docs_listing().await.map_err(|e| e.to_string());
+        let at = got.as_ref().ok().map(|l| l.at);
+        if let Some(page) = &mut self.docs {
+            page.loaded(got);
+        }
+        if let Some(at) = at
+            && let Err(e) = self.client.docs_seen(at).await
+        {
+            self.say(format!("couldn't mark docs read: {e}"));
+        }
+    }
+
+    /// Keys while the Docs page is open.
+    async fn docs_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.docs else {
+            return;
+        };
+        for act in page.keys(bytes) {
+            match act {
+                docs::Do::Close => self.docs = None,
+                docs::Do::Load => self.load_docs().await,
+                docs::Do::Open(key) => {
+                    let got = self
+                        .client
+                        .open_doc(key.clone())
+                        .await
+                        .map_err(|e| e.to_string());
+                    if let Some(page) = &mut self.docs {
+                        page.opened(&key, got);
+                    }
+                }
+                docs::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
+                    Ok(()) => self.say("copied the doc as markdown".into()),
+                    Err(e) => self.say(format!("couldn't copy: {e}")),
+                },
+                docs::Do::Say(text) => self.say(text),
+            }
+        }
+    }
+
+    /// The wheel scrolls the doc being read; a click on a link in it opens it.
+    fn on_docs_mouse(&mut self, m: Mouse) {
+        let Some(page) = &self.docs else { return };
+        match m.kind {
+            MouseKind::WheelUp | MouseKind::WheelDown => {
+                page.wheel(m.kind == MouseKind::WheelDown, WHEEL_ROWS)
+            }
+            MouseKind::Press => {
+                if let Some(url) = page.link_at(m.x, m.y) {
+                    self.open_url(&url);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3063,6 +3142,7 @@ impl App {
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
                         && self.digest.is_none()
+                        && self.docs.is_none()
                         && self.backlog.is_none()
                         && !self.mini_open()
                         && !self.rail_open();
@@ -3101,6 +3181,9 @@ impl App {
                 self.draw_keys_page(frame, page);
             }
             if let Some(page) = &self.digest {
+                page.draw(frame, self.settings.theme);
+            }
+            if let Some(page) = &self.docs {
                 page.draw(frame, self.settings.theme);
             }
             if let Some(page) = &self.backlog {
@@ -5073,6 +5156,7 @@ fn footer_line(
         ("n", "new"),
         ("b", "backlog"),
         ("w", "digest"),
+        ("D", "docs"),
         (",", "settings"),
         (".", "keys"),
         ("p", "pair"),
@@ -5104,6 +5188,7 @@ fn chip_key(label: &str) -> HomeKey {
         "n" => HomeKey::NewShell,
         "b" => HomeKey::Backlog,
         "w" => HomeKey::Digest,
+        "D" => HomeKey::Docs,
         "," => HomeKey::Settings,
         "." => HomeKey::Keys,
         "p" => HomeKey::AddDevice,
@@ -5667,6 +5752,8 @@ enum HomeKey {
     Backlog,
     /// Open the away digest.
     Digest,
+    /// Open the Docs page.
+    Docs,
     /// Write the selected agent session down as a backlog item.
     Adopt,
     /// Take the other step offered on the selected flagged session.
@@ -5730,6 +5817,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
             b'w' => Some(HomeKey::Digest),
+            b'D' => Some(HomeKey::Docs),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),

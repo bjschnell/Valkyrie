@@ -22,6 +22,7 @@ pub struct Link {
     pub url: String,
 }
 
+#[derive(Debug)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub links: Vec<Link>,
