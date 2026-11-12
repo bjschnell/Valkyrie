@@ -43,6 +43,8 @@ struct Reader {
     doc: Option<Doc>,
     failed: Option<String>,
     top: Cell<u16>,
+    /// The last `top` that still fills the area, as last drawn.
+    last: Cell<Option<u16>>,
     /// Rows the text area showed last, for paging.
     rows: Cell<u16>,
     /// Where the text was drawn, and its links, for a click.
@@ -77,16 +79,19 @@ fn group_of(path: &str) -> &str {
 
 /// A doc's text without its front matter, which the header already shows.
 pub(crate) fn body(text: &str) -> String {
+    // As the web app's `body` does it, so both show the same text.
     let t = text.replace("\r\n", "\n");
-    let Some(rest) = t.strip_prefix("---\n") else {
+    if !t.starts_with("---\n") {
+        return t;
+    }
+    let Some(end) = t[3..].find("\n---").map(|e| e + 3) else {
         return t;
     };
-    let Some(end) = rest.find("\n---") else {
-        return t;
-    };
-    let after = &rest[end + 4..];
-    match after.find('\n') {
-        Some(n) => after[n + 1..].trim_start_matches('\n').to_string(),
+    match t[end + 4..].find('\n').map(|n| n + end + 4) {
+        Some(after) => {
+            let rest = &t[after + 1..];
+            rest.strip_prefix('\n').unwrap_or(rest).to_string()
+        }
         None => String::new(),
     }
 }
@@ -102,8 +107,9 @@ fn when(created: &str, tz: &TimeZone) -> String {
 impl Page {
     /// The daemon's list.
     pub(crate) fn loaded(&mut self, got: Result<DocsListing, String>) {
-        self.rows.clear();
+        // Read before the rows go: `selected` walks them.
         let keep = self.selected().map(|d| d.key.clone());
+        self.rows.clear();
         match got {
             Ok(listing) => {
                 let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
@@ -115,7 +121,14 @@ impl Page {
                     }
                 }
                 // Agent-level first, then each repository's by name.
-                groups.sort_by(|(a, _), (b, _)| (!a.is_empty(), *a).cmp(&(!b.is_empty(), *b)));
+                // Case aside, as the web app's localeCompare has it.
+                groups.sort_by(|(a, _), (b, _)| {
+                    (!a.is_empty(), a.to_lowercase(), *a).cmp(&(
+                        !b.is_empty(),
+                        b.to_lowercase(),
+                        *b,
+                    ))
+                });
                 for (name, list) in groups {
                     let head = if name.is_empty() {
                         "agent-level".to_string()
@@ -495,6 +508,7 @@ impl Page {
         };
         let total = rendered.lines.len() as u16;
         let last = total.saturating_sub(text_area.height);
+        r.last.set(Some(last));
         r.top.set(r.top.get().min(last));
         r.rows.set(text_area.height);
         r.area.set(text_area);
@@ -520,8 +534,10 @@ impl Page {
 
 impl Reader {
     fn scroll(&self, rows: i32) {
-        let top = (i32::from(self.top.get()) + rows).clamp(0, i32::from(u16::MAX));
-        // Drawing clamps it to the last page.
+        // Clamped now, not at the next draw, so a click in the same read finds
+        // the row that will show.
+        let last = i32::from(self.last.get().unwrap_or(u16::MAX));
+        let top = (i32::from(self.top.get()) + rows).clamp(0, last);
         self.top.set(top as u16);
     }
 }
@@ -714,8 +730,57 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_keeps_the_doc_you_were_on() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![
+            doc("1", "a.md", false),
+            doc("2", "b.md", false),
+        ])));
+        page.keys(b"j");
+        assert_eq!(page.selected().unwrap().key, "2");
+        page.loaded(Ok(listing(vec![
+            doc("3", "new.md", true),
+            doc("1", "a.md", false),
+            doc("2", "b.md", false),
+        ])));
+        assert_eq!(page.selected().unwrap().key, "2");
+    }
+
+    #[test]
+    fn groups_sort_without_case() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![
+            doc("1", "repos/Zeta/a.md", false),
+            doc("2", "repos/alpha/b.md", false),
+        ])));
+        assert_eq!(page.rows[0], Row::Head("alpha".into(), 1));
+    }
+
+    #[test]
+    fn scrolling_past_the_end_stops_there_before_the_next_draw() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![doc("1", "a.md", false)])));
+        page.keys(b"\r");
+        let mut read = doc("1", "a.md", false);
+        read.text = Some((0..60).map(|i| format!("line {i}\n\n")).collect());
+        page.opened("1", Ok(read));
+        screen(&page, 60, 20);
+        page.keys(b"G");
+        page.wheel(true, 3);
+        let r = page.reader.as_ref().unwrap();
+        assert_eq!(Some(r.top.get()), r.last.get());
+    }
+
+    #[test]
     fn strips_front_matter_only_when_it_is_there() {
         assert_eq!(body("---\na: 1\n---\n\nhi\n"), "hi\n");
+        // An empty block is all that goes; a rule further down stays.
+        assert_eq!(
+            body("---\n---\n# T\n\nx\n\n---\n\ny"),
+            "# T\n\nx\n\n---\n\ny"
+        );
+        // One blank line after it goes, as on the web; more stay.
+        assert_eq!(body("---\na: 1\n---\n\n\nhi"), "\nhi");
         assert_eq!(body("no front matter\n"), "no front matter\n");
         assert_eq!(body("---\nunclosed\n"), "---\nunclosed\n");
     }
