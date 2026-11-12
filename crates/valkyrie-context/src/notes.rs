@@ -410,6 +410,9 @@ mod tests {
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(repo.join("src/build.rs"), "fn main() {}\n").unwrap();
         let store = Store::new(dir.0.join("context"));
+        // As the daemon names it: canonical, so `/var` on macOS is `/private/var`
+        // and a Windows short name is spelled out, as `Store::note` keys it.
+        let repo = project::root(&repo);
         (dir, store, repo)
     }
 
