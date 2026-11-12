@@ -2812,7 +2812,12 @@ impl App {
                         Box::pin(self.docs_do(next)).await;
                     }
                 }
-                Err(e) => self.say(format!("couldn't put it back: {e}")),
+                Err(e) => {
+                    if let Some(page) = &mut self.docs {
+                        page.undo_failed(&token);
+                    }
+                    self.say(format!("couldn't put it back: {e}"));
+                }
             },
             docs::Do::Deleted => {
                 let got = self.client.deleted_docs().await.map_err(|e| e.to_string());
@@ -2951,12 +2956,13 @@ impl App {
 
     /// The wheel scrolls the doc being read; a click on a link in it opens it.
     fn on_docs_mouse(&mut self, m: Mouse) {
-        let Some(page) = &self.docs else { return };
+        let Some(page) = &mut self.docs else { return };
         match m.kind {
             MouseKind::WheelUp | MouseKind::WheelDown => {
                 page.wheel(m.kind == MouseKind::WheelDown, WHEEL_ROWS)
             }
             MouseKind::Press => {
+                page.pressed();
                 if let Some(url) = page.link_at(m.x, m.y) {
                     self.open_url(&url);
                 }

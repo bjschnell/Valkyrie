@@ -636,14 +636,30 @@ impl Page {
 
     /// The wheel over the doc being read scrolls it.
     pub(crate) fn wheel(&self, down: bool, rows: i32) {
-        if let Some(r) = &self.reader {
+        if let Some(r) = self.reader.as_ref().filter(|r| !r.covered()) {
             r.scroll(if down { rows } else { -rows });
+        }
+    }
+
+    /// A mouse press: a `d` waiting for its second press is off.
+    pub(crate) fn pressed(&mut self) {
+        if let Some(r) = &mut self.reader {
+            r.deleting = false;
+        }
+    }
+
+    /// Putting `token` back failed: it's gone (put back elsewhere, or expired),
+    /// so `u` stops offering it.
+    pub(crate) fn undo_failed(&mut self, token: &str) {
+        if self.undo.as_ref().is_some_and(|(t, _)| t == token) {
+            self.undo = None;
         }
     }
 
     /// The link at screen cell (`x`, `y`) of the doc being read, if any.
     pub(crate) fn link_at(&self, x: u16, y: u16) -> Option<String> {
-        let r = self.reader.as_ref()?;
+        // Not through a panel over the doc: its links are hidden.
+        let r = self.reader.as_ref().filter(|r| !r.covered())?;
         let area = r.area.get();
         if !area.contains(Position::new(x, y)) {
             return None;
@@ -1028,6 +1044,11 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
 }
 
 impl Reader {
+    /// A panel is over the doc (comments, history, a conflict).
+    fn covered(&self) -> bool {
+        self.comments.is_open() || self.history.is_some() || self.conflict.is_some()
+    }
+
     fn scroll(&self, rows: i32) {
         // Clamped now, not at the next draw, so a click in the same read finds
         // the row that will show.
@@ -1423,6 +1444,32 @@ mod tests {
         assert!(page.reading());
         assert_eq!(page.keys(b"\x1b"), vec![]);
         assert_eq!(page.keys(b"u"), vec![Do::Say("nothing to undo".into())]);
+    }
+
+    #[test]
+    fn the_mouse_leaves_a_covered_doc_alone_and_disarms_d() {
+        let mut page = reading("7", "[x](https://x.dev)\n");
+        screen(&page, 60, 20);
+        let r = page.reader.as_ref().unwrap();
+        let area = r.area.get();
+        let y = (area.y..area.bottom())
+            .find(|&y| page.link_at(area.x, y).is_some())
+            .unwrap();
+        page.keys(b"h");
+        assert_eq!(
+            page.link_at(area.x, y),
+            None,
+            "not through the history panel"
+        );
+        page.keys(b"\x1b");
+        page.keys(b"d");
+        page.pressed();
+        assert!(!page.reader.as_ref().unwrap().deleting);
+        page.deleted("7", "tok".into(), "t".into());
+        page.undo_failed("other");
+        assert!(page.undo.is_some());
+        page.undo_failed("tok");
+        assert!(page.undo.is_none());
     }
 
     #[test]
