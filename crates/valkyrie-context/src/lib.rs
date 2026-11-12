@@ -22,6 +22,7 @@ pub mod order;
 pub mod outcome;
 pub mod policy;
 pub mod project;
+pub mod promote;
 pub mod recall;
 pub mod reply;
 pub mod retro;
@@ -469,6 +470,13 @@ impl Store {
             && files.get(&old).is_some_and(|(_, o)| o.status == Active)
         {
             d.pinned |= self.supersede(root, old, id, now)?;
+        }
+        // Proposed from recurring notes (ADR-0017 §7): the decision now carries
+        // what they said, so they leave search. The decision is already written,
+        // so a failure here doesn't undo the accept: the daemon's next recurrence
+        // check (`promote::Store::heal_promotions`) marks them.
+        if accepting {
+            let _ = self.promote_notes(root, id);
         }
         Ok(d)
     }

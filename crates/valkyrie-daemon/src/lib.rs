@@ -18,6 +18,7 @@ mod merged;
 mod order;
 mod overlap;
 mod pairing;
+mod promote;
 mod pty;
 mod quota;
 mod restore;
@@ -163,6 +164,10 @@ struct Registry {
     /// How many of its watchers show notices to someone (`WatchNotices::shows`).
     notice_viewers: AtomicU32,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// Projects a note was just written in, for `promote` to check for
+    /// recurrence (ADR-0017 §7).
+    notes_written: mpsc::UnboundedSender<PathBuf>,
+    notes_written_rx: Mutex<Option<mpsc::UnboundedReceiver<PathBuf>>>,
     /// Replies to stops short of shipping, for `habit` to learn from.
     answers: mpsc::UnboundedSender<(SessionId, session::Answered)>,
     answers_rx: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, session::Answered)>>>,
@@ -506,6 +511,7 @@ fn new_registry(
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
     let (turns, turns_rx) = mpsc::unbounded_channel();
+    let (notes_written, notes_written_rx) = mpsc::unbounded_channel();
     let (answers, answers_rx) = mpsc::unbounded_channel();
     let (seen, seen_rx) = mpsc::unbounded_channel();
     let (order_tx, order_rx) = mpsc::unbounded_channel();
@@ -543,6 +549,8 @@ fn new_registry(
         stale_check: tokio::sync::Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
+        notes_written,
+        notes_written_rx: Mutex::new(Some(notes_written_rx)),
         answers,
         answers_rx: Mutex::new(Some(answers_rx)),
         seen,
@@ -602,6 +610,9 @@ async fn serve_forever(
     tokio::spawn(publish_queue(registry.clone()));
     if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
         tokio::spawn(extract::run(registry.clone(), turns));
+    }
+    if let Some(written) = registry.notes_written_rx.lock().unwrap().take() {
+        tokio::spawn(promote::run(registry.clone(), written));
     }
     if let Some(answers) = registry.answers_rx.lock().unwrap().take() {
         tokio::spawn(habit::run(registry.clone(), answers));

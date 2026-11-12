@@ -282,6 +282,7 @@ impl Registry {
             replaces = note.replaces,
             "note written"
         );
+        let _ = self.notes_written.send(note.project.clone());
         Ok(Reply::Note {
             note: Box::new(note),
         })
