@@ -1302,7 +1302,7 @@ pub(crate) fn step_changes(step: &valkyrie_proto::OrderStep, item: Option<&Item>
 
 /// The hints, key and word in pairs, that fit in `room` columns: the first ones,
 /// which matter most, since a centered title too wide loses its start.
-fn fit_hints(hints: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
+pub(crate) fn fit_hints(hints: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
     let mut used = 0;
     hints
         .chunks(2)

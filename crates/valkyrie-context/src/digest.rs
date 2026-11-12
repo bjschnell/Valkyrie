@@ -536,31 +536,61 @@ fn when(ms: u64, tz: &TimeZone) -> String {
 /// The digest as markdown to paste: a heading per repository or day, a line per
 /// session, its agent's own last line under it.
 pub fn render(digest: &Digest, tz: &TimeZone) -> String {
-    let mut out = String::from("# Away digest\n\n");
-    let window = span(digest.until_ms.saturating_sub(digest.since_ms));
-    let from = when(digest.since_ms, tz);
-    if digest.away {
-        out.push_str(&format!("Since you left, {from} ({window} ago).\n\n"));
-    } else {
-        out.push_str(&format!("Since {from} ({window} ago).\n\n"));
-    }
+    let mut out = format!("# Away digest\n\n{}\n\n", about(digest, tz));
     if digest.entries.is_empty() {
         out.push_str("No agent did anything in that time.\n");
         return out;
     }
+    out.push_str(&format!("{}.\n", tally(&digest.entries)));
+    for (key, list) in grouped(digest, tz) {
+        out.push_str(&format!("\n## {key}\n\n"));
+        for e in list {
+            out.push_str(&format!(
+                "- **{}**: {}: {} ({})\n",
+                e.outcome.label(),
+                e.what,
+                e.detail,
+                at(e, digest.by, tz)
+            ));
+            if let Some(summary) = &e.summary {
+                out.push_str(&format!("  > {summary}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// Where the window starts: "Since you left, Tue 10 Nov 18:00 (14h ago)."
+pub fn about(digest: &Digest, tz: &TimeZone) -> String {
+    let window = span(digest.until_ms.saturating_sub(digest.since_ms));
+    let from = when(digest.since_ms, tz);
+    if digest.away {
+        format!("Since you left, {from} ({window} ago).")
+    } else {
+        format!("Since {from} ({window} ago).")
+    }
+}
+
+/// How many sessions ended up where: "5 agent sessions: 1 stuck, 4 shipped".
+pub fn tally(entries: &[DigestEntry]) -> String {
     let counts: Vec<String> = Outcome::ALL
         .iter()
         .filter_map(|o| {
-            let n = digest.entries.iter().filter(|e| e.outcome == *o).count();
+            let n = entries.iter().filter(|e| e.outcome == *o).count();
             (n > 0).then(|| format!("{n} {}", o.label()))
         })
         .collect();
-    let n = digest.entries.len();
-    out.push_str(&format!(
-        "{n} agent session{}: {}.\n",
+    let n = entries.len();
+    format!(
+        "{n} agent session{}: {}",
         if n == 1 { "" } else { "s" },
         counts.join(", ")
-    ));
+    )
+}
+
+/// The entries under their headings, in the order they're shown: by repository
+/// in the digest's own order, or by day, newest first.
+pub fn grouped<'a>(digest: &'a Digest, tz: &TimeZone) -> Vec<(String, Vec<&'a DigestEntry>)> {
     let mut groups: Vec<(String, Vec<&DigestEntry>)> = Vec::new();
     let mut ordered: Vec<&DigestEntry> = digest.entries.iter().collect();
     if digest.by == DigestGroup::Day {
@@ -577,26 +607,16 @@ pub fn render(digest: &Digest, tz: &TimeZone) -> String {
             None => groups.push((key, vec![e])),
         }
     }
-    for (key, list) in groups {
-        out.push_str(&format!("\n## {key}\n\n"));
-        for e in list {
-            let at = if digest.by == DigestGroup::Repo {
-                format!("{}, {}", e.agent, day_clock(e, tz))
-            } else {
-                format!("{} in {}, {}", e.agent, e.repo, clock_span(e, tz))
-            };
-            out.push_str(&format!(
-                "- **{}**: {}: {} ({at})\n",
-                e.outcome.label(),
-                e.what,
-                e.detail
-            ));
-            if let Some(summary) = &e.summary {
-                out.push_str(&format!("  > {summary}\n"));
-            }
-        }
+    groups
+}
+
+/// Who and when, for a line under `by`'s heading: the agent and its day and
+/// times by repository; the agent, its repository and times by day.
+pub fn at(e: &DigestEntry, by: DigestGroup, tz: &TimeZone) -> String {
+    match by {
+        DigestGroup::Repo => format!("{}, {}", e.agent, day_clock(e, tz)),
+        DigestGroup::Day => format!("{} in {}, {}", e.agent, e.repo, clock_span(e, tz)),
     }
-    out
 }
 
 fn day_key(ms: u64, tz: &TimeZone) -> Option<civil::Date> {

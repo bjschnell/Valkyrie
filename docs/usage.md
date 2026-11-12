@@ -62,7 +62,10 @@ valk digest --since yesterday --by day
 valk digest --since 12h --json
 ```
 
-The web app has the same view: the clock on the home screen, with a Copy button.
+The TUI has it too: `w` on the home screen. `w` steps through since you left,
+12 hours, today and 3 days, `t` switches between repository and day, `↩` opens a
+session that's still running and `y` copies the markdown. The web app has the
+same view behind the clock on the home screen, with a Copy button.
 
 ## Docs for you to read
 

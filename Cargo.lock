@@ -6870,6 +6870,7 @@ dependencies = [
  "arboard",
  "base64 0.23.1",
  "image",
+ "jiff",
  "ratatui",
  "serde_json",
  "tokio",
