@@ -2689,7 +2689,12 @@ impl App {
                             });
                     }
                     // The comment stays in its box, to send again.
-                    Err(e) => self.say(format!("couldn't comment: {e}")),
+                    Err(e) => {
+                        if let Some(page) = &mut self.docs {
+                            page.comments(&key, Err(e.to_string()), true);
+                        }
+                        self.say(format!("couldn't comment: {e}"));
+                    }
                 }
             }
             docs::Do::Resolve { key, id } => {

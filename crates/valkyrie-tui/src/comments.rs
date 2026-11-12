@@ -36,9 +36,12 @@ enum Mode {
     /// Which block to comment on: 0 is the whole doc, then each block.
     Pick { cursor: usize, blocks: Vec<Block> },
     /// Writing one, on the block `quote` reads or the whole doc.
+    /// `sending` while the daemon has it: keys wait, so a held Enter can't send
+    /// it twice.
     Write {
         quote: Option<String>,
         text: LineEdit,
+        sending: bool,
     },
 }
 
@@ -65,6 +68,13 @@ impl Comments {
         }
         if let Some(Mode::List { cursor }) = &mut self.mode {
             *cursor = (*cursor).min(self.list.len().saturating_sub(1));
+        }
+    }
+
+    /// The comment wasn't taken: its box takes keys again, to send it again.
+    pub(crate) fn unsent(&mut self) {
+        if let Some(Mode::Write { sending, .. }) = &mut self.mode {
+            *sending = false;
         }
     }
 
@@ -98,7 +108,9 @@ impl Comments {
     }
 
     /// A key while the panel is open, with the doc's `body` for picking a block.
-    pub(crate) fn key(&mut self, key: &[u8], whole: bool, body: &str) -> Option<Do> {
+    /// A key while the panel is open; `body` gives the doc's body, for picking a
+    /// block (made only then: a doc can be large).
+    pub(crate) fn key(&mut self, key: &[u8], whole: bool, body: &dyn Fn() -> String) -> Option<Do> {
         // What the list shows, by id and state, before the mode is borrowed.
         let shown: Vec<(u32, CommentState)> =
             self.shown().iter().map(|c| (c.id, c.state)).collect();
@@ -114,7 +126,7 @@ impl Comments {
                     b"n" | b"c" => {
                         self.mode = Some(Mode::Pick {
                             cursor: 0,
-                            blocks: blocks::blocks(body),
+                            blocks: blocks::blocks(&body()),
                         })
                     }
                     b"x" => {
@@ -141,13 +153,19 @@ impl Comments {
                     self.mode = Some(Mode::Write {
                         quote,
                         text: LineEdit::default(),
+                        sending: false,
                     });
                 }
                 b"\x1b" if whole => self.mode = Some(Mode::List { cursor: 0 }),
                 b"q" | [0x03] => self.mode = Some(Mode::List { cursor: 0 }),
                 _ => {}
             },
-            Mode::Write { quote, text } => {
+            Mode::Write { sending: true, .. } => {}
+            Mode::Write {
+                quote,
+                text,
+                sending,
+            } => {
                 // Esc or ^C ends a paste whose end never came, then does what it does.
                 if (whole && key == b"\x1b") || key == [0x03] {
                     self.paste = None;
@@ -177,6 +195,7 @@ impl Comments {
                     b"\r" | b"\n" => {
                         let words = text.text().trim().to_string();
                         if !words.is_empty() {
+                            *sending = true;
                             return Some(Do::Send {
                                 quote: quote.clone(),
                                 text: words,
@@ -305,7 +324,11 @@ impl Comments {
                 let hints = [hint(" ↩ ", "comment on it ", t), hint(" esc ", "back ", t)].concat();
                 (" Comment on… ".to_string(), hints, at)
             }
-            Mode::Write { quote, text } => {
+            Mode::Write {
+                quote,
+                text,
+                sending,
+            } => {
                 match quote {
                     Some(q) => {
                         for l in wrap(&format!("“{q}”"), room).into_iter().take(3) {
@@ -318,11 +341,17 @@ impl Comments {
                 let mut input = vec![Span::from("› ").fg(t.accent)];
                 input.extend(text.spans(room.saturating_sub(2), t));
                 lines.push(Line::from(input));
-                let hints = [hint(" ↩ ", "send ", t), hint(" esc ", "cancel ", t)].concat();
+                let hints = if *sending {
+                    vec![" sending… ".fg(t.muted)]
+                } else {
+                    [hint(" ↩ ", "send ", t), hint(" esc ", "cancel ", t)].concat()
+                };
                 (" Comment ".to_string(), hints, (0, 0))
             }
         };
-        let height = (lines.len() as u16 + 3)
+        let height = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(3)
             .min(area.height.saturating_sub(2))
             .max(5);
         let rect = Rect::new(
@@ -416,7 +445,10 @@ mod tests {
     }
 
     fn press(c: &mut Comments, keys: &[&[u8]], body: &str) -> Vec<Do> {
-        keys.iter().filter_map(|k| c.key(k, true, body)).collect()
+        let body = body.to_string();
+        keys.iter()
+            .filter_map(|k| c.key(k, true, &|| body.clone()))
+            .collect()
     }
 
     #[test]
@@ -441,6 +473,20 @@ mod tests {
         )]);
         assert!(matches!(c.mode, Some(Mode::List { .. })));
         assert_eq!(c.open_count(), 1);
+    }
+
+    #[test]
+    fn a_held_enter_sends_once_and_a_failed_send_can_go_again() {
+        let mut c = Comments::default();
+        c.open();
+        let got = press(&mut c, &[b"n", b"\r", b"o", b"k", b"\r", b"\r", b"z"], "x");
+        assert_eq!(got.len(), 1, "{got:?}");
+        c.unsent();
+        let Some(Mode::Write { text, .. }) = &c.mode else {
+            panic!()
+        };
+        assert_eq!(text.text(), "ok", "nothing typed while it was sending");
+        assert_eq!(press(&mut c, &[b"\r"], "x").len(), 1);
     }
 
     #[test]

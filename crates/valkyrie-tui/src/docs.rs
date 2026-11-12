@@ -201,6 +201,8 @@ impl Page {
         };
         match got {
             Ok(list) if sent => reader.comments.sent(list),
+            // A send that failed: the comment stays in its box, to send again.
+            Err(_) if sent => reader.comments.unsent(),
             got => reader.comments.loaded(got),
         }
     }
@@ -280,13 +282,14 @@ impl Page {
         if let Some(reader) = &mut self.reader
             && reader.comments.is_open()
         {
-            let body = body(
-                reader
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.text.as_deref())
-                    .unwrap_or_default(),
-            );
+            let text = &reader.doc;
+            let body = || {
+                body(
+                    text.as_ref()
+                        .and_then(|d| d.text.as_deref())
+                        .unwrap_or_default(),
+                )
+            };
             let doc = reader.key.clone();
             match reader.comments.key(key, whole, &body) {
                 Some(comments::Do::Send { quote, text }) => out.push(Do::Comment {

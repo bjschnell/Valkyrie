@@ -60,9 +60,16 @@ fn hidden(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
-/// JavaScript's `\s`.
+/// JavaScript's `\s` (and what its `trim` drops): Rust's whitespace less
+/// U+0085, plus U+FEFF.
 fn is_space(c: char) -> bool {
-    c.is_whitespace() || c == '\u{feff}'
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+}
+
+/// Whether JavaScript's `.` matches all of `s`: it doesn't match line breaks,
+/// so a `(.*)$` fails on a line that holds one.
+fn dot_all(s: &str) -> bool {
+    !s.contains(['\n', '\r', '\u{2028}', '\u{2029}'])
 }
 
 fn blank(line: &str) -> bool {
@@ -91,7 +98,7 @@ fn list_item(line: &str) -> Option<(bool, &str)> {
     };
     let text = trim_start(after);
     // At least one space after the marker.
-    (text.len() < after.len()).then_some((ordered, text))
+    (text.len() < after.len() && dot_all(text)).then_some((ordered, text))
 }
 
 /// `^(#{1,6})\s+(.*)$`: the heading's text.
@@ -102,7 +109,13 @@ fn heading(line: &str) -> Option<&str> {
     }
     let after = &line[hashes..];
     let text = trim_start(after);
-    (text.len() < after.len()).then_some(text)
+    (text.len() < after.len() && dot_all(text)).then_some(text)
+}
+
+/// `^#{1,6}\s`: a heading's start, as `startsBlock` looks for it (no `$`).
+fn heading_start(line: &str) -> bool {
+    let hashes = line.len() - line.trim_start_matches('#').len();
+    (1..=6).contains(&hashes) && line[hashes..].starts_with(is_space)
 }
 
 /// `^\s*([-*_])(\s*\1){2,}\s*$`: a rule.
@@ -139,7 +152,7 @@ fn starts_block(line: &str) -> bool {
     let t = trim_start(line);
     t.starts_with("```")
         || t.starts_with("~~~")
-        || heading(line).is_some()
+        || heading_start(line)
         || rule(line)
         || t.starts_with('|')
         || line.starts_with('>')
@@ -335,6 +348,16 @@ mod tests {
             quotes("#nospace\n####### seven\n-nospace"),
             vec![(Kind::Paragraph, "#nospace ####### seven -nospace".into())]
         );
+    }
+
+    #[test]
+    fn line_breaks_js_dot_skips_and_u85_are_as_on_the_web() {
+        assert_eq!(
+            quotes("# a\u{2028}b"),
+            vec![(Kind::Paragraph, "# a b".into())]
+        );
+        assert_eq!(quotes("- x\n- a\rb"), vec![(Kind::Item, "x - a b".into())]);
+        assert_eq!(quotes("#\u{85}x"), vec![(Kind::Paragraph, "# x".into())]);
     }
 
     #[test]
