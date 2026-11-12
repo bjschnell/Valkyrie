@@ -60,44 +60,39 @@ pub fn sessions(cluster: &[&Note]) -> usize {
     conversations.len() + bare.len()
 }
 
-/// The clusters among `notes`, each oldest first: two notes are in one when they
-/// share a signature or most of their words, and so is anything either is in one
-/// with. Live notes, stale ones too, and promoted ones are clustered, so a note
-/// that joins a proposed cluster is still found to belong to it after the notes
-/// it matched go stale or are promoted; [`ready`] counts only the live, fresh ones.
+/// The clusters among `notes`, each oldest first. Each cluster is seeded by its
+/// newest note, and an older note joins the newest cluster whose seed it shares
+/// a signature or most of its words with. Matching the seed, not any member,
+/// keeps a chain of loosely worded notes (A like B, B like C) from pulling A and
+/// C into one cluster. Live notes, stale ones too, and promoted ones are
+/// clustered, so a note that joins a proposed cluster is still found to belong
+/// to it after the notes it matched go stale or are promoted; [`ready`] counts
+/// only the live, fresh ones.
 pub fn clusters(notes: &[Note]) -> Vec<Vec<&Note>> {
-    let notes: Vec<&Note> = notes
+    let mut notes: Vec<&Note> = notes
         .iter()
         .filter(|n| matches!(n.status, NoteStatus::Live | NoteStatus::Promoted))
         .collect();
-    let words: Vec<BTreeSet<String>> = notes.iter().map(|n| extract::words(&n.text)).collect();
-    let mut parent: Vec<usize> = (0..notes.len()).collect();
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
+    notes.sort_by_key(|n| std::cmp::Reverse((n.created, n.id)));
+    // (seed's words, members newest first)
+    let mut groups: Vec<(BTreeSet<String>, Vec<&Note>)> = Vec::new();
+    for n in notes {
+        let words = extract::words(&n.text);
+        let seed = groups.iter_mut().find(|(seed_words, members)| {
+            let seed = members[0];
+            let same_sig = n.sig.is_some() && n.sig == seed.sig;
+            let same_words = !words.is_empty() && extract::similar(&words, seed_words);
+            same_sig || same_words
+        });
+        match seed {
+            Some((_, members)) => members.push(n),
+            None => groups.push((words, vec![n])),
         }
-        i
-    }
-    for i in 0..notes.len() {
-        for j in i + 1..notes.len() {
-            let same_sig = notes[i].sig.is_some() && notes[i].sig == notes[j].sig;
-            let same_words = !words[i].is_empty() && extract::similar(&words[i], &words[j]);
-            if same_sig || same_words {
-                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
-                parent[a.max(b)] = a.min(b);
-            }
-        }
-    }
-    let mut groups: BTreeMap<usize, Vec<&Note>> = BTreeMap::new();
-    for (i, n) in notes.iter().enumerate() {
-        let root = find(&mut parent, i);
-        groups.entry(root).or_default().push(n);
     }
     groups
-        .into_values()
-        .map(|mut g| {
-            g.sort_by_key(|n| (n.created, n.id));
+        .into_iter()
+        .map(|(_, mut g)| {
+            g.reverse();
             g
         })
         .collect()
@@ -531,6 +526,46 @@ mod tests {
             "{cited}"
         );
         assert!(cited.contains("#2") && cited.contains("#4"), "{cited}");
+    }
+
+    #[test]
+    fn notes_linked_only_through_a_third_dont_cluster() {
+        let (_d, store, repo) = store();
+        // A matches B and B matches C, but A and C share two words of six.
+        write(
+            &store,
+            &repo,
+            "cargo build needs protoc",
+            Some("c1"),
+            None,
+            1,
+        );
+        write(
+            &store,
+            &repo,
+            "cargo build needs protoc installed locally",
+            Some("c2"),
+            None,
+            2,
+        );
+        write(
+            &store,
+            &repo,
+            "needs protoc installed locally",
+            Some("c3"),
+            None,
+            3,
+        );
+        let notes = store.notes(&repo);
+        let groups: Vec<Vec<u32>> = clusters(&notes)
+            .iter()
+            .map(|c| c.iter().map(|n| n.id).collect())
+            .collect();
+        assert!(
+            !groups.iter().any(|g| g.contains(&1) && g.contains(&3)),
+            "{groups:?}"
+        );
+        assert!(ready(&notes, &[], &[]).is_none(), "{groups:?}");
     }
 
     #[test]
