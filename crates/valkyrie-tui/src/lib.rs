@@ -10,6 +10,7 @@ mod digest;
 mod edit;
 mod keys;
 mod links;
+mod markdown;
 mod mini;
 mod mouse;
 mod panes;
@@ -208,6 +209,8 @@ struct App {
     /// How far down the shown proposal's text is scrolled: whose it is, the top
     /// row, and how many rows show. Drawing keeps it in range.
     proposal_scroll: std::cell::Cell<ProposalScroll>,
+    /// The links in the proposal text last drawn, by row of the whole text.
+    proposal_links: std::cell::RefCell<Vec<markdown::Link>>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
     /// What the home screen last drew where, first match wins: its rows (each with
@@ -386,6 +389,7 @@ impl App {
             backlog: None,
             retire_armed: None,
             proposal_scroll: Default::default(),
+            proposal_links: Default::default(),
             selected: 0,
             home_rows: Default::default(),
             home_captured: false,
@@ -780,7 +784,7 @@ impl App {
                     (None, Input::Bytes(rest)) => Box::pin(self.home_input(&rest)).await,
                     (None, Input::Mouse(_)) => {}
                     (Some(_), Input::Mouse(m)) if self.reviewing.is_some() => {
-                        self.wheel_proposal(m)
+                        self.on_proposal_mouse(m)
                     }
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
                     // A finished program: any key returns home (or to the next pane),
@@ -856,6 +860,12 @@ impl App {
                     self.update_preview().await;
                 }
                 Some(Hit::Key(key)) => self.on_home_key(key).await,
+                // Links are a proposal's: after one, the preview holds a session.
+                Some(Hit::Preview) if self.proposal().is_some() => {
+                    if let Some(url) = self.proposal_link_at(m.x, m.y) {
+                        self.open_url(&url);
+                    }
+                }
                 Some(Hit::Preview) | None => {}
             },
             MouseKind::WheelUp | MouseKind::WheelDown => {
@@ -2150,8 +2160,9 @@ impl App {
         self.proposal_scroll.set(at);
     }
 
-    /// The wheel over a proposal's text scrolls it. Anything else is not for it.
-    fn wheel_proposal(&self, m: Mouse) {
+    /// The wheel over a proposal's text scrolls it, and a click on a link in it
+    /// opens the link. Anything else is not for it.
+    fn on_proposal_mouse(&mut self, m: Mouse) {
         let at = self.proposal_scroll.get();
         if !at.area.contains(ratatui::layout::Position::new(m.x, m.y)) {
             return;
@@ -2159,20 +2170,71 @@ impl App {
         match m.kind {
             MouseKind::WheelUp => self.scroll_proposal_rows(-WHEEL_ROWS),
             MouseKind::WheelDown => self.scroll_proposal_rows(WHEEL_ROWS),
+            MouseKind::Press => {
+                if let Some(url) = self.proposal_link_at(m.x, m.y) {
+                    self.open_url(&url);
+                }
+            }
             _ => {}
         }
     }
 
+    /// The link drawn at screen cell (`x`, `y`) of the proposal's text, if any.
+    fn proposal_link_at(&self, x: u16, y: u16) -> Option<String> {
+        let at = self.proposal_scroll.get();
+        if !at.area.contains(ratatui::layout::Position::new(x, y)) {
+            return None;
+        }
+        let row = usize::from(y - at.area.y + at.top);
+        let col = x - at.area.x;
+        self.proposal_links
+            .borrow()
+            .iter()
+            .find(|l| l.row == row && (l.from..l.to).contains(&col))
+            .map(|l| l.url.clone())
+    }
+
+    /// Opens `url` from the home screen, and says so.
+    fn open_url(&mut self, url: &str) {
+        let said = match links::open(url) {
+            Ok(links::Opened::Browser) => format!("opened {url}"),
+            Ok(links::Opened::Copied) => format!("copied {url} (no browser over SSH)"),
+            Err(e) => format!("couldn't open {url}: {e}"),
+        };
+        self.say(said);
+    }
+
     /// A proposal's text in `area`, scrolled as `proposal_scroll` says, with how
     /// much is left below.
+    /// `head` (plain lines) comes first, then the body as markdown.
     fn draw_proposal_text(
         &self,
         frame: &mut ratatui::Frame,
         area: Rect,
         d: &Decision,
-        lines: Vec<Line<'static>>,
+        head: Vec<Line<'static>>,
     ) {
         let t = self.settings.theme;
+        let body = markdown::render(&d.body, area.width, t);
+        let mut lines = head;
+        if !body.lines.is_empty() {
+            // A row between the head and the body.
+            lines.push(Line::default());
+        }
+        // The head may wrap; the body comes back wrapped to fit, so its links'
+        // rows only move down by the rows above it.
+        let shift = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(area.width.max(1));
+        *self.proposal_links.borrow_mut() = body
+            .links
+            .into_iter()
+            .map(|l| markdown::Link {
+                row: l.row + shift,
+                ..l
+            })
+            .collect();
+        lines.extend(body.lines);
         let mut at = self.proposal_scroll.get();
         // Another proposal, or a new version of this one, starts at its top.
         let whose = (fnv_path(&d.project), d.id, d.updated);
@@ -3439,7 +3501,7 @@ impl App {
                 d.title.clone().fg(t.fg).bold(),
                 format!(" #{} ", d.id).fg(t.muted),
             ]);
-            let mut lines = vec![Line::from(
+            let lines = vec![Line::from(
                 format!(
                     "{}  ·  {} · {}{}",
                     d.kind.as_str(),
@@ -3451,7 +3513,6 @@ impl App {
                 )
                 .fg(t.muted),
             )];
-            lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
             let block = panel(title, t, false);
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -3686,7 +3747,6 @@ impl App {
                 format!("applies to {}", d.scope.join(", ")).fg(t.muted),
             ));
         }
-        lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
         self.draw_proposal_text(frame, body, d, lines);
     }
 }
@@ -8554,6 +8614,47 @@ mod tests {
         assert!(app.proposal_scroll.get().top > 0, "wheel scrolled the text");
         app.on_input(press(64, x, y)).await;
         assert_eq!(app.proposal_scroll.get().top, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A proposal's body shows as markdown, not its source, and a click on a
+    /// link in it opens the link.
+    #[tokio::test]
+    async fn a_proposal_body_is_markdown_and_its_links_open() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-md-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let mut d = proposed("/r/a", 1, "md one");
+        d.body = "## Why\n\n**Bold** words, then [the ADR](https://x.dev/adr).".into();
+        app.proposals = vec![d];
+        app.selected = 0;
+        let width = 160;
+        let screen: Vec<String> = home_screen(&app, width);
+        let all = screen.join("\n");
+        assert!(all.contains("Why") && !all.contains("## Why"), "{all}");
+        assert!(all.contains("Bold words") && !all.contains("**"), "{all}");
+        let (y, row) = screen
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains("the ADR"))
+            .unwrap();
+        let x = row
+            .chars()
+            .collect::<Vec<_>>()
+            .windows(7)
+            .position(|w| w.iter().collect::<String>() == "the ADR")
+            .unwrap() as u16;
+        let opened = || links::OPENED.with(|o| std::mem::take(&mut *o.borrow_mut()));
+        opened();
+        app.on_input(press(0, x + 1, y as u16)).await;
+        assert_eq!(opened(), ["https://x.dev/adr"]);
+        app.on_input(press(0, x - 3, y as u16)).await;
+        assert!(opened().is_empty(), "plain text opens nothing");
+        // A session selected now: the old proposal's link is gone with it.
+        app.proposals.clear();
+        app.sessions = vec![info(1)];
+        app.selected = 0;
+        app.on_input(press(0, x + 1, y as u16)).await;
+        assert!(opened().is_empty(), "no stale link");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
