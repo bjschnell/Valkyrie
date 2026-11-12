@@ -347,11 +347,13 @@ fn corrections_become_proposals() {
     drop(daemon);
 }
 
-/// ADR-0011: a turn that ended after a tool failed gets a retro. The failed call
-/// and what worked next become a proposal, its signature is recorded, and a turn
-/// with no new failure isn't read again.
+/// ADR-0011 with ADR-0017 §5: a turn that ended after a tool failed gets a retro.
+/// The failed call and what worked next become an agent note with the failure's
+/// signature, not a proposal, and a turn with no new failure isn't read again.
+/// When the note was served to the session and the failure came back anyway, the
+/// retro is shown it and replaces it.
 #[test]
-fn failures_become_proposals() {
+fn failures_become_notes() {
     let dir = std::env::temp_dir().join(format!("valkyrie-retro-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let daemon = Daemon { dir: dir.clone() };
@@ -369,19 +371,26 @@ fn failures_become_proposals() {
     .unwrap();
     std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
 
+    // The model: a lesson, then the same lesson correcting note #1.
     let model = bin.join("model");
+    let calls = out.join("calls");
     std::fs::write(
         &model,
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
-             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
-            calls = out.join("calls").display()
+             if [ $(grep -c -- --- {calls}) = 1 ]; then\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n\
+             else\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill by pid from pgrep -x\\\",\\\"body\\\":\\\"kill <pid> alone missed the daemon.\\\",\\\"replaces\\\":1}}]}}\"}}'\n\
+             fi\n",
+            calls = calls.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&model, exec.clone()).unwrap();
 
-    // The agent's transcript: `pkill -f` failed, `kill <pid>` worked.
+    // The agent's transcript: `pkill -f` failed, `kill <pid>` worked; later the
+    // same failure again.
     let transcript = out.join("t.jsonl");
     let call = |id: &str, command: &str| {
         serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":command}}]}}).to_string()
@@ -396,6 +405,13 @@ fn failures_become_proposals() {
         result("2", None),
     ];
     std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    let again = [
+        call("3", "pkill -f 'valk daemon'"),
+        result("3", Some("Exit code 144\nTerminated")),
+        call("4", "kill $(pgrep -x valk)"),
+        result("4", None),
+    ];
+    std::fs::write(out.join("again.jsonl"), again.join("\n") + "\n").unwrap();
     let hook = |event: &str| {
         format!(
             "echo '{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"c1\",\"tool_name\":\"Bash\",\"transcript_path\":\"{}\"}}' | valk hook claude\n",
@@ -406,12 +422,21 @@ fn failures_become_proposals() {
     std::fs::write(
         &agent,
         format!(
-            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            "#!/bin/sh\ncd {repo}\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}\
+             for i in $(seq 50); do valk notes search pkill > {search} 2>&1; \
+             grep -q 'agent note #1' {search} && break; sleep 0.2; done\n\
+             cat {again} >> {t}\n{}sleep 0.3\n{}sleep 30\n",
             hook("SessionStart"),
             hook("PostToolUseFailure"),
             hook("Stop"),
             // No failure since: no retro.
             hook("Stop"),
+            hook("PostToolUseFailure"),
+            hook("Stop"),
+            repo = repo.display(),
+            search = out.join("search").display(),
+            again = out.join("again.jsonl").display(),
+            t = transcript.display(),
         ),
     )
     .unwrap();
@@ -444,30 +469,54 @@ fn failures_become_proposals() {
         "--",
         agent.to_str().unwrap(),
     ]);
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let root = valkyrie_context::project::root(&repo);
     let start = Instant::now();
-    let mut listed = String::new();
-    while start.elapsed() < Duration::from_secs(10) && !listed.contains("pkill") {
+    let mut notes = Vec::new();
+    while start.elapsed() < Duration::from_secs(15) && notes.len() < 2 {
         std::thread::sleep(Duration::from_millis(100));
-        listed = valk(&["decisions"]);
+        notes = store.notes(&root);
     }
-    assert!(
-        listed.contains("#1  gotcha     Kill exact pids, never pkill -f (proposed)"),
-        "{listed}"
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    let (one, two) = (&notes[0], &notes[1]);
+    assert_eq!(
+        one.text,
+        "Kill exact pids, never pkill -f\npkill -f matches the agent shell.\n\n\
+         From a failure: `pkill -f 'valk daemon'` → Terminated"
     );
-    let shown = stored(&dir, &repo, 1);
+    assert_eq!(one.by, "valkyrie");
+    assert!(one.sig.as_deref().is_some_and(|s| s.len() == 16), "{one:?}");
+    assert_eq!(one.conversation.as_deref(), Some("c1"));
+    // Served, then the failure came back: corrected, not added beside it.
+    let search = std::fs::read_to_string(out.join("search")).unwrap();
+    assert!(search.contains("agent note #1"), "{search}");
+    assert_eq!(one.status, valkyrie_proto::NoteStatus::Replaced, "{one:?}");
+    assert_eq!(two.replaces, Some(1));
+    assert_eq!(two.sig, one.sig);
     assert!(
-        shown.contains("by: valkyrie")
-            && shown.contains("From a failure: `pkill -f 'valk daemon'` → Terminated"),
-        "{shown}"
+        two.text.starts_with("Kill by pid from pgrep -x\n"),
+        "{}",
+        two.text
     );
-    std::thread::sleep(Duration::from_millis(1500));
-    let calls = std::fs::read_to_string(out.join("calls")).unwrap();
-    assert_eq!(calls.matches("---").count(), 1, "{calls}");
+    // Nothing went to review.
+    assert!(store.load(&root).is_empty(), "{:?}", store.load(&root));
+
+    std::thread::sleep(Duration::from_millis(1000));
+    let calls = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(calls.matches("---").count(), 2, "{calls}");
+    let first = calls.split("---").next().unwrap();
     assert!(
-        calls.contains("Call: pkill -f 'valk daemon'")
-            && calls.contains("Next that worked: kill 4242")
-            && calls.contains("seen_before=\"0\""),
-        "{calls}"
+        first.contains("Call: pkill -f 'valk daemon'")
+            && first.contains("Next that worked: kill 4242")
+            && first.contains("seen_before=\"0\"")
+            && !first.contains("<notes>"),
+        "{first}"
+    );
+    let second = calls.split("---").nth(1).unwrap();
+    assert!(
+        second.contains("seen_before=\"1\"")
+            && second.contains("<note number=\"1\" moment=\"1\" served=\"true\">Kill exact pids"),
+        "{second}"
     );
     let state = dir.join("state/valkyrie/context");
     let sigs = std::fs::read_dir(&state)
@@ -479,7 +528,7 @@ fn failures_become_proposals() {
     let sigs = std::fs::read_to_string(sigs).unwrap();
     assert_eq!(sigs.lines().count(), 2, "{sigs}");
     assert!(
-        sigs.contains("\"call\":\"1\"") && sigs.contains("\"decision\":1"),
+        sigs.contains("\"call\":\"1\"") && sigs.contains("\"call\":\"3\""),
         "{sigs}"
     );
     drop(daemon);
