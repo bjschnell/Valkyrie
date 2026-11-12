@@ -476,7 +476,7 @@ impl Store {
         // so a failure here doesn't undo the accept: the daemon's next recurrence
         // check (`promote::Store::heal_promotions`) marks them.
         if accepting {
-            let _ = self.promote_notes(root, id);
+            let _ = self.promote_notes(root, &d);
         }
         Ok(d)
     }
