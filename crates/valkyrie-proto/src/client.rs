@@ -484,6 +484,54 @@ impl Client {
         }
     }
 
+    /// The comments on the doc with this key.
+    pub async fn doc_comments(&self, key: String) -> Result<Vec<crate::DocComment>> {
+        match self
+            .request(|req| ClientMsg::DocComments { req, key })
+            .await?
+        {
+            Reply::DocComments { comments, .. } => Ok(comments),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user comments on a doc, on the block `quote` reads or the whole doc:
+    /// its comments now, and the session that will hear it, if one is running.
+    pub async fn comment_doc(
+        &self,
+        key: String,
+        quote: Option<String>,
+        text: String,
+    ) -> Result<(Vec<crate::DocComment>, Option<String>)> {
+        match self
+            .request(|req| ClientMsg::CommentDoc {
+                req,
+                key,
+                quote,
+                text,
+            })
+            .await?
+        {
+            Reply::DocComments { comments, to } => Ok((comments, to)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user closes a comment on a doc.
+    pub async fn resolve_comment(
+        &self,
+        key: String,
+        comment: u32,
+    ) -> Result<Vec<crate::DocComment>> {
+        match self
+            .request(|req| ClientMsg::ResolveComment { req, key, comment })
+            .await?
+        {
+            Reply::DocComments { comments, .. } => Ok(comments),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// The user opened the list stamped `at`: what agents wrote until then is read.
     pub async fn docs_seen(&self, at: u64) -> Result<()> {
         match self.request(|req| ClientMsg::DocsSeen { req, at }).await? {

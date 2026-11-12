@@ -5,7 +5,9 @@
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
 mod backlog;
+mod blocks;
 mod clip;
+mod comments;
 mod digest;
 mod docs;
 mod edit;
@@ -2644,25 +2646,67 @@ impl App {
             return;
         };
         for act in page.keys(bytes) {
-            match act {
-                docs::Do::Close => self.docs = None,
-                docs::Do::Load => self.load_docs().await,
-                docs::Do::Open(key) => {
-                    let got = self
-                        .client
-                        .open_doc(key.clone())
-                        .await
-                        .map_err(|e| e.to_string());
-                    if let Some(page) = &mut self.docs {
-                        page.opened(&key, got);
-                    }
+            Box::pin(self.docs_do(act)).await;
+        }
+    }
+
+    /// Does what the Docs page asked.
+    async fn docs_do(&mut self, act: docs::Do) {
+        match act {
+            docs::Do::Close => self.docs = None,
+            docs::Do::Load => self.load_docs().await,
+            docs::Do::Open(key) => {
+                let got = self
+                    .client
+                    .open_doc(key.clone())
+                    .await
+                    .map_err(|e| e.to_string());
+                let next = self.docs.as_mut().and_then(|page| page.opened(&key, got));
+                if let Some(next) = next {
+                    Box::pin(self.docs_do(next)).await;
                 }
-                docs::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
-                    Ok(()) => self.say("copied the doc as markdown".into()),
-                    Err(e) => self.say(format!("couldn't copy: {e}")),
-                },
-                docs::Do::Say(text) => self.say(text),
             }
+            docs::Do::Comments(key) => {
+                let got = self
+                    .client
+                    .doc_comments(key.clone())
+                    .await
+                    .map_err(|e| e.to_string());
+                if let Some(page) = &mut self.docs {
+                    page.comments(&key, got, false);
+                }
+            }
+            docs::Do::Comment { key, quote, text } => {
+                match self.client.comment_doc(key.clone(), quote, text).await {
+                    Ok((list, to)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.comments(&key, Ok(list), true);
+                        }
+                        // As the web app says it.
+                        self.say(match to {
+                                Some(to) => format!("{to} hears it at its next prompt."),
+                                None => "The session that wrote it isn't running: the comment stays open here.".into(),
+                            });
+                    }
+                    // The comment stays in its box, to send again.
+                    Err(e) => self.say(format!("couldn't comment: {e}")),
+                }
+            }
+            docs::Do::Resolve { key, id } => {
+                match self.client.resolve_comment(key.clone(), id).await {
+                    Ok(list) => {
+                        if let Some(page) = &mut self.docs {
+                            page.comments(&key, Ok(list), false);
+                        }
+                    }
+                    Err(e) => self.say(format!("couldn't close it: {e}")),
+                }
+            }
+            docs::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
+                Ok(()) => self.say("copied the doc as markdown".into()),
+                Err(e) => self.say(format!("couldn't copy: {e}")),
+            },
+            docs::Do::Say(text) => self.say(text),
         }
     }
 
