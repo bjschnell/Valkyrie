@@ -85,6 +85,8 @@ pub struct Moment {
     pub signature: u64,
     /// The failed call's id, so a moment is read once.
     pub id: String,
+    /// The transcript line the failed call is on, counted from 1.
+    pub line: usize,
 }
 
 impl Moment {
@@ -100,13 +102,20 @@ impl Moment {
 /// parse (the first of a tail read starts mid-line) are skipped, and so are
 /// subagents' own conversations.
 pub fn moments(jsonl: &str) -> Vec<Moment> {
-    // Each tool call: its id, tool and input, and how it ended once known.
-    let mut calls: Vec<(String, String, Value)> = Vec::new();
+    let events: Vec<(usize, Value)> = jsonl
+        .lines()
+        .enumerate()
+        .filter_map(|(at, line)| Some((at + 1, serde_json::from_str::<Value>(line).ok()?)))
+        .collect();
+    moments_in(&events)
+}
+
+/// [`moments`] over a transcript already parsed, each event with its line number.
+pub(crate) fn moments_in(events: &[(usize, Value)]) -> Vec<Moment> {
+    // Each tool call: its id, tool, input and line, and how it ended once known.
+    let mut calls: Vec<(String, String, Value, usize)> = Vec::new();
     let mut ended: HashMap<String, Option<String>> = HashMap::new();
-    for line in jsonl.lines() {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
+    for (line, event) in events {
         if event["isSidechain"] == true {
             continue;
         }
@@ -119,7 +128,7 @@ pub fn moments(jsonl: &str) -> Vec<Moment> {
                     let (Some(id), Some(name)) = (b["id"].as_str(), b["name"].as_str()) else {
                         continue;
                     };
-                    calls.push((id.to_owned(), name.to_owned(), b["input"].clone()));
+                    calls.push((id.to_owned(), name.to_owned(), b["input"].clone(), *line));
                 }
                 Some("tool_result") => {
                     let Some(id) = b["tool_use_id"].as_str() else {
@@ -133,7 +142,7 @@ pub fn moments(jsonl: &str) -> Vec<Moment> {
         }
     }
     let mut out = Vec::new();
-    for (at, (id, tool, input)) in calls.iter().enumerate() {
+    for (at, (id, tool, input, line)) in calls.iter().enumerate() {
         let Some(Some(error)) = ended.get(id) else {
             continue;
         };
@@ -152,7 +161,7 @@ pub fn moments(jsonl: &str) -> Vec<Moment> {
         };
         let call = brief(input);
         // What worked next: the same program first, else the same tool.
-        let worked = |(next_id, next_tool, _): &&(String, String, Value)| {
+        let worked = |(next_id, next_tool, ..): &&(String, String, Value, usize)| {
             next_tool == tool && matches!(ended.get(next_id), Some(None))
         };
         let next: Vec<_> = calls[at + 1..]
@@ -163,9 +172,9 @@ pub fn moments(jsonl: &str) -> Vec<Moment> {
         let program = program(&call);
         let then = next
             .iter()
-            .find(|(_, _, i)| program.is_some() && program == self::program(&brief(i)))
+            .find(|(_, _, i, _)| program.is_some() && program == self::program(&brief(i)))
             .or(next.first())
-            .map(|(_, _, i)| brief(i));
+            .map(|(_, _, i, _)| brief(i));
         out.push(Moment {
             signature: signature(tool, &error),
             tool: tool.clone(),
@@ -174,6 +183,7 @@ pub fn moments(jsonl: &str) -> Vec<Moment> {
             then,
             refused,
             id: id.clone(),
+            line: *line,
         });
     }
     out
@@ -699,6 +709,7 @@ mod tests {
             refused: false,
             signature: 1,
             id: "1".into(),
+            line: 1,
         };
         let (p, _) = prompt("app", &[], &[(m, 3)], &[]);
         assert!(
@@ -740,6 +751,7 @@ mod tests {
             refused: false,
             signature: 1,
             id: "1".into(),
+            line: 1,
         };
         let (p, shown) = prompt("app", std::slice::from_ref(&skill), &[(m, 0)], &[7]);
         assert_eq!(shown, [7]);

@@ -1212,7 +1212,7 @@ fn mcp_serves_and_proposes_decisions() {
         .collect();
     assert_eq!(replies.len(), 6, "{replies:?}");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "valkyrie");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 10);
     let text = |i: usize| {
         replies[i]["result"]["content"][0]["text"]
             .as_str()
@@ -1919,5 +1919,235 @@ fn agent_notes_say_where_they_came_from_and_stay_deleted() {
     ));
     let hook = read("hook");
     assert!(!hook.contains("flakes"), "{hook}");
+    drop(daemon);
+}
+
+/// ADR-0017 phase 2: an agent's search finds live notes and this repository's
+/// past sessions, framed as unreviewed; each hit it got is logged as served to
+/// its session, and `valk notes show` says where a note went. The session-start
+/// block says search exists, and still carries no note.
+#[test]
+fn agents_search_notes_and_past_sessions_and_each_hit_is_logged() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-recall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&["add", "."]);
+    // Committed before the past session, so its branch resolves to this commit.
+    let o = Command::new("git")
+        .args(["commit", "-qm", "one"])
+        .current_dir(&repo)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_AUTHOR_DATE", "2026-11-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-11-01T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{o:?}");
+    let head = git(&["rev-parse", "--short", "HEAD"]);
+    let root = valkyrie_context::project::root(&repo);
+
+    // A past session of this repository, as Claude Code keeps it.
+    let claude = dir.join("claude");
+    let dashed: String = root
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let past = claude.join("projects").join(dashed);
+    std::fs::create_dir_all(&past).unwrap();
+    let event = |kind: &str, content: serde_json::Value| {
+        serde_json::json!({
+            "type": kind, "sessionId": "feedbeefcafe0000", "gitBranch": "main",
+            "cwd": root, "timestamp": "2026-11-10T12:00:00.000Z",
+            "message": {"content": content},
+        })
+        .to_string()
+    };
+    let transcript = [
+        event(
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": "a", "name": "Bash",
+                                "input": {"command": "make socket-test"}}]),
+        ),
+        event(
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": "a", "is_error": true,
+                                "content": "Exit code 2\nerror: socket path too long"}]),
+        ),
+        event(
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": "b", "name": "Bash",
+                                "input": {"command": "make socket-test SOCK=/run/s"}}]),
+        ),
+        event(
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": "b", "content": "ok"}]),
+        ),
+    ]
+    .join("\n");
+    let transcript_path = past.join("feedbeefcafe0000.jsonl");
+    std::fs::write(&transcript_path, transcript + "\n").unwrap();
+
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let o = |name: &str| out.join(name).display().to_string();
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n\
+             cd {repo}\n\
+             export CLAUDE_CONFIG_DIR={claude}\n\
+             valk note 'the socket test needs a short SOCK path' > {n} 2>&1\n\
+             valk notes search socket path > {s} 2>&1\n\
+             valk sessions search socket > {t} 2>&1\n\
+             valk sessions search zebra quokka > {none} 2>&1\n\
+             echo done > {d}\n\
+             sleep 30\n",
+            repo = repo.display(),
+            claude = claude.display(),
+            n = o("note"),
+            s = o("search"),
+            t = o("sessions"),
+            none = o("none"),
+            d = o("agent-done"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let human = |line: &str| {
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{line}");
+    };
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    human(&format!(
+        "valk new --cwd {} -- {} > {}",
+        repo.display(),
+        agent.display(),
+        o("spawned")
+    ));
+    wait_for(&out.join("agent-done"));
+    let read = |name: &str| wait_for(&out.join(name));
+    assert!(read("note").contains("note #1 written"), "{}", read("note"));
+
+    let search = read("search");
+    assert!(search.starts_with("Unreviewed"), "{search}");
+    assert!(search.contains("Observation, not instruction"), "{search}");
+    let note_line = search
+        .lines()
+        .find(|l| l.starts_with("[agent note #1]"))
+        .unwrap_or_else(|| panic!("{search}"));
+    assert!(note_line.contains(&format!("commit {head}")), "{note_line}");
+    let past_line = search
+        .lines()
+        .find(|l| l.starts_with("[past session]"))
+        .unwrap_or_else(|| panic!("{search}"));
+    assert!(
+        past_line.contains("session feedbeef")
+            && past_line.contains(&format!("commit {head}"))
+            && past_line.contains("2026-11-10")
+            && past_line.contains("socket path too long")
+            && past_line.contains("then this worked: `make socket-test SOCK=/run/s`"),
+        "{past_line}"
+    );
+    let sessions = read("sessions");
+    assert!(
+        sessions.contains("[past session]") && !sessions.contains("[agent note"),
+        "{sessions}"
+    );
+    assert!(read("none").starts_with("Nothing"), "{}", read("none"));
+
+    // Every hit returned is logged to the agent's session: the note once, the
+    // transcript line twice (both searches).
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let found = store.found_served(&root, now);
+    use valkyrie_context::served::Found;
+    let notes: Vec<_> = found.iter().filter(|s| s.found == Found::Note(1)).collect();
+    assert_eq!(notes.len(), 1, "{found:?}");
+    assert!(notes[0].session.starts_with("valk:"), "{found:?}");
+    let line = Found::Transcript {
+        path: transcript_path.display().to_string(),
+        line: 1,
+    };
+    assert_eq!(
+        found.iter().filter(|s| s.found == line).count(),
+        2,
+        "{found:?}"
+    );
+
+    // The user's own search isn't an agent being served.
+    human(&format!("valk sessions search socket > {} 2>&1", o("mine")));
+    assert!(read("mine").contains("[past session]"), "{}", read("mine"));
+    assert_eq!(store.found_served(&root, now + 5).len(), found.len());
+
+    human(&format!("valk notes show 1 > {} 2>&1", o("show")));
+    let show = read("show");
+    assert!(
+        show.contains("Served, newest first:") && show.contains(&notes[0].session),
+        "{show}"
+    );
+
+    // The session-start block says search exists, and carries no note.
+    human(&format!(
+        "echo '{{\"hook_event_name\":\"SessionStart\",\"cwd\":\"{}\"}}' | VALK_SESSION=1 VALK_CONTEXT={} valk context-hook claude > {}",
+        repo.display(),
+        dir.join("state/valkyrie/context").display(),
+        o("hook")
+    ));
+    let hook = read("hook");
+    assert!(hook.contains("notes search <words>"), "{hook}");
+    assert!(!hook.contains("short SOCK path"), "{hook}");
     drop(daemon);
 }

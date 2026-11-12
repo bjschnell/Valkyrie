@@ -5,6 +5,9 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use std::io::Read;
+use std::path::Path;
+use valkyrie_context::recall;
+use valkyrie_context::served::{Found, FoundServe, Layer};
 use valkyrie_proto::client::Client;
 use valkyrie_proto::{NewNote, Note, NoteStatus, NotesListing};
 
@@ -25,6 +28,33 @@ pub enum NotesCmd {
     Rm { id: u32 },
     /// How many notes there are and in what state, and what agents deleted.
     Health,
+    /// Search live notes and this repository's past Claude sessions (main
+    /// checkout and worktrees) for words: has an agent here hit this, and what
+    /// fixed it? Best matches first, stale notes last.
+    Search {
+        #[arg(required = true)]
+        words: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SessionsCmd {
+    /// Search this repository's past Claude sessions (main checkout and
+    /// worktrees) for words: failed tool calls with what worked next, and what
+    /// the user typed. `valk notes search` searches notes too.
+    Search {
+        #[arg(required = true)]
+        words: Vec<String>,
+    },
+}
+
+/// `valk sessions`: reads Claude's transcripts directly, no daemon needed.
+pub fn sessions(cmd: SessionsCmd) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    match cmd {
+        SessionsCmd::Search { words } => print!("{}", search(&[], &cwd, &words.join(" "))),
+    }
+    Ok(())
 }
 
 /// The heading every listing carries: a note is what an agent saw, not a rule.
@@ -150,6 +180,18 @@ pub async fn run(client: &Client, cmd: Option<NotesCmd>) -> Result<()> {
                     );
                 }
             }
+            let served = served_lines(&root, id);
+            if served.is_empty() {
+                println!(
+                    "\nServed: never, in the last {} days.",
+                    valkyrie_context::served::SERVED_DAYS
+                );
+            } else {
+                println!("\nServed, newest first:");
+                for line in served {
+                    println!("{line}");
+                }
+            }
             if let Some(commit) = &n.commit {
                 println!("\nCheck it: git show {commit}");
             }
@@ -168,7 +210,69 @@ pub async fn run(client: &Client, cmd: Option<NotesCmd>) -> Result<()> {
             print!("{}", health(&listing, &root.display().to_string()));
             Ok(())
         }
+        NotesCmd::Search { words } => {
+            let listing = client.notes(cwd.clone()).await?;
+            print!("{}", search(&listing.notes, &cwd, &words.join(" ")));
+            Ok(())
+        }
     }
+}
+
+/// Searches `notes` and this repository's past sessions for `query` and logs each
+/// hit returned as served to the asking session (ADR-0017 rule 3). Outside a
+/// Valkyrie session it's you reading, not an agent, so nothing is logged, as for
+/// a decision search (ADR-0014 §5). `notes` empty searches sessions only.
+pub(crate) fn search(notes: &[Note], cwd: &Path, query: &str) -> String {
+    let root = valkyrie_context::project::root(cwd);
+    let files = recall::session_files(&recall::claude_home(), &root);
+    let mut hits = recall::search(notes, &files, query);
+    if hits.is_empty() {
+        return "Nothing in this repository's notes or past sessions has those words.\n".into();
+    }
+    recall::resolve(&root, &mut hits);
+    if let Some(session) = crate::context::reader() {
+        let at = now();
+        let store = valkyrie_context::Store::new(crate::context::store_base());
+        let found: Vec<FoundServe> = hits
+            .iter()
+            .map(|h| FoundServe {
+                session: session.clone(),
+                found: h.found(),
+                layer: Layer::Search,
+                at,
+            })
+            .collect();
+        // A log that can't be written never costs the agent its answer.
+        let _ = store.record_found(&root, &found, at);
+    }
+    recall::render(&hits)
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Where note `id` was served, newest first, one line each; empty when nowhere.
+fn served_lines(root: &Path, id: u32) -> Vec<String> {
+    let store = valkyrie_context::Store::new(crate::context::store_base());
+    let mut lines: Vec<String> = store
+        .found_served(root, now())
+        .into_iter()
+        .filter(|s| s.found == Found::Note(id))
+        .map(|s| {
+            format!(
+                "  {} to session {} ({})",
+                date(s.at),
+                s.session,
+                s.layer.as_str()
+            )
+        })
+        .collect();
+    lines.reverse();
+    lines
 }
 
 fn find(listing: &NotesListing, id: u32) -> Option<&Note> {

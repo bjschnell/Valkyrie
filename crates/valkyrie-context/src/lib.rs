@@ -22,6 +22,7 @@ pub mod order;
 pub mod outcome;
 pub mod policy;
 pub mod project;
+pub mod recall;
 pub mod reply;
 pub mod retro;
 pub mod scope;
@@ -894,8 +895,24 @@ impl Store {
     /// time. Writers hold `served.lock` throughout, so an append can't land in
     /// the file a prune is about to replace and be lost with it.
     pub fn record_served(&self, root: &Path, serves: &[served::Serve], now: u64) -> Result<()> {
+        self.record_lines(root, serves.iter().map(served::Serve::to_json), now)
+    }
+
+    /// Records notes and transcript lines a search served (ADR-0017 rule 3), in
+    /// the same log as decisions, the same way.
+    pub fn record_found(&self, root: &Path, found: &[served::FoundServe], now: u64) -> Result<()> {
+        self.record_lines(root, found.iter().map(served::FoundServe::to_json), now)
+    }
+
+    fn record_lines(
+        &self,
+        root: &Path,
+        lines: impl Iterator<Item = serde_json::Value>,
+        now: u64,
+    ) -> Result<()> {
         use std::io::{BufRead, Write};
-        if serves.is_empty() {
+        let lines: String = lines.map(|v| format!("{v}\n")).collect();
+        if lines.is_empty() {
             return Ok(());
         }
         self.mark_project(root)?;
@@ -915,17 +932,15 @@ impl Store {
             serde_json::from_str::<serde_json::Value>(&first).ok()?["at"].as_u64()
         });
         if oldest.is_some_and(|at| now.saturating_sub(at) > (served::SERVED_DAYS + 7) * 86_400) {
+            // Every kind of line is kept while it counts, not only the ones this
+            // reader knows: a note's serve must outlive a decision's prune.
             let kept: String = self
-                .served(root, now)
+                .served_values(root, now)
                 .iter()
-                .map(|s| format!("{}\n", s.to_json()))
+                .map(|v| format!("{v}\n"))
                 .collect();
             write_atomic(&path, &kept)?;
         }
-        let lines: String = serves
-            .iter()
-            .map(|s| format!("{}\n", s.to_json()))
-            .collect();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -935,15 +950,36 @@ impl Store {
         Ok(())
     }
 
-    /// What was served in `root` over the last [`served::SERVED_DAYS`] days,
-    /// oldest first.
-    pub fn served(&self, root: &Path, now: u64) -> Vec<served::Serve> {
+    /// Every line of `root`'s serving log from the last [`served::SERVED_DAYS`]
+    /// days, whatever it served, oldest first.
+    fn served_values(&self, root: &Path, now: u64) -> Vec<serde_json::Value> {
         std::fs::read_to_string(self.served_file(root))
             .unwrap_or_default()
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter_map(|v| served::Serve::from_json(&v))
-            .filter(|s| now.saturating_sub(s.at) <= served::SERVED_DAYS * 86_400)
+            .filter(|v| {
+                v["at"]
+                    .as_u64()
+                    .is_some_and(|at| now.saturating_sub(at) <= served::SERVED_DAYS * 86_400)
+            })
+            .collect()
+    }
+
+    /// The notes and transcript lines searches served in `root` over the last
+    /// [`served::SERVED_DAYS`] days, oldest first.
+    pub fn found_served(&self, root: &Path, now: u64) -> Vec<served::FoundServe> {
+        self.served_values(root, now)
+            .iter()
+            .filter_map(served::FoundServe::from_json)
+            .collect()
+    }
+
+    /// What was served in `root` over the last [`served::SERVED_DAYS`] days,
+    /// oldest first.
+    pub fn served(&self, root: &Path, now: u64) -> Vec<served::Serve> {
+        self.served_values(root, now)
+            .iter()
+            .filter_map(served::Serve::from_json)
             .collect()
     }
 
@@ -1994,6 +2030,51 @@ mod tests {
             .unwrap();
         assert_eq!(lines(), 3);
         assert_eq!(f.store.served(&f.repo, much_later)[0].id, 2);
+    }
+
+    #[test]
+    fn a_prune_keeps_what_searches_served_beside_decisions() {
+        use served::{Found, FoundServe, Layer, Serve};
+        let f = Fixture::new("served-found");
+        let day = 86_400;
+        let old = Serve {
+            session: "s1".into(),
+            id: 1,
+            layer: Layer::Block,
+            at: day,
+        };
+        f.store.record_served(&f.repo, &[old], day).unwrap();
+        let note = FoundServe {
+            session: "valk:1".into(),
+            found: Found::Note(4),
+            layer: Layer::Search,
+            at: 60 * day,
+        };
+        let line = FoundServe {
+            found: Found::Transcript {
+                path: "/t.jsonl".into(),
+                line: 7,
+            },
+            ..note.clone()
+        };
+        f.store
+            .record_found(&f.repo, &[note.clone(), line.clone()], 60 * day)
+            .unwrap();
+        // The decision's line is past the window, so this write prunes.
+        let now = (served::SERVED_DAYS + 9) * day;
+        let new = Serve {
+            session: "s2".into(),
+            id: 2,
+            layer: Layer::Show,
+            at: now,
+        };
+        f.store
+            .record_served(&f.repo, std::slice::from_ref(&new), now)
+            .unwrap();
+        assert_eq!(f.store.found_served(&f.repo, now), [note, line]);
+        assert_eq!(f.store.served(&f.repo, now), [new]);
+        let file = std::fs::read_to_string(f.store.served_file(&f.repo)).unwrap();
+        assert_eq!(file.lines().count(), 3);
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn jsonl_under(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 /// The directory a transcript's agent worked in: Claude Code puts `cwd` on its
 /// events, Codex on its `session_meta`.
-fn cwd_of(path: &Path) -> Option<PathBuf> {
+pub(crate) fn cwd_of(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
     BufReader::new(file)
         .lines()

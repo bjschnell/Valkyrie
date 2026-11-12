@@ -144,6 +144,31 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+/// Whether `cwd` is in the project at `root` (`repo` is how it was named, before
+/// it was canonicalized; pass `root` again when it wasn't). A directory that's gone can't be
+/// asked for its repository; a worktree Valkyrie made is named `<repo>-<branch>`
+/// beside the root (DESIGN §4.3), so a gone one is matched by that name.
+pub fn in_repo(cwd: &Path, repo: &Path, root: &Path) -> bool {
+    if cwd.starts_with(repo) || cwd.starts_with(root) {
+        return true;
+    }
+    if cwd.exists() {
+        return self::root(cwd) == root;
+    }
+    // A gone cwd can't be canonicalized, so it may be spelled like either path
+    // (macOS's /var is /private/var, and Windows canonical paths start \\?\).
+    [root, repo].into_iter().any(|base| {
+        let (Some(parent), Some(name)) = (base.parent(), base.file_name()) else {
+            return false;
+        };
+        let prefix = format!("{}-", name.to_string_lossy());
+        cwd.strip_prefix(parent)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .is_some_and(|dir| dir.as_os_str().to_string_lossy().starts_with(&prefix))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

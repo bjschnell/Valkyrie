@@ -85,22 +85,40 @@ pub fn listed(d: &Decision, inactive: bool) -> bool {
     d.status == DecisionStatus::Active || (inactive && d.status != DecisionStatus::Proposed)
 }
 
-/// Decisions with any of `query`'s words in their kind, title or body, most
-/// words matched first, at most [`MAX_SEARCH`]. A word matches inside another
-/// ("proto" finds "protocol"): a search is asked for, so it errs on finding.
-pub fn search<'a>(list: &'a [Decision], query: &str, inactive: bool) -> Vec<&'a Decision> {
-    let words: Vec<String> = query
+/// A search's words: lowercase, two characters or more. Agent notes and past
+/// sessions are searched with them too (ADR-0017 §4).
+pub fn query_words(query: &str) -> Vec<String> {
+    let mut words: Vec<String> = query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() > 1)
         .map(str::to_owned)
         .collect();
+    words.sort();
+    words.dedup();
+    words
+}
+
+/// How many of `words` are in `text`, each inside any word of it ("proto"
+/// finds "protocol"): a search is asked for, so it errs on finding.
+pub fn score(words: &[String], text: &str) -> usize {
+    let text = text.to_lowercase();
+    words.iter().filter(|w| text.contains(w.as_str())).count()
+}
+
+/// Decisions with any of `query`'s words in their kind, title or body, most
+/// words matched first, at most [`MAX_SEARCH`]. A word matches inside another
+/// ("proto" finds "protocol"): a search is asked for, so it errs on finding.
+pub fn search<'a>(list: &'a [Decision], query: &str, inactive: bool) -> Vec<&'a Decision> {
+    let words = query_words(query);
     let mut scored: Vec<(usize, &Decision)> = list
         .iter()
         .filter(|d| listed(d, inactive))
         .filter_map(|d| {
-            let text = format!("{} {} {}", d.title, d.body, d.kind.as_str()).to_lowercase();
-            let score = words.iter().filter(|w| text.contains(w.as_str())).count();
+            let score = score(
+                &words,
+                &format!("{} {} {}", d.title, d.body, d.kind.as_str()),
+            );
             (score > 0).then_some((score, d))
         })
         .collect();

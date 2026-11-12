@@ -1,6 +1,8 @@
 //! Which decisions reached which session, and how (ADR-0014 §5), so `health`
 //! can flag a decision no session gets. The hooks and the read commands append
 //! to the project's `served.jsonl`; this is the pure part.
+//! Searches log the agent notes and past-session lines they return in the same
+//! file (ADR-0017 rule 3, [`FoundServe`]).
 
 use crate::stale;
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,6 +92,60 @@ impl Serve {
         Some(Serve {
             session: v["session"].as_str()?.to_owned(),
             id: u32::try_from(v["id"].as_u64()?).ok()?,
+            layer: Layer::parse(v["layer"].as_str()?)?,
+            at: v["at"].as_u64()?,
+        })
+    }
+}
+
+/// What a search served that isn't a decision (ADR-0017 rule 3): an agent note,
+/// or a line of one of this repository's past session transcripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    Note(u32),
+    Transcript { path: String, line: usize },
+}
+
+/// A note or a transcript line served to one session. Its line in the log has
+/// `note` or `transcript` and `line` where a decision's has `id`, so readers of
+/// either kind skip the other's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundServe {
+    pub session: String,
+    pub found: Found,
+    pub layer: Layer,
+    pub at: u64,
+}
+
+impl FoundServe {
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "session": self.session,
+            "layer": self.layer.as_str(),
+            "at": self.at,
+        });
+        match &self.found {
+            Found::Note(id) => v["note"] = (*id).into(),
+            Found::Transcript { path, line } => {
+                v["transcript"] = path.as_str().into();
+                v["line"] = (*line).into();
+            }
+        }
+        v
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<FoundServe> {
+        let found = match (v["note"].as_u64(), v["transcript"].as_str()) {
+            (Some(id), _) => Found::Note(u32::try_from(id).ok()?),
+            (None, Some(path)) => Found::Transcript {
+                path: path.to_owned(),
+                line: usize::try_from(v["line"].as_u64()?).ok()?,
+            },
+            (None, None) => return None,
+        };
+        Some(FoundServe {
+            session: v["session"].as_str()?.to_owned(),
+            found,
             layer: Layer::parse(v["layer"].as_str()?)?,
             at: v["at"].as_u64()?,
         })
@@ -219,6 +275,32 @@ mod tests {
         assert_eq!(Serve::from_json(&s.to_json()), Some(s));
         let bad = serde_json::json!({"session": "x", "id": 1, "layer": "telepathy", "at": 1});
         assert_eq!(Serve::from_json(&bad), None);
+    }
+
+    #[test]
+    fn found_serves_round_trip_and_decision_readers_skip_them() {
+        let note = FoundServe {
+            session: "valk:3".into(),
+            found: Found::Note(12),
+            layer: Layer::Search,
+            at: 9,
+        };
+        let line = FoundServe {
+            found: Found::Transcript {
+                path: "/c/projects/-r/a.jsonl".into(),
+                line: 40,
+            },
+            ..note.clone()
+        };
+        for f in [&note, &line] {
+            assert_eq!(FoundServe::from_json(&f.to_json()).as_ref(), Some(f));
+            assert_eq!(Serve::from_json(&f.to_json()), None);
+        }
+        assert_eq!(note.to_json()["note"], 12);
+        assert_eq!(
+            FoundServe::from_json(&serve(1, 2, Layer::Search, 3).to_json()),
+            None
+        );
     }
 
     #[test]
