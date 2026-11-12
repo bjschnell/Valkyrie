@@ -860,12 +860,13 @@ impl App {
                     self.update_preview().await;
                 }
                 Some(Hit::Key(key)) => self.on_home_key(key).await,
-                Some(Hit::Preview) => {
+                // Links are a proposal's: after one, the preview holds a session.
+                Some(Hit::Preview) if self.proposal().is_some() => {
                     if let Some(url) = self.proposal_link_at(m.x, m.y) {
                         self.open_url(&url);
                     }
                 }
-                None => {}
+                Some(Hit::Preview) | None => {}
             },
             MouseKind::WheelUp | MouseKind::WheelDown => {
                 let down = m.kind == MouseKind::WheelDown;
@@ -8648,6 +8649,12 @@ mod tests {
         assert_eq!(opened(), ["https://x.dev/adr"]);
         app.on_input(press(0, x - 3, y as u16)).await;
         assert!(opened().is_empty(), "plain text opens nothing");
+        // A session selected now: the old proposal's link is gone with it.
+        app.proposals.clear();
+        app.sessions = vec![info(1)];
+        app.selected = 0;
+        app.on_input(press(0, x + 1, y as u16)).await;
+        assert!(opened().is_empty(), "no stale link");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

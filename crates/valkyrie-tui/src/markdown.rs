@@ -96,6 +96,14 @@ enum Container {
     },
 }
 
+struct List {
+    /// The next item's number, or None for bullets.
+    next: Option<u64>,
+    /// Its items hold paragraphs, so they get a blank line between them.
+    loose: bool,
+    items: usize,
+}
+
 struct Table {
     rows: Vec<Vec<Vec<Piece>>>,
     head: usize,
@@ -117,8 +125,7 @@ struct Writer<'t> {
     heading: Option<HeadingLevel>,
     code: Option<String>,
     containers: Vec<Container>,
-    /// Each open list's next number, or None for bullets.
-    lists: Vec<Option<u64>>,
+    lists: Vec<List>,
     /// The next block follows without a blank line (the first in an item).
     tight: bool,
     table: Option<Table>,
@@ -202,6 +209,11 @@ impl<'t> Writer<'t> {
     fn start(&mut self, tag: Tag) {
         match tag {
             Tag::Paragraph => {
+                if matches!(self.containers.last(), Some(Container::Item { .. }))
+                    && let Some(list) = self.lists.last_mut()
+                {
+                    list.loose = true;
+                }
                 self.gap();
             }
             Tag::Heading { level, .. } => {
@@ -228,18 +240,33 @@ impl<'t> Writer<'t> {
                 if self.lists.is_empty() {
                     self.gap();
                 }
-                self.lists.push(start);
+                self.lists.push(List {
+                    next: start,
+                    loose: false,
+                    items: 0,
+                });
             }
             Tag::Item => {
                 self.flush();
+                // Items of a loose list stand apart, like paragraphs.
+                if self.lists.last().is_some_and(|l| l.loose && l.items > 0) {
+                    self.tight = false;
+                    self.gap();
+                }
                 let depth = self.lists.len().saturating_sub(1);
                 let marker = match self.lists.last_mut() {
-                    Some(Some(n)) => {
-                        let m = format!("{n}. ");
-                        *n += 1;
-                        m
+                    Some(list) => {
+                        list.items += 1;
+                        match &mut list.next {
+                            Some(n) => {
+                                let m = format!("{n}. ");
+                                *n += 1;
+                                m
+                            }
+                            None => format!("{} ", ["•", "◦", "▪"][depth % 3]),
+                        }
                     }
-                    _ => format!("{} ", ["•", "◦", "▪"][depth % 3]),
+                    None => "• ".into(),
                 };
                 let width = marker.width();
                 self.containers.push(Container::Item {
@@ -305,6 +332,13 @@ impl<'t> Writer<'t> {
             }
             TagEnd::Item => {
                 self.flush();
+                // An empty item still shows its marker.
+                if matches!(
+                    self.containers.last(),
+                    Some(Container::Item { used: false, .. })
+                ) {
+                    self.emit(Vec::new());
+                }
                 self.containers.pop();
                 // What follows is a block of its own, with room above it.
                 self.tight = false;
@@ -527,7 +561,7 @@ impl<'t> Writer<'t> {
             let (mut spans, mut x) = self.prefix(n == 0);
             for seg in merge(row) {
                 let w = seg.text.width();
-                if let Some(i) = seg.link {
+                if let Some(i) = seg.link.filter(|&i| clickable(&self.urls[i])) {
                     self.links.push(Link {
                         row: self.out.len(),
                         from: x as u16,
@@ -591,26 +625,68 @@ impl<'t> Writer<'t> {
                 spans.push(Span::styled(rule.join("─┼─"), sep));
                 self.out.push(Line::from(spans));
             }
-            let (mut spans, _) = self.prefix(true);
-            for (i, w) in widths.iter().enumerate() {
+            let (mut spans, mut x) = self.prefix(true);
+            for (i, &w) in widths.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::styled(" │ ", sep));
+                    x += 3;
                 }
-                let cell = row.get(i).map(|c| text(c)).unwrap_or_default();
-                let shown = fit(&cell, *w);
-                let pad = w.saturating_sub(shown.width());
-                let mut style = row
-                    .get(i)
-                    .and_then(|c| c.first())
-                    .map_or(Style::new().fg(self.t.fg), |p| p.style);
-                if r < table.head {
-                    style = style.add_modifier(Modifier::BOLD);
+                let cell = row.get(i).map(Vec::as_slice).unwrap_or_default();
+                // A cell too wide keeps a column for the …
+                let limit = if text(cell).width() > w {
+                    w.saturating_sub(1)
+                } else {
+                    w
+                };
+                let mut used = 0;
+                for p in merge(cell.to_vec()) {
+                    let mut shown = String::new();
+                    for c in p.text.chars() {
+                        let cw = c.width().unwrap_or(0);
+                        if used + cw > limit {
+                            break;
+                        }
+                        shown.push(c);
+                        used += cw;
+                    }
+                    if shown.is_empty() {
+                        continue;
+                    }
+                    let sw = shown.width();
+                    if let Some(l) = p.link.filter(|&l| clickable(&self.urls[l])) {
+                        self.links.push(Link {
+                            row: self.out.len(),
+                            from: x as u16,
+                            to: (x + sw) as u16,
+                            url: self.urls[l].clone(),
+                        });
+                    }
+                    x += sw;
+                    let style = if r < table.head {
+                        p.style.add_modifier(Modifier::BOLD)
+                    } else {
+                        p.style
+                    };
+                    spans.push(Span::styled(shown, style));
                 }
-                spans.push(Span::styled(format!("{shown}{}", " ".repeat(pad)), style));
+                if limit < w {
+                    spans.push(Span::styled("…", Style::new().fg(self.t.muted)));
+                    used += 1;
+                    x += 1;
+                }
+                let pad = w.saturating_sub(used);
+                spans.push(Span::raw(" ".repeat(pad)));
+                x += pad;
             }
             self.out.push(Line::from(spans));
         }
     }
+}
+
+/// Only http(s) links open: agents write these bodies, so no `file:` or
+/// `mailto:` reaches the opener.
+fn clickable(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
 }
 
 /// Where the first http(s) URL in `s` starts.
@@ -665,25 +741,6 @@ fn cut(s: &str, width: usize) -> Vec<String> {
         out.last_mut().unwrap().push(c);
         w += cw;
     }
-    out
-}
-
-/// `s` in `width` columns, ending in … when it had to be cut.
-fn fit(s: &str, width: usize) -> String {
-    if s.width() <= width {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut w = 0;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw + 1 > width {
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out.push('…');
     out
 }
 
@@ -937,6 +994,45 @@ mod tests {
     fn a_block_after_a_tight_list_gets_its_gap() {
         let r = render("- a\n- b\n\n> q", 20, theme());
         assert_eq!(text(&r), ["• a", "• b", "", "│ q"]);
+    }
+
+    #[test]
+    fn empty_items_keep_their_marker_and_loose_lists_their_gaps() {
+        let r = render("1.\n2. b", 20, theme());
+        assert_eq!(text(&r), ["1. ", "2. b"]);
+        let r = render("- a\n\n- b", 20, theme());
+        assert_eq!(text(&r), ["• a", "", "• b"]);
+    }
+
+    #[test]
+    fn only_http_links_open() {
+        let r = render(
+            "[mail](mailto:a@b.c) [file](file:///etc/passwd) [ok](https://a.dev)",
+            80,
+            theme(),
+        );
+        let urls: Vec<_> = r.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(urls, ["https://a.dev", "https://a.dev"]);
+    }
+
+    #[test]
+    fn links_in_tables_open() {
+        let r = render(
+            "| a | b |\n|---|---|\n| x | [y](https://y.dev) |",
+            60,
+            theme(),
+        );
+        assert_eq!(text(&r)[2], "x │ y https://y.dev");
+        assert_eq!(
+            r.links[0],
+            Link {
+                row: 2,
+                from: 4,
+                to: 5,
+                url: "https://y.dev".into()
+            }
+        );
+        assert_eq!(r.links[1].from, 6);
     }
 
     #[test]
