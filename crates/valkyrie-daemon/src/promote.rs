@@ -111,7 +111,7 @@ async fn check(
                 // The model found it already known: held, not proposed.
                 promote::Reply::Known => {
                     tracing::info!(project = %root.display(), notes = ?ids, "recurring notes already known");
-                    record(registry, &root, promote::KNOWN, &ids, true, now);
+                    record(registry, &root, (promote::KNOWN, None), &ids, true, now);
                     return;
                 }
                 promote::Reply::Garbled => {
@@ -157,7 +157,7 @@ async fn check(
     let decided = {
         let store = registry.context.lock().unwrap();
         store.decide(&new, provenance, now).map(|d| {
-            let linked = store.record_promotion(&root, d.id, &ids, false, now);
+            let linked = store.record_promotion(&root, (d.id, Some(d.created)), &ids, false, now);
             // So ADR-0011 §6 can tell whether it worked, like the retro's.
             let sig = sig.map(|sig| store.record_proposal(&root, sig, d.id, now));
             (d, linked, sig)
@@ -178,19 +178,19 @@ async fn check(
     }
 }
 
-/// The known decision `title` says the same as, if any.
-fn matching(title: &str, known: &[valkyrie_proto::Decision]) -> Option<u32> {
+/// The known decision `title` says the same as, if any, as its id and `created`.
+fn matching(title: &str, known: &[valkyrie_proto::Decision]) -> Option<promote::Target> {
     let words = extract::words(title);
     known
         .iter()
         .find(|d| !words.is_empty() && extract::similar(&words, &extract::words(&d.title)))
-        .map(|d| d.id)
+        .map(|d| (d.id, Some(d.created)))
 }
 
 fn record(
     registry: &Registry,
     root: &std::path::Path,
-    decision: u32,
+    decision: promote::Target,
     notes: &[u32],
     matched: bool,
     now: u64,
@@ -201,7 +201,7 @@ fn record(
         .unwrap()
         .record_promotion(root, decision, notes, matched, now);
     if let Err(e) = recorded {
-        tracing::warn!(project = %root.display(), decision, "couldn't record the notes' proposal: {e:#}");
+        tracing::warn!(project = %root.display(), decision = decision.0, "couldn't record the notes' proposal: {e:#}");
     }
 }
 
