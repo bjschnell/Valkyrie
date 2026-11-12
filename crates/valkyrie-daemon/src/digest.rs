@@ -55,9 +55,16 @@ impl Registry {
             (None, Some(left)) => (left, true),
             (None, None) => (now.saturating_sub(digest::FALLBACK_MS), false),
         };
+        // Every log since the epoch would be a long read for one answer.
+        let since = since.max(now.saturating_sub(digest::LONGEST_MS));
         let items: Vec<_> = self.items.borrow().iter().cloned().collect();
         let sessions = self.all();
-        let live: BTreeMap<String, u32> = sessions.iter().map(|s| (s.key(), s.id)).collect();
+        // Exited sessions stay listed until closed, but aren't running.
+        let live: BTreeMap<String, u32> = sessions
+            .iter()
+            .filter(|s| !s.exited())
+            .map(|s| (s.key(), s.id))
+            .collect();
         let dir = self.host.transcript_dir.clone();
         let mut digest = tokio::task::spawn_blocking(move || {
             let mut roots: Vec<PathBuf> = items

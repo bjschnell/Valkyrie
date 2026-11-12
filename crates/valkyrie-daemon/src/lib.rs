@@ -1108,7 +1108,8 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                             continue;
                         }
                         s.driven_by(agent);
-                    } else {
+                    } else if !matches!(data.as_slice(), b"\x1b[I" | b"\x1b[O") {
+                        // A focus report is a window changing hands, not you.
                         registry.you_typed();
                     }
                     s.typed(data);

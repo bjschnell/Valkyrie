@@ -23,6 +23,8 @@ pub const FALLBACK_MS: u64 = 24 * 60 * 60 * 1000;
 /// Idle this long with work short of shipping, a live session counts as
 /// abandoned; sooner, it's stuck (it still waits on you).
 pub const ABANDONED_MS: u64 = 2 * 60 * 60 * 1000;
+/// The furthest back a digest reaches.
+pub const LONGEST_MS: u64 = 31 * 24 * 60 * 60 * 1000;
 /// Presence is written at most this often while you type.
 const SAVE_EVERY_MS: u64 = 60 * 1000;
 /// Longest `what` line.
@@ -81,8 +83,12 @@ pub struct Run {
     pub topic: Option<String>,
     /// Where its agent last worked, from its hooks.
     pub cwd: Option<PathBuf>,
+    /// The branch and pull request its last turn end was on: a later branch with
+    /// no PR yet clears the PR.
     pub branch: Option<String>,
     pub pr: Option<String>,
+    /// Every pull request it was on, oldest first, for one it finished with.
+    pub prs: Vec<String>,
     /// The work state its last turn end left (`clean`, `uncommitted`, `unpushed`,
     /// `no-pr`, `pr-red`).
     pub work: Option<String>,
@@ -181,6 +187,10 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
             if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
                 run.cwd = Some(PathBuf::from(cwd));
             }
+            if p["hook_event_name"] == "UserPromptSubmit" {
+                // A new turn: the last one's closing line isn't about it.
+                run.finished = None;
+            }
             if p["hook_event_name"] == "UserPromptSubmit" && t >= since {
                 run.prompts += 1;
                 if run.prompt.is_none() {
@@ -206,12 +216,14 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
         }
         "seen" => run.seen = true,
         "work" => {
+            // Each turn end says where the work is now, branch and PR both.
             run.work = v["state"].as_str().map(str::to_owned);
-            if let Some(branch) = text(&v["branch"]) {
-                run.branch = Some(branch);
-            }
-            if let Some(pr) = text(&v["pr"]) {
-                run.pr = Some(pr);
+            run.branch = text(&v["branch"]);
+            run.pr = text(&v["pr"]);
+            if let Some(pr) = &run.pr
+                && !run.prs.contains(pr)
+            {
+                run.prs.push(pr.clone());
             }
             run.active(t, since, until);
         }
@@ -292,6 +304,17 @@ pub fn classify(
     }
     if let Some(item) = item.filter(|i| i.status == ItemStatus::Shipped) {
         return (Outcome::Shipped, format!("#{} shipped", item.id));
+    }
+    // Back on a branch with nothing to ship after an earlier PR merged.
+    let short = matches!(
+        run.work.as_deref(),
+        Some("uncommitted" | "unpushed" | "no-pr" | "pr-red")
+    );
+    if pr.is_none()
+        && !short
+        && let Some(done) = run.prs.iter().rev().find(|p| merged.contains(*p))
+    {
+        return (Outcome::Shipped, format!("{} merged", pr_label(done)));
     }
     let ended = !live || run.exited_ms.is_some() || run.state.as_deref() == Some("exited");
     let said = |fallback: &str| {
@@ -740,6 +763,42 @@ mod tests {
         .unwrap();
         (i.status, i.pr) = (status, pr.map(Into::into));
         i
+    }
+
+    #[test]
+    fn a_later_branch_without_a_pr_drops_the_earlier_pr() {
+        let dir = tempdir("branch");
+        let pr = "https://github.com/o/r/pull/177";
+        let work = |t, branch: &str, pr: Option<&str>, state: &str| json!({"k": "work", "t": t, "off": 0, "state": state, "branch": branch, "pr": pr});
+        let path = write_log(
+            &dir,
+            "1-8",
+            &[
+                json!({"k": "start", "t": NOON - 3 * H, "off": 0, "agent": "claude", "command": ["claude"]}),
+                work(NOON - 2 * H, "feat/a", Some(pr), "clean"),
+                state(NOON - 2 * H, "review_ready", Some("Opened PR #177."), true),
+                hook(NOON - H, "/r/app", "UserPromptSubmit", Some("next one")),
+                work(NOON - H + 5, "feat/b", None, "uncommitted"),
+                json!({"k": "exit", "t": NOON - H + 9, "off": 0, "code": 0}),
+            ],
+        );
+        let run = read_run(&path, NOON - 3 * H, NOON).unwrap();
+        assert_eq!(run.pr, None);
+        assert_eq!(run.branch.as_deref(), Some("feat/b"));
+        assert_eq!(run.finished, None, "the new turn said nothing yet");
+        let merged: HashSet<String> = [pr.to_owned()].into();
+        assert_eq!(
+            classify(&run, None, &merged, false, NOON),
+            (Outcome::Abandoned, "ended with uncommitted changes".into())
+        );
+        // Back on the default branch with nothing left, the merged PR counts.
+        let mut back = run.clone();
+        back.work = Some("clean".into());
+        assert_eq!(
+            classify(&back, None, &merged, false, NOON),
+            (Outcome::Shipped, "PR #177 merged".into())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

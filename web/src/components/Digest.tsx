@@ -54,6 +54,9 @@ export function DigestView() {
   useEffect(() => {
     if (status !== "open") return;
     let live = true;
+    // The old window's digest would pass for the new one's, and hide a failure.
+    setDigest(null);
+    setFailed(null);
     awayDigest(windowStart(win, Date.now()), by).then(
       (d) => {
         if (!live) return;
