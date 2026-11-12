@@ -255,10 +255,13 @@ impl Page {
     }
 
     /// A save found the doc changed since it was opened; nothing was written.
-    pub(crate) fn conflict(&mut self, key: &str, mine: String, theirs: Doc) {
-        if let Some(reader) = self.reader.as_mut().filter(|r| r.key == key) {
-            reader.conflict = Some(Conflict { mine, theirs });
-        }
+    /// Whether it's shown: not when you've gone on to another doc.
+    pub(crate) fn conflict(&mut self, key: &str, mine: String, theirs: Doc) -> bool {
+        let Some(reader) = self.reader.as_mut().filter(|r| r.key == key) else {
+            return false;
+        };
+        reader.conflict = Some(Conflict { mine, theirs });
+        true
     }
 
     /// Whether a doc is open over the list.
@@ -321,8 +324,12 @@ impl Page {
             && let Some(c) = &reader.conflict
         {
             let doc = reader.key.clone();
-            let base = c.theirs.hash.clone().unwrap_or_default();
+            let base = c.theirs.hash.clone();
             match c.key(key) {
+                // Without theirs' hash there's nothing to save over.
+                Some(Choice::Edit | Choice::Mine) if base.is_none() => {
+                    out.push(Do::Say("can't save over it: t, then edit again".into()))
+                }
                 Some(Choice::Theirs) => {
                     let theirs = c.theirs.clone();
                     self.saved(&doc, theirs);
@@ -332,7 +339,7 @@ impl Page {
                     let body = c.mine.clone();
                     out.push(Do::Edit {
                         key: doc,
-                        base,
+                        base: base.unwrap_or_default(),
                         body,
                         title,
                     });
@@ -341,13 +348,14 @@ impl Page {
                     let body = c.mine.clone();
                     out.push(Do::Save {
                         key: doc,
-                        base,
+                        base: base.unwrap_or_default(),
                         body,
                     });
                 }
                 // Yours isn't saved anywhere else: no key leaves without a choice.
-                None if matches!(key, b"\x1b" | b"q") || (whole && key == b"\x1b") => out.push(Do::Say(
-                    "yours isn't saved: t takes theirs, e edits yours again, s saves yours over it".into(),
+                None if matches!(key, b"\x1b" | b"q") => out.push(Do::Say(
+                    "yours isn't saved: t takes theirs, e edits yours again, s saves yours over it"
+                        .into(),
                 )),
                 None => {}
             }
@@ -1069,6 +1077,14 @@ mod tests {
         let r = page.reader.as_ref().unwrap();
         assert!(r.conflict.is_none());
         assert_eq!(r.doc.as_ref().unwrap().hash.as_deref(), Some("h2"));
+    }
+
+    #[test]
+    fn a_conflict_for_a_doc_you_left_is_not_shown() {
+        let mut page = reading("7", "Hello\n");
+        assert!(!page.conflict("8", "mine".into(), doc("8", "b.md", false)));
+        page.keys(b"\x1b");
+        assert!(!page.conflict("7", "mine".into(), doc("7", "a.md", false)));
     }
 
     #[test]
