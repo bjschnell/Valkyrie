@@ -451,6 +451,47 @@ impl Client {
         }
     }
 
+    /// Every doc, newest first, with how many are unread and when it was listed
+    /// (for `docs_seen`).
+    pub async fn docs_listing(&self) -> Result<crate::DocsListing> {
+        match self
+            .request(|req| ClientMsg::Docs {
+                req,
+                count_only: false,
+            })
+            .await?
+        {
+            Reply::Docs {
+                docs,
+                root,
+                unread,
+                at,
+            } => Ok(crate::DocsListing {
+                docs,
+                root,
+                unread,
+                at,
+            }),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// A doc by the key a list gave it, never writing to the file.
+    pub async fn open_doc(&self, key: String) -> Result<crate::Doc> {
+        match self.request(|req| ClientMsg::OpenDoc { req, key }).await? {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user opened the list stamped `at`: what agents wrote until then is read.
+    pub async fn docs_seen(&self, at: u64) -> Result<()> {
+        match self.request(|req| ClientMsg::DocsSeen { req, at }).await? {
+            Reply::Done => Ok(()),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// What every agent did since `since_ms`, or since you were last gone.
     pub async fn digest(
         &self,

@@ -89,6 +89,18 @@ pub struct Doc {
     pub text: Option<String>,
 }
 
+/// The Docs list as the daemon gave it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DocsListing {
+    pub docs: Vec<Doc>,
+    /// The docs folder.
+    pub root: PathBuf,
+    /// How many an agent wrote or edited since the list was last opened.
+    pub unread: u32,
+    /// When it was listed, in seconds.
+    pub at: u64,
+}
+
 /// One of a doc's past versions (ADR-0021 §4): the file as it was before an edit
 /// replaced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -30,7 +30,9 @@ pub use context::{
     ReviewAction,
 };
 pub use digest::{Digest, DigestEntry, DigestGroup, Outcome};
-pub use docs::{CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, NewDoc};
+pub use docs::{
+    CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, NewDoc,
+};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
