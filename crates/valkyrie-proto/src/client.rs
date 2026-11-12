@@ -517,6 +517,29 @@ impl Client {
         }
     }
 
+    /// The user's save: the doc with this key gets `body`, if `base` is still the
+    /// hash on disk. The doc as written, or with `true`, as it is on disk now
+    /// (someone saved in between, and this save didn't happen).
+    pub async fn save_doc(
+        &self,
+        key: String,
+        base: String,
+        body: String,
+    ) -> Result<(crate::Doc, bool)> {
+        match self
+            .request(|req| ClientMsg::SaveDoc {
+                req,
+                key,
+                base,
+                body,
+            })
+            .await?
+        {
+            Reply::DocSaved { doc, conflict } => Ok((*doc, conflict)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// The user closes a comment on a doc.
     pub async fn resolve_comment(
         &self,
