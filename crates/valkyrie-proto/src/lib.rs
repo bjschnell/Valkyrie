@@ -9,6 +9,7 @@ pub mod backlog;
 pub mod client;
 pub mod codec;
 pub mod context;
+pub mod digest;
 pub mod docs;
 pub mod ipc;
 pub mod layout;
@@ -28,13 +29,14 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
+pub use digest::{Digest, DigestEntry, DigestGroup, Outcome};
 pub use docs::{Doc, DocKind, NewDoc};
 pub use layout::{Axis, Pane, Side};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 32;
+pub const PROTOCOL: u32 = 33;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -625,6 +627,15 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<PathBuf>,
     },
+    /// What every agent did since `since_ms`, or since you were last gone
+    /// (backlog #105, protocol 33). Read-only. Replies `Digest`.
+    Digest {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+        #[serde(default)]
+        by: DigestGroup,
+    },
 }
 
 fn yes() -> bool {
@@ -800,6 +811,9 @@ pub enum Reply {
         /// empty when nothing is.
         against: Vec<String>,
         worktrees: Vec<Worktree>,
+    },
+    Digest {
+        digest: Box<Digest>,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

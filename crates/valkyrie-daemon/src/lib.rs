@@ -6,6 +6,7 @@ mod backlog;
 mod branches;
 mod chat;
 mod context;
+mod digest;
 mod dispatch;
 mod docs;
 mod extract;
@@ -197,6 +198,10 @@ struct Registry {
     /// pushed with the queue, and where it's kept.
     quota: watch::Sender<quota::Held>,
     quota_file: PathBuf,
+    /// When you last typed and when you were last gone, for the away digest
+    /// (backlog #105), and where it's kept.
+    presence: Mutex<valkyrie_context::digest::Presence>,
+    presence_file: PathBuf,
 }
 
 impl Registry {
@@ -563,6 +568,8 @@ fn new_registry(
         dispatch_kick: Notify::new(),
         quota: watch::Sender::new(quota::load(&quota::file(state_dir))),
         quota_file: quota::file(state_dir),
+        presence: Mutex::new(digest::load(&digest::file(state_dir))),
+        presence_file: digest::file(state_dir),
         supervisor: Mutex::new(supervise::Supervisor::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -1101,6 +1108,8 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                             continue;
                         }
                         s.driven_by(agent);
+                    } else {
+                        registry.you_typed();
                     }
                     s.typed(data);
                 }
@@ -1378,6 +1387,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 body,
             } => (req, registry.edit_doc(id, &base, &body, peer)),
             ClientMsg::Docs { req } => (req, registry.docs()),
+            ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
             ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (
                 req,

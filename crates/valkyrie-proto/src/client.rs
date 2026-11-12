@@ -445,6 +445,21 @@ impl Client {
         }
     }
 
+    /// What every agent did since `since_ms`, or since you were last gone.
+    pub async fn digest(
+        &self,
+        since_ms: Option<u64>,
+        by: crate::DigestGroup,
+    ) -> Result<crate::Digest> {
+        match self
+            .request(|req| ClientMsg::Digest { req, since_ms, by })
+            .await?
+        {
+            Reply::Digest { digest } => Ok(*digest),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// The docs folder; with `root`, sets it first (`""` for the default).
     pub async fn docs_root(&self, root: Option<PathBuf>) -> Result<String> {
         match self

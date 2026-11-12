@@ -6626,6 +6626,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jiff",
  "libc",
  "serde_json",
  "sha2 0.11.1",
@@ -6656,6 +6657,7 @@ name = "valkyrie-context"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "jiff",
  "libc",
  "serde",
  "serde_json",
@@ -6667,6 +6669,7 @@ name = "valkyrie-daemon"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "jiff",
  "libc",
  "portable-pty",
  "serde",

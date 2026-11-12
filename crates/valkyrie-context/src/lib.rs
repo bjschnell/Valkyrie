@@ -4,6 +4,7 @@
 
 pub mod backlog;
 pub mod blocker;
+pub mod digest;
 pub mod docs;
 pub mod extract;
 pub mod facts;
