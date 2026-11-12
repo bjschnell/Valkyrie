@@ -156,35 +156,11 @@ pub fn collect(dir: &Path, since_ms: u64, repo: Option<&Path>) -> Result<Vec<Pin
             let Some(cwd) = &p.cwd else { return false };
             *inside
                 .entry(cwd.clone())
-                .or_insert_with(|| in_repo(cwd, repo, &root))
+                .or_insert_with(|| project::in_repo(cwd, repo, &root))
         });
     }
     pings.sort_by_key(|p| p.t);
     Ok(pings)
-}
-
-/// Whether `cwd` is in the project at `root`. A directory that's gone can't be
-/// asked for its repository; a worktree Valkyrie made is named `<repo>-<branch>`
-/// beside the root (DESIGN §4.3), so a gone one is matched by that name.
-fn in_repo(cwd: &Path, repo: &Path, root: &Path) -> bool {
-    if cwd.starts_with(repo) || cwd.starts_with(root) {
-        return true;
-    }
-    if cwd.exists() {
-        return project::root(cwd) == root;
-    }
-    // A gone cwd can't be canonicalized, so it may be spelled like either path
-    // (macOS's /var is /private/var, and Windows canonical paths start \\?\).
-    [root, repo].into_iter().any(|base| {
-        let (Some(parent), Some(name)) = (base.parent(), base.file_name()) else {
-            return false;
-        };
-        let prefix = format!("{}-", name.to_string_lossy());
-        cwd.strip_prefix(parent)
-            .ok()
-            .and_then(|rest| rest.components().next())
-            .is_some_and(|dir| dir.as_os_str().to_string_lossy().starts_with(&prefix))
-    })
 }
 
 /// The last Stop hook seen before a state line.

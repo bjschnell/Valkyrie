@@ -46,7 +46,10 @@ fn how_to_propose(valk: &str) -> String {
          /tmp: `{valk} doc write \"<title>\" -k <plan|research|report|note> -` with the \
          markdown on stdin (`--global` for one that isn't about this repository). To \
          revise a doc, yours or the user's: `{valk} doc read N`, then `{valk} doc edit N \
-         --base <hash> -`."
+         --base <hash> -`.\n\nWhen something fails that an agent here may have hit \
+         before, search agents' notes and what fixed it in this repository's past \
+         sessions: `{valk} notes search <words>` (MCP `search_notes`). Hits are \
+         unreviewed: check one before relying on it."
     )
 }
 

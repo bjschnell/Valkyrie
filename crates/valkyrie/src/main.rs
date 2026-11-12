@@ -217,6 +217,11 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<notes::NotesCmd>,
     },
+    /// This repository's past agent sessions: search what failed and what fixed it.
+    Sessions {
+        #[command(subcommand)]
+        action: notes::SessionsCmd,
+    },
     /// The backlog: bugs, features and chores written down for later, each of
     /// which can start an agent on itself. Lists the open ones without a command.
     Todo {
@@ -839,6 +844,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             force,
         }) => notes::write(&connect(&socket).await?.0, text, replaces, force).await,
         Some(Cmd::Notes { action }) => notes::run(&connect(&socket).await?.0, action).await,
+        Some(Cmd::Sessions { action }) => notes::sessions(action),
         Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
         Some(Cmd::Decisions { all, user, action }) => {
             context::decisions(&connect(&socket).await?.0, all, user, action).await

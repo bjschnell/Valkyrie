@@ -1,6 +1,6 @@
 # ADR-0017: Agents keep unreviewed notes below decisions; notes are only searched, never injected, and recurring ones become proposals
 
-Status: accepted (2026-11-11); phase 1 built (#158): the store, `valk note`, `valk notes show|list|rm|health`, tombstones and staleness
+Status: accepted (2026-11-11); phase 1 built (#158): the store, `valk note`, `valk notes show|list|rm|health`, tombstones and staleness; phase 2 built (#159): `valk notes search`, `valk sessions search`, MCP `search_notes`, and their serves in `served.jsonl`
 Date: 2026-11-02
 Amends: [ADR-0011](0011-learning-loops.md) §1 (the retro writes notes instead of proposing), [ADR-0014](0014-serve-decisions-by-relevance.md) §5 (the serve log also records notes)
 

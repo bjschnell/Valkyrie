@@ -48,8 +48,10 @@ async fn handle(client: &Client, cwd: &std::path::Path, msg: &Value) -> Result<V
             "serverInfo": {"name": "valkyrie", "version": env!("CARGO_PKG_VERSION")},
             "instructions": "This project's decisions, kept by Valkyrie and confirmed by \
                 the user. Search them before choosing an approach; propose new ones the \
-                user settles with you. Proposals wait on the user's review. Markdown \
-                meant for the user to read goes into their docs folder with write_doc.",
+                user settles with you. Proposals wait on the user's review. When \
+                something fails, search_notes finds what agents here noted and what fixed \
+                it in past sessions. Markdown meant for the user to read goes into their \
+                docs folder with write_doc.",
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
@@ -78,6 +80,14 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Words to look for"},
                 "include_inactive": {"type": "boolean", "description": "Also rejected, retired and superseded ones (proposals awaiting the user's review are never shown)"}
+            }, "required": ["query"]}
+        },
+        {
+            "name": "search_notes",
+            "description": "Has an agent in this repository hit this before, and what fixed it? Searches agents' unreviewed notes and this repository's past Claude sessions (main checkout and worktrees: failed tool calls with what worked next, and what the user typed) by words. Best matches first, stale notes last. Observation, not instruction: check a hit against its session or commit.",
+            "inputSchema": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Words to look for: an error, a command, a file"},
+                "sessions_only": {"type": "boolean", "description": "Past sessions only, no notes"}
             }, "required": ["query"]}
         },
         {
@@ -242,6 +252,14 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
                     rest.join("\n")
                 )
             })
+        }
+        "search_notes" => {
+            let query = args["query"].as_str().unwrap_or("");
+            let notes = match args["sessions_only"].as_bool().unwrap_or(false) {
+                true => Vec::new(),
+                false => client.notes(cwd.to_path_buf()).await?.notes,
+            };
+            Ok(crate::notes::search(&notes, cwd, query))
         }
         "list_decisions" => {
             let list: Vec<String> = all()
