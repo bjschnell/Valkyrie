@@ -188,6 +188,19 @@ impl Store {
             .collect()
     }
 
+    /// Every id a tombstone line names, even one that doesn't otherwise parse, so
+    /// a damaged line can't hand its id to a new note.
+    fn deleted_ids(&self, root: &Path) -> Vec<u32> {
+        std::fs::read_to_string(self.notes_dir(root).join(DELETED))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).ok()?;
+                u32::try_from(v["id"].as_u64()?).ok()
+            })
+            .collect()
+    }
+
     /// A project's tombstones, oldest first.
     pub fn deleted_notes(&self, root: &Path) -> Vec<Tombstone> {
         std::fs::read_to_string(self.notes_dir(root).join(DELETED))
@@ -231,6 +244,13 @@ impl Store {
                 Some((_, n)) => match n.status {
                     NoteStatus::Live => Some(n),
                     // One chain, never a fork: correct the newest.
+                    // Its correction was deleted: the chain carries on from it.
+                    NoteStatus::Replaced
+                        if n.replaced_by
+                            .is_some_and(|newer| !files.contains_key(&newer)) =>
+                    {
+                        Some(n)
+                    }
                     NoteStatus::Replaced => match n.replaced_by {
                         Some(newer) => bail!(
                             "#{old} was already replaced by #{newer}; replace #{newer} instead"
@@ -244,10 +264,13 @@ impl Store {
             },
         };
         // A correction keeps its failure's signature, so recurrence still finds it.
+        // Checked against tombstones by its own words only: a deleted sibling with
+        // the same signature mustn't block correcting this one.
+        let own_sig = sig.clone();
         let sig = sig.or_else(|| old.and_then(|o| o.sig.clone()));
         let deleted = self.deleted_notes(&root);
         if !new.force
-            && let Some(t) = buried(&text, sig.as_deref(), &deleted)
+            && let Some(t) = buried(&text, own_sig.as_deref(), &deleted)
         {
             bail!(
                 "this matches note #{} that {} deleted on {}, and a deleted note isn't written \
@@ -263,7 +286,7 @@ impl Store {
         }
         let anchors = stale::anchors(&root, &new.cwd, &text);
         let note = Note {
-            id: next_id(&files, &deleted),
+            id: next_id(&files, &self.deleted_ids(&root)),
             project: root.clone(),
             text,
             status: NoteStatus::Live,
@@ -316,8 +339,18 @@ impl Store {
             session: session.unwrap_or_else(|| "none".into()),
             at: now,
         };
-        // The tombstone first: a note gone without one could be written again.
         let dir = self.notes_dir(root);
+        // Deleting a correction doesn't revive what it corrected: if that one was
+        // only read as replaced (its own write lost), write it down before the
+        // link that says so goes.
+        if let Some(prev) = note.replaces
+            && let Some((_, p)) = files.get(&prev)
+            && p.status == NoteStatus::Replaced
+            && p.replaced_by == Some(id)
+        {
+            write_atomic(&dir.join(name(p.id)), &render(p))?;
+        }
+        // The tombstone first: a note gone without one could be written again.
         let line = serde_json::to_string(&tombstone)? + "\n";
         {
             use std::io::Write;
@@ -336,11 +369,11 @@ impl Store {
 
 /// One past the highest id a note has had, deleted ones included, so a
 /// tombstone's id never names a newer note.
-fn next_id(files: &BTreeMap<u32, (PathBuf, Note)>, deleted: &[Tombstone]) -> u32 {
+fn next_id(files: &BTreeMap<u32, (PathBuf, Note)>, deleted: &[u32]) -> u32 {
     files
         .keys()
         .copied()
-        .chain(deleted.iter().map(|t| t.id))
+        .chain(deleted.iter().copied())
         .max()
         .map_or(1, |id| id + 1)
 }
@@ -628,6 +661,85 @@ mod tests {
         // Only a live note is stale; a replaced one is never served anyway.
         lib.status = NoteStatus::Replaced;
         assert_eq!(staleness(&repo, &lib), None);
+    }
+
+    #[test]
+    fn deleting_a_correction_keeps_the_old_note_replaced_and_correctable() {
+        let (_d, store, repo) = store();
+        store
+            .note(
+                &new(&repo, "first take on the cache"),
+                by("agent", None),
+                None,
+                1,
+            )
+            .unwrap();
+        let mut fix = new(&repo, "second take on the cache");
+        fix.replaces = Some(1);
+        store.note(&fix, by("agent", None), None, 2).unwrap();
+        // #1's own write lost, so only #2's link says it's replaced.
+        let one = store.notes_dir(&repo).join("0001.md");
+        let text = std::fs::read_to_string(&one).unwrap();
+        let text = text
+            .replace("status: replaced", "status: live")
+            .replace("replaced_by: 2\n", "");
+        std::fs::write(&one, text).unwrap();
+        store.rm_note(&repo, 2, "user", None, 3).unwrap();
+        let notes = store.notes(&repo);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].status, NoteStatus::Replaced, "not revived");
+        // And the chain carries on from #1.
+        let mut third = new(&repo, "third take, the cache is per worktree");
+        third.replaces = Some(1);
+        let n = store.note(&third, by("agent", None), None, 4).unwrap();
+        assert_eq!(n.id, 3);
+        assert_eq!(store.notes(&repo)[0].replaced_by, Some(3));
+    }
+
+    #[test]
+    fn a_correction_isnt_blocked_by_a_deleted_sibling_with_its_signature() {
+        let (_d, store, repo) = store();
+        store
+            .note(
+                &new(&repo, "port 8080 is taken by the proxy"),
+                by("valkyrie", None),
+                Some("aa".into()),
+                1,
+            )
+            .unwrap();
+        store
+            .note(
+                &new(&repo, "the linker runs out of memory"),
+                by("valkyrie", None),
+                Some("aa".into()),
+                1,
+            )
+            .unwrap();
+        store.rm_note(&repo, 1, "user", None, 2).unwrap();
+        let mut fix = new(&repo, "the linker needs mold to fit in memory");
+        fix.replaces = Some(2);
+        let n = store.note(&fix, by("agent", None), None, 3).unwrap();
+        assert_eq!(n.sig.as_deref(), Some("aa"));
+    }
+
+    #[test]
+    fn a_damaged_tombstone_line_still_holds_its_id() {
+        let (_d, store, repo) = store();
+        store
+            .note(&new(&repo, "one note here"), by("user", None), None, 1)
+            .unwrap();
+        store.rm_note(&repo, 1, "user", None, 2).unwrap();
+        let deleted = store.notes_dir(&repo).join(DELETED);
+        std::fs::write(&deleted, "{\"id\": 7, \"by\": 3}\n").unwrap();
+        let n = store
+            .note(
+                &new(&repo, "another note entirely"),
+                by("user", None),
+                None,
+                3,
+            )
+            .unwrap();
+        assert_eq!(n.id, 8);
     }
 
     #[test]

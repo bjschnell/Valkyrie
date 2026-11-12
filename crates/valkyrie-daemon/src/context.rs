@@ -264,6 +264,12 @@ impl Registry {
             commit: valkyrie_context::project::head(&new.cwd),
             cwd: Some(new.cwd.clone()),
         };
+        // Past a tombstone only from the user's own terminal: a paired device
+        // counts as the user, but this is checked here too, not only by the web
+        // app's allow-list.
+        if new.force && (caller.bridge || caller.desktop) {
+            bail!("--force is for the user's own terminal");
+        }
         let note = self
             .context
             .lock()
