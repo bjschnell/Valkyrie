@@ -2151,3 +2151,130 @@ fn agents_search_notes_and_past_sessions_and_each_hit_is_logged() {
     assert!(!hook.contains("short SOCK path"), "{hook}");
     drop(daemon);
 }
+
+/// ADR-0017 §7: one note write proposes every recurring cluster that's due, not
+/// only the first; the rest don't wait for the project's next note.
+#[test]
+fn one_note_write_proposes_every_cluster_due() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-due-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let o = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{o:?}");
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Two clusters, each from three sessions, already on disk; drafting is off,
+    // so each is proposed as its newest note says it.
+    let context = dir.join("state/valkyrie/context");
+    for d in [
+        dir.join("state"),
+        dir.join("state/valkyrie"),
+        context.clone(),
+    ] {
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(context.join("auto"), "off\n").unwrap();
+    let store = valkyrie_context::Store::new(context.clone());
+    let root = valkyrie_context::project::root(&repo);
+    let topics = [
+        "the net retry test is flaky under load, rerun it once",
+        "builds need protoc installed from the system packages",
+    ];
+    for (t, text) in topics.iter().enumerate() {
+        for s in 0..3 {
+            store
+                .note(
+                    &valkyrie_proto::NewNote {
+                        cwd: repo.clone(),
+                        text: (*text).into(),
+                        replaces: None,
+                        force: false,
+                    },
+                    valkyrie_proto::Provenance {
+                        by: "agent".into(),
+                        session: Some(format!("s{t}{s}")),
+                        conversation: Some(format!("c{t}{s}")),
+                        commit: None,
+                        cwd: None,
+                    },
+                    None,
+                    1 + (t * 3 + s) as u64,
+                )
+                .unwrap();
+        }
+    }
+
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\ncd {repo}\nvalk note 'the docs site deploys on tag' > {a} 2>&1\nsleep 30\n",
+            repo = repo.display(),
+            a = out.join("a").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let status = Command::new("setsid")
+        .args([
+            "-f",
+            "script",
+            "-qec",
+            &format!("valk new --cwd {} -- {}", repo.display(), agent.display()),
+            "/dev/null",
+        ])
+        .current_dir(&repo)
+        .env("PATH", &path)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("VALK_SOCKET", dir.join("run/v.sock"))
+        .env_remove("VALK_SESSION")
+        .env_remove("VALK_CONTEXT")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let a = wait_for(&out.join("a"));
+    assert!(a.contains("note #7 written"), "{a}");
+
+    let start = Instant::now();
+    let proposed = loop {
+        let proposed: Vec<String> = store
+            .load(&root)
+            .into_iter()
+            .filter(|d| d.provenance.by == "valkyrie")
+            .map(|d| d.title)
+            .collect();
+        if proposed.len() >= 2 || start.elapsed() > Duration::from_secs(10) {
+            break proposed;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(proposed.len(), 2, "{proposed:?}");
+    drop(daemon);
+}
