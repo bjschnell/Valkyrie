@@ -10,6 +10,7 @@ valkyrie-proto.workspace = true
 valkyrie-term.workspace = true
 valkyrie-agents.workspace = true
 valkyrie-context.workspace = true
+jiff = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 portable-pty.workspace = true

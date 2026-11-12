@@ -246,6 +246,20 @@ enum Cmd {
         #[arg(long)]
         labels: Option<PathBuf>,
     },
+    /// What every agent did while you were gone, one line a session: shipped,
+    /// stuck, abandoned, waiting on PR/CI. Prints markdown to paste as a standup.
+    Digest {
+        /// Where to start instead of when you were last gone: 90m, 12h, 3d, today,
+        /// yesterday, 2026-11-10 or "2026-11-10 09:00" (local time).
+        #[arg(long)]
+        since: Option<String>,
+        /// Group by repository or by day.
+        #[arg(long, value_parser = ["repo", "day"], default_value = "repo")]
+        by: String,
+        /// Print JSON instead.
+        #[arg(long)]
+        json: bool,
+    },
     /// Where agents stopped and waited on you: questions, permissions, turns that
     /// ended asking something. Read from the recorded sessions; no daemon needed.
     Pings {
@@ -892,6 +906,25 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 println!("{}", pings::json(&pings, days, since, now));
             } else {
                 print!("{}", pings::report(&pings, days, since, now)?);
+            }
+            Ok(())
+        }
+        Some(Cmd::Digest { since, by, json }) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            let since = since
+                .map(|s| {
+                    valkyrie_context::digest::parse_since(&s, now, &jiff::tz::TimeZone::system())
+                })
+                .transpose()?;
+            let by = valkyrie_proto::DigestGroup::parse_str(&by).unwrap_or_default();
+            let client = connect(&socket).await?.0;
+            let digest = client.digest(since, by).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&digest)?);
+            } else {
+                print!("{}", digest.markdown);
             }
             Ok(())
         }

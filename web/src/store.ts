@@ -7,6 +7,8 @@ import type { Mismatch } from "./lib/protocol";
 import { termColors } from "./lib/theme";
 import type {
   Decision,
+  Digest,
+  DigestGroup,
   Doc,
   DeletedDoc,
   DocComment,
@@ -617,6 +619,15 @@ export async function allDocs(): Promise<{ docs: Doc[]; unread: number; at: numb
   } catch {
     return null;
   }
+}
+
+/** What every agent did since `sinceMs`, or since you were last gone (backlog
+ * #105). Throws with the daemon's reason. */
+export async function awayDigest(sinceMs: number | null, by: DigestGroup): Promise<Digest> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "digest", since_ms: sinceMs, by });
+  if (reply.t !== "digest") throw new Error("unexpected reply");
+  return reply.digest;
 }
 
 /** One doc's text, by the key its list entry carries. Throws with the daemon's reason. */

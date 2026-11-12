@@ -5,6 +5,7 @@
 pub mod backlog;
 pub mod blocker;
 pub mod comments;
+pub mod digest;
 pub mod docs;
 pub mod extract;
 pub mod facts;

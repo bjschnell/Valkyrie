@@ -6,6 +6,7 @@
 
 mod backlog;
 mod clip;
+mod digest;
 mod edit;
 mod keys;
 mod links;
@@ -236,6 +237,8 @@ struct App {
     mini: Option<mini::Mini>,
     /// The keys page is open (`.` on the home screen).
     keys_page: Option<KeysPage>,
+    /// The away digest is open (`w` on the home screen).
+    digest: Option<digest::Page>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -400,6 +403,7 @@ impl App {
             said: None,
             settings_cursor: None,
             keys_page: None,
+            digest: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
@@ -737,6 +741,9 @@ impl App {
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
+        if self.digest.is_some() {
+            return self.digest_keys(&bytes).await;
+        }
         if self.backlog.is_some() {
             // A mouse report cut off by the read isn't typed into a prompt.
             if let Some(cut) = mouse::unfinished(&bytes) {
@@ -806,6 +813,9 @@ impl App {
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
+        if self.digest.is_some() {
+            return self.digest_keys(&bytes).await;
+        }
         if self.settings_cursor.is_some() {
             return self.settings_keys(&bytes);
         }
@@ -828,7 +838,11 @@ impl App {
     /// does; a chip or the backlog panel does what its key does. The wheel moves the
     /// selection, or scrolls a proposal's text over the preview.
     async fn on_home_mouse(&mut self, m: Mouse) {
-        if self.keys_page.is_some() || self.settings_cursor.is_some() || self.renaming.is_some() {
+        if self.keys_page.is_some()
+            || self.digest.is_some()
+            || self.settings_cursor.is_some()
+            || self.renaming.is_some()
+        {
             return;
         }
         let hit = self.home_hit(Position::new(m.x, m.y));
@@ -2391,6 +2405,7 @@ impl App {
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
             HomeKey::Backlog => self.open_backlog().await,
+            HomeKey::Digest => self.open_digest().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
     }
@@ -2477,6 +2492,53 @@ impl App {
             .cloned()
             .collect();
         backlog::rows_of(&items, &self.items, &self.sessions, self.boot())
+    }
+
+    async fn open_digest(&mut self) {
+        self.digest = Some(digest::Page::default());
+        self.load_digest().await;
+    }
+
+    /// Asks the daemon for the digest the page's window and grouping want.
+    async fn load_digest(&mut self) {
+        let Some(page) = &mut self.digest else {
+            return;
+        };
+        page.loading();
+        let tz = jiff::tz::TimeZone::system();
+        let since = page.win.since(now_ms(), &tz);
+        let by = page.by;
+        let got = self
+            .client
+            .digest(since, by)
+            .await
+            .map_err(|e| e.to_string());
+        if let Some(page) = &mut self.digest {
+            page.loaded(got, &tz);
+        }
+    }
+
+    /// Keys while the away digest is open.
+    async fn digest_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.digest else {
+            return;
+        };
+        for act in page.keys(bytes) {
+            match act {
+                digest::Do::Close => self.digest = None,
+                digest::Do::Load => self.load_digest().await,
+                digest::Do::Open(id) => {
+                    self.digest = None;
+                    self.attach(id).await;
+                    return;
+                }
+                digest::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
+                    Ok(()) => self.say("copied the digest as markdown".into()),
+                    Err(e) => self.say(format!("couldn't copy: {e}")),
+                },
+                digest::Do::Say(text) => self.say(text),
+            }
+        }
     }
 
     async fn open_backlog(&mut self) {
@@ -2938,6 +3000,7 @@ impl App {
                         && self.reviewing.is_none()
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
+                        && self.digest.is_none()
                         && self.backlog.is_none()
                         && !self.mini_open()
                         && !self.rail_open();
@@ -2974,6 +3037,9 @@ impl App {
             }
             if let Some(page) = &self.keys_page {
                 self.draw_keys_page(frame, page);
+            }
+            if let Some(page) = &self.digest {
+                page.draw(frame, self.settings.theme);
             }
             if let Some(page) = &self.backlog {
                 let rows = self.backlog_rows();
@@ -4946,6 +5012,7 @@ fn footer_line(
     let general = [
         ("n", "new"),
         ("b", "backlog"),
+        ("w", "digest"),
         (",", "settings"),
         (".", "keys"),
         ("p", "pair"),
@@ -4976,6 +5043,7 @@ fn chip_key(label: &str) -> HomeKey {
         "A" => HomeKey::Adopt,
         "n" => HomeKey::NewShell,
         "b" => HomeKey::Backlog,
+        "w" => HomeKey::Digest,
         "," => HomeKey::Settings,
         "." => HomeKey::Keys,
         "p" => HomeKey::AddDevice,
@@ -5537,6 +5605,8 @@ enum HomeKey {
     AddDevice,
     /// Open the backlog page.
     Backlog,
+    /// Open the away digest.
+    Digest,
     /// Write the selected agent session down as a backlog item.
     Adopt,
     /// Take the other step offered on the selected flagged session.
@@ -5599,6 +5669,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'd' => Some(HomeKey::Reject),
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
+            b'w' => Some(HomeKey::Digest),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),

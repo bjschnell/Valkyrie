@@ -87,6 +87,47 @@ export interface Flag {
 }
 
 /** A project decision (ADR-0007). */
+/** How the away digest is grouped (backlog #105). */
+export type DigestGroup = "repo" | "day";
+/** Where a session's work ended up, most urgent first. */
+export type Outcome = "stuck" | "abandoned" | "waiting" | "working" | "shipped" | "done";
+
+/** One agent session in the away digest. */
+export interface DigestEntry {
+  /** Its event log's name: stable across daemon restarts. */
+  key: string;
+  /** The live session, while it runs. */
+  session?: SessionId;
+  repo: string;
+  cwd?: string;
+  agent: string;
+  /** What it was about, one line. */
+  what: string;
+  item?: number;
+  branch?: string;
+  pr?: string;
+  outcome: Outcome;
+  /** Why that outcome, one line. */
+  detail: string;
+  /** The agent's own last line. */
+  summary?: string;
+  prompts: number;
+  first_ms: number;
+  last_ms: number;
+  ended_ms?: number;
+}
+
+export interface Digest {
+  since_ms: number;
+  until_ms: number;
+  /** `since_ms` is when you were last gone, not a time you picked. */
+  away: boolean;
+  by: DigestGroup;
+  entries: DigestEntry[];
+  /** The same, as markdown to paste. */
+  markdown: string;
+}
+
 export type DocKind = "plan" | "research" | "report" | "note";
 
 /** A doc in the docs folder (ADR-0021). `key` is what it's opened by: its
@@ -518,6 +559,8 @@ export type Request =
   /** Every doc, newest first; replies `docs`. */
   /** `count_only`: no docs, just the unread count (the Inbox's poll). */
   | { t: "docs"; count_only?: boolean }
+  /** What every agent did since `since_ms`, or since you were last gone (protocol 37). */
+  | { t: "digest"; since_ms?: number | null; by: DigestGroup }
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
   | { t: "open_doc"; key: string }
   /** A doc's comments; replies `doc_comments`. */
@@ -624,7 +667,8 @@ export type Reply =
   | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] }
   /** `from_top`: the first row's line, from the oldest in history; `history`: lines
    * above the screen, so `from_top == history` is the live screen. */
-  | { t: "scrollback"; from_top: number; history: number; rows: Row[] };
+  | { t: "scrollback"; from_top: number; history: number; rows: Row[] }
+  | { t: "digest"; digest: Digest };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
