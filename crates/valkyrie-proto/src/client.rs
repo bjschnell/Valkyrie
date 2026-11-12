@@ -540,6 +540,79 @@ impl Client {
         }
     }
 
+    /// A doc's past versions, newest first; with `version`, that one's text too.
+    pub async fn doc_history(
+        &self,
+        key: String,
+        version: Option<String>,
+    ) -> Result<(Vec<crate::DocVersion>, Option<String>)> {
+        match self
+            .request(|req| ClientMsg::DocHistory { req, key, version })
+            .await?
+        {
+            Reply::DocHistory { versions, text } => Ok((versions, text)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user puts a past version back, if `base` is still the hash on disk:
+    /// the doc as written, or with `true`, as it is on disk now.
+    pub async fn restore_doc(
+        &self,
+        key: String,
+        base: String,
+        version: String,
+    ) -> Result<(crate::Doc, bool)> {
+        match self
+            .request(|req| ClientMsg::RestoreDoc {
+                req,
+                key,
+                base,
+                version,
+            })
+            .await?
+        {
+            Reply::DocSaved { doc, conflict } => Ok((*doc, conflict)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user deletes a doc, if `base` is still the hash on disk: the token
+    /// that puts it back, or the doc as it is now if it changed.
+    pub async fn delete_doc(
+        &self,
+        key: String,
+        base: String,
+    ) -> Result<Result<String, crate::Doc>> {
+        match self
+            .request(|req| ClientMsg::DeleteDoc { req, key, base })
+            .await?
+        {
+            Reply::DocDeleted { token } => Ok(Ok(token)),
+            Reply::DocSaved { doc, .. } => Ok(Err(*doc)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Puts a doc the user deleted back.
+    pub async fn undelete_doc(&self, token: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::UndeleteDoc { req, token })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Docs the user deleted that can still be put back, newest first.
+    pub async fn deleted_docs(&self) -> Result<Vec<crate::DeletedDoc>> {
+        match self.request(|req| ClientMsg::DeletedDocs { req }).await? {
+            Reply::DeletedDocs { docs } => Ok(docs),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// The user closes a comment on a doc.
     pub async fn resolve_comment(
         &self,

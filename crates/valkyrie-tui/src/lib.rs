@@ -12,6 +12,7 @@ mod conflict;
 mod digest;
 mod docs;
 mod edit;
+mod history;
 mod keys;
 mod links;
 mod markdown;
@@ -2742,6 +2743,88 @@ impl App {
                 title,
             } => self.start_edit(key, base, body, title).await,
             docs::Do::Save { key, base, body } => self.save_doc(key, base, body, None).await,
+            docs::Do::History(key) => {
+                let got = self.client.doc_history(key.clone(), None).await;
+                if let Some(page) = &mut self.docs {
+                    page.history(&key, got.map(|(v, _)| v).map_err(|e| e.to_string()));
+                }
+            }
+            docs::Do::Peek { key, version } => {
+                match self
+                    .client
+                    .doc_history(key.clone(), Some(version.clone()))
+                    .await
+                {
+                    Ok((_, Some(text))) => {
+                        if let Some(page) = &mut self.docs {
+                            page.peeked(&key, &version, text);
+                        }
+                    }
+                    Ok((_, None)) => self.say("that version is gone".into()),
+                    Err(e) => self.say(format!("couldn't open it: {e}")),
+                }
+            }
+            docs::Do::Restore { key, base, version } => {
+                match self.client.restore_doc(key.clone(), base, version).await {
+                    Ok((doc, false)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.changed(&key, doc);
+                        }
+                        // As the web app says it.
+                        self.say("Restored. What it replaced is in its history.".into());
+                    }
+                    Ok((doc, true)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.changed(&key, doc);
+                        }
+                        self.say("It changed since you opened it: this is the new version.".into());
+                    }
+                    Err(e) => self.say(format!("couldn't restore it: {e}")),
+                }
+            }
+            docs::Do::Delete { key, base, title } => {
+                match self.client.delete_doc(key.clone(), base).await {
+                    Ok(Ok(token)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.deleted(&key, token, title.clone());
+                        }
+                        self.say(format!("Deleted “{title}”: u puts it back."));
+                        self.load_docs().await;
+                    }
+                    Ok(Err(now)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.changed(&key, now);
+                        }
+                        self.say("It changed since you opened it. This is the new version: d d to delete it.".into());
+                    }
+                    Err(e) => self.say(format!("couldn't delete it: {e}")),
+                }
+            }
+            docs::Do::Undelete(token) => match self.client.undelete_doc(token.clone()).await {
+                Ok(doc) => {
+                    let next = self
+                        .docs
+                        .as_mut()
+                        .and_then(|page| page.undeleted(&token, &doc));
+                    self.say(format!("Put back as {}.", doc.path));
+                    self.load_docs().await;
+                    if let Some(next) = next {
+                        Box::pin(self.docs_do(next)).await;
+                    }
+                }
+                Err(e) => {
+                    if let Some(page) = &mut self.docs {
+                        page.undo_failed(&token);
+                    }
+                    self.say(format!("couldn't put it back: {e}"));
+                }
+            },
+            docs::Do::Deleted => {
+                let got = self.client.deleted_docs().await.map_err(|e| e.to_string());
+                if let Some(page) = &mut self.docs {
+                    page.trash(got);
+                }
+            }
             docs::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
                 Ok(()) => self.say("copied the doc as markdown".into()),
                 Err(e) => self.say(format!("couldn't copy: {e}")),
@@ -2873,12 +2956,13 @@ impl App {
 
     /// The wheel scrolls the doc being read; a click on a link in it opens it.
     fn on_docs_mouse(&mut self, m: Mouse) {
-        let Some(page) = &self.docs else { return };
+        let Some(page) = &mut self.docs else { return };
         match m.kind {
             MouseKind::WheelUp | MouseKind::WheelDown => {
                 page.wheel(m.kind == MouseKind::WheelDown, WHEEL_ROWS)
             }
             MouseKind::Press => {
+                page.pressed();
                 if let Some(url) = page.link_at(m.x, m.y) {
                     self.open_url(&url);
                 }

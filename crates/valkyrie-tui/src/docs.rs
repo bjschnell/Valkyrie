@@ -3,13 +3,16 @@
 //! with what an agent wrote since you last looked marked unread. `↩` reads one,
 //! drawn as markdown; links in it open on a click, and `c` shows its comments
 //! and leaves new ones (`comments.rs`); `e` edits it in your editor, and a
-//! save that finds it changed shows both versions (`conflict.rs`).
+//! save that finds it changed shows both versions (`conflict.rs`). `h` shows its
+//! past versions to restore (`history.rs`); `d d` deletes it, `u` on the list
+//! undoes that, and `t` there shows Recently deleted to put back.
 
 use std::cell::{Cell, RefCell};
 
 use crate::backlog::fit_hints;
 use crate::comments::{self, Comments};
 use crate::conflict::{Choice, Conflict};
+use crate::history::{self, History};
 use crate::markdown::{self, Rendered};
 use crate::next_key;
 use crate::theme::Theme;
@@ -18,7 +21,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
-use valkyrie_proto::{Doc, DocsListing};
+use valkyrie_proto::{DeletedDoc, Doc, DocVersion, DocsListing};
 
 /// What a key on the page asks the app to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,29 @@ pub(crate) enum Do {
         base: String,
         body: String,
     },
+    /// Fetch a doc's past versions.
+    History(String),
+    /// Fetch one past version's text.
+    Peek {
+        key: String,
+        version: String,
+    },
+    /// Put a past version back over the version `base` names.
+    Restore {
+        key: String,
+        base: String,
+        version: String,
+    },
+    /// Delete a doc, if it's still the version `base` names.
+    Delete {
+        key: String,
+        base: String,
+        title: String,
+    },
+    /// Put a deleted doc back.
+    Undelete(String),
+    /// Fetch the docs that can be put back.
+    Deleted,
 }
 
 /// A line of the list: a group's heading, or a doc (its index in the listing).
@@ -84,6 +110,18 @@ struct Reader {
     comments: Comments,
     /// A save found it changed: yours and theirs, until you choose.
     conflict: Option<Conflict>,
+    /// Its past versions, while `h` has them open.
+    history: Option<History>,
+    /// `d` was pressed once: another deletes it.
+    deleting: bool,
+}
+
+/// Docs you deleted that can still be put back.
+#[derive(Debug, Default)]
+struct Trash {
+    docs: Option<Vec<DeletedDoc>>,
+    failed: Option<String>,
+    cursor: usize,
 }
 
 /// The open page: the list, and the doc being read over it, if any.
@@ -95,6 +133,10 @@ pub(crate) struct Page {
     /// Index among the docs (not the headings).
     cursor: usize,
     reader: Option<Reader>,
+    /// The doc you just deleted, by its token and title, for `u`.
+    undo: Option<(String, String)>,
+    /// Recently deleted, while `t` has it open.
+    trash: Option<Trash>,
 }
 
 /// The group a doc is listed under, as the web app has it: "" for agent-level
@@ -264,6 +306,71 @@ impl Page {
         true
     }
 
+    /// A doc's past versions, fetched.
+    pub(crate) fn history(&mut self, key: &str, got: Result<Vec<DocVersion>, String>) {
+        if let Some(h) = self.reader_for(key).and_then(|r| r.history.as_mut()) {
+            h.loaded(got);
+        }
+    }
+
+    /// One past version's text, fetched.
+    pub(crate) fn peeked(&mut self, key: &str, version: &str, text: String) {
+        if let Some(h) = self.reader_for(key).and_then(|r| r.history.as_mut()) {
+            h.peeked(version, text);
+        }
+    }
+
+    /// A restore or delete found the doc changed since it was opened: the reader
+    /// shows it as it is now.
+    pub(crate) fn changed(&mut self, key: &str, doc: Doc) {
+        if let Some(r) = self.reader_for(key) {
+            r.history = None;
+        }
+        self.saved(key, doc);
+    }
+
+    /// The doc was deleted: back to the list, with `u` to put it back.
+    pub(crate) fn deleted(&mut self, key: &str, token: String, title: String) {
+        if self.reader.as_ref().is_some_and(|r| r.key == key) {
+            self.reader = None;
+        }
+        self.undo = Some((token, title));
+    }
+
+    /// Recently deleted, fetched.
+    pub(crate) fn trash(&mut self, got: Result<Vec<DeletedDoc>, String>) {
+        if let Some(t) = &mut self.trash {
+            match got {
+                Ok(docs) => {
+                    t.cursor = t.cursor.min(docs.len().saturating_sub(1));
+                    t.docs = Some(docs);
+                    t.failed = None;
+                }
+                Err(e) => t.failed = Some(e),
+            }
+        }
+    }
+
+    /// A doc was put back: it opens, as on the web.
+    pub(crate) fn undeleted(&mut self, token: &str, doc: &Doc) -> Option<Do> {
+        if self.undo.as_ref().is_some_and(|(t, _)| t == token) {
+            self.undo = None;
+        }
+        self.trash = None;
+        if doc.key.is_empty() {
+            return None;
+        }
+        self.reader = Some(Reader {
+            key: doc.key.clone(),
+            ..Default::default()
+        });
+        Some(Do::Open(doc.key.clone()))
+    }
+
+    fn reader_for(&mut self, key: &str) -> Option<&mut Reader> {
+        self.reader.as_mut().filter(|r| r.key == key)
+    }
+
     /// Whether a doc is open over the list.
     #[cfg(test)]
     pub(crate) fn reading(&self) -> bool {
@@ -288,8 +395,34 @@ impl Page {
 
     /// ↑/↓ (j/k) pick a doc, ↩ reads it; `r` loads again; Esc or `q` closes.
     fn list_key(&mut self, key: &[u8], whole: bool, out: &mut Vec<Do>) {
+        if let Some(trash) = &mut self.trash {
+            let n = trash.docs.as_ref().map_or(0, Vec::len);
+            match key {
+                b"k" | b"\x1b[A" | b"\x1bOA" => trash.cursor = trash.cursor.saturating_sub(1),
+                b"j" | b"\x1b[B" | b"\x1bOB" => {
+                    trash.cursor = (trash.cursor + 1).min(n.saturating_sub(1))
+                }
+                b"\r" | b"\n" => {
+                    if let Some(d) = trash.docs.as_ref().and_then(|d| d.get(trash.cursor)) {
+                        out.push(Do::Undelete(d.token.clone()));
+                    }
+                }
+                b"\x1b" if whole => self.trash = None,
+                b"q" | [0x03] => self.trash = None,
+                _ => {}
+            }
+            return;
+        }
         let n = self.docs().count();
         match key {
+            b"u" => match &self.undo {
+                Some((token, _)) => out.push(Do::Undelete(token.clone())),
+                None => out.push(Do::Say("nothing to undo".into())),
+            },
+            b"t" => {
+                self.trash = Some(Trash::default());
+                out.push(Do::Deleted);
+            }
             b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
             b"j" | b"\x1b[B" | b"\x1bOB" => {
                 self.cursor = (self.cursor + 1).min(n.saturating_sub(1))
@@ -362,6 +495,55 @@ impl Page {
             return;
         }
         if let Some(reader) = &mut self.reader
+            && let Some(h) = &mut reader.history
+        {
+            let (open, act) = h.key(key, whole);
+            if !open {
+                reader.history = None;
+            }
+            match act {
+                Some(history::Do::Peek(version)) => out.push(Do::Peek {
+                    key: reader.key.clone(),
+                    version,
+                }),
+                Some(history::Do::Restore(version)) => {
+                    match reader.doc.as_ref().and_then(|d| d.hash.clone()) {
+                        Some(base) => out.push(Do::Restore {
+                            key: reader.key.clone(),
+                            base,
+                            version,
+                        }),
+                        None => out.push(Do::Say("it can't be restored from here".into())),
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
+        // `d` once asks; the next key deletes it only if it's `d` again.
+        if let Some(reader) = &mut self.reader
+            && std::mem::take(&mut reader.deleting)
+        {
+            if key == b"d" {
+                if let Some(d) = &reader.doc
+                    && let Some(base) = d.hash.clone()
+                {
+                    out.push(Do::Delete {
+                        key: reader.key.clone(),
+                        base,
+                        title: if d.title.is_empty() {
+                            d.path.clone()
+                        } else {
+                            d.title.clone()
+                        },
+                    });
+                }
+            } else {
+                out.push(Do::Say("not deleted".into()));
+            }
+            return;
+        }
+        if let Some(reader) = &mut self.reader
             && reader.comments.is_open()
         {
             let text = &reader.doc;
@@ -395,6 +577,27 @@ impl Page {
             b"b" | b"\x1b[5~" => reader.scroll(-page),
             b"g" | b"\x1b[H" | b"\x1b[1~" => reader.top.set(0),
             b"G" | b"\x1b[F" | b"\x1b[4~" => reader.scroll(i32::from(u16::MAX)),
+            b"h" => match &reader.doc {
+                Some(d) if d.id > 0 => {
+                    reader.history = Some(History::default());
+                    out.push(Do::History(reader.key.clone()));
+                }
+                Some(_) => out.push(Do::Say(
+                    "it has a history once it has a valk-id: an agent reading it gives it one"
+                        .into(),
+                )),
+                None => {}
+            },
+            b"d" => match &reader.doc {
+                Some(d) if d.hash.is_some() => {
+                    reader.deleting = true;
+                    out.push(Do::Say(
+                        "d again deletes it (it can be put back); any other key doesn't".into(),
+                    ));
+                }
+                Some(_) => out.push(Do::Say("it can't be deleted from here".into())),
+                None => {}
+            },
             b"c" => match &reader.doc {
                 Some(d) if d.id > 0 => reader.comments.open(),
                 Some(_) => out.push(Do::Say(
@@ -433,14 +636,30 @@ impl Page {
 
     /// The wheel over the doc being read scrolls it.
     pub(crate) fn wheel(&self, down: bool, rows: i32) {
-        if let Some(r) = &self.reader {
+        if let Some(r) = self.reader.as_ref().filter(|r| !r.covered()) {
             r.scroll(if down { rows } else { -rows });
+        }
+    }
+
+    /// A mouse press: a `d` waiting for its second press is off.
+    pub(crate) fn pressed(&mut self) {
+        if let Some(r) = &mut self.reader {
+            r.deleting = false;
+        }
+    }
+
+    /// Putting `token` back failed: it's gone (put back elsewhere, or expired),
+    /// so `u` stops offering it.
+    pub(crate) fn undo_failed(&mut self, token: &str) {
+        if self.undo.as_ref().is_some_and(|(t, _)| t == token) {
+            self.undo = None;
         }
     }
 
     /// The link at screen cell (`x`, `y`) of the doc being read, if any.
     pub(crate) fn link_at(&self, x: u16, y: u16) -> Option<String> {
-        let r = self.reader.as_ref()?;
+        // Not through a panel over the doc: its links are hidden.
+        let r = self.reader.as_ref().filter(|r| !r.covered())?;
         let area = r.area.get();
         if !area.contains(Position::new(x, y)) {
             return None;
@@ -494,6 +713,10 @@ impl Page {
                     l.root.display()
                 );
                 top.push(format!(" {}", fit(&about, inner)).fg(t.fg).into());
+                if let Some((_, title)) = &self.undo {
+                    let line = format!(" Deleted “{title}” · u puts it back");
+                    top.push(fit(&line, inner).fg(t.accent2).into());
+                }
                 if l.docs.is_empty() {
                     top.push(Line::default());
                     top.push(
@@ -577,6 +800,12 @@ impl Page {
 
         let hints = [
             hint(" ↩ ", "read ", t),
+            if self.undo.is_some() {
+                hint(" u ", "undo ", t)
+            } else {
+                Vec::new()
+            },
+            hint(" t ", "recently deleted ", t),
             hint(" r ", "reload ", t),
             hint(" esc ", "close ", t),
         ]
@@ -584,6 +813,9 @@ impl Page {
         let hints = fit_hints(hints, inner);
         let block = page_block(" Docs ".into(), hints, t);
         frame.render_widget(Paragraph::new(lines).block(block), rect);
+        if let Some(trash) = &self.trash {
+            draw_trash(frame, rect, trash, t);
+        }
     }
 
     fn draw_reader(&self, frame: &mut ratatui::Frame, rect: Rect, r: &Reader, t: &Theme) {
@@ -609,6 +841,12 @@ impl Page {
                 Vec::new()
             },
             hint(" e ", "edit ", t),
+            if takes {
+                hint(" h ", "history ", t)
+            } else {
+                Vec::new()
+            },
+            hint(" d ", "delete ", t),
             hint(" y ", "copy ", t),
             hint(" r ", "reload ", t),
             hint(" esc ", "back ", t),
@@ -726,10 +964,91 @@ impl Page {
             );
         }
         r.comments.draw(frame, rect, t);
+        if let Some(h) = &r.history {
+            h.draw(frame, rect, t);
+        }
     }
 }
 
+/// Recently deleted, over the list: each with where it was and when it went.
+fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) {
+    let width = area.width.saturating_sub(6).min(96);
+    let room = width.saturating_sub(4) as usize;
+    let tz = TimeZone::system();
+    let mut lines: Vec<Line> = vec![Line::default()];
+    match (&trash.docs, &trash.failed) {
+        (_, Some(e)) => lines.push(
+            fit(&format!("Couldn't load them: {e}"), room)
+                .fg(t.needs)
+                .into(),
+        ),
+        (None, None) => lines.push("Loading…".fg(t.muted).into()),
+        (Some(d), None) if d.is_empty() => lines.push(
+            "Nothing deleted. Docs you delete here stay 30 days."
+                .fg(t.muted)
+                .into(),
+        ),
+        (Some(docs), None) => {
+            for (i, d) in docs.iter().enumerate() {
+                let here = i == trash.cursor;
+                let name = if d.title.is_empty() {
+                    &d.path
+                } else {
+                    &d.title
+                };
+                let bg = style::Style::new().bg(t.selection);
+                let mut first = Line::from(vec![
+                    if here { "▌".fg(t.accent) } else { " ".into() },
+                    fit(name, room.saturating_sub(1)).fg(t.fg),
+                ]);
+                let sub = format!(" {} · deleted {}", d.path, history::when(d.at, &tz));
+                let mut second = Line::from(fit(&sub, room).fg(t.muted));
+                if here {
+                    first = first.style(bg);
+                    second = second.style(bg);
+                }
+                lines.push(first);
+                lines.push(second);
+            }
+        }
+    }
+    let title = match &trash.docs {
+        Some(d) => format!(" Recently deleted · {} ", d.len()),
+        None => " Recently deleted ".into(),
+    };
+    let hints = [hint(" ↩ ", "put back ", t), hint(" esc ", "back ", t)].concat();
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(3)
+        .min(area.height.saturating_sub(2))
+        .max(5);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+    .intersection(area);
+    let rows = rect.height.saturating_sub(2) as usize;
+    let skip = (trash.cursor * 2 + 3).saturating_sub(rows);
+    let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style::Style::new().fg(t.accent))
+        .title(title.fg(t.fg).bold())
+        .title_bottom(Line::from(fit_hints(hints, room)).centered())
+        .padding(ratatui::widgets::Padding::horizontal(1))
+        .style(style::Style::new().bg(t.panel).fg(t.fg));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 impl Reader {
+    /// A panel is over the doc (comments, history, a conflict).
+    fn covered(&self) -> bool {
+        self.comments.is_open() || self.history.is_some() || self.conflict.is_some()
+    }
+
     fn scroll(&self, rows: i32) {
         // Clamped now, not at the next draw, so a click in the same read finds
         // the row that will show.
@@ -1098,6 +1417,136 @@ mod tests {
         page.comments("12", Ok(vec![]), false);
         assert_eq!(page.keys(b"c"), vec![]);
         assert!(page.reader.as_ref().unwrap().comments.is_open());
+    }
+
+    #[test]
+    fn d_twice_deletes_and_u_puts_it_back() {
+        let mut page = reading("7", "Hello\n");
+        // d, then anything else: nothing happens.
+        assert!(matches!(page.keys(b"d").as_slice(), [Do::Say(_)]));
+        assert_eq!(page.keys(b"j"), vec![Do::Say("not deleted".into())]);
+        assert!(matches!(page.keys(b"d").as_slice(), [Do::Say(_)]));
+        assert_eq!(
+            page.keys(b"d"),
+            vec![Do::Delete {
+                key: "7".into(),
+                base: "h1".into(),
+                title: "title 7".into()
+            }]
+        );
+        page.deleted("7", "tok".into(), "title 7".into());
+        assert!(!page.reading());
+        assert!(screen(&page, 80, 20).contains("Deleted “title 7” · u puts it back"));
+        assert_eq!(page.keys(b"u"), vec![Do::Undelete("tok".into())]);
+        let mut back = doc("7", "a.md", false);
+        back.key = "7".into();
+        assert_eq!(page.undeleted("tok", &back), Some(Do::Open("7".into())));
+        assert!(page.reading());
+        assert_eq!(page.keys(b"\x1b"), vec![]);
+        assert_eq!(page.keys(b"u"), vec![Do::Say("nothing to undo".into())]);
+    }
+
+    #[test]
+    fn the_mouse_leaves_a_covered_doc_alone_and_disarms_d() {
+        let mut page = reading("7", "[x](https://x.dev)\n");
+        screen(&page, 60, 20);
+        let r = page.reader.as_ref().unwrap();
+        let area = r.area.get();
+        let y = (area.y..area.bottom())
+            .find(|&y| page.link_at(area.x, y).is_some())
+            .unwrap();
+        page.keys(b"h");
+        assert_eq!(
+            page.link_at(area.x, y),
+            None,
+            "not through the history panel"
+        );
+        page.keys(b"\x1b");
+        page.keys(b"d");
+        page.pressed();
+        assert!(!page.reader.as_ref().unwrap().deleting);
+        page.deleted("7", "tok".into(), "t".into());
+        page.undo_failed("other");
+        assert!(page.undo.is_some());
+        page.undo_failed("tok");
+        assert!(page.undo.is_none());
+    }
+
+    #[test]
+    fn recently_deleted_puts_one_back() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![doc("1", "a.md", false)])));
+        assert_eq!(page.keys(b"t"), vec![Do::Deleted]);
+        page.trash(Ok(vec![
+            DeletedDoc {
+                token: "t1".into(),
+                at: 10,
+                path: "repos/x/old.md".into(),
+                title: "Old plan".into(),
+            },
+            DeletedDoc {
+                token: "t2".into(),
+                at: 5,
+                path: "older.md".into(),
+                title: String::new(),
+            },
+        ]));
+        let shown = screen(&page, 80, 20);
+        assert!(
+            shown.contains("Recently deleted · 2")
+                && shown.contains("Old plan")
+                && shown.contains("older.md"),
+            "{shown}"
+        );
+        assert_eq!(page.keys(b"j\r"), vec![Do::Undelete("t2".into())]);
+        assert_eq!(page.keys(b"\x1b"), vec![]);
+        assert!(page.trash.is_none());
+    }
+
+    #[test]
+    fn h_shows_history_and_restores_a_version() {
+        let mut page = reading("7", "Hello\n");
+        assert_eq!(page.keys(b"h"), vec![Do::History("7".into())]);
+        page.history(
+            "7",
+            Ok(vec![DocVersion {
+                version: "v1".into(),
+                at: 10,
+                by: "claude".into(),
+                size: 10,
+            }]),
+        );
+        assert_eq!(
+            page.keys(b"\r"),
+            vec![Do::Peek {
+                key: "7".into(),
+                version: "v1".into()
+            }]
+        );
+        page.peeked("7", "v1", "Old\n".into());
+        assert_eq!(
+            page.keys(b"R"),
+            vec![Do::Restore {
+                key: "7".into(),
+                base: "h1".into(),
+                version: "v1".into()
+            }]
+        );
+        // A restore that found it changed: the new version, the panel closed.
+        let mut now = doc("7", "a.md", false);
+        now.text = Some("Newer\n".into());
+        now.hash = Some("h3".into());
+        page.changed("7", now);
+        let r = page.reader.as_ref().unwrap();
+        assert!(r.history.is_none());
+        assert_eq!(r.doc.as_ref().unwrap().hash.as_deref(), Some("h3"));
+    }
+
+    #[test]
+    fn a_doc_without_an_id_has_no_history() {
+        let mut page = reading("p0123456789abcdef", "mine\n");
+        page.reader.as_mut().unwrap().doc.as_mut().unwrap().id = 0;
+        assert!(matches!(page.keys(b"h").as_slice(), [Do::Say(s)] if s.contains("valk-id")));
     }
 
     #[test]
