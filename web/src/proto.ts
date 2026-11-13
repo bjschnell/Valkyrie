@@ -132,6 +132,48 @@ export interface Digest {
   markdown: string;
 }
 
+/** Where in a session a search hit was found (backlog #106): your prompt, the
+ * agent's closing reply, a file it wrote, or what it was about. */
+export type SearchField = "you" | "agent" | "file" | "about";
+
+/** One session whose history holds every word, at its best line. */
+export interface SearchHit {
+  /** Its event log's name: stable across daemon restarts. */
+  key: string;
+  /** The live session, while it runs: open it. */
+  session?: SessionId;
+  repo: string;
+  cwd?: string;
+  /** `cwd` no longer exists (a removed worktree): a resume can't start there. */
+  gone?: boolean;
+  agent: string;
+  /** What it was about, one line. */
+  what: string;
+  item?: number;
+  branch?: string;
+  pr?: string;
+  field: SearchField;
+  /** The best line, clipped around the words. */
+  snippet: string;
+  at_ms: number;
+  /** Lines in the session holding every word. */
+  lines: number;
+  last_ms: number;
+  ended_ms?: number;
+  /** A closed session: the command that resumes its conversation, run in `cwd`. */
+  resume?: string[];
+}
+
+export interface SearchResults {
+  query: string;
+  since_ms: number;
+  until_ms: number;
+  /** Newest first, at most the limit. */
+  hits: SearchHit[];
+  /** Sessions that matched, before the limit. */
+  total: number;
+}
+
 export type DocKind = "plan" | "research" | "report" | "note";
 
 /** A doc in the docs folder (ADR-0021). `key` is what it's opened by: its
@@ -252,7 +294,7 @@ export type ReviewAction =
   | { a: "accept" }
   | { a: "reject" }
   | { a: "retire" }
-  /** Bring a retired decision back (protocol 40). */
+  /** Bring a retired decision back (protocol 41). */
   | { a: "restore" }
   /** An active decision flagged for review still holds. */
   | { a: "confirm" }
@@ -592,7 +634,7 @@ export type Request =
       seen: number;
     }
   | { t: "decisions"; cwd: string | null }
-  /** Every note of `cwd`'s project, or of every project; replies `notes` (protocol 40). */
+  /** Every note of `cwd`'s project, or of every project; replies `notes` (protocol 41). */
   | { t: "notes"; cwd: string | null }
   /** Writes a note; with `replaces`, a correction of that one. Replies `note`. */
   | { t: "note"; note: { cwd: string; text: string; replaces?: number } }
@@ -603,6 +645,8 @@ export type Request =
   | { t: "docs"; count_only?: boolean }
   /** What every agent did since `since_ms`, or since you were last gone (protocol 37). */
   | { t: "digest"; since_ms?: number | null; by: DigestGroup }
+  /** Sessions whose history holds every word of `query` (backlog #106, protocol 40). */
+  | { t: "search"; query: string; since_ms?: number | null; repo?: string | null; limit?: number | null }
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
   | { t: "open_doc"; key: string }
   /** A doc's comments; replies `doc_comments`. */
@@ -713,7 +757,8 @@ export type Reply =
   /** `from_top`: the first row's line, from the oldest in history; `history`: lines
    * above the screen, so `from_top == history` is the live screen. */
   | { t: "scrollback"; from_top: number; history: number; rows: Row[] }
-  | { t: "digest"; digest: Digest };
+  | { t: "digest"; digest: Digest }
+  | { t: "search"; results: SearchResults };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
