@@ -5,6 +5,8 @@ describe("session search", () => {
   it("reads the query as the daemon does", () => {
     expect(terms('Zoom  "One   Key" zoom')).toEqual(["zoom", "one key"]);
     expect(terms('  "" ')).toEqual([]);
+    // A character at a time, as the daemon folds: ΟΔΟΣ is οδοσ, not οδος.
+    expect(terms("ΟΔΟΣ")).toEqual(["οδοσ"]);
   });
 
   it("marks every place a word appears, in any case", () => {

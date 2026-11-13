@@ -3,15 +3,20 @@
 
 import type { SearchField } from "../proto";
 
+/** Lower case a character at a time, as the daemon folds (a final sigma stays σ). */
+export function fold(text: string): string {
+  return Array.from(text, (c) => Array.from(c.toLowerCase())[0] ?? c).join("");
+}
+
 /** The query's words as the daemon reads them: lower case, a "quoted phrase" whole. */
 export function terms(query: string): string[] {
   const out: string[] = [];
   query.split('"').forEach((part, i) => {
     if (i % 2 === 1) {
       const phrase = part.split(/\s+/).filter(Boolean).join(" ");
-      if (phrase) out.push(phrase.toLowerCase());
+      if (phrase) out.push(fold(phrase));
     } else {
-      out.push(...part.split(/\s+/).filter(Boolean).map((w) => w.toLowerCase()));
+      out.push(...part.split(/\s+/).filter(Boolean).map(fold));
     }
   });
   return [...new Set(out)];
@@ -19,7 +24,7 @@ export function terms(query: string): string[] {
 
 /** `text` cut into runs, each marked when it is one of the words (any case). */
 export function marks(text: string, words: string[]): { text: string; hit: boolean }[] {
-  const lower = text.toLowerCase();
+  const lower = fold(text);
   // Lower casing can change a string's length; marking needs positions to agree.
   if (lower.length !== text.length || words.length === 0) return [{ text, hit: false }];
   const hit = new Array<boolean>(text.length).fill(false);

@@ -6,7 +6,7 @@
 
 use crate::Registry;
 use crate::session::now_ms;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use valkyrie_context::digest::{self, Known, Presence};
@@ -84,6 +84,8 @@ impl Registry {
 /// What the daemon knows beside the logs, gathered to take off its thread.
 struct Around {
     items: Vec<Item>,
+    /// The conversations live sessions are in: one is never offered again.
+    talking: HashSet<String>,
     /// Live sessions by log key. Exited ones stay listed until closed, but
     /// aren't running.
     live: BTreeMap<String, u32>,
@@ -109,6 +111,11 @@ impl Registry {
             .filter(|s| !s.exited())
             .map(|s| (s.key(), s.id))
             .collect();
+        let talking = sessions
+            .iter()
+            .filter(|s| !s.exited())
+            .filter_map(|s| s.conversation())
+            .collect();
         let mut roots: Vec<PathBuf> = items
             .iter()
             .filter_map(|i| i.project.clone())
@@ -122,7 +129,12 @@ impl Registry {
             .collect();
         roots.sort();
         roots.dedup();
-        Around { items, live, roots }
+        Around {
+            items,
+            talking,
+            live,
+            roots,
+        }
     }
 
     /// The sessions whose history since `since_ms` (by default, as far back as a
@@ -151,7 +163,9 @@ impl Registry {
             let by_key: BTreeMap<&str, &digest::Run> =
                 runs.iter().map(|r| (r.key.as_str(), r)).collect();
             for hit in hits.iter_mut().filter(|h| h.session.is_none()) {
-                hit.resume = by_key.get(hit.key.as_str()).and_then(|run| resume(run));
+                hit.resume = by_key
+                    .get(hit.key.as_str())
+                    .and_then(|run| resume(run, &around.talking));
             }
             SearchResults {
                 query,
@@ -169,13 +183,25 @@ impl Registry {
 }
 
 /// The command that resumes a closed run's conversation, by its agent's own
-/// rule for bringing a session back after a restart.
-fn resume(run: &digest::Run) -> Option<Vec<String>> {
-    if run.command.is_empty() {
+/// rule for bringing a session back after a restart. An agent started from a
+/// shell in it resumes as the agent alone, its options unknown. `None` while a
+/// live session is in that conversation: two agents would write one transcript.
+fn resume(run: &digest::Run, talking: &HashSet<String>) -> Option<Vec<String>> {
+    let conversation = run
+        .conversation
+        .as_deref()
+        .filter(|c| !talking.contains(*c))?;
+    let agent = run.agent.as_deref()?;
+    let command = if run.command.is_empty() || valkyrie_agents::is_shell(&run.command) {
+        vec![agent.to_owned()]
+    } else {
+        run.command.clone()
+    };
+    let adapter = valkyrie_agents::adapter_for(&command);
+    if adapter.name() != agent {
         return None;
     }
-    let conversation = run.conversation.as_deref()?;
-    valkyrie_agents::adapter_for(&run.command).restore(&run.command, Some(conversation))
+    adapter.restore(&command, Some(conversation))
 }
 
 /// The runs of every log written to since `since` that started by `until`, each
@@ -312,6 +338,34 @@ mod tests {
         };
         assert!(digest.entries.is_empty(), "nothing in the last second");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resume_follows_the_agent_and_skips_a_conversation_already_live() {
+        let mut run = valkyrie_context::digest::Run {
+            agent: Some("claude".into()),
+            command: vec!["fish".into()],
+            conversation: Some("c1".into()),
+            ..Default::default()
+        };
+        let none = std::collections::HashSet::new();
+        assert_eq!(
+            super::resume(&run, &none),
+            Some(vec!["claude".into(), "--resume".into(), "c1".into()]),
+            "claude typed in a shell resumes as claude, not the shell"
+        );
+        let talking = std::collections::HashSet::from(["c1".to_owned()]);
+        assert_eq!(super::resume(&run, &talking), None, "already resumed");
+        run.agent = Some("codex".into());
+        run.command = vec!["claude".into()];
+        assert_eq!(
+            super::resume(&run, &none),
+            None,
+            "command and agent disagree"
+        );
+        run.agent = None;
+        run.command = vec!["fish".into()];
+        assert_eq!(super::resume(&run, &none), None, "a plain shell");
     }
 
     /// Search reads the same logs, and offers a closed Claude session's resume.

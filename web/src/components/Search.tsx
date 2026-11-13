@@ -22,7 +22,8 @@ export function SearchView() {
   const status = useApp((s) => s.status);
   const [query, setQuery] = useState("");
   const [win, setWin] = useState<SearchWindow>("all");
-  const [results, setResults] = useState<SearchResults | null>(null);
+  // With the window they were asked for: a new window waits for its own.
+  const [results, setResults] = useState<{ win: SearchWindow; r: SearchResults } | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -38,10 +39,11 @@ export function SearchView() {
     let live = true;
     const timer = setTimeout(() => {
       setBusy(true);
+      setFailed(null);
       searchHistory(query, windowStart(win, Date.now())).then(
         (r) => {
           if (!live) return;
-          setResults(r);
+          setResults({ win, r });
           setFailed(null);
           setBusy(false);
         },
@@ -80,7 +82,7 @@ export function SearchView() {
 
   const words = terms(query);
   // Results answer the query they were asked with; a newer one waits for its own.
-  const shown = results !== null && results.query === query ? results : null;
+  const shown = results !== null && results.r.query === query && results.win === win ? results.r : null;
   return (
     <div className="page">
       <header className="topbar">
@@ -133,7 +135,7 @@ export function SearchView() {
                 : `${shown.total} ${shown.total === 1 ? "session" : "sessions"}.`}
           </p>
         )}
-        {shown !== null && !busy && shown.hits.length > 0 && (
+        {!failed && shown !== null && !busy && shown.hits.length > 0 && (
           <div className="list">
             {shown.hits.map((h) => (
               <HitRow key={h.key} hit={h} words={words} />
