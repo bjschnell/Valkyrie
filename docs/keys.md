@@ -17,11 +17,12 @@ decisions. The bar under a session lists these keys, and you can click them.
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
 | | `Alt-n` | each session that needs you, then back where you started |
 | | `Alt-t` · `Alt-w` · `Alt-o` | new shell tab · close tab · next pane |
+| | `Alt-z` | zoom: the pane you're in fills the screen, `Alt-z` again shows the split; `Alt-o` while zoomed shows the next pane full-size |
 | | `Alt-a` | add a bug or idea into the backlog (`↩` adds, `Esc` cancels), then back where you were |
 | | `Alt-m` | mini terminal: a small shell in a box over the screen, for a side command; `Alt-m` again puts it away, and it keeps running until you `exit` it |
 | Attached | `^\` | actions (below) |
 | | `^]` | back home |
-| Actions | `s` / `v` · `p` | split below / beside · the pane's menu |
+| Actions | `s` / `v` · `p` · `z` | split below / beside · the pane's menu · zoom |
 | | `r` · `,` | rename the tab · settings |
 | | `m` | minimal tabs: one row each; at the side, a rail of icons that opens under the mouse |
 | | `d` | decisions to review, over the session (`a`/`d` accept/reject) |

@@ -96,8 +96,22 @@ impl App {
         Some(self.split_body(Rect::new(0, 0, full.cols, full.rows)).0)
     }
 
-    /// Each pane's area within `main`, and the dividers between them.
+    /// Whether the focused pane of a split tab fills the screen (`toggle_zoom`).
+    pub(crate) fn is_zoomed(&self) -> bool {
+        self.zoomed && self.layout.is_some() && self.view.is_some()
+    }
+
+    /// Each pane on screen and its area within `main`, and the dividers between
+    /// them. Zoomed, that is the focused pane alone, over all of `main`.
     pub(crate) fn pane_layout(&self, main: Rect) -> (Vec<(SessionId, Rect)>, Vec<Divider>) {
+        match &self.view {
+            Some(view) if self.is_zoomed() => (vec![(view.id, main)], Vec::new()),
+            _ => self.split_layout(main),
+        }
+    }
+
+    /// Each pane's area within `main` as split, zoomed or not.
+    fn split_layout(&self, main: Rect) -> (Vec<(SessionId, Rect)>, Vec<Divider>) {
         match (&self.layout, &self.view) {
             (Some(layout), _) => {
                 let (panes, dividers) = layout.layout(area(main));
@@ -111,14 +125,22 @@ impl App {
         }
     }
 
-    /// Each pane's size, for the daemon.
+    /// Each pane's size, for the daemon. Zoomed, the focused pane has all of the
+    /// room and the hidden ones keep their split sizes, so they run on as they were
+    /// and nothing redraws them when the zoom ends.
     pub(crate) fn pane_sizes(&self) -> Vec<(SessionId, Size)> {
         let Some(main) = self.main_area() else {
             return Vec::new();
         };
-        self.pane_layout(main)
+        let zoomed = self
+            .view
+            .as_ref()
+            .filter(|_| self.is_zoomed())
+            .map(|v| v.id);
+        self.split_layout(main)
             .0
             .into_iter()
+            .map(|(id, r)| (id, if Some(id) == zoomed { main } else { r }))
             .map(|(id, r)| {
                 let size = Size {
                     cols: r.width,
@@ -155,6 +177,10 @@ impl App {
         if self.main_area().is_none() {
             self.status = "no terminal size".into();
             return;
+        }
+        // A zoom is for the tab it was made on.
+        if !self.view.as_ref().is_some_and(|v| ids.contains(&v.id)) {
+            self.zoomed = false;
         }
         // Switching from another tab: its modes and images must not carry over.
         if let Some(view) = &self.view
@@ -236,11 +262,14 @@ impl App {
         if same && self.divider_drag.is_some() {
             return;
         }
-        let old = self.main_area().map(|main| self.pane_layout(main).0);
+        let old = self.main_area().map(|main| self.split_layout(main).0);
         self.layout = layout;
         if same {
             return self.resize_panes();
         }
+        // A pane came or went: show the split, so a new pane isn't hidden and the
+        // keyboard doesn't land on one you can't see.
+        self.zoomed = false;
         // The pane that took a closed one's room gets the keyboard.
         let focus = if wanted.contains(&focused) {
             focused
@@ -328,6 +357,30 @@ impl App {
             }
             let _ = write_modes(self.outer_modes(view.modes), Some(view.shape));
         }
+        // The zoom follows the keyboard: the newly focused pane fills the screen.
+        if self.is_zoomed() {
+            self.resize_panes();
+        }
+    }
+
+    /// Shows the focused pane of a split tab full-size, or the split again. Only
+    /// here: the daemon's layout and other clients' views stay as they are.
+    pub(crate) fn toggle_zoom(&mut self) {
+        if self.layout.is_none() {
+            if let Some(view) = &mut self.view {
+                view.notice("one pane: nothing to zoom".into());
+            }
+            return;
+        }
+        self.zoomed = !self.zoomed;
+        self.divider_drag = None;
+        self.mouse_owner = None;
+        // A selection is in the cells of the area it was made in.
+        if let Some(view) = &mut self.view {
+            view.selection = None;
+            view.selecting = false;
+        }
+        self.resize_panes();
     }
 
     /// Moves the keyboard `step` panes on, in layout order.
@@ -349,6 +402,11 @@ impl App {
         let Some(at) = self.view.as_ref().map(|v| v.id) else {
             return;
         };
+        // The new pane goes beside this one, so show the split.
+        if self.is_zoomed() {
+            self.zoomed = false;
+            self.resize_panes();
+        }
         let shell = valkyrie_proto::default_shell();
         // About half the pane; attaching sets the real size.
         let size = self
@@ -554,6 +612,11 @@ impl App {
             1 => Side::Down,
             2 => Side::Left,
             3 => Side::Up,
+            4 => {
+                self.menu = None;
+                self.focus(id);
+                return self.toggle_zoom();
+            }
             _ => {
                 self.menu = None;
                 return self.close_session(id).await;
