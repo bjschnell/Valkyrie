@@ -31,16 +31,44 @@ export const parseScope = (text: string) =>
  * and not also flagged as out of date, which comes first. */
 export const scoping = (d: Decision) => d.status === "active" && !d.fresh?.review && !!d.proposed_scope?.length;
 
-/** Active decisions by project, the ones in full first, then as the block ranks them. */
-export function byProject(list: Decision[]): [string, Decision[]][] {
+/** Where the Memory page files a decision: your habits on their own shelf, a
+ * project's skills and policies on theirs, and every other kind as decisions. */
+export type Shelf = "decisions" | "skills" | "policies" | "habits";
+export const SHELVES: Shelf[] = ["decisions", "skills", "policies", "habits"];
+
+export const shelf = (d: Decision): Shelf =>
+  d.project === USER_SCOPE ? "habits" : d.kind === "skill" ? "skills" : d.kind === "policy" ? "policies" : "decisions";
+
+/** No longer given to agents: retired, rejected, or replaced by another. Proposals
+ * are neither: they wait on you in the inbox. */
+export const ended = (d: Decision) => d.status === "retired" || d.status === "rejected" || d.status === "superseded";
+
+/** Whether every word typed into a filter is in its title, body or scope. */
+export function matches(words: string, ...texts: (string | undefined)[]): boolean {
+  const hay = texts.join("\n").toLowerCase();
+  return words
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((w) => hay.includes(w));
+}
+
+/** By project, as `byProject` groups them: active ones (the default), or with
+ * `ended`, the ones agents no longer get, most recently changed first. */
+export function byProject(list: Decision[], showEnded = false): [string, Decision[]][] {
   const groups = new Map<string, Decision[]>();
-  for (const d of list.filter((d) => d.status === "active")) {
+  for (const d of list.filter((d) => (showEnded ? ended(d) : d.status === "active"))) {
     groups.set(d.project, [...(groups.get(d.project) ?? []), d]);
   }
   for (const ds of groups.values()) {
     ds.sort(
-      (a, b) =>
-        Number(inFull(b)) - Number(inFull(a)) || RANK[a.kind] - RANK[b.kind] || b.updated - a.updated || b.id - a.id,
+      showEnded
+        ? (a, b) => b.updated - a.updated || b.id - a.id
+        : (a, b) =>
+            Number(inFull(b)) - Number(inFull(a)) ||
+            RANK[a.kind] - RANK[b.kind] ||
+            b.updated - a.updated ||
+            b.id - a.id,
     );
   }
   // Projects by name, your habits last.

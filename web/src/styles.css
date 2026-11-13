@@ -3989,3 +3989,49 @@ button.as-text {
   color: var(--soft);
   overflow-wrap: anywhere;
 }
+
+/* The Memory page (#144): tabs, filters, ended entries and notes. */
+.memory-tabs {
+  margin-bottom: 4px;
+}
+
+.memory-tabs .kind-chip .count {
+  margin-left: 4px;
+  opacity: 0.7;
+}
+
+.memory-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.memory-filter {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--fg);
+  /* 16px: a phone doesn't zoom in on focus. */
+  font: 16px/1.4 var(--font);
+}
+
+.memory-filter:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.decision-card.ended {
+  opacity: 0.75;
+}
+
+.note-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.45;
+}

@@ -1237,7 +1237,8 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Notes { req, cwd } => {
                 // Staleness runs `git` per note: off the connection's thread.
                 let registry = registry.clone();
-                let listed = tokio::task::spawn_blocking(move || registry.notes(&cwd)).await;
+                let listed =
+                    tokio::task::spawn_blocking(move || registry.notes(cwd.as_deref())).await;
                 (
                     req,
                     listed.map_err(|e| anyhow::anyhow!("listing notes: {e}")),

@@ -242,6 +242,8 @@ pub enum ReviewAction {
     Accept,
     Reject,
     Retire,
+    /// Bring a retired decision back: active again, confirmed as of now.
+    Restore,
     /// It still holds: an active decision flagged for review is confirmed as of now.
     Confirm,
     /// Put an active decision's body in every session's block (ADR-0014 §1).

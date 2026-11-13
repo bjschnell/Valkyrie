@@ -5,6 +5,7 @@ Tell Valkyrie something once, and every agent in the repo starts with it.
 ```sh
 valk decide -k constraint "Never pkill by pattern" "It killed tool shells; kill exact pids."
 valk decisions            # this repo's decisions (--all: retired ones too)
+valk decisions retire 7   # agents stop getting #7; `restore 7` brings it back
 valk decisions preview    # what an agent gets at session start
 valk decisions export     # copy them into .valkyrie/decisions/ (skills: .claude/skills/) for git
 valk decisions health     # what waits on you; decisions that may be out of date or not working

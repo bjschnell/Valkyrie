@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Decision, DecisionKind } from "../proto";
-import { byProject, inFull, parseScope, pinnable, scoping } from "./decisions";
+import { byProject, inFull, matches, parseScope, pinnable, scoping, shelf } from "./decisions";
 import { USER_SCOPE } from "./scope";
 
 const d = (id: number, kind: DecisionKind, more: Partial<Decision> = {}): Decision => ({
@@ -60,5 +60,34 @@ describe("scopes", () => {
     expect(scoping(d(2, "decision"))).toBe(false);
     expect(scoping(d(3, "decision", { proposed_scope: ["web/**"], status: "proposed" }))).toBe(false);
     expect(scoping(d(4, "decision", { proposed_scope: ["web/**"], fresh: { review: "churn" } }))).toBe(false);
+  });
+});
+
+describe("the Memory page's shelves", () => {
+  it("files habits, skills and policies apart from decisions", () => {
+    expect(shelf(d(1, "gotcha"))).toBe("decisions");
+    expect(shelf(d(1, "skill"))).toBe("skills");
+    expect(shelf(d(1, "policy"))).toBe("policies");
+    expect(shelf(d(1, "policy", { project: USER_SCOPE }))).toBe("habits");
+  });
+
+  it("lists ended ones on their own, latest change first, and never proposals", () => {
+    const groups = byProject(
+      [
+        d(1, "gotcha", { status: "retired", updated: 5 }),
+        d(2, "gotcha", { status: "superseded", updated: 9 }),
+        d(3, "gotcha", { status: "rejected", updated: 7 }),
+        d(4, "gotcha", { status: "proposed" }),
+        d(5, "gotcha"),
+      ],
+      true,
+    );
+    expect(groups.map(([, ds]) => ds.map((x) => x.id))).toEqual([[2, 3, 1]]);
+  });
+
+  it("matches every typed word, in any case, across the texts given", () => {
+    expect(matches("PKILL shell", "Never pkill", "it killed tool shells")).toBe(true);
+    expect(matches("pkill npm", "Never pkill", "it killed tool shells")).toBe(false);
+    expect(matches("  ", "anything")).toBe(true);
   });
 });
