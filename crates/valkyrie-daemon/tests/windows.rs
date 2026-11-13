@@ -4,9 +4,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use valkyrie_proto::client::{Client, Pushes};
 use valkyrie_proto::{Size, SpawnSpec};
+
+/// How long a test waits on a program before failing. CI runners have run this file
+/// at a quarter of its usual speed, starving node past a 10s wait (backlog #17), so
+/// it is generous: a passing wait returns the moment its condition holds.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+/// Whether `start + PATIENCE` is still ahead.
+fn patient(start: Instant) -> bool {
+    start.elapsed() < PATIENCE
+}
 
 /// A per-test temp dir, removed when the test ends so runs don't pile up in /tmp.
 struct TempDir(PathBuf);
@@ -39,7 +49,8 @@ async fn start() -> (Client, Pushes, TempDir) {
     tokio::spawn(async move {
         valkyrie_daemon::run(&serve_socket, &state, std::path::Path::new("valk"), false).await
     });
-    for _ in 0..200 {
+    let began = Instant::now();
+    while patient(began) {
         if let Ok((client, pushes)) = Client::connect(&socket).await {
             return (client, pushes, dir);
         }
@@ -67,14 +78,18 @@ fn cmd(args: &[&str]) -> SpawnSpec {
 /// Waits until `dump` satisfies `pred`, returning the last dump.
 async fn wait_dump(client: &Client, id: u32, pred: impl Fn(&str) -> bool) -> String {
     let mut text = String::new();
-    for _ in 0..500 {
+    let began = Instant::now();
+    while patient(began) {
         text = client.dump(id).await.unwrap();
         if pred(&text) {
             return text;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("screen never matched; last:\n{text}");
+    panic!(
+        "screen never matched in {:?}; last:\n{text}",
+        began.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -92,7 +107,8 @@ async fn output_input_and_kill_through_a_conpty() {
 
     // Killing ends the program's job, its children with it.
     client.kill(id).await.unwrap();
-    for _ in 0..200 {
+    let began = Instant::now();
+    while patient(began) {
         let sessions = client.list().await.unwrap();
         if !sessions.iter().any(|s| s.id == id) {
             return;
@@ -106,7 +122,8 @@ async fn output_input_and_kill_through_a_conpty() {
 async fn a_program_that_exits_reports_its_code() {
     let (client, _pushes, _dir) = start().await;
     let id = client.spawn(cmd(&["/c", "exit 3"])).await.unwrap().id;
-    for _ in 0..500 {
+    let began = Instant::now();
+    while patient(began) {
         let sessions = client.list().await.unwrap();
         if let Some(s) = sessions.iter().find(|s| s.id == id)
             && s.exited.is_some()
@@ -143,7 +160,8 @@ async fn the_shell_session_follows_cmds_directory() {
     let line = format!("cd /d \"{}\"\r", target.display());
     client.input(id, line.into_bytes()).unwrap();
     let canonical = valkyrie_proto::canonical(&target).unwrap();
-    for _ in 0..200 {
+    let began = Instant::now();
+    while patient(began) {
         let sessions = client.list().await.unwrap();
         let cwd = &sessions.iter().find(|s| s.id == id).unwrap().cwd;
         if valkyrie_proto::canonical(cwd).ok().as_ref() == Some(&canonical) {
