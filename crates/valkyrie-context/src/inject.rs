@@ -25,7 +25,8 @@ fn how_to_propose(valk: &str) -> String {
          to deliver your task, as part of this change. Anything else you find broken, keep \
          out of this change and file it: `{valk} todo add -k <bug|feature|chore> \"<title>\" \
          --body \"<what, how to reproduce it, how much it matters>\"`, after checking `{valk} \
-         todo list --json`. That's the right call, not a fix skipped. When your task is \
+         todo list --json`; if one already covers it, `{valk} todo note -i N` what you \
+         found there instead. That's the right call, not a fix skipped. When your task is \
          done, say in a line what you filed (number and title). Offer to fix a find here \
          only when it's worth acting on now: it blocks the user's next step, or it's a real \
          bug the user would want dealt with before moving on. Otherwise leave it on the \
@@ -358,7 +359,7 @@ mod tests {
         all.push(d(13, K::Pattern, DecisionStatus::Active, 0));
         all[12].pinned = true;
         for x in &mut all {
-            x.body = "y".repeat(490);
+            x.body = "y".repeat(470);
         }
         let (text, shown) = laid_out(Path::new("/r/app"), &all, BUDGET, "valk");
         assert!(text.len() <= BUDGET, "{}", text.len());

@@ -466,8 +466,8 @@ pub enum ClientMsg {
         req: ReqId,
         id: u32,
     },
-    /// Leaves a handoff note on an item: an agent only on the item its session was
-    /// launched for. Replies `Item`.
+    /// Leaves a note on an item. An agent's on an item its session wasn't
+    /// launched for is kept out of the item's brief. Replies `Item`.
     NoteItem {
         req: ReqId,
         id: u32,

@@ -93,7 +93,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             "#!/bin/sh\nfor a; do last=$a; done\n\
              if [ \"$VALK_ITEM\" = 5 ]; then echo on5 > {l5}; exec sleep 60; fi\npwd > {p}\n\
              valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
-             valk todo note -i 2 'not mine' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
+             valk todo note -i 2 'seen while on #1' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
              valk todo edit 1 -t 'Done already' > {e}.tmp 2>&1; mv {e}.tmp {e}\n\
              valk todo take 3 -b fix/3-clients --pr {pr} > {t}.tmp 2>&1; mv {t}.tmp {t}\n\
              valk todo take 4 -b fix/4-open > {t4}.tmp 2>&1; mv {t4}.tmp {t4}\n\
@@ -360,17 +360,22 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{refused}"
     );
 
-    // The agent's handoff landed on its own item, and only there.
+    // The agent's handoff landed on its own item.
     assert_eq!(
         wait_for(&out.join("note")),
         "noted on #1 Tab rename eats the last letter\n"
     );
     let edited = wait_for(&out.join("agent-edit"));
     assert!(edited.contains("is for the user"), "{edited}");
-    let refused = wait_for(&out.join("not-mine"));
+    // Its note on an item it isn't on lands too, as an aside that says where
+    // it came from and stays out of that item's brief (backlog #153).
+    let aside = wait_for(&out.join("not-mine"));
+    assert!(aside.starts_with("noted on #2 Someone else"), "{aside}");
+    human("valk todo show 2", "show2-aside");
+    let show2 = wait_for(&out.join("show2-aside"));
     assert!(
-        refused.contains("only the item its session was launched for"),
-        "{refused}"
+        show2.contains("note from claude (while on #1):\nseen while on #1"),
+        "{show2}"
     );
     human("valk todo show 1", "show");
     let show = wait_for(&out.join("show"));

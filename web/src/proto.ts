@@ -410,6 +410,10 @@ export interface ItemNote {
   text: string;
   /** From an agent that took the item rather than was launched on it: never in a brief. */
   taken?: boolean;
+  /** From an agent on other work, neither launched on it nor took it: never in a brief. */
+  aside?: boolean;
+  /** For an aside, the item that agent was on, when it was on one. */
+  from?: number;
 }
 
 /** What an item's checkout holds, from git. */
