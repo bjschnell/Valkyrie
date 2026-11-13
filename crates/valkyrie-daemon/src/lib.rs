@@ -1444,6 +1444,13 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 };
                 (req, result)
             }
+            ClientMsg::Search {
+                req,
+                query,
+                since_ms,
+                repo,
+                limit,
+            } => (req, registry.search(query, since_ms, repo, limit).await),
             ClientMsg::OpenDoc { req, key } => (req, registry.open_doc(&key)),
             ClientMsg::DocComments { req, key } => (req, registry.doc_comments(&key)),
             ClientMsg::CommentDoc {

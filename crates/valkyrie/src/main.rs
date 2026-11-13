@@ -301,6 +301,28 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Find the session where you said or did something: every word in your
+    /// prompts, the agents' closing replies, the files they wrote, or what they
+    /// were about (backlog item, branch, PR). Prints how to get back to each: a
+    /// running one to attach, a closed one to resume. "Quote" a phrase
+    Search {
+        #[arg(required = true)]
+        words: Vec<String>,
+        /// How far back to look (at most 31 days): 90m, 12h, 3d, today,
+        /// yesterday, 2026-11-10 or "2026-11-10 09:00" (local time).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only sessions in this repository: its folder name, or a path in it
+        /// (`.` for this one).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Most sessions to show, newest first.
+        #[arg(long, default_value_t = valkyrie_context::search::DEFAULT_LIMIT)]
+        limit: u32,
+        /// Print JSON instead.
+        #[arg(long)]
+        json: bool,
+    },
     /// Where agents stopped and waited on you: questions, permissions, turns that
     /// ended asking something. Read from the recorded sessions; no daemon needed.
     Pings {
@@ -1053,6 +1075,43 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&digest)?);
             } else {
                 print!("{}", digest.markdown);
+            }
+            Ok(())
+        }
+        Some(Cmd::Search {
+            words,
+            since,
+            repo,
+            limit,
+            json,
+        }) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            let tz = jiff::tz::TimeZone::system();
+            let since = since
+                .map(|s| valkyrie_context::digest::parse_since(&s, now, &tz))
+                .transpose()?;
+            // A path names its repository; anything else is a folder name.
+            let repo = repo.map(|r| {
+                let path = std::path::Path::new(&r);
+                if path.exists() {
+                    let root = valkyrie_context::project::root(&std::path::absolute(path)?);
+                    if let Some(name) = root.file_name() {
+                        return Ok(name.to_string_lossy().into_owned());
+                    }
+                }
+                anyhow::Ok(r)
+            });
+            let repo = repo.transpose()?;
+            let client = connect(&socket).await?.0;
+            let results = client
+                .search(words.join(" "), since, repo, Some(limit))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                print!("{}", valkyrie_context::search::render(&results, &tz));
             }
             Ok(())
         }

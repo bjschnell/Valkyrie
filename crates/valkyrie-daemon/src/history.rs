@@ -3,7 +3,7 @@
 //! (the away digest's fold); `Resume` starts one again on its own conversation, in
 //! its own directory, adding its worktree back if that was taken away.
 
-use crate::digest::{read_runs, roots};
+use crate::digest::read_runs;
 use crate::session::now_ms;
 use crate::{Registry, spawn_with};
 use anyhow::{Context, Result, bail};
@@ -35,11 +35,10 @@ pub(crate) struct Regrow {
 
 /// What a run's resume takes: its agent on its conversation, where it started.
 pub(crate) fn plan(run: &Run, roots: &[PathBuf]) -> Result<Plan, String> {
-    let conversation = run
-        .conversation
-        .as_deref()
-        .ok_or("its agent never named its conversation")?;
-    let command = command(run, conversation)?;
+    if run.conversation.is_none() {
+        return Err("its agent never named its conversation".into());
+    }
+    let command = command(run)?;
     let dir = run
         .home
         .clone()
@@ -93,22 +92,10 @@ pub(crate) fn plan(run: &Run, roots: &[PathBuf]) -> Result<Plan, String> {
     })
 }
 
-/// Its agent's resume command: its own options when it started as the agent, the
-/// bare agent when it ran inside a shell.
-fn command(run: &Run, conversation: &str) -> Result<Vec<String>, String> {
-    let agent = run.agent.as_deref().ok_or("no agent ran in it")?;
-    let started = valkyrie_agents::adapter_for(&run.command);
-    let own = [agent.to_owned()];
-    let (adapter, line) = if started.name() == agent {
-        (started, run.command.as_slice())
-    } else {
-        (valkyrie_agents::adapter_for(&own), own.as_slice())
-    };
-    if adapter.name() != agent {
-        return Err(format!("{agent} sessions can't be resumed"));
-    }
-    adapter
-        .restore(line, Some(conversation))
+/// Its agent's resume command, by the rule search's hits use (#106): its own
+/// options when it started as the agent, the bare agent when it ran in a shell.
+fn command(run: &Run) -> Result<Vec<String>, String> {
+    crate::digest::resume(run, &HashSet::new())
         .ok_or_else(|| "it ran one command, not a conversation to come back to".into())
 }
 
@@ -248,24 +235,11 @@ impl Registry {
     /// The agent sessions of the last weeks that have ended, newest first.
     pub(crate) async fn history(&self) -> Result<Reply> {
         let now = now_ms();
-        let items: Vec<_> = self.items.borrow().iter().cloned().collect();
-        let sessions = self.all();
-        let live_sessions: Vec<_> = sessions.iter().filter(|s| !s.exited()).collect();
-        let live: BTreeMap<String, u32> = live_sessions.iter().map(|s| (s.key(), s.id)).collect();
-        let running: HashSet<String> = live_sessions
-            .iter()
-            .filter_map(|s| s.conversation())
-            .collect();
+        let around = self.around();
         let dir = self.host.transcript_dir.clone();
         let sessions = tokio::task::spawn_blocking(move || {
-            let roots = roots(&items, &sessions);
-            let runs = read_runs(&dir, now.saturating_sub(REACH_MS), now);
-            let known = Known {
-                items: &items,
-                live: &live,
-                roots: &roots,
-            };
-            past(&runs, &known, &running, now)
+            let runs = read_runs(&dir, now.saturating_sub(REACH_MS), now, digest::read_run);
+            past(&runs, &around.known(), &around.talking, now)
         })
         .await?;
         Ok(Reply::History { sessions })
@@ -285,11 +259,10 @@ impl Registry {
         let _busy = Busy::take(key)?;
         let path = self.host.transcript_dir.join(format!("{key}.events.jsonl"));
         anyhow::ensure!(path.is_file(), "no past session {key}");
-        let items: Vec<_> = self.items.borrow().iter().cloned().collect();
-        let sessions = self.all();
+        let roots = self.around().roots;
         let (run, plan) = tokio::task::spawn_blocking(move || {
             let run = digest::read_run(&path, 0, now_ms())?;
-            let plan = plan(&run, &roots(&items, &sessions));
+            let plan = plan(&run, &roots);
             anyhow::Ok((run, plan))
         })
         .await??;
