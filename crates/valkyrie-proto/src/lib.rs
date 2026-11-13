@@ -17,6 +17,7 @@ pub mod notes;
 pub mod pastes;
 pub mod quota;
 pub mod screen;
+pub mod search;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -38,9 +39,10 @@ pub use layout::{Axis, Pane, Side};
 pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
+pub use search::{SearchField, SearchHit, SearchResults};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 39;
+pub const PROTOCOL: u32 = 40;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -737,6 +739,20 @@ pub enum ClientMsg {
         #[serde(default)]
         by: DigestGroup,
     },
+    /// Sessions whose history holds every word of `query` (backlog #106,
+    /// protocol 40): your prompts, the agent's closing replies, files it wrote,
+    /// what it was about. Read-only. Replies `Search`.
+    Search {
+        req: ReqId,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+        /// Only sessions in this repository (its folder name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Writes an agent note (ADR-0017, protocol 38). Replies `Note`.
     Note {
         req: ReqId,
@@ -966,6 +982,9 @@ pub enum Reply {
     },
     Digest {
         digest: Box<Digest>,
+    },
+    Search {
+        results: Box<SearchResults>,
     },
     Note {
         note: Box<Note>,

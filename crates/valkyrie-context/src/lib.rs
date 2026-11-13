@@ -27,6 +27,7 @@ pub mod recall;
 pub mod reply;
 pub mod retro;
 pub mod scope;
+pub mod search;
 pub mod served;
 pub mod skill;
 pub mod stale;

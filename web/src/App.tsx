@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Backlog, ItemEditor } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
 import { DigestView } from "./components/Digest";
+import { SearchView } from "./components/Search";
 import { DocView, DocsList } from "./components/Docs";
 import { Inbox } from "./components/Inbox";
 import { Launcher } from "./components/Launcher";
@@ -26,6 +27,7 @@ type Route =
   | { page: "decisions" }
   | { page: "docs" }
   | { page: "digest" }
+  | { page: "search" }
   | { page: "doc"; key: string }
   | { page: "item"; id: number | null }
   | { page: "session"; id: number }
@@ -35,7 +37,7 @@ type Route =
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
  * writing an item down and changing item 3, `#/decisions` every active decision,
- * `#/digest` what every agent did while you were gone, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
+ * `#/digest` what every agent did while you were gone, `#/search` session history, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
@@ -46,6 +48,7 @@ function route(): Route {
   if (location.hash === "#/decisions") return { page: "decisions" };
   if (location.hash === "#/docs") return { page: "docs" };
   if (location.hash === "#/digest") return { page: "digest" };
+  if (location.hash === "#/search") return { page: "search" };
   const d = /^#\/docs\/([^/]+)$/.exec(location.hash);
   // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
   if (d) return { page: "doc", key: d[1] };
@@ -159,6 +162,7 @@ export function App() {
       {at.page === "decisions" && <DecisionList />}
       {at.page === "docs" && <DocsList />}
       {at.page === "digest" && <DigestView />}
+      {at.page === "search" && <SearchView />}
       {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}
       {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}
       {at.page === "session" && <SessionView id={at.id} />}

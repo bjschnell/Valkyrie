@@ -1424,6 +1424,13 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             } => (req, registry.edit_doc(id, &base, &body, peer)),
             ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
+            ClientMsg::Search {
+                req,
+                query,
+                since_ms,
+                repo,
+                limit,
+            } => (req, registry.search(query, since_ms, repo, limit).await),
             ClientMsg::OpenDoc { req, key } => (req, registry.open_doc(&key)),
             ClientMsg::DocComments { req, key } => (req, registry.doc_comments(&key)),
             ClientMsg::CommentDoc {
