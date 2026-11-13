@@ -14,7 +14,7 @@
 //! reaches goes to `<ns>-<id>.events.jsonl` next to the transcript, so a recorded
 //! session replays to the same states (DESIGN §14.6).
 
-use crate::pty::{Pty, StopPipe, pty_size};
+use crate::pty::{Pty, StopPipe, open_retrying, pty_size};
 use crate::{chat, foreground};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, native_pty_system};
@@ -335,8 +335,8 @@ impl Session {
         let events_path = stem.with_extension("events.jsonl");
 
         let cell = *host.cell_px.lock().unwrap();
-        let pair = native_pty_system()
-            .openpty(pty_size(size, cell.unwrap_or((0, 0))))
+        let pty_system = native_pty_system();
+        let pair = open_retrying(|| pty_system.openpty(pty_size(size, cell.unwrap_or((0, 0)))))
             .context("openpty")?;
         let mut argv = spec.command.clone();
         adapter.prepare(&mut argv, &host.hook_exe);

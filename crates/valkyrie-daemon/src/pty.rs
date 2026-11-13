@@ -16,6 +16,27 @@ pub fn pty_size(size: Size, cell: (u16, u16)) -> portable_pty::PtySize {
     }
 }
 
+/// Opens a PTY with `open`, retrying for about a second and a half while the system
+/// says it is out of them (ENXIO, "Device not configured", on macOS). Many sessions
+/// opening at once, a busy CI runner for one, can briefly exhaust the pool; a moment
+/// later ptys have closed and the open succeeds.
+pub fn open_retrying<T>(mut open: impl FnMut() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let mut wait = std::time::Duration::from_millis(25);
+    for _ in 0..6 {
+        match open() {
+            Err(error) if out_of_ptys(&error) => std::thread::sleep(wait),
+            result => return result,
+        }
+        wait *= 2;
+    }
+    open()
+}
+
+/// portable-pty reports a failed openpty as text around the `io::Error`'s debug form.
+fn out_of_ptys(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("code: 6,")
+}
+
 #[cfg(unix)]
 pub use unix::*;
 #[cfg(windows)]
@@ -305,5 +326,53 @@ mod windows {
             }
             Ok(job)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enxio() -> anyhow::Error {
+        anyhow::anyhow!(
+            "failed to openpty: {:?}",
+            std::io::Error::from_raw_os_error(6)
+        )
+    }
+
+    #[test]
+    fn a_pty_open_that_finds_none_free_is_tried_again() {
+        let mut tries = 0;
+        let opened = open_retrying(|| {
+            tries += 1;
+            if tries < 3 { Err(enxio()) } else { Ok("pty") }
+        });
+        assert_eq!(opened.unwrap(), "pty");
+        assert_eq!(tries, 3);
+    }
+
+    #[test]
+    fn other_pty_errors_are_not_retried() {
+        let mut tries = 0;
+        let opened: anyhow::Result<()> = open_retrying(|| {
+            tries += 1;
+            Err(anyhow::anyhow!(
+                "failed to openpty: {:?}",
+                std::io::Error::from_raw_os_error(13)
+            ))
+        });
+        assert!(opened.is_err());
+        assert_eq!(tries, 1);
+    }
+
+    #[test]
+    fn a_pool_that_stays_empty_gives_up() {
+        let mut tries = 0;
+        let opened: anyhow::Result<()> = open_retrying(|| {
+            tries += 1;
+            Err(enxio())
+        });
+        assert!(format!("{:#}", opened.unwrap_err()).contains("code: 6,"));
+        assert_eq!(tries, 7);
     }
 }
