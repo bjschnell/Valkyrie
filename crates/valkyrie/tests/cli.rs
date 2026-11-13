@@ -1595,9 +1595,13 @@ fn an_agent_drives_the_panes_of_its_tab() {
             .spawn()
             .unwrap()
     };
+    // Hooks return before the daemon applies them: wait for each state to show.
+    let reach = |state: &str| ok(pane(&["wait", &agent, "--state", state, "--timeout", "10"]));
     // The last turn's `done` is on show; only the new turn's end may count.
     fire("UserPromptSubmit");
+    reach("working");
     fire("Stop");
+    reach("done");
     let mut waiting = prompt(&[&agent, "echo prompt-$((6*7))", "--wait", "--timeout", "20"]);
     ok(pane(&[
         "wait",
@@ -1607,8 +1611,8 @@ fn an_agent_drives_the_panes_of_its_tab() {
         "--timeout",
         "10",
     ]));
-    std::thread::sleep(Duration::from_millis(500));
     fire("UserPromptSubmit");
+    reach("working");
     std::thread::sleep(Duration::from_millis(500));
     assert!(
         waiting.try_wait().unwrap().is_none(),
@@ -1624,8 +1628,15 @@ fn an_agent_drives_the_panes_of_its_tab() {
     );
 
     // A turn that stops on a question fails at once, and the next prompt is refused.
-    let waiting = prompt(&[&agent, "true", "--wait", "--timeout", "20"]);
-    std::thread::sleep(Duration::from_millis(500));
+    let waiting = prompt(&[&agent, "echo ask-$((6*7))", "--wait", "--timeout", "20"]);
+    ok(pane(&[
+        "wait",
+        &agent,
+        "--match",
+        "ask-42",
+        "--timeout",
+        "10",
+    ]));
     fire("UserPromptSubmit");
     let ask = serde_json::json!({
         "hook_event_name": "Notification",
@@ -1644,7 +1655,10 @@ fn an_agent_drives_the_panes_of_its_tab() {
         "{out:?}"
     );
     let refused = prompt(&[&agent, "true"]).wait_with_output().unwrap();
-    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("needs a human first"),
+        "{refused:?}"
+    );
 
     // A pane whose program reports nothing: the prompt never lands.
     let started = Instant::now();

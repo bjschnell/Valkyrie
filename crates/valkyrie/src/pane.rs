@@ -312,9 +312,11 @@ enum Turn {
 }
 
 /// `seq` is the status transition before the prompt went in; `waited`, how long
-/// ago that was. A turn counts once the status moved past `seq`, so the state the
-/// pane was already in (an idle prompt, `done` from the last turn) never matches.
-fn turn(seq: u64, s: &SessionInfo, waited: Duration) -> Turn {
+/// ago that was; `worked`, whether the pane was seen working since. A turn counts
+/// once the status moved past `seq`, so the state the pane was already in (an idle
+/// prompt, `done` from the last turn) never matches. Idle only ends a turn that
+/// was seen working: a `/clear` or restart also lands on idle, without one.
+fn turn(seq: u64, s: &SessionInfo, waited: Duration, worked: bool) -> Turn {
     if s.exited.is_some() {
         return Turn::Exited;
     }
@@ -328,6 +330,7 @@ fn turn(seq: u64, s: &SessionInfo, waited: Duration) -> Turn {
         AgentState::Working | AgentState::Stale => Turn::Going,
         state @ (AgentState::Blocked | AgentState::NeedsInput) => Turn::Stuck(state),
         AgentState::Exited => Turn::Exited,
+        AgentState::Idle if !worked => Turn::Going,
         state => Turn::Over(state),
     }
 }
@@ -379,10 +382,12 @@ async fn prompt(
     }
     let sent = Instant::now();
     let deadline = sent + Duration::from_secs(timeout);
+    let mut worked = false;
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let now = find(client.list().await?)?;
-        match turn(seq, &now, sent.elapsed()) {
+        worked |= now.status.seq != seq && now.status.state == AgentState::Working;
+        match turn(seq, &now, sent.elapsed(), worked) {
             Turn::Going => {}
             Turn::Over(_) => {
                 println!("{}", outcome(&now));
@@ -597,38 +602,50 @@ mod tests {
         // Still on the transition before the prompt: `done` from the last turn
         // isn't this turn's end.
         assert_eq!(
-            turn(4, &pane(AgentState::ReviewReady, 4), soon),
+            turn(4, &pane(AgentState::ReviewReady, 4), soon, true),
             Turn::Going
         );
         assert_eq!(
-            turn(4, &pane(AgentState::Idle, 4), LANDED_WITHIN),
+            turn(4, &pane(AgentState::Idle, 4), LANDED_WITHIN, true),
             Turn::Stalled
         );
         assert_eq!(
-            turn(4, &pane(AgentState::Working, 5), LANDED_WITHIN),
+            turn(4, &pane(AgentState::Working, 5), LANDED_WITHIN, true),
             Turn::Going
         );
-        assert_eq!(turn(4, &pane(AgentState::Stale, 6), soon), Turn::Going);
+        assert_eq!(
+            turn(4, &pane(AgentState::Stale, 6), soon, true),
+            Turn::Going
+        );
         // A fast turn, over between two looks, still counts.
         assert_eq!(
-            turn(4, &pane(AgentState::ReviewReady, 6), soon),
+            turn(4, &pane(AgentState::ReviewReady, 6), soon, false),
             Turn::Over(AgentState::ReviewReady)
         );
         assert_eq!(
-            turn(4, &pane(AgentState::Interrupted, 6), soon),
+            turn(4, &pane(AgentState::Interrupted, 6), soon, true),
             Turn::Over(AgentState::Interrupted)
         );
         assert_eq!(
-            turn(4, &pane(AgentState::NeedsInput, 6), soon),
+            turn(4, &pane(AgentState::NeedsInput, 6), soon, true),
             Turn::Stuck(AgentState::NeedsInput)
         );
         assert_eq!(
-            turn(4, &pane(AgentState::Blocked, 6), soon),
+            turn(4, &pane(AgentState::Blocked, 6), soon, true),
             Turn::Stuck(AgentState::Blocked)
+        );
+        // Idle from a restart before the turn began isn't its end.
+        assert_eq!(
+            turn(4, &pane(AgentState::Idle, 5), soon, false),
+            Turn::Going
+        );
+        assert_eq!(
+            turn(4, &pane(AgentState::Idle, 7), soon, true),
+            Turn::Over(AgentState::Idle)
         );
         let mut gone = pane(AgentState::Working, 4);
         gone.exited = Some(Some(1));
-        assert_eq!(turn(4, &gone, soon), Turn::Exited);
+        assert_eq!(turn(4, &gone, soon, true), Turn::Exited);
     }
 
     #[test]
