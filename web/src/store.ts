@@ -9,6 +9,7 @@ import type {
   Decision,
   Digest,
   DigestGroup,
+  SearchResults,
   Doc,
   DeletedDoc,
   DocComment,
@@ -628,6 +629,15 @@ export async function awayDigest(sinceMs: number | null, by: DigestGroup): Promi
   const reply = await conn.request({ t: "digest", since_ms: sinceMs, by });
   if (reply.t !== "digest") throw new Error("unexpected reply");
   return reply.digest;
+}
+
+/** The sessions whose history since `sinceMs` holds every word of `query`,
+ * newest first (backlog #106). Throws with the daemon's reason. */
+export async function searchHistory(query: string, sinceMs: number | null, limit = 30): Promise<SearchResults> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "search", query, since_ms: sinceMs, limit });
+  if (reply.t !== "search") throw new Error("unexpected reply");
+  return reply.results;
 }
 
 /** One doc's text, by the key its list entry carries. Throws with the daemon's reason. */

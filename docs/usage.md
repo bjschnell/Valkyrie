@@ -12,6 +12,7 @@ valk pings                 # where agents stopped and waited on you, last 30 day
 valk notes                 # findings agents left about this repo (unreviewed, never injected)
 valk notes search WORDS    # those notes and past sessions here: what failed, what fixed it
 valk digest                # what every agent did while you were gone, as markdown
+valk search WORDS          # the session where you (or an agent) said or did something
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v
 ```
@@ -71,6 +72,31 @@ The TUI has it too: `w` on the home screen. `w` steps through since you left,
 12 hours, today and 3 days, `t` switches between repository and day, `↩` opens a
 session that's still running and `y` copies the markdown. The web app has the
 same view behind the clock on the home screen, with a Copy button.
+
+## Find the session where you said something
+
+`valk search` finds the sessions whose history holds every word you give it,
+in any case: your prompts, each agent's closing reply at the end of a turn, the
+files it wrote or edited, and what it was about (its backlog item, topic,
+branch and pull request). `"Quote"` a phrase to keep it whole. You get one hit
+per session, newest first, with the time and the line that matched. Each hit
+also says how to get back to that session: `valk attach N` while it's running,
+or for a closed one a `valk new … -- claude --resume <id>` that picks its
+conversation up again in a new session where it worked. It looks back up to 31
+days, the same logs the digest reads.
+
+```sh
+valk search zoom pane                 # every session, the last 31 days
+valk search '"merge guard"' --since 3d
+valk search layout.rs --repo .        # only this repository
+valk search flaky test --json
+```
+
+The agent's mid-turn messages aren't searched, only the reply it ended each
+turn with. A hit whose worktree has since been removed says so: the agent may
+not find its conversation from another folder. In the web app, the magnifier on
+the home screen (or `/`) opens the same search. A running session opens on a
+tap, and a closed one has a Resume button.
 
 ## Docs for you to read
 

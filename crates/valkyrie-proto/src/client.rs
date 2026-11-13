@@ -691,6 +691,29 @@ impl Client {
         }
     }
 
+    /// Sessions whose history holds every word of `query`, newest first.
+    pub async fn search(
+        &self,
+        query: String,
+        since_ms: Option<u64>,
+        repo: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<crate::SearchResults> {
+        match self
+            .request(|req| ClientMsg::Search {
+                req,
+                query,
+                since_ms,
+                repo,
+                limit,
+            })
+            .await?
+        {
+            Reply::Search { results } => Ok(*results),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// The docs folder; with `root`, sets it first (`""` for the default).
     pub async fn docs_root(&self, root: Option<PathBuf>) -> Result<String> {
         match self

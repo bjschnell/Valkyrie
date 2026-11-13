@@ -82,6 +82,12 @@ export const Clock = () => (
     <path d="M12 7v5l3 2" />
   </svg>
 );
+export const Search = () => (
+  <svg {...base}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="M20 20l-4-4" />
+  </svg>
+);
 export const Pin = () => (
   <svg {...base}>
     <path d="M9 4h6l-1 6 4 4H6l4-4-1-6zM12 14v7" />

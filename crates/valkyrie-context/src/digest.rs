@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use valkyrie_proto::{Digest, DigestEntry, DigestGroup, Item, ItemStatus, Outcome};
+use valkyrie_proto::{Digest, DigestEntry, DigestGroup, Item, ItemStatus, Outcome, SearchField};
 
 /// No typing anywhere for this long counts as being gone.
 pub const AWAY_GAP_MS: u64 = 30 * 60 * 1000;
@@ -109,6 +109,21 @@ pub struct Run {
     /// First and last activity in the window; `None`: nothing happened in it.
     pub first_ms: Option<u64>,
     pub last_ms: u64,
+    /// The command it was started with, to resume it.
+    pub command: Vec<String>,
+    /// The agent's own conversation id, from its hooks.
+    pub conversation: Option<String>,
+    /// What was said and written in the window, for search (`read_said`); the
+    /// digest leaves it empty.
+    pub said: Vec<Said>,
+}
+
+/// One line of a session's history: a prompt, a closing reply, a file written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Said {
+    pub t: u64,
+    pub field: SearchField,
+    pub text: String,
 }
 
 impl Run {
@@ -123,6 +138,23 @@ impl Run {
 /// Folds the event log at `path` up to `until`. Every log is read whole, so a
 /// branch or pull request recorded before the window still names the work.
 pub fn read_run(path: &Path, since: u64, until: u64) -> Result<Run> {
+    read(path, since, until, false)
+}
+
+/// `read_run`, also keeping what was said and written in the window: the
+/// search over session history (backlog #106) reads the logs the digest does.
+pub fn read_said(path: &Path, since: u64, until: u64) -> Result<Run> {
+    let mut run = read(path, since, until, true)?;
+    // A file written many times is one line, at its last write.
+    let mut seen = HashSet::new();
+    run.said.reverse();
+    run.said
+        .retain(|s| s.field != SearchField::File || seen.insert(s.text.clone()));
+    run.said.reverse();
+    Ok(run)
+}
+
+fn read(path: &Path, since: u64, until: u64, said: bool) -> Result<Run> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let key = path
         .file_name()
@@ -144,6 +176,9 @@ pub fn read_run(path: &Path, since: u64, until: u64) -> Result<Run> {
             continue;
         };
         fold(&mut run, &v, since, until);
+        if said {
+            keep_said(&mut run, &v, since, until);
+        }
     }
     Ok(run)
 }
@@ -168,6 +203,14 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
     match v["k"].as_str().unwrap_or_default() {
         "start" => {
             run.started_ms = t;
+            run.command = v["command"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
             run.agent = agent_name(&v["agent"]).or(run.agent.take());
         }
         "foreground" => run.agent = agent_name(&v["agent"]).or(run.agent.take()),
@@ -186,6 +229,13 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
             let p = &v["payload"];
             if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
                 run.cwd = Some(PathBuf::from(cwd));
+            }
+            // A session start names the conversation (`/clear` starts another);
+            // an agent that started before the daemon names it on its next hook.
+            if let Some(id) = p["session_id"].as_str().filter(|c| !c.is_empty())
+                && (p["hook_event_name"] == "SessionStart" || run.conversation.is_none())
+            {
+                run.conversation = Some(id.to_owned());
             }
             if p["hook_event_name"] == "UserPromptSubmit" {
                 // A new turn: the last one's closing line isn't about it.
@@ -242,6 +292,45 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
         }
         _ => {}
     }
+}
+
+/// Longest line kept for search: a pasted log in a prompt is mostly noise.
+const MAX_SAID: usize = 4000;
+
+/// A prompt, a closing reply or a file written, as a line of history.
+fn keep_said(run: &mut Run, v: &Value, since: u64, until: u64) {
+    let t = v["t"].as_u64().unwrap_or(0);
+    if v["k"] != "hook" || v["ignored"].as_bool() == Some(true) || t < since || t > until {
+        return;
+    }
+    let p = &v["payload"];
+    let (field, text) = match p["hook_event_name"].as_str().unwrap_or_default() {
+        "UserPromptSubmit" => (SearchField::You, &p["prompt"]),
+        "Stop" => (SearchField::Agent, &p["last_assistant_message"]),
+        // Reading a file isn't working on it.
+        "PostToolUse" if p["tool_name"] != "Read" => {
+            let input = &p["tool_input"];
+            let path = if input["file_path"].is_string() {
+                &input["file_path"]
+            } else {
+                &input["notebook_path"]
+            };
+            (SearchField::File, path)
+        }
+        _ => return,
+    };
+    let Some(text) = text.as_str().map(crate::file::one_line) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let text = if text.chars().count() > MAX_SAID {
+        text.chars().take(MAX_SAID).collect()
+    } else {
+        text
+    };
+    run.said.push(Said { t, field, text });
 }
 
 /// The backlog item a run worked on: the one with its pull request, else its
@@ -422,7 +511,17 @@ pub fn repo_name(cwd: Option<&Path>, roots: &[PathBuf]) -> String {
         .map_or_else(|| name(cwd), |r| name(r))
 }
 
-fn clip(text: &str, max: usize) -> String {
+/// The repository a run worked in: its directory while that exists, else its
+/// backlog item's.
+pub fn repo_of(run: &Run, item: Option<&Item>, roots: &[PathBuf]) -> String {
+    match (&run.cwd, item.and_then(|i| i.project.as_deref())) {
+        (Some(c), _) if c.exists() => repo_name(Some(c), roots),
+        (_, Some(project)) => repo_name(Some(project), roots),
+        (c, None) => repo_name(c.as_deref(), roots),
+    }
+}
+
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
@@ -481,11 +580,7 @@ pub fn entries(runs: &[Run], known: &Known, now: u64) -> Vec<DigestEntry> {
             let session = known.live.get(&run.key).copied();
             let (outcome, detail) = classify(run, item, &merged, session.is_some(), now);
             let cwd = run.cwd.clone();
-            let repo = match (&cwd, item.and_then(|i| i.project.as_deref())) {
-                (Some(c), _) if c.exists() => repo_name(Some(c), known.roots),
-                (_, Some(project)) => repo_name(Some(project), known.roots),
-                (c, None) => repo_name(c.as_deref(), known.roots),
-            };
+            let repo = repo_of(run, item, known.roots);
             Some(DigestEntry {
                 key: run.key.clone(),
                 session,
@@ -529,7 +624,7 @@ fn clock(ms: u64, tz: &TimeZone) -> String {
     zoned(ms, tz).map_or_else(|| "?".into(), |z| z.strftime("%H:%M").to_string())
 }
 
-fn when(ms: u64, tz: &TimeZone) -> String {
+pub(crate) fn when(ms: u64, tz: &TimeZone) -> String {
     zoned(ms, tz).map_or_else(|| "?".into(), |z| z.strftime("%a %-d %b %H:%M").to_string())
 }
 
@@ -783,6 +878,89 @@ mod tests {
         .unwrap();
         (i.status, i.pr) = (status, pr.map(Into::into));
         i
+    }
+
+    #[test]
+    fn read_said_keeps_prompts_closing_replies_and_files_written_once_each() {
+        let dir = tempdir("said");
+        let tool = |t, name: &str, input: Value| {
+            json!({"k": "hook", "t": t, "off": 0, "agent": "claude", "ignored": false,
+                "payload": {"cwd": "/r/app", "hook_event_name": "PostToolUse",
+                    "tool_name": name, "tool_input": input}})
+        };
+        let mut start = hook(NOON - 3 * H, "/r/app", "SessionStart", None);
+        start["payload"]["session_id"] = "conv-1".into();
+        let mut stop = hook(NOON - H, "/r/app", "Stop", None);
+        stop["payload"]["last_assistant_message"] = "Zoom works.\n\nPR is up.".into();
+        let mut ignored = hook(NOON - H, "/r/app", "UserPromptSubmit", Some("not ours"));
+        ignored["ignored"] = true.into();
+        let path = write_log(
+            &dir,
+            "1-9",
+            &[
+                json!({"k": "start", "t": NOON - 3 * H, "off": 0, "agent": "claude", "command": ["claude", "--model", "opus"]}),
+                start,
+                hook(
+                    NOON - 3 * H,
+                    "/r/app",
+                    "UserPromptSubmit",
+                    Some("before the window"),
+                ),
+                hook(
+                    NOON - 2 * H,
+                    "/r/app",
+                    "UserPromptSubmit",
+                    Some("add  a\nzoom key"),
+                ),
+                tool(
+                    NOON - 2 * H + 1,
+                    "Edit",
+                    json!({"file_path": "/r/app/src/zoom.rs"}),
+                ),
+                tool(
+                    NOON - 2 * H + 2,
+                    "Read",
+                    json!({"file_path": "/r/app/README.md"}),
+                ),
+                tool(
+                    NOON - 2 * H + 3,
+                    "Edit",
+                    json!({"file_path": "/r/app/src/zoom.rs"}),
+                ),
+                tool(
+                    NOON - 2 * H + 4,
+                    "NotebookEdit",
+                    json!({"notebook_path": "/r/app/n.ipynb"}),
+                ),
+                ignored,
+                stop,
+            ],
+        );
+        let run = read_said(&path, NOON - 2 * H - 5, NOON).unwrap();
+        let said: Vec<(SearchField, &str, u64)> = run
+            .said
+            .iter()
+            .map(|s| (s.field, s.text.as_str(), s.t))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                (SearchField::You, "add a zoom key", NOON - 2 * H),
+                (SearchField::File, "/r/app/src/zoom.rs", NOON - 2 * H + 3),
+                (SearchField::File, "/r/app/n.ipynb", NOON - 2 * H + 4),
+                (SearchField::Agent, "Zoom works. PR is up.", NOON - H),
+            ]
+        );
+        assert_eq!(run.conversation.as_deref(), Some("conv-1"));
+        assert_eq!(run.command, ["claude", "--model", "opus"]);
+        assert!(
+            read_run(&path, NOON - 2 * H - 5, NOON)
+                .unwrap()
+                .said
+                .is_empty(),
+            "the digest keeps none"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -14,6 +14,8 @@ agents:
   files and screenshots to an agent.
 - Push notifications tell you when an agent needs you, finishes or stops while
   you're away, and the away digest sums up what every agent did meanwhile.
+- Search every session's history for something you or an agent said, and
+  resume the session it was in.
 
 <p align="center">
   <img src="images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">
