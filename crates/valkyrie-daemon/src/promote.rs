@@ -36,18 +36,26 @@ pub(crate) async fn run(registry: Arc<Registry>, mut written: mpsc::UnboundedRec
             {
                 calls.pop_front();
             }
-            check(&registry, root, &command, &mut calls).await;
+            // Every cluster that's due, not just the first: each round holds or
+            // proposes one, so the next round finds the next. Bounded, so a
+            // record that keeps failing can't spin.
+            for _ in 0..PER_HOUR {
+                if !check(&registry, root.clone(), &command, &mut calls).await {
+                    break;
+                }
+            }
         }
     }
 }
 
-/// Proposes `root`'s next recurring cluster, if one is due.
+/// Proposes `root`'s next recurring cluster, if one is due. Whether it held or
+/// proposed one, so there may be another.
 async fn check(
     registry: &Registry,
     root: PathBuf,
     command: &[String],
     calls: &mut VecDeque<Instant>,
-) {
+) -> bool {
     let (mut notes, links, known) = {
         let store = registry.context.lock().unwrap();
         let known = store.load(&root);
@@ -67,7 +75,7 @@ async fn check(
     .await
     {
         Ok(notes) => notes,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let now = now_secs();
     // Notes that joined a cluster already proposed are recorded with it, so it
@@ -76,17 +84,16 @@ async fn check(
         record(registry, &root, decision, &ids, matched, now);
     }
     let Some(cluster) = promote::ready(&notes, &links, &known) else {
-        return;
+        return false;
     };
     let ids: Vec<u32> = cluster.iter().map(|n| n.id).collect();
     let Some(plain) = promote::plain(&cluster) else {
-        return;
+        return false;
     };
     // Said already (any status, so a rejected one isn't made again): the cluster
     // is held by that decision, without asking the model.
     if let Some(d) = matching(&plain.title, &known) {
-        record(registry, &root, d, &ids, true, now);
-        return;
+        return record(registry, &root, d, &ids, true, now);
     }
     let mode = crate::extract::mode(&registry.host.context_dir);
     let mut found = None;
@@ -111,8 +118,7 @@ async fn check(
                 // The model found it already known: held, not proposed.
                 promote::Reply::Known => {
                     tracing::info!(project = %root.display(), notes = ?ids, "recurring notes already known");
-                    record(registry, &root, (promote::KNOWN, None), &ids, true, now);
-                    return;
+                    return record(registry, &root, (promote::KNOWN, None), &ids, true, now);
                 }
                 promote::Reply::Garbled => {
                     tracing::warn!(project = %root.display(), "drafting from notes gave nothing usable")
@@ -125,8 +131,7 @@ async fn check(
     }
     let f = found.unwrap_or(plain);
     if let Some(d) = matching(&f.title, &known) {
-        record(registry, &root, d, &ids, true, now);
-        return;
+        return record(registry, &root, d, &ids, true, now);
     }
     let scope = valkyrie_context::scope::proposed(&f.scope, &root);
     let body = match f.body.trim() {
@@ -166,15 +171,24 @@ async fn check(
     match decided {
         Ok((d, linked, sig)) => {
             tracing::info!(project = %root.display(), id = d.id, notes = ?ids, "proposed from recurring notes");
-            if let Err(e) = linked {
-                tracing::warn!(id = d.id, "couldn't record the notes' proposal: {e:#}");
-            }
-            if let Some(Err(e)) = sig {
+            if let Some(Err(e)) = &sig {
                 tracing::warn!(id = d.id, "couldn't record the proposal: {e:#}");
             }
             registry.refresh_proposals();
+            // Without its link the cluster still looks due: stop, or the next
+            // round proposes it again.
+            match linked {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(id = d.id, "couldn't record the notes' proposal: {e:#}");
+                    false
+                }
+            }
         }
-        Err(e) => tracing::warn!(project = %root.display(), "couldn't propose from notes: {e:#}"),
+        Err(e) => {
+            tracing::warn!(project = %root.display(), "couldn't propose from notes: {e:#}");
+            false
+        }
     }
 }
 
@@ -194,7 +208,7 @@ fn record(
     notes: &[u32],
     matched: bool,
     now: u64,
-) {
+) -> bool {
     let recorded = registry
         .context
         .lock()
@@ -202,7 +216,9 @@ fn record(
         .record_promotion(root, decision, notes, matched, now);
     if let Err(e) = recorded {
         tracing::warn!(project = %root.display(), decision = decision.0, "couldn't record the notes' proposal: {e:#}");
+        return false;
     }
+    true
 }
 
 fn now_secs() -> u64 {
