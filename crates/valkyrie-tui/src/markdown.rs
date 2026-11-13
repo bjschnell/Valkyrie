@@ -4,14 +4,22 @@
 //! wrapped list item lines up under its text instead of under its bullet, and so
 //! the caller's row count is the real one.
 //!
-//! Text stays text: HTML shows as written, and only http(s) links are links.
+//! Text stays text: HTML shows as written, and only http(s) links are links. In
+//! docs, a `[[wikilink]]` is a link to the doc it names, when one does.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
+
+/// Where a link goes: a web page, or a doc by its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Url(String),
+    Doc(String),
+}
 
 /// A link drawn at `row` of the lines, over columns `from..to`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +27,19 @@ pub struct Link {
     pub row: usize,
     pub from: u16,
     pub to: u16,
-    pub url: String,
+    pub target: Target,
+}
+
+/// The key of the doc a `[[wikilink]]` names, if any.
+pub type Wiki<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// What a link in the source goes to, as read.
+enum Dest {
+    Url(String),
+    /// A wikilink to the doc with this key.
+    Doc(String),
+    /// A wikilink no doc goes by.
+    Missing,
 }
 
 #[derive(Debug)]
@@ -30,9 +50,19 @@ pub struct Rendered {
 
 /// `src` drawn in `width` columns.
 pub fn render(src: &str, width: u16, t: &Theme) -> Rendered {
+    render_with(src, width, t, None)
+}
+
+/// `src` drawn in `width` columns, with `[[wikilinks]]` going where `wiki` says:
+/// a doc's key makes a link, and a name no doc goes by shows dimmed.
+pub fn render_with(src: &str, width: u16, t: &Theme, wiki: Option<Wiki>) -> Rendered {
     let mut w = Writer::new(width.max(1), t);
-    let options =
+    w.wiki = wiki;
+    let mut options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    if wiki.is_some() {
+        options |= Options::ENABLE_WIKILINKS;
+    }
     for event in Parser::new_ext(src, options) {
         w.event(event);
     }
@@ -112,10 +142,11 @@ struct Table {
 
 struct Writer<'t> {
     t: &'t Theme,
+    wiki: Option<Wiki<'t>>,
     width: u16,
     out: Vec<Line<'static>>,
     links: Vec<Link>,
-    urls: Vec<String>,
+    urls: Vec<Dest>,
     /// Inline text of the block being read.
     pieces: Vec<Piece>,
     bold: u8,
@@ -136,6 +167,7 @@ impl<'t> Writer<'t> {
     fn new(width: u16, t: &'t Theme) -> Self {
         Writer {
             t,
+            wiki: None,
             width,
             out: Vec::new(),
             links: Vec::new(),
@@ -280,12 +312,21 @@ impl<'t> Writer<'t> {
             Tag::Emphasis => self.italic += 1,
             Tag::Strong => self.bold += 1,
             Tag::Strikethrough => self.strike += 1,
+            Tag::Link {
+                link_type: LinkType::WikiLink { .. },
+                dest_url,
+                ..
+            } => {
+                let key = self.wiki.and_then(|wiki| wiki(&dest_url));
+                self.urls.push(key.map_or(Dest::Missing, Dest::Doc));
+                self.link.push(self.urls.len() - 1);
+            }
             Tag::Link { dest_url, .. } => {
-                self.urls.push(dest_url.into_string());
+                self.urls.push(Dest::Url(dest_url.into_string()));
                 self.link.push(self.urls.len() - 1);
             }
             Tag::Image { dest_url, .. } => {
-                self.urls.push(dest_url.into_string());
+                self.urls.push(Dest::Url(dest_url.into_string()));
                 self.link.push(self.urls.len() - 1);
                 let style = self.style();
                 self.push("image: ".into(), style);
@@ -350,7 +391,11 @@ impl<'t> Writer<'t> {
             TagEnd::Link | TagEnd::Image => {
                 let Some(i) = self.link.pop() else { return };
                 // The URL follows its text, dimmed, unless the text already is it.
-                let url = self.urls[i].clone();
+                // A wikilink shows only its label, as on the web.
+                let Dest::Url(url) = &self.urls[i] else {
+                    return;
+                };
+                let url = url.clone();
                 let shown: String = self
                     .pieces
                     .iter()
@@ -401,8 +446,10 @@ impl<'t> Writer<'t> {
         if self.strike > 0 {
             s = s.add_modifier(Modifier::CROSSED_OUT);
         }
-        if !self.link.is_empty() {
-            s = s.fg(self.t.accent).add_modifier(Modifier::UNDERLINED);
+        match self.link.last().map(|&i| &self.urls[i]) {
+            Some(Dest::Missing) => s = s.fg(self.t.muted),
+            Some(_) => s = s.fg(self.t.accent).add_modifier(Modifier::UNDERLINED),
+            None => {}
         }
         s
     }
@@ -430,7 +477,7 @@ impl<'t> Writer<'t> {
             }
             let len = url_len(from);
             let (url, after) = from.split_at(len);
-            self.urls.push(url.to_string());
+            self.urls.push(Dest::Url(url.to_string()));
             self.pieces.push(Piece {
                 text: url.to_string(),
                 style: style.fg(self.t.accent).add_modifier(Modifier::UNDERLINED),
@@ -562,12 +609,12 @@ impl<'t> Writer<'t> {
             let (mut spans, mut x) = self.prefix(n == 0);
             for seg in merge(row) {
                 let w = seg.text.width();
-                if let Some(i) = seg.link.filter(|&i| clickable(&self.urls[i])) {
+                if let Some(target) = seg.link.and_then(|i| target(&self.urls[i])) {
                     self.links.push(Link {
                         row: self.out.len(),
                         from: x as u16,
                         to: (x + w) as u16,
-                        url: self.urls[i].clone(),
+                        target,
                     });
                 }
                 x += w;
@@ -654,12 +701,12 @@ impl<'t> Writer<'t> {
                         continue;
                     }
                     let sw = shown.width();
-                    if let Some(l) = p.link.filter(|&l| clickable(&self.urls[l])) {
+                    if let Some(target) = p.link.and_then(|l| target(&self.urls[l])) {
                         self.links.push(Link {
                             row: self.out.len(),
                             from: x as u16,
                             to: (x + sw) as u16,
-                            url: self.urls[l].clone(),
+                            target,
                         });
                     }
                     x += sw;
@@ -684,10 +731,17 @@ impl<'t> Writer<'t> {
     }
 }
 
-/// Only http(s) links open: agents write these bodies, so no `file:` or
-/// `mailto:` reaches the opener.
-fn clickable(url: &str) -> bool {
-    url.starts_with("https://") || url.starts_with("http://")
+/// Where a click on a link goes. Only http(s) links open: agents write these
+/// bodies, so no `file:` or `mailto:` reaches the opener. A wikilink goes to its
+/// doc, or nowhere when no doc goes by its name.
+fn target(dest: &Dest) -> Option<Target> {
+    match dest {
+        Dest::Url(url) if url.starts_with("https://") || url.starts_with("http://") => {
+            Some(Target::Url(url.clone()))
+        }
+        Dest::Doc(key) => Some(Target::Doc(key.clone())),
+        _ => None,
+    }
 }
 
 /// Where the first http(s) URL in `s` starts.
@@ -879,6 +933,16 @@ mod tests {
             .collect()
     }
 
+    fn urls(r: &Rendered) -> Vec<&str> {
+        r.links
+            .iter()
+            .filter_map(|l| match &l.target {
+                Target::Url(u) => Some(u.as_str()),
+                Target::Doc(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn marks_are_gone_and_styles_stay() {
         let r = render("# Title\n\nSome **bold** and `code`.", 40, theme());
@@ -936,19 +1000,21 @@ mod tests {
         let urls: Vec<_> = r
             .links
             .iter()
-            .map(|l| (l.from, l.to, l.url.as_str()))
+            .map(|l| (l.from, l.to, l.target.clone()))
             .collect();
         assert_eq!(
             urls,
-            [(4, 12, "https://x.dev/d"), (13, 28, "https://x.dev/d")]
+            [
+                (4, 12, Target::Url("https://x.dev/d".into())),
+                (13, 28, Target::Url("https://x.dev/d".into()))
+            ]
         );
     }
 
     #[test]
     fn bare_urls_are_links_without_trailing_punctuation() {
         let r = render("Read https://a.dev/x (and https://b.dev/y).", 60, theme());
-        let urls: Vec<_> = r.links.iter().map(|l| l.url.as_str()).collect();
-        assert_eq!(urls, ["https://a.dev/x", "https://b.dev/y"]);
+        assert_eq!(urls(&r), ["https://a.dev/x", "https://b.dev/y"]);
         // A link whose text is its URL isn't shown twice.
         let r = render("<https://a.dev>", 60, theme());
         assert_eq!(text(&r), ["https://a.dev"]);
@@ -964,7 +1030,7 @@ mod tests {
                 row: 1,
                 from: 2,
                 to: 20,
-                url: "https://a.dev/long".into()
+                target: Target::Url("https://a.dev/long".into())
             }]
         );
     }
@@ -1012,8 +1078,7 @@ mod tests {
             80,
             theme(),
         );
-        let urls: Vec<_> = r.links.iter().map(|l| l.url.as_str()).collect();
-        assert_eq!(urls, ["https://a.dev", "https://a.dev"]);
+        assert_eq!(urls(&r), ["https://a.dev", "https://a.dev"]);
     }
 
     #[test]
@@ -1030,10 +1095,48 @@ mod tests {
                 row: 2,
                 from: 4,
                 to: 5,
-                url: "https://y.dev".into()
+                target: Target::Url("https://y.dev".into())
             }
         );
         assert_eq!(r.links[1].from, 6);
+    }
+
+    #[test]
+    fn wikilinks_go_to_their_doc_by_label_and_missing_ones_dim() {
+        let wiki = |name: &str| (name == "plan").then(|| "7".to_string());
+        let r = render_with(
+            "See [[plan]], [[plan|the plan]] and [[nowhere]].",
+            80,
+            theme(),
+            Some(&wiki),
+        );
+        assert_eq!(text(&r), ["See plan, the plan and nowhere."]);
+        let got: Vec<_> = r
+            .links
+            .iter()
+            .map(|l| (l.from, l.to, l.target.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (4, 8, Target::Doc("7".into())),
+                (10, 18, Target::Doc("7".into()))
+            ]
+        );
+        let missing = r.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "nowhere")
+            .unwrap();
+        assert_eq!(missing.style.fg, Some(theme().muted));
+        assert!(!missing.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn wikilinks_outside_docs_stay_text() {
+        let r = render("See [[plan|the plan]].", 80, theme());
+        assert_eq!(text(&r), ["See [[plan|the plan]]."]);
+        assert!(r.links.is_empty());
     }
 
     #[test]
