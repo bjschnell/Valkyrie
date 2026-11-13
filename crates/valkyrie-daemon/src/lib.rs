@@ -359,6 +359,7 @@ impl Registry {
                 auto_name: info.auto_name,
                 cwd: info.cwd,
                 status: info.status,
+                report: info.report,
             })
             .collect();
         valkyrie_agents::sort_queue(&mut items);
@@ -1293,6 +1294,18 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 };
                 (req, result)
             }
+            ClientMsg::Report {
+                req,
+                session,
+                text,
+                ttl_secs,
+            } => (
+                req,
+                registry.get(session).map(|s| {
+                    s.report(text, ttl_secs);
+                    Reply::Done
+                }),
+            ),
             ClientMsg::Rename { req, session, name } => (
                 req,
                 registry.get(session).map(|s| {

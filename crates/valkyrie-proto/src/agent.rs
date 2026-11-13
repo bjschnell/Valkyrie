@@ -104,6 +104,9 @@ pub struct QueueItem {
     /// shows that flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<Flag>,
+    /// The session's published status (`SessionInfo::report`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
 }
 
 /// A watcher's flag on an idle session (ADR-0019 §1): the reason the queue shows,

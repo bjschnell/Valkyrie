@@ -44,6 +44,8 @@ export interface SessionInfo {
   chat?: string;
   /** Another live agent in the repository changed the same files (protocol 31). */
   overlap?: string;
+  /** A short status it published with `valk status`, e.g. "tests 41/50" (protocol 39). */
+  report?: string;
 }
 
 export interface QueueItem {
@@ -54,6 +56,8 @@ export interface QueueItem {
   status: AgentStatus;
   /** The supervisor's flag on this session's PR, and the step it offers (protocol 25). */
   flag?: Flag;
+  /** The session's published status (`SessionInfo.report`). */
+  report?: string;
 }
 
 /** What the supervisor can do for a flagged session (ADR-0019 §2). */

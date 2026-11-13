@@ -1282,6 +1282,85 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     remove_test_dir(&dir);
 }
 
+/// `valk status` (backlog #117): an agent publishes a short status on its own
+/// session, a new one replaces it, `--clear` and its TTL take it down, and outside
+/// a session it has to be told which.
+#[test]
+fn an_agent_publishes_a_status_that_expires() {
+    let dir = temp("status");
+    let socket = dir.join("run/o.sock");
+    let mut daemon = KillOnDrop(
+        valk(&socket, &dir)
+            .arg("daemon")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let new = (0..100)
+        .find_map(|_| {
+            let out = valk(&socket, &dir)
+                .args(["new", "--cwd"])
+                .arg(&dir)
+                .args(["--", "sleep", "30"])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                return Some(out);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            None
+        })
+        .expect("daemon did not start");
+    let id = String::from_utf8(new.stdout).unwrap().trim().to_string();
+    // As the agent in that session would run it.
+    let status = |args: &[&str]| {
+        let out = valk(&socket, &dir)
+            .env("VALK_SESSION", &id)
+            .arg("status")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    let shown = || {
+        let ls = valk(&socket, &dir).arg("ls").output().unwrap();
+        let ls = String::from_utf8(ls.stdout).unwrap();
+        ls.lines()
+            .find_map(|l| l.trim().strip_prefix("▸ ").map(str::to_owned))
+    };
+    assert_eq!(shown(), None);
+    status(&["tests 41/50"]);
+    assert_eq!(shown().as_deref(), Some("tests 41/50"));
+    status(&["tests\n42/50"]);
+    assert_eq!(shown().as_deref(), Some("tests 42/50"));
+    status(&["--clear"]);
+    assert_eq!(shown(), None);
+
+    status(&["deploying", "--ttl", "1"]);
+    assert_eq!(shown().as_deref(), Some("deploying"));
+    let gone = (0..40).any(|_| {
+        std::thread::sleep(Duration::from_millis(100));
+        shown().is_none()
+    });
+    assert!(gone, "the status outlived its --ttl");
+
+    // Outside a session it needs --session.
+    let out = valk(&socket, &dir).args(["status", "x"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--session"));
+    let out = valk(&socket, &dir)
+        .args(["status", "built", "--session", &id])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(shown().as_deref(), Some("built"));
+
+    let _ = valk(&socket, &dir).args(["kill", &id]).output();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    remove_test_dir(&dir);
+}
+
 /// ADR-0007: the context hook answers Claude Code and Codex alike at session start,
 /// and stays silent outside a session and on events it has nothing for.
 #[test]

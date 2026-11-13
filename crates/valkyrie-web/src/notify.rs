@@ -529,6 +529,7 @@ mod tests {
                 ..AgentStatus::default()
             },
             flag: None,
+            report: None,
         }
     }
 
