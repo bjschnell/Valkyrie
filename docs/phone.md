@@ -14,6 +14,9 @@ agents:
   files and screenshots to an agent.
 - Push notifications tell you when an agent needs you, finishes or stops while
   you're away, and the away digest sums up what every agent did meanwhile.
+- **Memory** (the pin, or `d`) lists what Valkyrie keeps for agents: decisions,
+  skills, policies, your habits and agent notes. Read one in full with where it
+  came from, then edit, pin, retire or restore it, or correct or delete a note.
 - Search every session's history for something you or an agent said, and
   resume the session it was in.
 

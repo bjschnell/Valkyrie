@@ -355,6 +355,10 @@ impl Store {
             (ReviewAction::Accept, Proposed) => accepting = true,
             (ReviewAction::Reject, Proposed) => d.status = Rejected,
             (ReviewAction::Retire, Active) => d.status = Retired,
+            (ReviewAction::Restore, Retired) => {
+                d.status = Active;
+                confirming = true;
+            }
             (ReviewAction::Confirm, Active) => confirming = true,
             (ReviewAction::Pin | ReviewAction::Unpin, Active) => {
                 // A skill is an index line read when needed, and a policy's body
@@ -428,6 +432,7 @@ impl Store {
                     ReviewAction::Accept => "accept",
                     ReviewAction::Reject => "reject",
                     ReviewAction::Retire => "retire",
+                    ReviewAction::Restore => "restore",
                     ReviewAction::Confirm => "confirm",
                     ReviewAction::Pin => "pin",
                     ReviewAction::Unpin => "unpin",
@@ -1783,6 +1788,44 @@ mod tests {
         );
         // Already active (say, accepted elsewhere first): nothing is rewritten.
         assert!(f.store.review(&f.repo, 1, &revise, None, None, 3).is_err());
+    }
+
+    #[test]
+    fn restore_brings_back_a_retired_decision_only() {
+        let f = Fixture::new("restore");
+        f.store
+            .decide(&f.new_decision("Keep it"), by("human"), 1)
+            .unwrap();
+        // Active: nothing to restore.
+        assert!(
+            f.store
+                .review(&f.repo, 1, &ReviewAction::Restore, None, None, 2)
+                .is_err()
+        );
+        f.store
+            .review(&f.repo, 1, &ReviewAction::Retire, None, None, 3)
+            .unwrap();
+        let d = f
+            .store
+            .review(&f.repo, 1, &ReviewAction::Restore, Some(3), None, 4)
+            .unwrap();
+        // Back, and confirmed as of now: you just said it holds.
+        assert_eq!(
+            (d.status, d.fresh.confirmed, d.updated),
+            (DecisionStatus::Active, 4, 4)
+        );
+        // A rejected proposal isn't retired: it stays rejected.
+        f.store
+            .decide(&f.new_decision("Nope"), by("claude"), 5)
+            .unwrap();
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Reject, None, None, 6)
+            .unwrap();
+        assert!(
+            f.store
+                .review(&f.repo, 2, &ReviewAction::Restore, None, None, 7)
+                .is_err()
+        );
     }
 
     #[test]

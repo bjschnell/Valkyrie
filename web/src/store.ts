@@ -7,6 +7,7 @@ import type { Mismatch } from "./lib/protocol";
 import { termColors } from "./lib/theme";
 import type {
   Decision,
+  Note,
   Digest,
   DigestGroup,
   SearchResults,
@@ -565,6 +566,7 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   accept: "Accepted",
   reject: "Rejected",
   retire: "Retired",
+  restore: "Restored",
   confirm: "Confirmed",
   pin: "Pinned",
   unpin: "Unpinned",
@@ -607,6 +609,43 @@ export async function allDecisions(): Promise<Decision[] | null> {
     return reply.t === "decisions" ? reply.decisions : null;
   } catch {
     return null;
+  }
+}
+
+/** Every project's agent notes, every status; null when they can't be asked. */
+export async function allNotes(): Promise<Note[] | null> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const reply = await conn.request({ t: "notes", cwd: null });
+    return reply.t === "notes" ? reply.listing.notes : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Corrects note `n` with `text`: the new note replaces it in one write. */
+export async function correctNote(n: Note, text: string): Promise<boolean> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const reply = await conn.request({ t: "note", note: { cwd: n.project, text, replaces: n.id } });
+    toast(`Replaced note #${n.id}${reply.t === "note" ? ` with #${reply.note.id}` : ""} ✓`);
+    return true;
+  } catch (e) {
+    toast(`Couldn't: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+/** Deletes note `n`; its tombstone keeps it from being written again. */
+export async function deleteNote(n: Note): Promise<boolean> {
+  try {
+    if (!conn) throw new Error("not connected");
+    await conn.request({ t: "note_rm", cwd: n.project, id: n.id });
+    toast(`Deleted note #${n.id} ✓`);
+    return true;
+  } catch (e) {
+    toast(`Couldn't: ${(e as Error).message}`);
+    return false;
   }
 }
 

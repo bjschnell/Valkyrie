@@ -42,7 +42,7 @@ pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Sty
 pub use search::{SearchField, SearchHit, SearchResults};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 40;
+pub const PROTOCOL: u32 = 41;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -759,10 +759,11 @@ pub enum ClientMsg {
         note: NewNote,
     },
     /// The notes of the project holding `cwd`, every status, each live one's
-    /// staleness worked out, with the tombstones. Replies `Notes`.
+    /// staleness worked out, with the tombstones; `None`: every project's
+    /// (protocol 41). Replies `Notes`.
     Notes {
         req: ReqId,
-        cwd: PathBuf,
+        cwd: Option<PathBuf>,
     },
     /// Deletes a note and leaves a tombstone (ADR-0017 rule 4). Anyone may.
     /// Replies `Tombstone`.

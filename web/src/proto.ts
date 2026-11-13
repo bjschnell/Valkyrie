@@ -294,6 +294,8 @@ export type ReviewAction =
   | { a: "accept" }
   | { a: "reject" }
   | { a: "retire" }
+  /** Bring a retired decision back (protocol 41). */
+  | { a: "restore" }
   /** An active decision flagged for review still holds. */
   | { a: "confirm" }
   /** Put an active decision's body in every session's block, or take it back to a title. */
@@ -321,6 +323,32 @@ export type ReviewAction =
   | { a: "propose_scope"; scope: string[] }
   /** Turn a proposed scope down; it isn't proposed again. */
   | { a: "decline_scope" };
+
+/** Agent notes (ADR-0017, crates/valkyrie-proto/src/notes.rs). */
+export type NoteStatus = "live" | "replaced" | "promoted";
+
+export interface Note {
+  id: number;
+  /** The repository's root. */
+  project: string;
+  text: string;
+  status: NoteStatus;
+  /** Seconds since the epoch. */
+  created: number;
+  /** `agent`, `user` or `valkyrie`. */
+  by: string;
+  /** The Valkyrie session it was written in, or `none`. */
+  session: string;
+  conversation?: string | null;
+  commit?: string | null;
+  cwd?: string | null;
+  anchors?: string[];
+  sig?: string | null;
+  replaces?: number | null;
+  replaced_by?: number | null;
+  /** Why a live note may be out of date. */
+  stale?: string;
+}
 
 export type Color =
   "default" | { indexed: number } | { rgb: [number, number, number] };
@@ -606,6 +634,12 @@ export type Request =
       seen: number;
     }
   | { t: "decisions"; cwd: string | null }
+  /** Every note of `cwd`'s project, or of every project; replies `notes` (protocol 41). */
+  | { t: "notes"; cwd: string | null }
+  /** Writes a note; with `replaces`, a correction of that one. Replies `note`. */
+  | { t: "note"; note: { cwd: string; text: string; replaces?: number } }
+  /** Deletes a note, leaving a tombstone; replies `tombstone`. */
+  | { t: "note_rm"; cwd: string; id: number }
   /** Every doc, newest first; replies `docs`. */
   /** `count_only`: no docs, just the unread count (the Inbox's poll). */
   | { t: "docs"; count_only?: boolean }
@@ -700,6 +734,9 @@ export type Reply =
   | { t: "text"; text: string }
   | { t: "decision"; decision: Decision }
   | { t: "decisions"; decisions: Decision[] }
+  | { t: "notes"; listing: { notes: Note[] } }
+  | { t: "note"; note: Note }
+  | { t: "tombstone"; tombstone: { id: number } }
   | { t: "doc"; doc: Doc }
   /** `to`: on a new comment, the running session that hears it at its next prompt. */
   | { t: "doc_comments"; comments: DocComment[]; to?: string }

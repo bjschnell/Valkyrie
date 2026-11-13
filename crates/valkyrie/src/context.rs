@@ -15,6 +15,8 @@ pub enum DecisionsCmd {
     Reject { id: u32 },
     /// Retire an active decision that no longer holds.
     Retire { id: u32 },
+    /// Bring a retired decision back: agents get it again from their next session start.
+    Restore { id: u32 },
     /// Say an active decision still holds (one flagged as maybe out of date).
     Confirm { id: u32 },
     /// Put an active decision's body in every session's block, not only its
@@ -191,6 +193,7 @@ pub async fn decisions(
         Some(DecisionsCmd::Accept { id }) => review(id, ReviewAction::Accept).await,
         Some(DecisionsCmd::Reject { id }) => review(id, ReviewAction::Reject).await,
         Some(DecisionsCmd::Retire { id }) => review(id, ReviewAction::Retire).await,
+        Some(DecisionsCmd::Restore { id }) => review(id, ReviewAction::Restore).await,
         Some(DecisionsCmd::Confirm { id }) => review(id, ReviewAction::Confirm).await,
         Some(DecisionsCmd::Pin { id }) => review(id, ReviewAction::Pin).await,
         Some(DecisionsCmd::Unpin { id }) => review(id, ReviewAction::Unpin).await,

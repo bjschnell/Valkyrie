@@ -290,14 +290,22 @@ impl Registry {
 
     /// A project's notes, each live one's staleness worked out, with the
     /// tombstones.
-    pub(crate) fn notes(&self, cwd: &Path) -> Reply {
-        let root = valkyrie_context::project::root(cwd);
-        let (mut notes, deleted) = {
+    pub(crate) fn notes(&self, cwd: Option<&Path>) -> Reply {
+        let (mut notes, mut deleted) = (Vec::new(), Vec::new());
+        {
             let store = self.context.lock().unwrap();
-            (store.notes(&root), store.deleted_notes(&root))
-        };
+            let roots = match cwd {
+                Some(cwd) => vec![valkyrie_context::project::root(cwd)],
+                None => store.projects(),
+            };
+            for root in roots {
+                notes.extend(store.notes(&root));
+                deleted.extend(store.deleted_notes(&root));
+            }
+        }
         // After the lock: it runs `git` once per note with anchors.
         for n in &mut notes {
+            let root = n.project.clone();
             n.stale = valkyrie_context::notes::staleness(&root, n);
         }
         Reply::Notes {
@@ -361,7 +369,10 @@ impl Registry {
                 .review(project, id, action, seen, head, now_secs())?;
         if matches!(
             action,
-            ReviewAction::Confirm | ReviewAction::Retire | ReviewAction::Edit { .. }
+            ReviewAction::Confirm
+                | ReviewAction::Retire
+                | ReviewAction::Restore
+                | ReviewAction::Edit { .. }
         ) {
             self.stale
                 .lock()
