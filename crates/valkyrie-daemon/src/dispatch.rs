@@ -588,7 +588,9 @@ impl Registry {
         if launch {
             let session = self.start(&offer, None, peer).await?;
             let info = self.get(session)?.info();
-            return Ok(Reply::Session { info });
+            return Ok(Reply::Session {
+                info: Box::new(info),
+            });
         }
         let updated = self
             .backlog
@@ -799,6 +801,7 @@ mod tests {
                 agent: None,
                 session: None,
                 bridge: false,
+                desktop: false,
             }))
         });
         let ids: Vec<u32> = (1..=4)

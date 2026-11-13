@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEV_TOKEN, parseCode } from "../lib/pair";
+import { inDesktopApp } from "../lib/push";
 import { saveToken, useApp } from "../store";
 import { Wordmark } from "./Logo";
 
 /** A name for this device in `valk web devices`: the platform, roughly. */
 function deviceName(): string {
+  if (inDesktopApp()) return "Desktop app";
   const ua = navigator.userAgent;
   if (/iPhone/.test(ua)) return "iPhone";
   if (/iPad/.test(ua)) return "iPad";
@@ -54,6 +56,17 @@ export function Pair() {
     return () => {
       live = false;
     };
+  }, [code]);
+
+  // In the desktop app, the app pairs its own window: it is told, once each time
+  // this screen comes up, that the page isn't paired, by a navigation it catches
+  // and never loads. It asks whoever is at the window, and comes back with a
+  // pairing link or not at all; the code field below stays for when it doesn't.
+  const asked = useRef(false);
+  useEffect(() => {
+    if (!inDesktopApp() || code || asked.current) return;
+    asked.current = true;
+    location.href = "valk-desktop://pair";
   }, [code]);
 
   const pasted = parseCode(typed);

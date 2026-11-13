@@ -42,6 +42,15 @@ describe("blocks", () => {
     ]);
   });
 
+  it("never folds an agent's question into a group", () => {
+    const b = blocks([tool("1"), tool("2"), tool("3"), tool("q", "AskUserQuestion"), tool("4"), tool("5"), tool("6")]);
+    expect(b.map((x) => (x.k === "tools" ? `group ${x.tools.length}` : x.item.id))).toEqual([
+      "group 3",
+      "q",
+      "group 3",
+    ]);
+  });
+
   it("summarises a group", () => {
     expect(
       groupSummary([
@@ -86,10 +95,40 @@ describe("markdown", () => {
     expect(parseMarkdown(md)).toEqual([
       { t: "h", level: 2, text: "Done" },
       { t: "p", text: "It works:" },
-      { t: "list", ordered: false, items: ["one", "two continued"] },
+      { t: "list", ordered: false, items: ["one", "two\ncontinued"] },
       { t: "code", lang: "rust", text: "fn main() {}" },
-      { t: "pre", text: "| a | b |\n|---|---|" },
+      { t: "table", head: ["a", "b"], align: [null, null], rows: [] },
       { t: "quote", text: "quoted" },
+    ]);
+  });
+
+  it("keeps numbered steps in one list when a command or blank line sits between them", () => {
+    const md = [
+      "1. Check the conflicts:",
+      "`git merge-tree HEAD origin/main`",
+      "",
+      "2. Merge main.",
+      "",
+      "   If main rewrote the file, read it first.",
+      "",
+      "When it worked: done.",
+    ].join("\n");
+    expect(parseMarkdown(md)).toEqual([
+      {
+        t: "list",
+        ordered: true,
+        start: 1,
+        items: ["Check the conflicts:\n`git merge-tree HEAD origin/main`", "Merge main.\n\nIf main rewrote the file, read it first."],
+      },
+      { t: "p", text: "When it worked: done." },
+    ]);
+  });
+
+  it("starts an ordered list at its first number and stops a list at a heading", () => {
+    expect(parseMarkdown("3. three\n4. four\n## Next\n- a")).toEqual([
+      { t: "list", ordered: true, start: 3, items: ["three", "four"] },
+      { t: "h", level: 2, text: "Next" },
+      { t: "list", ordered: false, items: ["a"] },
     ]);
   });
 
@@ -111,5 +150,58 @@ describe("markdown", () => {
       { t: "text", v: "." },
     ]);
     expect(parseInline("a * b * c")).toEqual([{ t: "text", v: "a * b * c" }]);
+  });
+});
+
+describe("markdown for docs", () => {
+  it("reads a table with its alignment, padding short rows", () => {
+    const md = ["| name | n | note |", "|:--|--:|:-:|", "| `a\\|b` | 1 | **x** |", "| c | 2 |"].join("\n");
+    expect(parseMarkdown(md)).toEqual([
+      {
+        t: "table",
+        head: ["name", "n", "note"],
+        align: ["left", "right", "center"],
+        rows: [
+          ["`a|b`", "1", "**x**"],
+          ["c", "2", ""],
+        ],
+      },
+    ]);
+  });
+
+  it("keeps pipe lines with no separator row as text", () => {
+    expect(parseMarkdown("| just | pipes |\n| more |")).toEqual([{ t: "pre", text: "| just | pipes |\n| more |" }]);
+  });
+
+  it("reads task boxes, and leaves a list without any alone", () => {
+    expect(parseMarkdown("- [x] done\n- [ ] todo\n- plain")).toEqual([
+      { t: "list", ordered: false, items: ["done", "todo", "plain"], checks: [true, false, null] },
+    ]);
+    expect(parseMarkdown("- [link](https://x.dev)")).toEqual([
+      { t: "list", ordered: false, items: ["[link](https://x.dev)"] },
+    ]);
+  });
+
+  it("reads wikilinks, with a label after the bar", () => {
+    expect(parseInline("see [[Docs plan]] and [[repos/valk/notes|the notes]]")).toEqual([
+      { t: "text", v: "see " },
+      { t: "wiki", v: "Docs plan", target: "Docs plan" },
+      { t: "text", v: " and " },
+      { t: "wiki", v: "the notes", target: "repos/valk/notes" },
+    ]);
+  });
+
+  it("reads a long run of brackets in linear time", () => {
+    for (const run of ["[".repeat(200_000), "[[a|".repeat(50_000), "[x".repeat(100_000)]) {
+      const start = performance.now();
+      parseInline(run);
+      expect(performance.now() - start).toBeLessThan(500);
+    }
+  });
+
+  it("opens only http(s) links; HTML and other schemes stay text", () => {
+    expect(parseInline("[x](javascript:alert(1))")).toEqual([{ t: "text", v: "x" }, { t: "text", v: ")" }]);
+    expect(parseInline("[x](data:text/html,hi)")).toEqual([{ t: "text", v: "x" }]);
+    expect(parseInline('<img src=x onerror="alert(1)">')).toEqual([{ t: "text", v: '<img src=x onerror="alert(1)">' }]);
   });
 });

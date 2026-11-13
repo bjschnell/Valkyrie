@@ -94,7 +94,7 @@ Constraints:
   - No hub installs: a skill from elsewhere is text that would reach every agent unreviewed.
   - No trajectories kept for training.
 - **Model trust:** the model's text is still untrusted.
-  - A proposed skill is shown in full before it can be accepted: the web card scrolls, `valk decisions show` prints it, and the TUI's preview scrolls (PgUp/PgDn) and accepts a skill only once it's been scrolled to its end.
+  - A proposed skill is shown in full before it can be accepted: the web card scrolls, `valk decisions show` prints it, and the TUI's preview scrolls (PgUp/PgDn, or the mouse wheel over it). Reading is not a gate: you can accept a skill unread, as any other proposal.
   - Bodies lose control characters and bidi overrides, as decisions do.
 - **Open:** whether Valkyrie-launched Claude sessions should also load active skills natively, through a per-session plugin directory, so the `Skill` tool sees them. The index works without it.
 - **Reads are seen in Claude transcripts of Valkyrie sessions only.** A skill only Codex sessions, a `claude` outside Valkyrie, or you read looks unread, as does every skill with the Context setting off (agents never see the index); the question comes first, so keeping it is one key.

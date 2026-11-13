@@ -234,6 +234,7 @@ is up to you. The app installs and sends notifications only over HTTPS.
 ```sh
 valk setup web                                  # with Tailscale
 valk setup web --url https://valk.example.com   # behind your own proxy or tunnel
+valk setup web --local                          # this machine only: no Tailscale, no pairing code
 ```
 
 That runs `valk web` in the background as a service (systemd on Linux, launchd on
@@ -249,8 +250,10 @@ service running while you're logged out. To run it by hand instead: `valk web`.
   `sudo tailscale set --operator=$USER` once.
 - **Your own proxy or tunnel.** Forward HTTPS to `127.0.0.1:8790`, keep the `Host`
   header (or set `X-Forwarded-Host`), and pass the public address with `--url` so the
-  QR code points there. Anyone who can reach that address can try to pair, so put
-  it somewhere only you can reach.
+  QR code points there. `valk web` answers only to names it knows: an IP address,
+  `localhost`, the `--url` address and this machine's tailnet name. Reaching it by
+  any other name (a LAN hostname, say) needs that name as `--url`. Anyone who can
+  reach that address can try to pair, so put it somewhere only you can reach.
 
 Scan the QR code it prints. The code works once, for ten minutes; `valk web pair`
 prints another. A paired device stays paired until you revoke it. To use the web
@@ -280,3 +283,53 @@ Settings (the gear) in the app and turn notifications on. You'll get one when an
 finishes or stops while you're away: no typing at any session for 90 seconds, and the
 app not open. Notifications need the HTTPS address, and `valk web` has to keep running to send
 them.
+
+
+## The desktop app
+
+A native window around the web app, with a tray icon that counts the sessions
+that need you and notifications for them. Each release carries installers, from
+the first one after 0.4.0 on:
+
+| System | File on the release page |
+|---|---|
+| Debian, Ubuntu | `Valkyrie_<version>_amd64.deb` |
+| Any Linux (x86_64) | `Valkyrie_<version>_amd64.AppImage` |
+| macOS (Apple silicon) | `Valkyrie_<version>_aarch64.dmg` |
+| Windows (x64) | `Valkyrie_<version>_x64_en-US.msi` |
+
+The installers aren't signed with a certificate yet. On macOS, open the app
+once, then allow it under System Settings, Privacy & Security, Open Anyway. On
+Windows, choose More info, then Run anyway.
+
+You don't need `valk` installed first: the app carries the `valk` of its release
+and, on a machine with none, puts it where the install scripts do
+(`~/.local/bin/valk`, or `%LOCALAPPDATA%\Programs\Valkyrie\valk.exe`). It is
+then yours: `valk upgrade` updates it, and the app never replaces a `valk` that
+is already there, cargo's (`~/.cargo/bin`) included. Only the binary is placed:
+to use `valk` in a terminal too, add that directory to your PATH, or run the
+install script, which also sets up Windows Terminal.
+
+On first launch the app finds your `valk web`, or sets one up for this machine
+only, and asks to pair: press Pair. Closing the window keeps it in the tray;
+Quit is in the tray's menu.
+
+The app updates itself: at launch, and from Check for updates in the tray, it
+asks before installing a newer app and restarting. That's the app only; `valk`
+keeps its own updates (`valk upgrade`), and your sessions keep running. The
+AppImage, the `.msi` and the macOS app update this way. The `.deb` doesn't:
+install the new `.deb` over it.
+
+Uninstalling the `.deb` or the `.msi` unpairs the app (`valk web revoke
+"Desktop app"`), so the token left in its data stops working. macOS and the
+AppImage have no uninstall step: there the old device goes when the app pairs
+again, or remove it yourself with `valk web devices` and `valk web revoke`.
+
+From source it needs Rust 1.90 or newer and, on Linux, the WebKitGTK 4.1 and
+appindicator development packages (`webkit2gtk-4.1` and `libayatana-appindicator`
+on Arch; `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev` on Debian and
+Ubuntu):
+
+```sh
+cargo run --release -p valkyrie-desktop --features window
+```

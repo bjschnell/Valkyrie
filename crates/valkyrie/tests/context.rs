@@ -347,11 +347,13 @@ fn corrections_become_proposals() {
     drop(daemon);
 }
 
-/// ADR-0011: a turn that ended after a tool failed gets a retro. The failed call
-/// and what worked next become a proposal, its signature is recorded, and a turn
-/// with no new failure isn't read again.
+/// ADR-0011 with ADR-0017 §5: a turn that ended after a tool failed gets a retro.
+/// The failed call and what worked next become an agent note with the failure's
+/// signature, not a proposal, and a turn with no new failure isn't read again.
+/// When the note was served to the session and the failure came back anyway, the
+/// retro is shown it and replaces it.
 #[test]
-fn failures_become_proposals() {
+fn failures_become_notes() {
     let dir = std::env::temp_dir().join(format!("valkyrie-retro-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let daemon = Daemon { dir: dir.clone() };
@@ -369,19 +371,26 @@ fn failures_become_proposals() {
     .unwrap();
     std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
 
+    // The model: a lesson, then the same lesson correcting note #1.
     let model = bin.join("model");
+    let calls = out.join("calls");
     std::fs::write(
         &model,
         format!(
             "#!/bin/sh\ncat >> {calls}\necho '---' >> {calls}\n\
-             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n",
-            calls = out.join("calls").display()
+             if [ $(grep -c -- --- {calls}) = 1 ]; then\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill exact pids, never pkill -f\\\",\\\"body\\\":\\\"pkill -f matches the agent shell.\\\"}}]}}\"}}'\n\
+             else\n\
+             printf '%s\\n' '{{\"result\":\"{{\\\"decisions\\\":[{{\\\"moment\\\":1,\\\"kind\\\":\\\"gotcha\\\",\\\"title\\\":\\\"Kill by pid from pgrep -x\\\",\\\"body\\\":\\\"kill <pid> alone missed the daemon.\\\",\\\"replaces\\\":1}}]}}\"}}'\n\
+             fi\n",
+            calls = calls.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&model, exec.clone()).unwrap();
 
-    // The agent's transcript: `pkill -f` failed, `kill <pid>` worked.
+    // The agent's transcript: `pkill -f` failed, `kill <pid>` worked; later the
+    // same failure again.
     let transcript = out.join("t.jsonl");
     let call = |id: &str, command: &str| {
         serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":command}}]}}).to_string()
@@ -396,6 +405,13 @@ fn failures_become_proposals() {
         result("2", None),
     ];
     std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    let again = [
+        call("3", "pkill -f 'valk daemon'"),
+        result("3", Some("Exit code 144\nTerminated")),
+        call("4", "kill $(pgrep -x valk)"),
+        result("4", None),
+    ];
+    std::fs::write(out.join("again.jsonl"), again.join("\n") + "\n").unwrap();
     let hook = |event: &str| {
         format!(
             "echo '{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"c1\",\"tool_name\":\"Bash\",\"transcript_path\":\"{}\"}}' | valk hook claude\n",
@@ -406,12 +422,21 @@ fn failures_become_proposals() {
     std::fs::write(
         &agent,
         format!(
-            "#!/bin/sh\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 30\n",
+            "#!/bin/sh\ncd {repo}\n{}sleep 0.3\n{}sleep 0.3\n{}sleep 0.3\n{}\
+             for i in $(seq 50); do valk notes search pkill > {search} 2>&1; \
+             grep -q 'agent note #1' {search} && break; sleep 0.2; done\n\
+             cat {again} >> {t}\n{}sleep 0.3\n{}sleep 30\n",
             hook("SessionStart"),
             hook("PostToolUseFailure"),
             hook("Stop"),
             // No failure since: no retro.
             hook("Stop"),
+            hook("PostToolUseFailure"),
+            hook("Stop"),
+            repo = repo.display(),
+            search = out.join("search").display(),
+            again = out.join("again.jsonl").display(),
+            t = transcript.display(),
         ),
     )
     .unwrap();
@@ -444,30 +469,54 @@ fn failures_become_proposals() {
         "--",
         agent.to_str().unwrap(),
     ]);
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let root = valkyrie_context::project::root(&repo);
     let start = Instant::now();
-    let mut listed = String::new();
-    while start.elapsed() < Duration::from_secs(10) && !listed.contains("pkill") {
+    let mut notes = Vec::new();
+    while start.elapsed() < Duration::from_secs(15) && notes.len() < 2 {
         std::thread::sleep(Duration::from_millis(100));
-        listed = valk(&["decisions"]);
+        notes = store.notes(&root);
     }
-    assert!(
-        listed.contains("#1  gotcha     Kill exact pids, never pkill -f (proposed)"),
-        "{listed}"
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    let (one, two) = (&notes[0], &notes[1]);
+    assert_eq!(
+        one.text,
+        "Kill exact pids, never pkill -f\npkill -f matches the agent shell.\n\n\
+         From a failure: `pkill -f 'valk daemon'` → Terminated"
     );
-    let shown = stored(&dir, &repo, 1);
+    assert_eq!(one.by, "valkyrie");
+    assert!(one.sig.as_deref().is_some_and(|s| s.len() == 16), "{one:?}");
+    assert_eq!(one.conversation.as_deref(), Some("c1"));
+    // Served, then the failure came back: corrected, not added beside it.
+    let search = std::fs::read_to_string(out.join("search")).unwrap();
+    assert!(search.contains("agent note #1"), "{search}");
+    assert_eq!(one.status, valkyrie_proto::NoteStatus::Replaced, "{one:?}");
+    assert_eq!(two.replaces, Some(1));
+    assert_eq!(two.sig, one.sig);
     assert!(
-        shown.contains("by: valkyrie")
-            && shown.contains("From a failure: `pkill -f 'valk daemon'` → Terminated"),
-        "{shown}"
+        two.text.starts_with("Kill by pid from pgrep -x\n"),
+        "{}",
+        two.text
     );
-    std::thread::sleep(Duration::from_millis(1500));
-    let calls = std::fs::read_to_string(out.join("calls")).unwrap();
-    assert_eq!(calls.matches("---").count(), 1, "{calls}");
+    // Nothing went to review.
+    assert!(store.load(&root).is_empty(), "{:?}", store.load(&root));
+
+    std::thread::sleep(Duration::from_millis(1000));
+    let calls = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(calls.matches("---").count(), 2, "{calls}");
+    let first = calls.split("---").next().unwrap();
     assert!(
-        calls.contains("Call: pkill -f 'valk daemon'")
-            && calls.contains("Next that worked: kill 4242")
-            && calls.contains("seen_before=\"0\""),
-        "{calls}"
+        first.contains("Call: pkill -f 'valk daemon'")
+            && first.contains("Next that worked: kill 4242")
+            && first.contains("seen_before=\"0\"")
+            && !first.contains("<notes>"),
+        "{first}"
+    );
+    let second = calls.split("---").nth(1).unwrap();
+    assert!(
+        second.contains("seen_before=\"1\"")
+            && second.contains("<note number=\"1\" moment=\"1\" served=\"true\">Kill exact pids"),
+        "{second}"
     );
     let state = dir.join("state/valkyrie/context");
     let sigs = std::fs::read_dir(&state)
@@ -479,7 +528,7 @@ fn failures_become_proposals() {
     let sigs = std::fs::read_to_string(sigs).unwrap();
     assert_eq!(sigs.lines().count(), 2, "{sigs}");
     assert!(
-        sigs.contains("\"call\":\"1\"") && sigs.contains("\"decision\":1"),
+        sigs.contains("\"call\":\"1\"") && sigs.contains("\"call\":\"3\""),
         "{sigs}"
     );
     drop(daemon);
@@ -907,8 +956,11 @@ fn agents_hear_about_their_siblings() {
         .as_str()
         .unwrap();
     assert!(text.contains("- auth-work (claude, "), "{text}");
+    // Either order: each `valk hook` is its own connection, and the daemon can read
+    // the second edit first. Newest-first is activity.rs's unit test to pin.
     assert!(
-        text.contains("asked “refactor the auth module”; editing src/db.rs, src/auth.rs"),
+        text.contains("asked “refactor the auth module”; editing src/db.rs, src/auth.rs")
+            || text.contains("asked “refactor the auth module”; editing src/auth.rs, src/db.rs"),
         "{text}"
     );
     assert!(
@@ -1209,7 +1261,7 @@ fn mcp_serves_and_proposes_decisions() {
         .collect();
     assert_eq!(replies.len(), 6, "{replies:?}");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "valkyrie");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 10);
     let text = |i: usize| {
         replies[i]["result"]["content"][0]["text"]
             .as_str()
@@ -1752,4 +1804,526 @@ fn a_file_gets_the_decisions_scoped_to_it_once_a_session() {
     assert_eq!(sub.trim(), "");
     assert!(tool("c", "Read", proto).contains("Update the TS types"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-0017 phase 1: a note records the session and commit the daemon found, not
+/// what the client said; a correction replaces and never forks; a deletion leaves a
+/// tombstone an agent can't write past, shown in health; and no note reaches an
+/// agent's session start.
+#[test]
+fn agent_notes_say_where_they_came_from_and_stay_deleted() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-notes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo.join("src"), &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("src/net.rs"), "fn retry() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "one"]);
+    let head = git(&["rev-parse", "--short", "HEAD"]);
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let o = |name: &str| out.join(name).display().to_string();
+
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n\
+             cd {repo}\n\
+             valk note 'the retry test in src/net.rs is flaky under load' > {a} 2>&1\n\
+             valk note --replaces 1 'src/net.rs retry flakes only with --release' > {r} 2>&1\n\
+             valk note --replaces 1 'a fork of the chain' > {fork} 2>&1\n\
+             valk notes rm 2 > {rm} 2>&1\n\
+             valk note 'src/net.rs retry flakes only with --release!' > {again} 2>&1\n\
+             valk note --force 'src/net.rs retry flakes only with --release' > {forced} 2>&1\n\
+             echo done > {d}\n\
+             sleep 30\n",
+            repo = repo.display(),
+            a = o("a"),
+            r = o("r"),
+            fork = o("fork"),
+            rm = o("rm"),
+            again = o("again"),
+            forced = o("forced"),
+            d = o("agent-done"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let human = |line: &str| {
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{line}");
+    };
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    human(&format!(
+        "valk new --cwd {} -- {} > {}",
+        repo.display(),
+        agent.display(),
+        o("spawned")
+    ));
+    wait_for(&out.join("agent-done"));
+    let read = |name: &str| wait_for(&out.join(name));
+    assert!(read("a").contains("note #1 written"), "{}", read("a"));
+    assert!(read("r").contains("replaces #1"), "{}", read("r"));
+    assert!(read("fork").contains("replaced by #2"), "{}", read("fork"));
+    assert!(read("rm").contains("#2 deleted"), "{}", read("rm"));
+    assert!(
+        read("again").contains("matches note #2"),
+        "{}",
+        read("again")
+    );
+    assert!(
+        read("forced").contains("is for the user"),
+        "{}",
+        read("forced")
+    );
+
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let root = valkyrie_context::project::root(&repo);
+    let notes = store.notes(&root);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let one = &notes[0];
+    assert_eq!(one.by, "agent");
+    assert_ne!(one.session, "none", "the daemon found the agent's session");
+    assert_eq!(one.commit.as_deref(), Some(head.as_str()));
+    assert_eq!(one.anchors, vec!["src/net.rs".to_owned()]);
+    // #2 was deleted, so #1 stays replaced: deleting a correction doesn't revive
+    // what it corrected.
+    assert_eq!(one.status, valkyrie_proto::NoteStatus::Replaced);
+
+    // The user sees the agent's deletion, and may write the note again on purpose.
+    human(&format!("valk notes health > {} 2>&1", o("health")));
+    let health = read("health");
+    assert!(
+        health.contains("1 by agents") && health.contains("#2"),
+        "{health}"
+    );
+    human(&format!(
+        "valk note --force 'src/net.rs retry flakes only with --release' > {} 2>&1",
+        o("human-forced")
+    ));
+    assert!(
+        read("human-forced").contains("note #3 written"),
+        "{}",
+        read("human-forced")
+    );
+    human(&format!("valk notes > {} 2>&1", o("list")));
+    let list = read("list");
+    assert!(
+        list.contains("observation, not instruction")
+            && list.contains("#3")
+            && list.contains("session none")
+            && !list.contains("#1 "),
+        "{list}"
+    );
+
+    // Never injected: an agent's session start carries no note.
+    human(&format!(
+        "echo '{{\"hook_event_name\":\"SessionStart\",\"cwd\":\"{}\"}}' | VALK_SESSION=1 VALK_CONTEXT={} valk context-hook claude > {}",
+        repo.display(),
+        dir.join("state/valkyrie/context").display(),
+        o("hook")
+    ));
+    let hook = read("hook");
+    assert!(!hook.contains("flakes"), "{hook}");
+    drop(daemon);
+}
+
+/// ADR-0017 phase 2: an agent's search finds live notes and this repository's
+/// past sessions, framed as unreviewed; each hit it got is logged as served to
+/// its session, and `valk notes show` says where a note went. The session-start
+/// block says search exists, and still carries no note.
+#[test]
+fn agents_search_notes_and_past_sessions_and_each_hit_is_logged() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-recall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&["add", "."]);
+    // Committed before the past session, so its branch resolves to this commit.
+    let o = Command::new("git")
+        .args(["commit", "-qm", "one"])
+        .current_dir(&repo)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_AUTHOR_DATE", "2026-11-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-11-01T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{o:?}");
+    let head = git(&["rev-parse", "--short", "HEAD"]);
+    let root = valkyrie_context::project::root(&repo);
+
+    // A past session of this repository, as Claude Code keeps it.
+    let claude = dir.join("claude");
+    let dashed: String = root
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let past = claude.join("projects").join(dashed);
+    std::fs::create_dir_all(&past).unwrap();
+    let event = |kind: &str, content: serde_json::Value| {
+        serde_json::json!({
+            "type": kind, "sessionId": "feedbeefcafe0000", "gitBranch": "main",
+            "cwd": root, "timestamp": "2026-11-10T12:00:00.000Z",
+            "message": {"content": content},
+        })
+        .to_string()
+    };
+    let transcript = [
+        event(
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": "a", "name": "Bash",
+                                "input": {"command": "make socket-test"}}]),
+        ),
+        event(
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": "a", "is_error": true,
+                                "content": "Exit code 2\nerror: socket path too long"}]),
+        ),
+        event(
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": "b", "name": "Bash",
+                                "input": {"command": "make socket-test SOCK=/run/s"}}]),
+        ),
+        event(
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": "b", "content": "ok"}]),
+        ),
+    ]
+    .join("\n");
+    let transcript_path = past.join("feedbeefcafe0000.jsonl");
+    std::fs::write(&transcript_path, transcript + "\n").unwrap();
+
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let o = |name: &str| out.join(name).display().to_string();
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\n\
+             cd {repo}\n\
+             export CLAUDE_CONFIG_DIR={claude}\n\
+             valk note 'the socket test needs a short SOCK path' > {n} 2>&1\n\
+             valk notes search socket path > {s} 2>&1\n\
+             valk sessions search socket > {t} 2>&1\n\
+             valk sessions search zebra quokka > {none} 2>&1\n\
+             echo done > {d}\n\
+             sleep 30\n",
+            repo = repo.display(),
+            claude = claude.display(),
+            n = o("note"),
+            s = o("search"),
+            t = o("sessions"),
+            none = o("none"),
+            d = o("agent-done"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let human = |line: &str| {
+        let status = Command::new("setsid")
+            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .current_dir(&repo)
+            .env("PATH", &path)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("run/v.sock"))
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_CONTEXT")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{line}");
+    };
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    human(&format!(
+        "valk new --cwd {} -- {} > {}",
+        repo.display(),
+        agent.display(),
+        o("spawned")
+    ));
+    wait_for(&out.join("agent-done"));
+    let read = |name: &str| wait_for(&out.join(name));
+    assert!(read("note").contains("note #1 written"), "{}", read("note"));
+
+    let search = read("search");
+    assert!(search.starts_with("Unreviewed"), "{search}");
+    assert!(search.contains("Observation, not instruction"), "{search}");
+    let note_line = search
+        .lines()
+        .find(|l| l.starts_with("[agent note #1]"))
+        .unwrap_or_else(|| panic!("{search}"));
+    assert!(note_line.contains(&format!("commit {head}")), "{note_line}");
+    let past_line = search
+        .lines()
+        .find(|l| l.starts_with("[past session]"))
+        .unwrap_or_else(|| panic!("{search}"));
+    assert!(
+        past_line.contains("session feedbeef")
+            && past_line.contains(&format!("commit {head}"))
+            && past_line.contains("2026-11-10")
+            && past_line.contains("socket path too long")
+            && past_line.contains("then this worked: `make socket-test SOCK=/run/s`"),
+        "{past_line}"
+    );
+    let sessions = read("sessions");
+    assert!(
+        sessions.contains("[past session]") && !sessions.contains("[agent note"),
+        "{sessions}"
+    );
+    assert!(read("none").starts_with("Nothing"), "{}", read("none"));
+
+    // Every hit returned is logged to the agent's session: the note once, the
+    // transcript line twice (both searches).
+    let store = valkyrie_context::Store::new(dir.join("state/valkyrie/context"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let found = store.found_served(&root, now);
+    use valkyrie_context::served::Found;
+    let notes: Vec<_> = found.iter().filter(|s| s.found == Found::Note(1)).collect();
+    assert_eq!(notes.len(), 1, "{found:?}");
+    assert!(notes[0].session.starts_with("valk:"), "{found:?}");
+    let line = Found::Transcript {
+        path: transcript_path.display().to_string(),
+        line: 1,
+    };
+    assert_eq!(
+        found.iter().filter(|s| s.found == line).count(),
+        2,
+        "{found:?}"
+    );
+
+    // The user's own search isn't an agent being served.
+    human(&format!("valk sessions search socket > {} 2>&1", o("mine")));
+    assert!(read("mine").contains("[past session]"), "{}", read("mine"));
+    assert_eq!(store.found_served(&root, now + 5).len(), found.len());
+
+    human(&format!("valk notes show 1 > {} 2>&1", o("show")));
+    let show = read("show");
+    assert!(
+        show.contains("Served, newest first:") && show.contains(&notes[0].session),
+        "{show}"
+    );
+
+    // The session-start block says search exists, and carries no note.
+    human(&format!(
+        "echo '{{\"hook_event_name\":\"SessionStart\",\"cwd\":\"{}\"}}' | VALK_SESSION=1 VALK_CONTEXT={} valk context-hook claude > {}",
+        repo.display(),
+        dir.join("state/valkyrie/context").display(),
+        o("hook")
+    ));
+    let hook = read("hook");
+    assert!(hook.contains("notes search <words>"), "{hook}");
+    assert!(!hook.contains("short SOCK path"), "{hook}");
+    drop(daemon);
+}
+
+/// ADR-0017 §7: one note write proposes every recurring cluster that's due, not
+/// only the first; the rest don't wait for the project's next note.
+#[test]
+fn one_note_write_proposes_every_cluster_due() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: needs util-linux script for a human's terminal");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("valkyrie-due-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let daemon = Daemon { dir: dir.clone() };
+    let (bin, repo, out) = (dir.join("bin"), dir.join("repo"), dir.join("out"));
+    for d in [&bin, &repo, &out] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let o = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{o:?}");
+    std::os::unix::fs::symlink(BIN, bin.join("valk")).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Two clusters, each from three sessions, already on disk; drafting is off,
+    // so each is proposed as its newest note says it.
+    let context = dir.join("state/valkyrie/context");
+    for d in [
+        dir.join("state"),
+        dir.join("state/valkyrie"),
+        context.clone(),
+    ] {
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(context.join("auto"), "off\n").unwrap();
+    let store = valkyrie_context::Store::new(context.clone());
+    let root = valkyrie_context::project::root(&repo);
+    let topics = [
+        "the net retry test is flaky under load, rerun it once",
+        "builds need protoc installed from the system packages",
+    ];
+    for (t, text) in topics.iter().enumerate() {
+        for s in 0..3 {
+            store
+                .note(
+                    &valkyrie_proto::NewNote {
+                        cwd: repo.clone(),
+                        text: (*text).into(),
+                        replaces: None,
+                        force: false,
+                    },
+                    valkyrie_proto::Provenance {
+                        by: "agent".into(),
+                        session: Some(format!("s{t}{s}")),
+                        conversation: Some(format!("c{t}{s}")),
+                        commit: None,
+                        cwd: None,
+                    },
+                    None,
+                    1 + (t * 3 + s) as u64,
+                )
+                .unwrap();
+        }
+    }
+
+    let agent = bin.join("claude");
+    std::fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\ncd {repo}\nvalk note 'the docs site deploys on tag' > {a} 2>&1\nsleep 30\n",
+            repo = repo.display(),
+            a = out.join("a").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::set_permissions(
+        dir.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let status = Command::new("setsid")
+        .args([
+            "-f",
+            "script",
+            "-qec",
+            &format!("valk new --cwd {} -- {}", repo.display(), agent.display()),
+            "/dev/null",
+        ])
+        .current_dir(&repo)
+        .env("PATH", &path)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("VALK_SOCKET", dir.join("run/v.sock"))
+        .env_remove("VALK_SESSION")
+        .env_remove("VALK_CONTEXT")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let a = wait_for(&out.join("a"));
+    assert!(a.contains("note #7 written"), "{a}");
+
+    let start = Instant::now();
+    let proposed = loop {
+        let proposed: Vec<String> = store
+            .load(&root)
+            .into_iter()
+            .filter(|d| d.provenance.by == "valkyrie")
+            .map(|d| d.title)
+            .collect();
+        if proposed.len() >= 2 || start.elapsed() > Duration::from_secs(10) {
+            break proposed;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(proposed.len(), 2, "{proposed:?}");
+    drop(daemon);
 }

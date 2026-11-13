@@ -29,6 +29,9 @@ pub struct Setup {
     pub socket: PathBuf,
     pub listen: SocketAddr,
     pub url: Option<String>,
+    /// For this machine only (the desktop app, ADR-0020 §4): no `tailscale serve`,
+    /// and no pairing code at the end.
+    pub local: bool,
     pub dry_run: bool,
     pub remove: bool,
 }
@@ -97,6 +100,28 @@ pub fn run(setup: Setup) -> Result<()> {
         println!("# {}\n{text}", file.display());
         return Ok(());
     }
+    // The desktop app asks for this whenever nothing answers. A service that's
+    // already set up, for phones over the tailnet say, is the user's: it is
+    // started again as it is, never rewritten into a local one.
+    if setup.local && file.exists() {
+        if !platform.running(&setup.name) {
+            platform.start(&setup.name, &file)?;
+        }
+        if !wait_for(setup.listen, Duration::from_secs(10)) {
+            bail!(
+                "{} is already set up ({}) and nothing answers on {}; {}",
+                setup.name,
+                file.display(),
+                setup.listen,
+                platform.logs(&setup.name)
+            );
+        }
+        println!(
+            "{} was already set up; left as it is, running on {}",
+            setup.name, setup.listen
+        );
+        return Ok(());
+    }
     // A `valk web` left running in a terminal would hold the port, and the service
     // would fail to start over and over.
     if !platform.running(&setup.name) && std::net::TcpListener::bind(setup.listen).is_err() {
@@ -124,6 +149,11 @@ pub fn run(setup: Setup) -> Result<()> {
         setup.listen
     );
     platform.notes();
+    if setup.local {
+        println!("for this machine only: not on your tailnet, and no pairing code");
+        println!("logs: {}", platform.logs(&setup.name));
+        return Ok(());
+    }
 
     let url = valkyrie_web::public_url(setup.url.clone(), setup.listen);
     if url.starts_with("https://") && setup.listen.ip().is_loopback() {
@@ -555,6 +585,7 @@ mod tests {
             socket: "/home/u/My State/run/h.sock".into(),
             listen: "127.0.0.1:8790".parse().unwrap(),
             url: None,
+            local: false,
             dry_run: false,
             remove: false,
         }

@@ -37,6 +37,12 @@ pub struct Activity {
     /// Items this session filed that the user has accepted since, until its agent
     /// is told on its next prompt, so it can take them (backlog #53).
     accepted: Vec<u32>,
+    /// Pull requests merged in this repository since its last prompt, one line
+    /// each, until its agent is told (backlog #121).
+    merged: Vec<String>,
+    /// Comments the user left on docs this session wrote, as (doc, comment),
+    /// until its agent is told on its next prompt (ADR-0021 §6).
+    comments: Vec<(u32, u32)>,
 }
 
 impl Activity {
@@ -123,6 +129,30 @@ impl Activity {
         }
     }
 
+    /// Remembers to tell the agent `line` about a merge, once.
+    pub fn merged(&mut self, line: String) {
+        if !self.merged.contains(&line) {
+            self.merged.push(line);
+        }
+    }
+
+    /// The merges to tell the agent of, once, oldest first.
+    pub fn take_merged(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.merged)
+    }
+
+    /// Remembers to tell the agent of comment `comment` on its doc `doc`.
+    pub fn commented(&mut self, doc: u32, comment: u32) {
+        if !self.comments.contains(&(doc, comment)) {
+            self.comments.push((doc, comment));
+        }
+    }
+
+    /// The comments to tell the agent of, once, oldest first.
+    pub fn take_comments(&mut self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.comments)
+    }
+
     /// The items to tell the agent the user accepted, once, oldest first.
     pub fn take_accepted(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.accepted)
@@ -179,7 +209,7 @@ fn first_line(text: &str) -> Option<String> {
 
 /// One line another agent will read: no control characters (newlines included)
 /// or bidi overrides, at most `max` characters.
-fn plain(text: &str, max: usize) -> String {
+pub(crate) fn plain(text: &str, max: usize) -> String {
     let text: String = text
         .chars()
         .map(|c| {

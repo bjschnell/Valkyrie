@@ -42,6 +42,8 @@ export interface SessionInfo {
   status: AgentStatus;
   /** The agent's own transcript, when known: the Chat view reads it. */
   chat?: string;
+  /** Another live agent in the repository changed the same files (protocol 31). */
+  overlap?: string;
 }
 
 export interface QueueItem {
@@ -85,6 +87,110 @@ export interface Flag {
 }
 
 /** A project decision (ADR-0007). */
+/** How the away digest is grouped (backlog #105). */
+export type DigestGroup = "repo" | "day";
+/** Where a session's work ended up, most urgent first. */
+export type Outcome = "stuck" | "abandoned" | "waiting" | "working" | "shipped" | "done";
+
+/** One agent session in the away digest. */
+export interface DigestEntry {
+  /** Its event log's name: stable across daemon restarts. */
+  key: string;
+  /** The live session, while it runs. */
+  session?: SessionId;
+  repo: string;
+  cwd?: string;
+  agent: string;
+  /** What it was about, one line. */
+  what: string;
+  item?: number;
+  branch?: string;
+  pr?: string;
+  outcome: Outcome;
+  /** Why that outcome, one line. */
+  detail: string;
+  /** The agent's own last line. */
+  summary?: string;
+  prompts: number;
+  first_ms: number;
+  last_ms: number;
+  ended_ms?: number;
+}
+
+export interface Digest {
+  since_ms: number;
+  until_ms: number;
+  /** `since_ms` is when you were last gone, not a time you picked. */
+  away: boolean;
+  by: DigestGroup;
+  entries: DigestEntry[];
+  /** The same, as markdown to paste. */
+  markdown: string;
+}
+
+export type DocKind = "plan" | "research" | "report" | "note";
+
+/** A doc in the docs folder (ADR-0021). `key` is what it's opened by: its
+ * `valk-id`, or a handle the daemon made for one of the user's own; never a path. */
+export interface Doc {
+  id: number;
+  kind: DocKind;
+  title: string;
+  /** Relative to the docs folder, '/'-separated. */
+  path: string;
+  key?: string;
+  /** An agent wrote or edited it since the Docs list was last opened. */
+  unread?: boolean;
+  by: string;
+  created: string;
+  session?: string;
+  commit?: string;
+  item?: number;
+  repo?: string;
+  edited?: string[];
+  hash?: string;
+  /** The whole file, front matter and all; only when opened. */
+  text?: string;
+}
+
+/** One of a doc's past versions (ADR-0021 §4): the file as it was before an edit replaced it. */
+export interface DocVersion {
+  /** What `doc_history` and `restore_doc` name it by. */
+  version: string;
+  /** When it was replaced, in seconds. */
+  at: number;
+  /** Who wrote it. */
+  by: string;
+  size: number;
+}
+
+/** A doc the user deleted, kept so it can be put back. */
+export interface DeletedDoc {
+  /** What `undelete_doc` takes. */
+  token: string;
+  /** When it was deleted, in seconds. */
+  at: number;
+  path: string;
+  title: string;
+}
+
+/** Where a comment on a doc stands (ADR-0021 §6). */
+export type CommentState = "open" | "sent" | "answered" | "resolved";
+
+/** A comment the user left on a doc, or on one block of it. */
+export interface DocComment {
+  id: number;
+  /** When it was left, in seconds. */
+  at: number;
+  /** The block it's about, as it read then, on one line; none for the whole doc. */
+  quote?: string;
+  text: string;
+  state: CommentState;
+  /** The session it was told to. */
+  sent_to?: string;
+  changed: number;
+}
+
 export type DecisionKind =
   "decision" | "constraint" | "pattern" | "gotcha" | "fix" | "skill" | "policy";
 export const DECISION_KINDS: DecisionKind[] = [
@@ -203,15 +309,37 @@ export interface Modes {
   app_cursor: boolean;
   bracketed_paste: boolean;
   alt_screen: boolean;
+  /** 1004: the program wants to know when the terminal gains or loses the keyboard. */
+  focus_events?: boolean;
+  /** 1007: the wheel scrolls by sending arrow keys in the alternate screen. */
+  alt_scroll?: boolean;
+  /** The program asked for the mouse: clicks (1000), drags too (1002), every move (1003). */
+  mouse_click?: boolean;
+  mouse_drag?: boolean;
+  mouse_motion?: boolean;
+  /** How it wants reports written: 1006 (SGR) or 1005 (UTF-8); neither is the old X10 form. */
+  mouse_sgr?: boolean;
+  mouse_utf8?: boolean;
 }
+
+/** Where a `scrollback` page starts: lines above the live screen, or a line
+ * counted from the oldest in history (which stays put while output arrives). */
+export type ScrollAnchor = { up: number } | { from_top: number };
 
 export interface ScreenUpdate {
   full: boolean;
   size: Size;
   rows: Row[];
-  cursor: { x: number; y: number; visible: boolean };
+  cursor: Cursor;
   modes: Modes;
   title: string | null;
+}
+
+export interface Cursor {
+  x: number;
+  y: number;
+  visible: boolean;
+  shape?: "block" | "underline" | "beam";
 }
 
 export interface SpawnSpec {
@@ -282,6 +410,10 @@ export interface ItemNote {
   text: string;
   /** From an agent that took the item rather than was launched on it: never in a brief. */
   taken?: boolean;
+  /** From an agent on other work, neither launched on it nor took it: never in a brief. */
+  aside?: boolean;
+  /** For an aside, the item that agent was on, when it was on one. */
+  from?: number;
 }
 
 /** What an item's checkout holds, from git. */
@@ -335,7 +467,9 @@ export type ItemChange =
       /** The whole list, replacing the item's; empty clears it. */
       blocked_by?: number[];
     }
-  | { do: "status"; status: ItemStatus };
+  | { do: "status"; status: ItemStatus }
+  /** Puts a started item back in the backlog and stops its sessions (protocol 28). */
+  | { do: "return" };
 
 /** One item's place in a build order: why, and what accepting it changes
  * (`priority` and the whole `blocked_by` list; absent keeps what it has). */
@@ -362,6 +496,24 @@ export interface OrderProposal {
 /** A ready item the supervisor offers to start (ADR-0019 §2 `launch`, protocol 27):
  * open, nobody on it, its blockers finished (or waived by the model), with room
  * under the repository's `max_running`. One per repository at most. */
+/** How much of the plan is used (protocol 30), as Claude Code's status line last
+ * said it: only as new as the last Claude session to draw one. */
+export interface Quota {
+  /** When it was read, seconds since the epoch. */
+  at: number;
+  /** Shortest window first. */
+  limits: QuotaLimit[];
+}
+
+export interface QuotaLimit {
+  /** Claude Code's name: `five_hour`, `seven_day`, `seven_day_opus`, … */
+  name: string;
+  /** Share used, 0–100. */
+  used: number;
+  /** Seconds since the epoch. */
+  resets_at?: number;
+}
+
 export interface LaunchOffer {
   /** Changes when the repository's offer is replaced. */
   id: number;
@@ -393,6 +545,8 @@ export type Request =
   | { t: "attach"; session: SessionId; size: Size | null }
   | { t: "detach" }
   | { t: "dump"; session: SessionId }
+  /** One screenful of history, then the screen; replies `scrollback`. */
+  | { t: "scrollback"; session: SessionId; anchor: ScrollAnchor }
   | { t: "kill"; session: SessionId }
   | { t: "mark_seen"; session: SessionId; seq: number }
   | { t: "rename"; session: SessionId; name: string | null }
@@ -406,6 +560,33 @@ export type Request =
       seen: number;
     }
   | { t: "decisions"; cwd: string | null }
+  /** Every doc, newest first; replies `docs`. */
+  /** `count_only`: no docs, just the unread count (the Inbox's poll). */
+  | { t: "docs"; count_only?: boolean }
+  /** What every agent did since `since_ms`, or since you were last gone (protocol 37). */
+  | { t: "digest"; since_ms?: number | null; by: DigestGroup }
+  /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
+  | { t: "open_doc"; key: string }
+  /** A doc's comments; replies `doc_comments`. */
+  | { t: "doc_comments"; key: string }
+  /** The user comments on a doc, or the block `quote` reads; replies `doc_comments`. */
+  | { t: "comment_doc"; key: string; quote?: string; text: string }
+  /** The user closes a comment; replies `doc_comments`. */
+  | { t: "resolve_comment"; key: string; comment: number }
+  /** The Docs list was opened: what agents wrote until now is read. */
+  | { t: "docs_seen"; at: number }
+  /** The user's save from the editor, if `base` is still on disk; replies `doc_saved`. */
+  | { t: "save_doc"; key: string; base: string; body: string }
+  /** A doc's past versions, and `version`'s text when given; replies `doc_history`. */
+  | { t: "doc_history"; key: string; version?: string }
+  /** Puts a past version back, under the same rule as a save; replies `doc_saved`. */
+  | { t: "restore_doc"; key: string; base: string; version: string }
+  /** Deletes a doc, keeping a copy; replies `doc_deleted`, or `doc_saved` with `conflict`. */
+  | { t: "delete_doc"; key: string; base: string }
+  /** Puts a deleted doc back; replies `doc`. */
+  | { t: "undelete_doc"; token: string }
+  /** Deleted docs that can still be put back, newest first; replies `deleted_docs`. */
+  | { t: "deleted_docs" }
   | { t: "add_item"; item: NewItem }
   | { t: "items" }
   | { t: "change_item"; id: number; change: ItemChange }
@@ -440,9 +621,14 @@ export type Request =
       model?: string;
     };
 
+export type TermColors = { fg: [number, number, number]; bg: [number, number, number]; ansi: [number, number, number][] };
+
 /** Fire-and-forget messages. */
 export type Notice =
   | { t: "input"; session: SessionId; data: number[] }
+  | { t: "resize"; session: SessionId; size: Size }
+  /** The colors this session's programs are told the terminal has (OSC 10/11/4). */
+  | { t: "term_colors"; session: SessionId; colors: TermColors | null }
   /** To `valk web` itself, not the daemon: whether this app is on screen, which
    * holds back notifications. */
   | { t: "visible"; visible: boolean }
@@ -466,6 +652,15 @@ export type Reply =
   | { t: "text"; text: string }
   | { t: "decision"; decision: Decision }
   | { t: "decisions"; decisions: Decision[] }
+  | { t: "doc"; doc: Doc }
+  /** `to`: on a new comment, the running session that hears it at its next prompt. */
+  | { t: "doc_comments"; comments: DocComment[]; to?: string }
+  | { t: "docs"; docs: Doc[]; root: string; unread?: number; at?: number }
+  /** `conflict`: refused, and `doc` is what's on disk now. */
+  | { t: "doc_saved"; doc: Doc; conflict?: boolean }
+  | { t: "doc_history"; versions: DocVersion[]; text?: string }
+  | { t: "doc_deleted"; token: string }
+  | { t: "deleted_docs"; docs: DeletedDoc[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
@@ -473,7 +668,11 @@ export type Reply =
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
   | { t: "step_taken"; said: string }
-  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] };
+  | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] }
+  /** `from_top`: the first row's line, from the oldest in history; `history`: lines
+   * above the screen, so `from_top == history` is the live screen. */
+  | { t: "scrollback"; from_top: number; history: number; rows: Row[] }
+  | { t: "digest"; digest: Digest };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }
@@ -485,6 +684,8 @@ export type ServerMsg =
   | { t: "proposals"; items: Decision[] }
   /** Every backlog item, and the build orders and launch offers waiting on the user. */
   | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
+  /** The plan's quota, if anything has said it yet (protocol 30). */
+  | { t: "quota"; quota: Quota | null }
   | { t: "clipboard"; session: SessionId; text: string }
   | { t: "graphics"; session: SessionId }
   | ChatUpdate;

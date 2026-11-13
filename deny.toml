@@ -1,0 +1,13 @@
+# What `cargo deny check advisories` (.github/workflows/audit.yml) lets through.
+# Every entry is a crate that is unmaintained, not one with a known hole, that
+# only the desktop app's `window` feature pulls in, through Tauri, and that this
+# repository cannot replace. None of them is in `valk`. Take an entry out when
+# the Tauri release that drops the crate is in Cargo.lock.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, a build-time macro helper: via glib-macros 0.18, the GTK 3 bindings Tauri 2 uses on Linux" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; Tauri's notification, opener and single-instance plugins are still on zbus 5" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; same plugins" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; same plugins" },
+]

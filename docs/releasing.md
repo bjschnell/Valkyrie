@@ -91,6 +91,24 @@ any error.
    builds and installers, and publishes the draft. Only then do `install-release.sh`
    and `valk upgrade` see it.
 
+5. `desktop.yml` then builds the desktop app's installers (a `.deb` and an
+   AppImage, a `.dmg`, an `.msi`) around that release's `valk` and adds them to
+   the release. The release is published without waiting for them, so a failure
+   there doesn't hold back `valk`: re-run the failed `desktop` jobs. They aren't
+   signed with a certificate (the macOS app is signed ad hoc and has to be
+   allowed once in System Settings; Windows shows a SmartScreen prompt). To try the installer build without a release,
+   run it by hand: `gh workflow run desktop.yml` builds them around the latest
+   release's `valk` and uploads nothing.
+
+   The app's updater reads `latest.json` from the latest release. `desktop.yml`
+   writes it from the update files' signatures, signed with the
+   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets;
+   the public half is `plugins.updater.pubkey` in
+   `crates/valkyrie-desktop/tauri.conf.json`. Without the secrets the installers
+   still build, with no update. Losing the private key means no app update can
+   be signed again: every installed app would need a manual reinstall to take a
+   new key, so keep a copy somewhere safe.
+
 A tag is never moved or reused once it is published. A fix after a release is the
 next patch version.
 

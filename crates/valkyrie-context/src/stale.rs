@@ -99,27 +99,36 @@ pub fn valid_commit(commit: &str) -> bool {
     (4..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Why an active decision's files suggest it may no longer hold: one deleted, or
-/// many lines changed since the commit it was confirmed at. Runs `git` in `root`.
-pub fn churn(root: &Path, d: &Decision) -> Option<String> {
-    if d.status != DecisionStatus::Active || d.fresh.anchors.is_empty() {
+/// How the files a text names have changed since `commit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// One of them no longer exists.
+    Gone(String),
+    /// Lines added and removed in them, [`CHURN_LINES`] or more in all.
+    Churn { added: u64, removed: u64 },
+}
+
+/// Whether `anchors` (files under `root`) changed enough since `commit` to doubt
+/// what was said about them: one deleted, or [`CHURN_LINES`] lines changed on
+/// `root`'s side since it and `commit` forked. Runs `git` in `root`. Shared by
+/// decisions and agent notes (ADR-0017 §6).
+pub fn changed(root: &Path, anchors: &[String], commit: Option<&str>) -> Option<Change> {
+    if anchors.is_empty() {
         return None;
     }
-    if let Some(gone) = d.fresh.anchors.iter().find(|a| !root.join(a).exists()) {
-        return Some(format!("{gone} no longer exists"));
+    if let Some(gone) = anchors.iter().find(|a| !root.join(a).exists()) {
+        return Some(Change::Gone(gone.clone()));
     }
-    let commit = d.provenance.commit.as_deref().filter(|c| valid_commit(c))?;
+    let commit = commit.filter(|c| valid_commit(c))?;
+    // From where `commit` and `root`'s `HEAD` forked (`A...B`), not from `commit`
+    // itself: a text written in a worktree records that worktree's `HEAD`, and
+    // its branch's own unmerged edits aren't changes since (#169). On `root`'s
+    // own history the fork point is `commit`, so nothing else changes.
+    let range = format!("{commit}...HEAD");
     let out = Command::new("git")
         .no_window()
-        .args([
-            "diff",
-            "--numstat",
-            "--end-of-options",
-            commit,
-            "HEAD",
-            "--",
-        ])
-        .args(&d.fresh.anchors)
+        .args(["diff", "--numstat", "--end-of-options", &range, "--"])
+        .args(anchors)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stderr(Stdio::null())
@@ -132,12 +141,22 @@ pub fn churn(root: &Path, d: &Decision) -> Option<String> {
         added += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         removed += cols.next().and_then(|n| n.parse().ok()).unwrap_or(0);
     }
-    (added + removed >= CHURN_LINES).then(|| {
-        format!(
+    (added + removed >= CHURN_LINES).then_some(Change::Churn { added, removed })
+}
+
+/// Why an active decision's files suggest it may no longer hold: one deleted, or
+/// many lines changed since the commit it was confirmed at. Runs `git` in `root`.
+pub fn churn(root: &Path, d: &Decision) -> Option<String> {
+    if d.status != DecisionStatus::Active {
+        return None;
+    }
+    match changed(root, &d.fresh.anchors, d.provenance.commit.as_deref())? {
+        Change::Gone(gone) => Some(format!("{gone} no longer exists")),
+        Change::Churn { added, removed } => Some(format!(
             "{} changed a lot since it was confirmed (+{added}/-{removed})",
             d.fresh.anchors.join(", ")
-        )
-    })
+        )),
+    }
 }
 
 /// Why `d` should be looked at again, if it should.
@@ -287,5 +306,48 @@ mod tests {
             "b.rs no longer exists"
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// #169: a decision written in a worktree records that worktree's `HEAD`, but
+    /// staleness runs in the main checkout. Only what changed on the main
+    /// checkout's side since the two forked counts, not the branch's own work.
+    #[test]
+    fn a_worktrees_own_unmerged_work_isnt_churn() {
+        let base = std::env::temp_dir().join(format!("valk-churn-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, wt) = (base.join("repo"), base.join("repo-feat"));
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.rs"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "one"]);
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+        );
+        // The branch rewrites a.rs, and the decision is written there.
+        std::fs::write(wt.join("a.rs"), "branch\n".repeat(200)).unwrap();
+        git(&wt, &["commit", "-qam", "branch work"]);
+        let at = git(&wt, &["rev-parse", "--short", "HEAD"]);
+        let d = decision(
+            Freshness {
+                anchors: vec!["a.rs".into()],
+                ..Freshness::default()
+            },
+            Some(&at),
+        );
+        assert_eq!(churn(&root, &d), None, "the branch's own edits");
+        // Merged: still the same work, not a change since.
+        git(&root, &["merge", "-q", "--no-ff", "-m", "merge", "feat"]);
+        assert_eq!(churn(&root, &d), None, "merged as it was");
+        // Main then rewrites it: that counts.
+        std::fs::write(root.join("a.rs"), "main\n".repeat(200)).unwrap();
+        git(&root, &["commit", "-qam", "main work"]);
+        let why = churn(&root, &d).unwrap();
+        assert!(
+            why.starts_with("a.rs changed a lot since it was confirmed (+200/-200)"),
+            "{why}"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -82,6 +82,19 @@ pub fn is_web_bridge(pid: i32) -> bool {
     cmdline_n(pid, 8).is_some_and(|argv| bridge_argv(&argv))
 }
 
+/// Whether `pid` runs the desktop app (`valk-desktop`), which pairs its own
+/// window (ADR-0020 §5). By its name, as the bridge is told: a process that
+/// takes the name to get a pairing link could write `devices.json` as easily.
+pub fn is_desktop_app(pid: i32) -> bool {
+    cmdline_n(pid, 1).is_some_and(|argv| desktop_argv(&argv))
+}
+
+fn desktop_argv(argv: &[String]) -> bool {
+    argv.first()
+        .and_then(|program| valkyrie_agents::program_name(program))
+        == Some("valk-desktop")
+}
+
 fn bridge_argv(argv: &[String]) -> bool {
     let Some((program, args)) = argv.split_first() else {
         return false;
@@ -672,6 +685,16 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_desktop_app_is_told_by_its_name() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(desktop_argv(&argv(&["/usr/bin/valk-desktop"])));
+        assert!(desktop_argv(&argv(&["C:\\Programs\\Valkyrie\\valk-desktop.exe"])) || cfg!(unix));
+        assert!(!desktop_argv(&argv(&["/usr/bin/valk", "web"])));
+        assert!(!desktop_argv(&argv(&["bash", "valk-desktop"])));
+        assert!(!desktop_argv(&[]));
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]

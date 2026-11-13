@@ -1,6 +1,6 @@
 # ADR-0009: Add a device from a trusted one, with a short code
 
-Status: proposed (2026-10-15)
+Status: accepted (2026-11-11); shipped in 225db05, add-a-device under Settings
 
 ## Context
 

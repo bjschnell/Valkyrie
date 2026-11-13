@@ -434,6 +434,36 @@ pub fn reason(ship: &Ship, state: &str, branch: &str) -> String {
 /// one pull request before its stops go through to the user.
 pub const CI_FIX_LIMIT: u32 = 2;
 
+/// What `ci: agent` tells an agent whose pull request is open and whose branch
+/// head was pushed since the last such block (ADR-0016 §5). Valkyrie can't read
+/// that CI, so it asks the agent to, and takes its word. `block` counts from 1 to
+/// [`CI_FIX_LIMIT`].
+pub fn ci_agent(ci: Source, checks: Option<&(String, Source)>, pr: &str, block: u32) -> String {
+    let mut sources = vec![ci];
+    if let Some((_, from)) = checks
+        && *from != ci
+    {
+        sources.push(*from);
+    }
+    let number = pr
+        .rsplit_once("/pull/")
+        .map(|(_, n)| format!("#{}", n.trim_end_matches('/')))
+        .unwrap_or_else(|| pr.to_owned());
+    let run = match checks {
+        Some((checks, _)) => format!(" Run `{checks}` first if you haven't."),
+        None => String::new(),
+    };
+    format!(
+        "Valkyrie policy {}, accepted by the user: pull request {number} isn't done until \
+         its CI has passed, and Valkyrie can't see this project's CI. Check this branch's \
+         CI with the tools you use for it in this project. If it fails, fix it, push and \
+         check again. If you can't fix it, stop and say why.{run} Never merge, and never \
+         push to the default branch. This is block {block} of {CI_FIX_LIMIT} for this \
+         PR; after that your stops go to the user.",
+        names(&sources),
+    )
+}
+
 /// Where CI runs in a project, whatever says how far to ship: its newest `ci`
 /// setting. `None`: nothing recorded, so `ci-fix` is off. Only the project's own
 /// decisions count: it's a fact about the repository (ADR-0016 §3), so a stray
@@ -714,6 +744,26 @@ mod tests {
         assert_eq!(ci(&[policy(1, 1, "template: ship\nuntil: pr")]), None);
         let off = [policy(40, 10, "template: ship\nci: none")];
         assert_eq!(ci(&[facts[0].clone(), off[0].clone()]).unwrap().0, Ci::None);
+    }
+
+    #[test]
+    fn ci_agent_asks_the_agent_to_check_its_own_ci() {
+        let checks = ("cargo test".to_owned(), Source::Project(39));
+        let text = ci_agent(
+            Source::Project(40),
+            Some(&checks),
+            "https://github.com/o/r/pull/93",
+            1,
+        );
+        assert!(text.contains("#93"));
+        assert!(text.contains("policy #40"));
+        assert!(text.contains("#39"));
+        assert!(text.contains("Run `cargo test` first"));
+        assert!(text.contains("block 1 of 2"));
+        assert!(text.contains("Never merge"));
+        let bare = ci_agent(Source::Project(40), None, "u", 2);
+        assert!(!bare.contains("first if you haven't"));
+        assert!(bare.contains("block 2 of 2"));
     }
 
     #[test]

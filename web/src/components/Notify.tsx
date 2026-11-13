@@ -18,6 +18,7 @@ const TEXT: Record<Exclude<PushState, "unknown">, ReactNode> = {
       https:// address.
     </>
   ),
+  "desktop-app": "The desktop app notifies you itself when an agent needs you, finishes or stops.",
   unsupported: "This browser can't receive notifications.",
 };
 

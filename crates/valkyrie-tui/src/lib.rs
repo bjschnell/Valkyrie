@@ -5,15 +5,23 @@
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
 mod backlog;
+mod blocks;
 mod clip;
+mod comments;
+mod conflict;
+mod digest;
+mod docs;
 mod edit;
+mod history;
 mod keys;
 mod links;
+mod markdown;
 mod mini;
 mod mouse;
 mod panes;
 mod ping;
 mod quiet;
+mod quota;
 mod rain;
 mod settings;
 mod theme;
@@ -22,6 +30,7 @@ use anyhow::Result;
 use keys::{Action, Key, Keymap};
 pub use links::open as open_link;
 use mouse::{Input, Mouse, MouseKind, Selection};
+pub use ping::deliver as deliver_notice;
 use ping::{Kind, Ping, Pinger};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -115,11 +124,17 @@ pub async fn run(
         let _ = reset_terminal_modes();
         ratatui_hook(info);
     }));
-    let result = App::new(client, socket.clone())
-        .run(&mut terminal, pushes, attach_to)
-        .await;
+    let mut app = App::new(client, socket.clone());
+    let result = app.run(&mut terminal, pushes, attach_to).await;
     let _ = reset_terminal_modes();
     ratatui::restore();
+    // Quit with a doc still open in your editor: nothing will save it.
+    if let Some(e) = &app.editing {
+        eprintln!(
+            "A doc was still open in your editor and wasn't saved; what you wrote goes to {}",
+            e.path.display()
+        );
+    }
     #[cfg(unix)]
     if let Err(e) = &result
         && let Some(restart) = e.downcast_ref::<Restart>()
@@ -193,6 +208,8 @@ struct App {
     orders: Vec<valkyrie_proto::OrderProposal>,
     /// Ready items the supervisor offers to start, as last pushed with the items.
     launches: Vec<valkyrie_proto::LaunchOffer>,
+    /// The plan's quota, as last pushed (protocol 30).
+    quota: Option<valkyrie_proto::Quota>,
     /// Where a background task (`P`'s model call) reports a line to say.
     said: Option<mpsc::UnboundedSender<String>>,
     /// The backlog page is open (`b`).
@@ -203,11 +220,16 @@ struct App {
     /// How far down the shown proposal's text is scrolled: whose it is, the top
     /// row, and how many rows show. Drawing keeps it in range.
     proposal_scroll: std::cell::Cell<ProposalScroll>,
-    /// The last proposal scrolled to its end (project, id, `updated`): a skill is
-    /// accepted only once read whole.
-    proposal_read: std::cell::RefCell<Option<(PathBuf, u32, u64)>>,
+    /// The links in the proposal text last drawn, by row of the whole text.
+    proposal_links: std::cell::RefCell<Vec<markdown::Link>>,
     /// One selection over the proposals, then the queue rows, then the session rows.
     selected: usize,
+    /// What the home screen last drew where, first match wins: its rows (each with
+    /// its index in the selection), the backlog panel, the bar's chips, the preview.
+    /// What a click or the wheel is matched against.
+    home_rows: std::cell::RefCell<Vec<(Rect, Hit)>>,
+    /// The mouse is Valkyrie's on the home screen too (written once per detach).
+    home_captured: bool,
     view: Option<Attached>,
     status: String,
     quit: bool,
@@ -229,6 +251,12 @@ struct App {
     mini: Option<mini::Mini>,
     /// The keys page is open (`.` on the home screen).
     keys_page: Option<KeysPage>,
+    /// The away digest is open (`w` on the home screen).
+    digest: Option<digest::Page>,
+    /// The Docs page is open (`D` on the home screen).
+    docs: Option<docs::Page>,
+    /// A doc open in your editor, in a session of its own.
+    editing: Option<Editing>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -372,11 +400,14 @@ impl App {
             sessions: Vec::new(),
             proposals: Vec::new(),
             items: Vec::new(),
+            quota: None,
             backlog: None,
             retire_armed: None,
             proposal_scroll: Default::default(),
-            proposal_read: Default::default(),
+            proposal_links: Default::default(),
             selected: 0,
+            home_rows: Default::default(),
+            home_captured: false,
             view: None,
             status: String::new(),
             quit: false,
@@ -391,6 +422,9 @@ impl App {
             said: None,
             settings_cursor: None,
             keys_page: None,
+            digest: None,
+            docs: None,
+            editing: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
@@ -435,6 +469,8 @@ impl App {
         if let Err(e) = self.client.watch_queue().await {
             self.status = format!("queue unavailable: {e:#}");
         }
+        // Best effort: an older daemon doesn't know notices.
+        let _ = self.client.watch_notices(true).await;
         self.refresh().await;
         if let Some(id) = attach_to {
             self.attach(id).await;
@@ -500,6 +536,8 @@ impl App {
                 }
                 _ = tick.tick() => {
                     self.refresh().await;
+                    // An editor that ended while you were elsewhere.
+                    self.finish_edit().await;
                     self.update_preview().await;
                     if let Some(newer) = self.newer_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                         self.newer = newer;
@@ -567,6 +605,7 @@ impl App {
             if let Err(e) = self.client.watch_queue().await {
                 self.status = format!("queue unavailable: {e:#}");
             }
+            let _ = self.client.watch_notices(true).await;
             self.report_cell(None);
             self.refresh().await;
             if let Some(id) = self.view.as_ref().map(|v| v.id) {
@@ -709,8 +748,28 @@ impl App {
             joined.extend(bytes);
             bytes = joined;
         }
+        if self.view.is_none() && self.backlog.is_none() && !self.mini_open() {
+            // Home: reports are clicks, and never typed into a prompt.
+            if let Some(cut) = mouse::unfinished(&bytes) {
+                self.partial = bytes.split_off(cut);
+            }
+            for input in mouse::split(&bytes) {
+                match input {
+                    Input::Bytes(keys) => Box::pin(self.home_screen_keys(keys)).await,
+                    Input::Mouse(m) => self.on_home_mouse(m).await,
+                }
+            }
+            return;
+        }
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
+        }
+        if self.digest.is_some() {
+            return self.digest_keys(&bytes).await;
+        }
+        // Over a session, the Docs page waits: your editor on a doc is one.
+        if self.docs_shown() {
+            return self.docs_keys(&bytes).await;
         }
         if self.backlog.is_some() {
             // A mouse report cut off by the read isn't typed into a prompt.
@@ -747,7 +806,9 @@ impl App {
                     // Detached mid-read: the rest belongs to the home screen.
                     (None, Input::Bytes(rest)) => Box::pin(self.home_input(&rest)).await,
                     (None, Input::Mouse(_)) => {}
-                    (Some(_), Input::Mouse(_)) if self.reviewing.is_some() => {}
+                    (Some(_), Input::Mouse(m)) if self.reviewing.is_some() => {
+                        self.on_proposal_mouse(m)
+                    }
                     (Some(_), Input::Mouse(m)) => self.on_mouse(m).await,
                     // A finished program: any key returns home (or to the next pane),
                     // unless you are reading its scrollback.
@@ -771,11 +832,94 @@ impl App {
             }
             return;
         }
+        self.home_screen_keys(bytes).await;
+    }
+
+    /// Typed keys while on the home screen, whichever page or prompt is over it.
+    async fn home_screen_keys(&mut self, bytes: Vec<u8>) {
+        if self.keys_page.is_some() {
+            return self.keys_page_keys(&bytes);
+        }
+        if self.digest.is_some() {
+            return self.digest_keys(&bytes).await;
+        }
+        if self.docs.is_some() {
+            return self.docs_keys(&bytes).await;
+        }
+        if self.settings_cursor.is_some() {
+            return self.settings_keys(&bytes);
+        }
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
         }
         self.option_hint(&bytes);
         self.home_input(&bytes).await;
+    }
+
+    /// What the home screen drew at `at`.
+    fn home_hit(&self, at: Position) -> Option<Hit> {
+        let hits = self.home_rows.borrow();
+        hits.iter()
+            .find(|(area, _)| area.contains(at))
+            .map(|&(_, hit)| hit)
+    }
+
+    /// A press on a home row selects it, and on the selected row does what Enter
+    /// does; a chip or the backlog panel does what its key does. The wheel moves the
+    /// selection, or scrolls a proposal's text over the preview.
+    async fn on_home_mouse(&mut self, m: Mouse) {
+        if self.docs.is_some() {
+            return self.on_docs_mouse(m);
+        }
+        if self.keys_page.is_some()
+            || self.digest.is_some()
+            || self.settings_cursor.is_some()
+            || self.renaming.is_some()
+        {
+            return;
+        }
+        let hit = self.home_hit(Position::new(m.x, m.y));
+        match m.kind {
+            MouseKind::Press => match hit {
+                Some(Hit::Row(row)) if row == self.selected => {
+                    self.on_home_key(HomeKey::Enter).await
+                }
+                Some(Hit::Row(row)) => {
+                    self.selected = row;
+                    self.update_preview().await;
+                }
+                Some(Hit::Key(key)) => self.on_home_key(key).await,
+                // Links are a proposal's: after one, the preview holds a session.
+                Some(Hit::Preview) if self.proposal().is_some() => {
+                    if let Some(url) = self.proposal_link_at(m.x, m.y) {
+                        self.open_url(&url);
+                    }
+                }
+                Some(Hit::Preview) | None => {}
+            },
+            MouseKind::WheelUp | MouseKind::WheelDown => {
+                let down = m.kind == MouseKind::WheelDown;
+                if hit == Some(Hit::Preview) && self.proposal().is_some() {
+                    self.scroll_proposal_rows(if down { WHEEL_ROWS } else { -WHEEL_ROWS });
+                } else {
+                    let key = if down { HomeKey::Down } else { HomeKey::Up };
+                    self.on_home_key(key).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Takes the mouse on the home screen: clicks, no motion. Written once per
+    /// detach; attaching writes its own modes (`update_capture`).
+    fn capture_home(&mut self) {
+        if self.home_captured {
+            return;
+        }
+        self.home_captured = true;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{}{}", mouse::CAPTURE_OFF, mouse::CAPTURE_ON);
+        let _ = out.flush();
     }
 
     /// Keys on the home screen.
@@ -1167,6 +1311,7 @@ impl App {
     fn reset_outer_modes(&mut self) {
         let _ = reset_terminal_modes();
         self.paste_forced = false;
+        self.home_captured = false;
     }
 
     /// A Mac's Option typed a character where an Alt key was meant (the terminal
@@ -1558,6 +1703,15 @@ impl App {
         let alone = self.others.is_empty();
         let next = self.beside(id);
         self.refresh().await;
+        // Your editor on a doc: back to the doc, saved.
+        if let Some(e) = self.editing.as_mut().filter(|e| e.session == id) {
+            // It ended, so it ran.
+            e.seen = true;
+            if self.view.as_ref().is_some_and(|v| v.id == id) {
+                self.detach().await;
+            }
+            return self.finish_edit().await;
+        }
         if alone && !self.sessions.iter().any(|s| s.id == id) {
             self.leave(id, next).await;
         }
@@ -1683,6 +1837,12 @@ impl App {
         }
         if field == Field::Updates {
             self.look_for_updates();
+        }
+        if matches!(field, Field::Theme | Field::SessionColors) {
+            self.report_colors(None);
+            for id in self.pane_ids() {
+                self.report_colors(Some(id));
+            }
         }
         // So you hear what you picked.
         if field == Field::Sound && self.settings.sound {
@@ -2025,32 +2185,94 @@ impl App {
             .checked_sub(self.proposals.len() + self.queue.len())
     }
 
-    /// Whether a proposal was read whole here, so what's accepted was seen: a
-    /// skill must have been scrolled to its end. Others are a few sentences.
-    fn read_whole(&self, d: &Decision) -> bool {
-        d.kind != valkyrie_proto::DecisionKind::Skill
-            || *self.proposal_read.borrow() == Some((d.project.clone(), d.id, d.updated))
-    }
-
     /// Scrolls the shown proposal's text by `pages` (a page less a row, so the
     /// last row stays in sight).
     fn scroll_proposal(&self, pages: i32) {
+        let page = i32::from(self.proposal_scroll.get().rows.saturating_sub(1).max(1));
+        self.scroll_proposal_rows(pages * page);
+    }
+
+    fn scroll_proposal_rows(&self, rows: i32) {
         let mut at = self.proposal_scroll.get();
-        let page = i32::from(at.rows.saturating_sub(1).max(1));
-        at.top = (i32::from(at.top) + pages * page).clamp(0, i32::from(u16::MAX)) as u16;
+        at.top = (i32::from(at.top) + rows).clamp(0, i32::from(u16::MAX)) as u16;
         self.proposal_scroll.set(at);
     }
 
+    /// The wheel over a proposal's text scrolls it, and a click on a link in it
+    /// opens the link. Anything else is not for it.
+    fn on_proposal_mouse(&mut self, m: Mouse) {
+        let at = self.proposal_scroll.get();
+        if !at.area.contains(ratatui::layout::Position::new(m.x, m.y)) {
+            return;
+        }
+        match m.kind {
+            MouseKind::WheelUp => self.scroll_proposal_rows(-WHEEL_ROWS),
+            MouseKind::WheelDown => self.scroll_proposal_rows(WHEEL_ROWS),
+            MouseKind::Press => {
+                if let Some(url) = self.proposal_link_at(m.x, m.y) {
+                    self.open_url(&url);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The link drawn at screen cell (`x`, `y`) of the proposal's text, if any.
+    fn proposal_link_at(&self, x: u16, y: u16) -> Option<String> {
+        let at = self.proposal_scroll.get();
+        if !at.area.contains(ratatui::layout::Position::new(x, y)) {
+            return None;
+        }
+        let row = usize::from(y - at.area.y + at.top);
+        let col = x - at.area.x;
+        self.proposal_links
+            .borrow()
+            .iter()
+            .find(|l| l.row == row && (l.from..l.to).contains(&col))
+            .map(|l| l.url.clone())
+    }
+
+    /// Opens `url` from the home screen, and says so.
+    fn open_url(&mut self, url: &str) {
+        let said = match links::open(url) {
+            Ok(links::Opened::Browser) => format!("opened {url}"),
+            Ok(links::Opened::Copied) => format!("copied {url} (no browser over SSH)"),
+            Err(e) => format!("couldn't open {url}: {e}"),
+        };
+        self.say(said);
+    }
+
     /// A proposal's text in `area`, scrolled as `proposal_scroll` says, with how
-    /// much is left below. Notes when it has been read to its end.
+    /// much is left below.
+    /// `head` (plain lines) comes first, then the body as markdown.
     fn draw_proposal_text(
         &self,
         frame: &mut ratatui::Frame,
         area: Rect,
         d: &Decision,
-        lines: Vec<Line<'static>>,
+        head: Vec<Line<'static>>,
     ) {
         let t = self.settings.theme;
+        let body = markdown::render(&d.body, area.width, t);
+        let mut lines = head;
+        if !body.lines.is_empty() {
+            // A row between the head and the body.
+            lines.push(Line::default());
+        }
+        // The head may wrap; the body comes back wrapped to fit, so its links'
+        // rows only move down by the rows above it.
+        let shift = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(area.width.max(1));
+        *self.proposal_links.borrow_mut() = body
+            .links
+            .into_iter()
+            .map(|l| markdown::Link {
+                row: l.row + shift,
+                ..l
+            })
+            .collect();
+        lines.extend(body.lines);
         let mut at = self.proposal_scroll.get();
         // Another proposal, or a new version of this one, starts at its top.
         let whose = (fnv_path(&d.project), d.id, d.updated);
@@ -2069,13 +2291,11 @@ impl App {
         let last = total.saturating_sub(area.height);
         at.top = at.top.min(last);
         at.rows = area.height;
+        at.area = area;
         self.proposal_scroll.set(at);
-        if at.top >= last {
-            *self.proposal_read.borrow_mut() = Some((d.project.clone(), d.id, d.updated));
-        }
         frame.render_widget(text.scroll((at.top, 0)), area);
         if at.top < last && area.height > 0 {
-            let more = format!(" ↓ {} more rows · PgDn ", last - at.top);
+            let more = format!(" ↓ {} more rows · PgDn / wheel ", last - at.top);
             let width = (more.chars().count() as u16).min(area.width);
             let row = Rect::new(
                 area.x + area.width - width,
@@ -2177,9 +2397,6 @@ impl App {
         if flagged && !yes && !armed {
             self.retire_armed = Some((project, id));
             return Some(format!("d again to retire #{id}; agents stop getting it"));
-        }
-        if !flagged && yes && !self.read_whole(d) {
-            return Some(format!("read #{id} to its end first: PgDn scrolls it"));
         }
         let (action, done) = match (flagged, yes) {
             (false, true) => (ReviewAction::Accept, "accepted"),
@@ -2288,6 +2505,8 @@ impl App {
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
             HomeKey::Backlog => self.open_backlog().await,
+            HomeKey::Digest => self.open_digest().await,
+            HomeKey::Docs => self.open_docs().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
     }
@@ -2376,6 +2595,382 @@ impl App {
         backlog::rows_of(&items, &self.items, &self.sessions, self.boot())
     }
 
+    async fn open_digest(&mut self) {
+        self.digest = Some(digest::Page::default());
+        self.load_digest().await;
+    }
+
+    /// Asks the daemon for the digest the page's window and grouping want.
+    async fn load_digest(&mut self) {
+        let Some(page) = &mut self.digest else {
+            return;
+        };
+        page.loading();
+        let tz = jiff::tz::TimeZone::system();
+        let since = page.win.since(now_ms(), &tz);
+        let by = page.by;
+        let got = self
+            .client
+            .digest(since, by)
+            .await
+            .map_err(|e| e.to_string());
+        if let Some(page) = &mut self.digest {
+            page.loaded(got, &tz);
+        }
+    }
+
+    /// Keys while the away digest is open.
+    async fn digest_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.digest else {
+            return;
+        };
+        for act in page.keys(bytes) {
+            match act {
+                digest::Do::Close => self.digest = None,
+                digest::Do::Load => self.load_digest().await,
+                digest::Do::Open(id) => {
+                    self.digest = None;
+                    self.attach(id).await;
+                    return;
+                }
+                digest::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
+                    Ok(()) => self.say("copied the digest as markdown".into()),
+                    Err(e) => self.say(format!("couldn't copy: {e}")),
+                },
+                digest::Do::Say(text) => self.say(text),
+            }
+        }
+    }
+
+    /// Whether the Docs page is on screen: it's open, and you're home, not in a
+    /// session (your editor on a doc, say).
+    fn docs_shown(&self) -> bool {
+        self.docs.is_some() && self.view.is_none()
+    }
+
+    async fn open_docs(&mut self) {
+        self.docs = Some(docs::Page::default());
+        self.load_docs().await;
+    }
+
+    /// Asks the daemon for the docs list. Opening it marks what agents wrote
+    /// until now read, as the web app's list does; this list still shows them
+    /// as new.
+    async fn load_docs(&mut self) {
+        let got = self.client.docs_listing().await.map_err(|e| e.to_string());
+        let at = got.as_ref().ok().map(|l| l.at);
+        if let Some(page) = &mut self.docs {
+            page.loaded(got);
+        }
+        if let Some(at) = at
+            && let Err(e) = self.client.docs_seen(at).await
+        {
+            self.say(format!("couldn't mark docs read: {e}"));
+        }
+    }
+
+    /// Keys while the Docs page is open.
+    async fn docs_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.docs else {
+            return;
+        };
+        for act in page.keys(bytes) {
+            Box::pin(self.docs_do(act)).await;
+        }
+    }
+
+    /// Does what the Docs page asked.
+    async fn docs_do(&mut self, act: docs::Do) {
+        match act {
+            docs::Do::Close => self.docs = None,
+            docs::Do::Load => self.load_docs().await,
+            docs::Do::Open(key) => {
+                let got = self
+                    .client
+                    .open_doc(key.clone())
+                    .await
+                    .map_err(|e| e.to_string());
+                let next = self.docs.as_mut().and_then(|page| page.opened(&key, got));
+                if let Some(next) = next {
+                    Box::pin(self.docs_do(next)).await;
+                }
+            }
+            docs::Do::Comments(key) => {
+                let got = self
+                    .client
+                    .doc_comments(key.clone())
+                    .await
+                    .map_err(|e| e.to_string());
+                if let Some(page) = &mut self.docs {
+                    page.comments(&key, got, false);
+                }
+            }
+            docs::Do::Comment { key, quote, text } => {
+                match self.client.comment_doc(key.clone(), quote, text).await {
+                    Ok((list, to)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.comments(&key, Ok(list), true);
+                        }
+                        // As the web app says it.
+                        self.say(match to {
+                                Some(to) => format!("{to} hears it at its next prompt."),
+                                None => "The session that wrote it isn't running: the comment stays open here.".into(),
+                            });
+                    }
+                    // The comment stays in its box, to send again.
+                    Err(e) => {
+                        if let Some(page) = &mut self.docs {
+                            page.comments(&key, Err(e.to_string()), true);
+                        }
+                        self.say(format!("couldn't comment: {e}"));
+                    }
+                }
+            }
+            docs::Do::Resolve { key, id } => {
+                match self.client.resolve_comment(key.clone(), id).await {
+                    Ok(list) => {
+                        if let Some(page) = &mut self.docs {
+                            page.comments(&key, Ok(list), false);
+                        }
+                    }
+                    Err(e) => self.say(format!("couldn't close it: {e}")),
+                }
+            }
+            docs::Do::Edit {
+                key,
+                base,
+                body,
+                title,
+            } => self.start_edit(key, base, body, title).await,
+            docs::Do::Save { key, base, body } => self.save_doc(key, base, body, None).await,
+            docs::Do::History(key) => {
+                let got = self.client.doc_history(key.clone(), None).await;
+                if let Some(page) = &mut self.docs {
+                    page.history(&key, got.map(|(v, _)| v).map_err(|e| e.to_string()));
+                }
+            }
+            docs::Do::Peek { key, version } => {
+                match self
+                    .client
+                    .doc_history(key.clone(), Some(version.clone()))
+                    .await
+                {
+                    Ok((_, Some(text))) => {
+                        if let Some(page) = &mut self.docs {
+                            page.peeked(&key, &version, text);
+                        }
+                    }
+                    Ok((_, None)) => self.say("that version is gone".into()),
+                    Err(e) => self.say(format!("couldn't open it: {e}")),
+                }
+            }
+            docs::Do::Restore { key, base, version } => {
+                match self.client.restore_doc(key.clone(), base, version).await {
+                    Ok((doc, false)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.changed(&key, doc);
+                        }
+                        // As the web app says it.
+                        self.say("Restored. What it replaced is in its history.".into());
+                    }
+                    Ok((doc, true)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.changed(&key, doc);
+                        }
+                        self.say("It changed since you opened it: this is the new version.".into());
+                    }
+                    Err(e) => self.say(format!("couldn't restore it: {e}")),
+                }
+            }
+            docs::Do::Delete { key, base, title } => {
+                match self.client.delete_doc(key.clone(), base).await {
+                    Ok(Ok(token)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.deleted(&key, token, title.clone());
+                        }
+                        self.say(format!("Deleted “{title}”: u puts it back."));
+                        self.load_docs().await;
+                    }
+                    Ok(Err(now)) => {
+                        if let Some(page) = &mut self.docs {
+                            page.changed(&key, now);
+                        }
+                        self.say("It changed since you opened it. This is the new version: d d to delete it.".into());
+                    }
+                    Err(e) => self.say(format!("couldn't delete it: {e}")),
+                }
+            }
+            docs::Do::Undelete(token) => match self.client.undelete_doc(token.clone()).await {
+                Ok(doc) => {
+                    let next = self
+                        .docs
+                        .as_mut()
+                        .and_then(|page| page.undeleted(&token, &doc));
+                    self.say(format!("Put back as {}.", doc.path));
+                    self.load_docs().await;
+                    if let Some(next) = next {
+                        Box::pin(self.docs_do(next)).await;
+                    }
+                }
+                Err(e) => {
+                    if let Some(page) = &mut self.docs {
+                        page.undo_failed(&token);
+                    }
+                    self.say(format!("couldn't put it back: {e}"));
+                }
+            },
+            docs::Do::Deleted => {
+                let got = self.client.deleted_docs().await.map_err(|e| e.to_string());
+                if let Some(page) = &mut self.docs {
+                    page.trash(got);
+                }
+            }
+            docs::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
+                Ok(()) => self.say("copied the doc as markdown".into()),
+                Err(e) => self.say(format!("couldn't copy: {e}")),
+            },
+            docs::Do::Say(text) => self.say(text),
+        }
+    }
+
+    /// Opens a doc's body in your editor (`$VISUAL`, else `$EDITOR`, else `vi`),
+    /// in a session of its own, and attaches to it. When it ends, what you wrote
+    /// is saved (`finish_edit`).
+    async fn start_edit(&mut self, key: String, base: String, body: String, title: String) {
+        if self.editing.is_some() {
+            return self.say("a doc is already open in your editor".into());
+        }
+        let path = match edit_file(&body) {
+            Ok(path) => path,
+            Err(e) => return self.say(format!("couldn't make a file to edit: {e}")),
+        };
+        let mut command = editor_command();
+        command.push(path.display().to_string());
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let spec = SpawnSpec {
+            command,
+            cwd: None,
+            name: Some(format!("edit {}", fit(&title, 30))),
+            size,
+            env: valkyrie_proto::login_env(),
+            worktree: None,
+            hidden: false,
+        };
+        match self.client.spawn(spec).await {
+            Ok(info) => {
+                self.editing = Some(Editing {
+                    session: info.id,
+                    key,
+                    base,
+                    path,
+                    body,
+                    seen: false,
+                });
+                self.refresh().await;
+                let listed = self.sessions.iter().any(|s| s.id == info.id);
+                if let Some(e) = &mut self.editing {
+                    e.seen |= listed;
+                }
+                self.attach(info.id).await;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                self.say(format!("couldn't start your editor: {e:#}"));
+            }
+        }
+    }
+
+    /// Once the editor's session has ended: saves what you wrote, if anything.
+    /// It has to have been seen running first, so a list that missed it (a failed
+    /// refresh) doesn't end it while you're still typing.
+    async fn finish_edit(&mut self) {
+        let sessions = &self.sessions;
+        let Some(e) = &mut self.editing else { return };
+        let running = sessions
+            .iter()
+            .any(|s| s.id == e.session && s.exited.is_none());
+        if running {
+            e.seen = true;
+            return;
+        }
+        if !e.seen && sessions.iter().all(|s| s.id != e.session) {
+            return;
+        }
+        let Some(e) = self.editing.take() else { return };
+        match std::fs::read_to_string(&e.path) {
+            Ok(text) if text == e.body => {
+                let _ = std::fs::remove_file(&e.path);
+                // An editor that forks into the background ends at once, unchanged.
+                self.say("no changes (if your editor runs in the background, make it wait, as `code -w` does)".into());
+            }
+            Ok(text) => self.save_doc(e.key, e.base, text, Some(e.path)).await,
+            Err(err) => self.say(format!(
+                "couldn't read what you wrote in {}: {err}",
+                e.path.display()
+            )),
+        }
+    }
+
+    /// Saves `body` over the version `base` names. `file` holds it too (your
+    /// editor's), and goes only once it's saved: on a conflict or an error the
+    /// message says where yours is, so it's never only on screen.
+    async fn save_doc(&mut self, key: String, base: String, body: String, file: Option<PathBuf>) {
+        let saved = self.client.save_doc(key.clone(), base, body.clone()).await;
+        if let (Ok((_, false)), Some(f)) = (&saved, &file) {
+            let _ = std::fs::remove_file(f);
+        }
+        let kept = || match &file {
+            Some(f) => Ok(f.clone()),
+            None => edit_file(&body),
+        };
+        match saved {
+            Ok((doc, false)) => {
+                if let Some(page) = &mut self.docs {
+                    page.saved(&key, doc);
+                }
+                self.say("Saved.".into());
+            }
+            // The path first: a narrow bar cuts the end off.
+            Ok((theirs, true)) => {
+                let kept = kept();
+                let shown = self
+                    .docs
+                    .as_mut()
+                    .is_some_and(|page| page.conflict(&key, body, theirs));
+                let why = if shown {
+                    "it changed since you opened it: t, e or s"
+                } else {
+                    "it changed since you opened it"
+                };
+                self.say(match kept {
+                    Ok(f) => format!("not saved, yours is in {}: {why}", f.display()),
+                    Err(_) => format!("not saved: {why}"),
+                });
+            }
+            Err(err) => match kept() {
+                Ok(f) => self.say(format!("not saved, yours is in {}: {err}", f.display())),
+                Err(_) => self.say(format!("couldn't save: {err}")),
+            },
+        }
+    }
+
+    /// The wheel scrolls the doc being read; a click on a link in it opens it.
+    fn on_docs_mouse(&mut self, m: Mouse) {
+        let Some(page) = &mut self.docs else { return };
+        match m.kind {
+            MouseKind::WheelUp | MouseKind::WheelDown => {
+                page.wheel(m.kind == MouseKind::WheelDown, WHEEL_ROWS)
+            }
+            MouseKind::Press => {
+                page.pressed();
+                if let Some(url) = page.link_at(m.x, m.y) {
+                    self.open_url(&url);
+                }
+            }
+            _ => {}
+        }
+    }
+
     async fn open_backlog(&mut self) {
         let mut page = backlog::Page::default();
         page.orders = self.orders.clone();
@@ -2425,6 +3020,14 @@ impl App {
             page.typing = Some(backlog::Typing::add());
             bytes = &bytes[len..];
         }
+        let mut roots: Vec<PathBuf> = self
+            .items
+            .iter()
+            .filter_map(|i| i.project.clone())
+            .collect();
+        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
+        roots.dedup();
+        page.roots = roots;
         let todo = page.keys(bytes, &rows, &self.sessions, boot);
         for act in todo {
             // An item that couldn't be added goes back in the prompt, not lost.
@@ -2487,6 +3090,10 @@ impl App {
                 let said = format!("#{} {}", item.id, item.status.as_str());
                 self.say(note.map_or(said.clone(), |n| format!("{said}: {n}")));
             }
+            Do::Return(id) => {
+                let (item, _) = self.client.change_item(id, ItemChange::Return).await?;
+                self.say(format!("#{} back in the backlog", item.id));
+            }
             Do::Delete(id) => {
                 let (item, _) = self.client.delete_item(id).await?;
                 self.say(format!("deleted #{} {}", item.id, item.title));
@@ -2500,6 +3107,7 @@ impl App {
                 kind,
                 title,
                 priority,
+                cwd,
             } => {
                 let (item, _) = self
                     .client
@@ -2509,7 +3117,7 @@ impl App {
                             title,
                             body: None,
                             kind,
-                            cwd: None,
+                            cwd,
                             priority,
                             blocked_by: None,
                         },
@@ -2707,6 +3315,14 @@ impl App {
             self.launches = launches;
             return Ok(true);
         }
+        if let ServerMsg::Quota { quota } = msg {
+            self.quota = quota;
+            return Ok(true);
+        }
+        if let ServerMsg::Notice { text, sound } = msg {
+            self.show_ping(Ping::notice(&text, sound));
+            return Ok(true);
+        }
         if let ServerMsg::Queue { items } = msg {
             let viewing = self.pane_ids();
             self.pinger.on_queue(&items, &viewing, Instant::now());
@@ -2799,6 +3415,9 @@ impl App {
     }
 
     fn draw(&mut self, terminal: &mut Term) -> Result<()> {
+        if self.view.is_none() {
+            self.capture_home();
+        }
         terminal.draw(|frame| {
             let [body, bar] =
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
@@ -2811,6 +3430,8 @@ impl App {
                         && self.reviewing.is_none()
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
+                        && self.digest.is_none()
+                        && !self.docs_shown()
                         && self.backlog.is_none()
                         && !self.mini_open()
                         && !self.rail_open();
@@ -2848,6 +3469,12 @@ impl App {
             if let Some(page) = &self.keys_page {
                 self.draw_keys_page(frame, page);
             }
+            if let Some(page) = &self.digest {
+                page.draw(frame, self.settings.theme);
+            }
+            if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
+                page.draw(frame, self.settings.theme);
+            }
             if let Some(page) = &self.backlog {
                 let rows = self.backlog_rows();
                 let t = self.settings.theme;
@@ -2875,6 +3502,18 @@ impl App {
         if let Some((width, height)) = cell_pixels() {
             let _ = self.client.cell_pixels(session, width, height);
         }
+        self.report_colors(session);
+    }
+
+    /// Tells the daemon what colors sessions are drawn with, so a program that asks
+    /// for the background (OSC 11) picks a matching light or dark palette. With the
+    /// terminal's own colors it can't know them, so the daemon's dark guess stands.
+    fn report_colors(&self, session: Option<SessionId>) {
+        let colors = self
+            .settings
+            .themed_sessions
+            .then(|| self.settings.theme.term_colors());
+        let _ = self.client.term_colors(session, colors);
     }
 
     fn fire_pings(&mut self) {
@@ -2882,8 +3521,16 @@ impl App {
         let Some(ping) = self.pinger.due(&viewing, Instant::now()) else {
             return;
         };
+        self.show_ping(ping);
+    }
+
+    /// A ping's sound, desktop notification and toast, as the settings allow.
+    fn show_ping(&mut self, ping: Ping) {
         if ping.sound && self.settings.sound {
             ping::play(self.settings.noise, ping.kind);
+        }
+        if self.settings.desktop {
+            ping::desktop("Valkyrie", &ping.text);
         }
         // A fresh request stays up over a later finish.
         if self.toast().is_some_and(|t| t.kind == Kind::Request) && ping.kind == Kind::Done {
@@ -2904,7 +3551,7 @@ impl App {
     fn toast_summary(&self, ping: &Ping) -> Option<&str> {
         self.sessions
             .iter()
-            .find(|s| s.id == ping.session)
+            .find(|s| Some(s.id) == ping.session)
             .and_then(|s| s.status.summary.as_deref())
     }
 }
@@ -2940,6 +3587,8 @@ fn one_line(text: &str) -> String {
 /// How often the working spinner advances.
 const SPIN_EVERY: Duration = Duration::from_millis(100);
 /// Wide enough for the lists plus a preview of the selected session.
+/// Rows the wheel scrolls a proposal's text by, a notch.
+const WHEEL_ROWS: i32 = 3;
 const PREVIEW_MIN_WIDTH: u16 = 130;
 /// The most proposals shown at once; more scroll.
 const PROPOSAL_ROWS: usize = 6;
@@ -2968,18 +3617,34 @@ impl App {
             )),
             header,
         );
-        if let Some(newer) = self.newer.as_ref().filter(|_| self.settings.updates) {
-            let notice = Line::from(vec![
-                format!(" ↑ {newer} ").fg(t.bg).bg(t.accent2).bold(),
-                " valk upgrade ".fg(t.muted),
-            ]);
-            // Only where it clears the counts on the left.
-            let left = header_line(&self.queue, &self.sessions, self.proposals.len(), now, t);
-            if left.width() + notice.width() < header.width as usize {
-                frame.render_widget(Paragraph::new(notice).right_aligned(), header);
-            }
+        // On the right, the plan's quota and a newer release, each only where it
+        // clears the counts on the left; the quota first, it's the one to act on.
+        let notice = self
+            .newer
+            .as_ref()
+            .filter(|_| self.settings.updates)
+            .map(|newer| {
+                vec![
+                    format!(" ↑ {newer} ").fg(t.bg).bg(t.accent2).bold(),
+                    " valk upgrade ".fg(t.muted),
+                ]
+            });
+        let quota = self.quota.as_ref().map(|q| quota::line(q, now, t).spans);
+        let both = notice
+            .clone()
+            .zip(quota.clone())
+            .map(|(notice, quota)| [quota, notice].concat());
+        let left = header_line(&self.queue, &self.sessions, self.proposals.len(), now, t);
+        if let Some(right) = [both, quota, notice]
+            .into_iter()
+            .flatten()
+            .map(Line::from)
+            .find(|right| left.width() + right.width() < header.width as usize)
+        {
+            frame.render_widget(Paragraph::new(right).right_aligned(), header);
         }
 
+        self.home_rows.borrow_mut().clear();
         let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
             let [lists, preview] =
                 Layout::horizontal([Constraint::Percentage(62), Constraint::Fill(1)]).areas(main);
@@ -3041,6 +3706,9 @@ impl App {
                 Paragraph::new(lines).block(panel(title, t, false)),
                 backlog_area,
             );
+            self.home_rows
+                .borrow_mut()
+                .push((backlog_area, Hit::Key(HomeKey::Backlog)));
         }
 
         let in_proposals = self.proposal().is_some();
@@ -3058,6 +3726,7 @@ impl App {
                 proposals_area,
                 &mut state,
             );
+            self.remember_rows(proposals_area, state.offset(), self.proposals.len(), 0);
         }
 
         let in_queue = self.queue_index().is_some();
@@ -3100,6 +3769,12 @@ impl App {
             let rows = self.queue.iter().map(|q| queue_row(q, now, spin, t));
             let mut state = TableState::default().with_selected(self.queue_index());
             frame.render_stateful_widget(table(rows, t).block(queue_block), queue_area, &mut state);
+            self.remember_rows(
+                queue_area,
+                state.offset(),
+                self.queue.len(),
+                self.proposals.len(),
+            );
         }
 
         let sessions_title = Line::from(vec![
@@ -3115,9 +3790,16 @@ impl App {
             sessions_area,
             &mut state,
         );
+        self.remember_rows(
+            sessions_area,
+            state.offset(),
+            self.sessions.len(),
+            self.proposals.len() + self.queue.len(),
+        );
 
         if let Some(area) = preview {
             self.draw_preview(frame, area);
+            self.home_rows.borrow_mut().push((area, Hit::Preview));
         }
         if let Some(colors) = &t.rain {
             let inside = Margin::new(1, 1);
@@ -3137,27 +3819,49 @@ impl App {
             rain::draw(frame.buffer_mut(), screen, &regions, now, colors);
         }
 
+        let mut chips = Vec::new();
         let mut footer = match &self.renaming {
             Some((id, typed)) => rename_line(*id, typed, t),
-            None => footer_line(
-                &self.status,
-                self.offered().map(|(_, _, step)| step).as_ref(),
-                in_proposals,
-                self.proposal().is_some_and(|d| d.fresh.review.is_some()),
-                self.proposal().and_then(scoping).is_some(),
-                self.adoptable().is_some(),
-                t,
-            ),
+            None => {
+                let (line, found) = footer_line(
+                    &self.status,
+                    self.offered().map(|(_, _, step)| step).as_ref(),
+                    in_proposals,
+                    self.proposal().is_some_and(|d| d.fresh.review.is_some()),
+                    self.proposal().and_then(scoping).is_some(),
+                    self.adoptable().is_some(),
+                    t,
+                );
+                chips = found;
+                line
+            }
         };
+        let mut shift = 0;
         if let Some(toast) = self.toast() {
-            footer
-                .spans
-                .splice(0..0, toast_spans(toast, self.toast_summary(toast), t));
+            let spans = toast_spans(toast, self.toast_summary(toast), t);
+            shift = spans.iter().map(|s| s.width() as u16).sum();
+            footer.spans.splice(0..0, spans);
         }
+        self.home_rows
+            .borrow_mut()
+            .extend(chips.into_iter().map(|(from, to, key)| {
+                let (from, to) = (from + shift, to + shift);
+                (Rect::new(from, bar.y, to - from, 1), Hit::Key(key))
+            }));
         frame.render_widget(
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
+    }
+
+    /// Notes where the rows of a home table, shown from `offset`, were drawn inside
+    /// its bordered `area`; `first` is the selection index of its first row.
+    fn remember_rows(&self, area: Rect, offset: usize, len: usize, first: usize) {
+        let inner = area.inner(Margin::new(1, 1));
+        let mut rows = self.home_rows.borrow_mut();
+        for (y, row) in (inner.y..inner.bottom()).zip(offset..len) {
+            rows.push((Rect::new(inner.x, y, inner.width, 1), Hit::Row(first + row)));
+        }
     }
 
     /// The selected session: its full summary, then the bottom of its screen.
@@ -3169,7 +3873,7 @@ impl App {
                 d.title.clone().fg(t.fg).bold(),
                 format!(" #{} ", d.id).fg(t.muted),
             ]);
-            let mut lines = vec![Line::from(
+            let lines = vec![Line::from(
                 format!(
                     "{}  ·  {} · {}{}",
                     d.kind.as_str(),
@@ -3181,7 +3885,6 @@ impl App {
                 )
                 .fg(t.muted),
             )];
-            lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
             let block = panel(title, t, false);
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -3416,7 +4119,6 @@ impl App {
                 format!("applies to {}", d.scope.join(", ")).fg(t.muted),
             ));
         }
-        lines.extend(d.body.lines().map(|l| Line::from(l.to_string().fg(t.fg))));
         self.draw_proposal_text(frame, body, d, lines);
     }
 }
@@ -3428,6 +4130,8 @@ struct ProposalScroll {
     whose: Option<(u64, u32, u64)>,
     top: u16,
     rows: u16,
+    /// Where the text was drawn, so the wheel knows when it is over it.
+    area: Rect,
 }
 
 fn fnv_path(path: &std::path::Path) -> u64 {
@@ -4616,6 +5320,11 @@ fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'s
     if s.status.agent != "generic" && !s.status.hooked {
         detail.push("  no hooks yet".fg(t.interrupted).italic());
     }
+    // Another live agent changed the same files (ADR-0019 §1).
+    if let Some(overlap) = &s.overlap {
+        detail.push("  ⚠ ".fg(t.interrupted));
+        detail.push(overlap.clone().fg(t.interrupted));
+    }
     if s.clients > 0 {
         detail.insert(0, "◉ ".fg(t.accent2));
     }
@@ -4695,8 +5404,10 @@ fn footer_line(
     scope: bool,
     adoptable: bool,
     t: &Theme,
-) -> Line<'static> {
+) -> (Line<'static>, Vec<(u16, u16, HomeKey)>) {
     let mut spans = Vec::new();
+    // Where each chip is on the line: its columns, and the key it presses.
+    let mut chips = Vec::new();
     if !status.is_empty() {
         spans.push(format!(" {status} ").fg(t.accent2).bold());
         spans.push("│".fg(t.border));
@@ -4733,6 +5444,8 @@ fn footer_line(
     let general = [
         ("n", "new"),
         ("b", "backlog"),
+        ("w", "digest"),
+        ("D", "docs"),
         (",", "settings"),
         (".", "keys"),
         ("p", "pair"),
@@ -4740,10 +5453,38 @@ fn footer_line(
     ];
     for &(key, what) in context.iter().chain(&general) {
         spans.push(" ".into());
+        let from = spans.iter().map(|s| s.width() as u16).sum::<u16>();
         spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
         spans.push(format!(" {what}").fg(t.muted));
+        let to = spans.iter().map(|s| s.width() as u16).sum::<u16>();
+        chips.push((from, to, chip_key(key)));
     }
-    Line::from(spans).style(style::Style::new().bg(t.panel))
+    (
+        Line::from(spans).style(style::Style::new().bg(t.panel)),
+        chips,
+    )
+}
+
+/// The key a footer chip is labelled with, as the home screen takes it.
+fn chip_key(label: &str) -> HomeKey {
+    match label {
+        "a" => HomeKey::Accept,
+        "d" => HomeKey::Reject,
+        "↩" => HomeKey::Enter,
+        "x" => HomeKey::Kill,
+        "r" => HomeKey::Rename,
+        "A" => HomeKey::Adopt,
+        "n" => HomeKey::NewShell,
+        "b" => HomeKey::Backlog,
+        "w" => HomeKey::Digest,
+        "D" => HomeKey::Docs,
+        "," => HomeKey::Settings,
+        "." => HomeKey::Keys,
+        "p" => HomeKey::AddDevice,
+        "q" => HomeKey::Quit,
+        // `o`, the supervisor's second offer.
+        _ => HomeKey::Other,
+    }
 }
 
 /// What the attached bar's key hints are for.
@@ -5125,8 +5866,8 @@ fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     Ok(())
 }
 
-/// The mouse off: on the home screen it is nobody's. While attached it is always
-/// Valkyrie's first (`App::update_capture`).
+/// The mouse off, for leaving. Valkyrie takes it on the home screen
+/// (`App::capture_home`) and, while attached, first (`App::update_capture`).
 fn release_mouse() -> Result<()> {
     let mut out = std::io::stdout();
     write!(out, "{}", mouse::CAPTURE_OFF)?;
@@ -5262,6 +6003,17 @@ enum Anchor {
     Session(Option<SessionId>),
 }
 
+/// What a place on the home screen is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    /// A row of the selection (proposals, queue, sessions).
+    Row(usize),
+    /// A chip or panel that does what this key does.
+    Key(HomeKey),
+    /// The preview panel: the wheel scrolls a proposal's text there.
+    Preview,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HomeKey {
     Up,
@@ -5287,6 +6039,10 @@ enum HomeKey {
     AddDevice,
     /// Open the backlog page.
     Backlog,
+    /// Open the away digest.
+    Digest,
+    /// Open the Docs page.
+    Docs,
     /// Write the selected agent session down as a backlog item.
     Adopt,
     /// Take the other step offered on the selected flagged session.
@@ -5349,6 +6105,8 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'd' => Some(HomeKey::Reject),
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
+            b'w' => Some(HomeKey::Digest),
+            b'D' => Some(HomeKey::Docs),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
@@ -5362,6 +6120,60 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
     keys
 }
 
+/// A doc open in your editor (`App::start_edit`).
+#[derive(Debug)]
+struct Editing {
+    session: SessionId,
+    key: String,
+    /// The hash of the version it started from, which the save names.
+    base: String,
+    path: PathBuf,
+    /// The body as it went in, to tell whether you changed it.
+    body: String,
+    /// Its session has been seen running.
+    seen: bool,
+}
+
+/// Your editor as a command, the file to come after it: `$VISUAL`, else
+/// `$EDITOR`, else `vi`. Either may carry arguments or quotes (`code -w`), so on
+/// Unix it runs through the shell, as git runs it.
+fn editor_command() -> Vec<String> {
+    let editor = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "vi".into());
+    editor_command_for(&editor)
+}
+
+fn editor_command_for(editor: &str) -> Vec<String> {
+    if cfg!(unix) {
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!("{editor} \"$@\""),
+            "sh".into(),
+        ]
+    } else {
+        editor.split_whitespace().map(String::from).collect()
+    }
+}
+
+/// A new file holding `body`, readable only by you, for your editor.
+fn edit_file(body: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!("valk-doc-{}-{nanos}.md", std::process::id()));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+    open.open(&path)?.write_all(body.as_bytes())?;
+    Ok(path)
+}
+
 /// Whether `dir` is in a git repository (as the CLI and daemon see it).
 fn in_repository(dir: &Path) -> bool {
     valkyrie_context::project::in_git(dir)
@@ -5371,6 +6183,34 @@ fn in_repository(dir: &Path) -> bool {
 mod tests {
     use super::*;
     use valkyrie_proto::{Cursor, Span};
+
+    /// `$VISUAL` may quote a path with spaces and carry arguments: it runs
+    /// through the shell, the file after it.
+    #[cfg(unix)]
+    #[test]
+    fn the_editor_runs_through_the_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("valk tui editor {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("my ed");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s:%s' \"$1\" \"$(basename \"$2\")\" > \"$2\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("doc file.md");
+        std::fs::write(&file, "").unwrap();
+        let mut cmd = editor_command_for(&format!("'{}' -w", script.display()));
+        cmd.push(file.display().to_string());
+        let ok = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-w:doc file.md");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A stray empty `.git` above the cwd isn't a repository, so `n` mustn't file
     /// the item under it (backlog #13).
@@ -5539,6 +6379,7 @@ mod tests {
             status: AgentStatus::default(),
             last_input_ms: 0,
             chat: None,
+            overlap: None,
         }
     }
 
@@ -7411,19 +8252,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A skill longer than the review panel scrolls, and is accepted only once
-    /// it has been read to its end.
+    /// A long skill's text is a preview, not a gate: `a` takes it unread, and
+    /// the wheel scrolls it in the review overlay.
     #[tokio::test]
-    async fn a_long_skill_is_read_whole_before_it_is_accepted() {
+    async fn a_long_skill_scrolls_by_wheel_and_is_not_gated() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let dir = std::env::temp_dir().join(format!("valkyrie-tui-skill-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("valkyrie-tui-skill-wheel-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         let mut skill = proposed("/r/api", 1, "Cut a release");
         skill.kind = valkyrie_proto::DecisionKind::Skill;
         skill.body = (1..=40).map(|i| format!("{i}. step {i}\n")).collect();
         app.proposals = vec![skill];
-        app.reviewing = Some(0);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         let mut draw = |app: &App| {
             terminal
@@ -7439,34 +8280,29 @@ mod tests {
                 .collect::<Vec<String>>()
                 .join("\n")
         };
-        let text = draw(&app);
+        assert!(draw(&app).contains("1. step 1"));
+        // Unread, and `a` is not blocked: the first answer is the daemon's, not a gate's.
+        // The fake daemon never answers, so reaching it (timing out) is the proof.
+        let asked = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            app.review_at(0, true),
+        )
+        .await;
         assert!(
-            text.contains("1. step 1") && text.contains("more rows · PgDn"),
-            "{text}"
+            asked.is_err(),
+            "refused before asking the daemon: {asked:?}"
         );
-        assert!(!app.read_whole(&app.proposals[0]));
-        let said = app.review_at(0, true).await.unwrap();
-        assert!(said.contains("read #1 to its end first"), "{said}");
-        // Page by page to the end; the last step shows and the note goes.
-        for _ in 0..10 {
-            app.review_keys(b"\x1b[6~").await;
+        // The wheel over the review overlay's text (the home screen's is tested
+        // with the home mouse).
+        let over = app.proposal_scroll.get().area;
+        let wheel = |y: u16| format!("\x1b[<65;{};{}M", over.x + 2, y + 1).into_bytes();
+        app.view = Some(Attached::new(1, "p".into(), None));
+        app.reviewing = Some(0);
+        for _ in 0..20 {
+            app.on_input(wheel(over.y + 1)).await;
             draw(&app);
         }
-        let text = draw(&app);
-        assert!(
-            text.contains("40. step 40") && !text.contains("more rows"),
-            "{text}"
-        );
-        assert!(app.read_whole(&app.proposals[0]));
-        // Changed since (an edit elsewhere): read it again, from its top.
-        app.proposals[0].updated = 9;
-        assert!(!app.read_whole(&app.proposals[0]));
-        let text = draw(&app);
-        assert!(
-            text.contains("1. step 1") && text.contains("more rows"),
-            "{text}"
-        );
-        assert!(!app.read_whole(&app.proposals[0]));
+        assert!(draw(&app).contains("40. step 40"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7667,7 +8503,7 @@ mod tests {
         // A ping says what the session finished, on one line, and short.
         let ping = Ping {
             kind: Kind::Done,
-            session: 1,
+            session: Some(1),
             text: "proj1 finished".into(),
             sound: false,
         };
@@ -7679,6 +8515,18 @@ mod tests {
         app.sessions[0].status.summary = Some("x".repeat(200));
         let toast = toast_spans(&ping, app.toast_summary(&ping), app.settings.theme);
         assert_eq!(toast[1].content.width(), TOAST_SUMMARY_MAX + 2);
+
+        // A `valk notify` is a toast with no session behind it, and no summary.
+        app.settings.sound = false;
+        app.settings.desktop = false;
+        app.on_push(ServerMsg::Notice {
+            text: "deploy done".into(),
+            sound: Some(valkyrie_proto::NoticeSound::Request),
+        })
+        .unwrap();
+        let notice = app.toast().expect("the notice shows as a toast");
+        assert_eq!((notice.kind, notice.session), (Kind::Request, None));
+        assert_eq!(app.toast_summary(notice), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7958,7 +8806,9 @@ mod tests {
                 let answer = match msg {
                     ClientMsg::Spawn { req, .. } => ServerMsg::Ok {
                         req,
-                        reply: Reply::Session { info: info(7) },
+                        reply: Reply::Session {
+                            info: Box::new(info(7)),
+                        },
                     },
                     ClientMsg::AttachPanes { req, .. } => ServerMsg::Ok {
                         req,
@@ -8104,5 +8954,256 @@ mod tests {
         let f = forced_modes(m, true);
         assert!(f.bracketed_paste && f.app_cursor);
         assert_eq!(forced_modes(m, false), m);
+    }
+
+    /// A click on a row of the home screen selects it, and a click on the selected
+    /// row does what Enter does. Mouse reports used to be thrown away there (#96).
+    #[tokio::test]
+    async fn clicking_a_home_row_selects_it_and_a_second_click_opens_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-click-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = ["alpha", "bravo", "charlie"]
+            .into_iter()
+            .zip(1..)
+            .map(|(name, id)| SessionInfo {
+                name: name.into(),
+                ..info(id)
+            })
+            .collect();
+        app.queue = vec![queued(3)];
+        app.proposals = vec![proposed("/r/a", 1, "one")];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let screen = |app: &App, terminal: &mut Terminal<TestBackend>| -> Vec<String> {
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(buffer.area.width as usize)
+                .map(|row| row.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        let rows = screen(&app, &mut terminal);
+        // The sessions list, not the queue's row for the same session.
+        let y = rows.iter().rposition(|r| r.contains("bravo")).unwrap() as u16;
+        let x = rows[y as usize].find("bravo").unwrap() as u16;
+        let click =
+            |x: u16, y: u16| format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1);
+
+        assert_eq!(app.selected, 0);
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.selection().0, Some(2), "the click selected bravo");
+        assert_eq!(app.status, "");
+        // The border and the blank space under the rows select nothing.
+        let before = app.selected;
+        app.on_input(click(x, 0).into_bytes()).await;
+        app.on_input(click(x, 28).into_bytes()).await;
+        assert_eq!(app.selected, before);
+        // A proposal's row: the first click selects it, the second is Enter, which
+        // shows its text (a session's Enter would attach, which needs a daemon).
+        screen(&app, &mut terminal);
+        let y = rows.iter().position(|r| r.contains("one")).unwrap() as u16;
+        let x = rows[y as usize].find("one").unwrap() as u16;
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!((app.selected, app.status.as_str()), (0, ""));
+        screen(&app, &mut terminal);
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.status, proposal_text(&app.proposals[0]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Renders the home screen to text lines.
+    fn home_screen(app: &App, width: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                let [body, bar] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                    .areas(frame.area());
+                app.draw_home(frame, body, bar);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect())
+            .collect()
+    }
+
+    fn press(code: u8, x: u16, y: u16) -> Vec<u8> {
+        format!("\x1b[<{code};{};{}M", x + 1, y + 1).into_bytes()
+    }
+
+    /// The wheel moves the selection on the home screen, and scrolls a proposal's
+    /// text when it is over the preview.
+    #[tokio::test]
+    async fn the_wheel_moves_the_home_selection_and_scrolls_a_proposal() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-wheel-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = (1..=3).map(info).collect();
+        app.on_input(press(65, 5, 5)).await;
+        assert_eq!(app.selected, 1, "wheel down moves down");
+        app.on_input(press(65, 5, 5)).await;
+        app.on_input(press(65, 5, 5)).await;
+        assert_eq!(app.selected, 2, "and stops at the last row");
+        app.on_input(press(64, 5, 5)).await;
+        assert_eq!(app.selected, 1, "wheel up moves up");
+
+        let mut long = proposed("/r/a", 1, "long one");
+        long.body = (0..80).map(|i| format!("line {i}\n")).collect();
+        app.sessions.clear();
+        app.proposals = vec![long];
+        app.selected = 0;
+        let width = 160;
+        home_screen(&app, width);
+        // The preview is the right-hand panel, past the lists' 62%.
+        let (x, y) = (width - 10, 8);
+        assert_eq!(app.proposal_scroll.get().top, 0);
+        app.on_input(press(65, x, y)).await;
+        assert!(app.proposal_scroll.get().top > 0, "wheel scrolled the text");
+        app.on_input(press(64, x, y)).await;
+        assert_eq!(app.proposal_scroll.get().top, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A proposal's body shows as markdown, not its source, and a click on a
+    /// link in it opens the link.
+    #[tokio::test]
+    async fn a_proposal_body_is_markdown_and_its_links_open() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-md-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let mut d = proposed("/r/a", 1, "md one");
+        d.body = "## Why\n\n**Bold** words, then [the ADR](https://x.dev/adr).".into();
+        app.proposals = vec![d];
+        app.selected = 0;
+        let width = 160;
+        let screen: Vec<String> = home_screen(&app, width);
+        let all = screen.join("\n");
+        assert!(all.contains("Why") && !all.contains("## Why"), "{all}");
+        assert!(all.contains("Bold words") && !all.contains("**"), "{all}");
+        let (y, row) = screen
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains("the ADR"))
+            .unwrap();
+        let x = row
+            .chars()
+            .collect::<Vec<_>>()
+            .windows(7)
+            .position(|w| w.iter().collect::<String>() == "the ADR")
+            .unwrap() as u16;
+        let opened = || links::OPENED.with(|o| std::mem::take(&mut *o.borrow_mut()));
+        opened();
+        app.on_input(press(0, x + 1, y as u16)).await;
+        assert_eq!(opened(), ["https://x.dev/adr"]);
+        app.on_input(press(0, x - 3, y as u16)).await;
+        assert!(opened().is_empty(), "plain text opens nothing");
+        // A session selected now: the old proposal's link is gone with it.
+        app.proposals.clear();
+        app.sessions = vec![info(1)];
+        app.selected = 0;
+        app.on_input(press(0, x + 1, y as u16)).await;
+        assert!(opened().is_empty(), "no stale link");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The bar's chips click as their keys press.
+    #[tokio::test]
+    async fn the_home_bars_chips_click_as_their_keys() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-chips-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1)];
+        let chip = |app: &App, label: &str| -> (u16, u16) {
+            let rows = home_screen(app, 120);
+            let bar = rows.len() - 1;
+            let col = rows[bar]
+                .find(label)
+                .unwrap_or_else(|| panic!("{label}: {rows:?}"));
+            // `find` counts bytes; the bar's glyphs before the chips are not all one.
+            (rows[bar][..col].chars().count() as u16, bar as u16)
+        };
+        let (x, y) = chip(&app, "keys");
+        app.on_input(press(0, x, y)).await;
+        assert!(
+            app.keys_page.is_some(),
+            "the keys chip opened the keys page"
+        );
+        app.keys_page = None;
+        let (x, y) = chip(&app, "settings");
+        app.on_input(press(0, x, y)).await;
+        assert!(
+            app.settings_cursor.is_some(),
+            "the settings chip opened settings"
+        );
+        app.settings_cursor = None;
+        // Blank space on the bar is no chip.
+        app.on_input(press(0, 119, y)).await;
+        assert!(app.keys_page.is_none() && app.settings_cursor.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The backlog panel on home opens the backlog when clicked, as `b` does.
+    #[tokio::test]
+    async fn the_home_backlog_panel_is_a_click_target() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-bpanel-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let waiting = Item {
+            priority: Default::default(),
+            blocked_by: Vec::new(),
+            id: 2,
+            title: "Flaky exit test".into(),
+            body: String::new(),
+            kind: valkyrie_proto::ItemKind::Bug,
+            status: valkyrie_proto::ItemStatus::Proposed,
+            project: Some("/r/app".into()),
+            attachments: Vec::new(),
+            by: "claude".into(),
+            sessions: Vec::new(),
+            boot: 0,
+            taken: Vec::new(),
+            branch: None,
+            branch_taken: false,
+            checkout: None,
+            pr: None,
+            filed_by: None,
+            unaccepted: false,
+            pr_closed: false,
+            joined: Default::default(),
+            notes: Vec::new(),
+            launch: None,
+            created: 0,
+            updated: 2,
+        };
+        app.on_push(ServerMsg::Items {
+            launches: Vec::new(),
+            orders: Vec::new(),
+            items: vec![waiting],
+        })
+        .unwrap();
+        let rows = home_screen(&app, 110);
+        let y = rows
+            .iter()
+            .position(|r| r.contains("Flaky exit test"))
+            .unwrap() as u16;
+        assert_eq!(
+            app.home_hit(Position::new(10, y)),
+            Some(Hit::Key(HomeKey::Backlog))
+        );
+        // The sessions panel below it is not.
+        assert_ne!(
+            app.home_hit(Position::new(10, 28)),
+            Some(Hit::Key(HomeKey::Backlog))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -118,8 +118,9 @@ pub enum TodoCmd {
         #[arg(long, value_name = "ID")]
         not_after: Vec<u32>,
     },
-    /// Leave a handoff: what changed, what's left, what to check. It shows on the
-    /// item and goes into the brief of its next launch.
+    /// Leave a note: on your own item, a handoff (what changed, what's left, what
+    /// to check) that goes into the brief of its next launch; on any other, with
+    /// -i, something found that bears on it, shown on its card but not briefed.
     Note {
         /// What happened; `-` reads it from stdin.
         #[arg(required = true, num_args = 1..)]
@@ -194,6 +195,10 @@ pub enum TodoCmd {
         #[arg(short, long, requires = "merged")]
         yes: bool,
     },
+    /// Put a started item back in the backlog: stops the sessions on it and
+    /// forgets them. Its branch and worktree stay for the next launch. Yours to
+    /// do, not an agent's; refused once it has a pull request.
+    Return { id: u32 },
     /// Not going to happen.
     Drop { id: u32 },
     /// Open a shipped or dropped item again.
@@ -507,8 +512,8 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             for n in &i.notes {
                 let by = if n.by == "human" { "you" } else { &n.by };
-                let took = if n.taken { " (from a take)" } else { "" };
-                println!("\nnote from {by}{took}:\n{}", n.text);
+                let origin = n.origin().map(|o| format!(" ({o})")).unwrap_or_default();
+                println!("\nnote from {by}{origin}:\n{}", n.text);
             }
             Ok(None)
         }
@@ -692,6 +697,11 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             };
             status(client, id, ItemStatus::Shipped).await
         }
+        TodoCmd::Return { id } => {
+            let (item, _) = client.change_item(id, ItemChange::Return).await?;
+            println!("#{} {}: back in the backlog", item.id, item.title);
+            Ok(None)
+        }
         TodoCmd::Drop { id } => status(client, id, ItemStatus::Dropped).await,
         TodoCmd::Reopen { id } | TodoCmd::Accept { id } => {
             status(client, id, ItemStatus::Open).await
@@ -776,7 +786,7 @@ fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
         _ if item.pr_closed => "PR closed".into(),
         _ if item.pr.is_some() => "PR open".into(),
         Some(s) => s.status.state.label().into(),
-        None if item.checkout.is_some() || !item.sessions.is_empty() => "to review".into(),
+        None if !item.sessions.is_empty() => "to review".into(),
         None => "backlog".into(),
     }
 }

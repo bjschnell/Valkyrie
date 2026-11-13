@@ -6,15 +6,21 @@ mod backlog;
 mod branches;
 mod chat;
 mod context;
+mod digest;
 mod dispatch;
+mod docs;
 mod extract;
 mod facts;
 mod foreground;
 mod guard;
 mod habit;
+mod merged;
 mod order;
+mod overlap;
 mod pairing;
+mod promote;
 mod pty;
+mod quota;
 mod restore;
 mod session;
 mod supervise;
@@ -41,7 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use valkyrie_proto::codec::{read_frame, write_frame};
 use valkyrie_proto::ipc::{Listener, Stream};
@@ -137,6 +143,8 @@ struct Registry {
     /// Tabs split into panes (DESIGN §8.9). Panes whose session left the lists are
     /// pruned by `layouts`.
     layouts: Mutex<Vec<Pane>>,
+    /// Docs (ADR-0021): the lock keeps their ids from colliding.
+    docs: Mutex<valkyrie_context::docs::Docs>,
     /// Project decisions (ADR-0007). The lock makes the daemon their only writer,
     /// one change at a time, so ids can't collide.
     context: Mutex<valkyrie_context::Store>,
@@ -151,7 +159,15 @@ struct Registry {
     stale_check: tokio::sync::Mutex<()>,
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
+    /// Toasts raised with `valk notify`, for the clients watching notices.
+    notices: broadcast::Sender<Arc<ServerMsg>>,
+    /// How many of its watchers show notices to someone (`WatchNotices::shows`).
+    notice_viewers: AtomicU32,
     turns_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    /// Projects a note was just written in, for `promote` to check for
+    /// recurrence (ADR-0017 §7).
+    notes_written: mpsc::UnboundedSender<PathBuf>,
+    notes_written_rx: Mutex<Option<mpsc::UnboundedReceiver<PathBuf>>>,
     /// Replies to stops short of shipping, for `habit` to learn from.
     answers: mpsc::UnboundedSender<(SessionId, session::Answered)>,
     answers_rx: Mutex<Option<mpsc::UnboundedReceiver<(SessionId, session::Answered)>>>,
@@ -183,9 +199,44 @@ struct Registry {
     /// connection, for `valk upgrade` to name the ones left on an old build.
     clients: Mutex<HashMap<u64, ClientBuild>>,
     next_conn: AtomicU64,
+    /// The plan's quota as Claude Code's status line last said it (protocol 30),
+    /// pushed with the queue, and where it's kept.
+    quota: watch::Sender<quota::Held>,
+    quota_file: PathBuf,
+    /// When you last typed and when you were last gone, for the away digest
+    /// (backlog #105), and where it's kept.
+    presence: Mutex<valkyrie_context::digest::Presence>,
+    presence_file: PathBuf,
 }
 
 impl Registry {
+    /// Stops a session and forgets it, as `Kill` does.
+    pub(crate) fn kill_session(&self, session: SessionId) -> Result<()> {
+        // Moved to `dying` under the sessions lock, so a handoff sees the
+        // session in one list or the other.
+        let removed = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let removed = sessions.remove(&session);
+            self.prune_layouts(&sessions);
+            if let Some(s) = &removed
+                && !s.exited()
+            {
+                let mut dying = self.dying.lock().unwrap();
+                dying.retain(|d| d.upgrade().is_some_and(|d| !d.exited()));
+                dying.push(Arc::downgrade(s));
+            }
+            removed
+        };
+        let Some(s) = removed else {
+            anyhow::bail!("no session {session}");
+        };
+        s.kill();
+        self.host.changed.notify_one();
+        // A kill just before a reboot must not come back.
+        self.restore_now.notify_one();
+        Ok(())
+    }
+
     /// `Reply::Clients`: a client is current on this daemon's protocol and binary.
     fn clients(&self) -> Reply {
         let ours = valkyrie_proto::binary_id();
@@ -460,6 +511,7 @@ fn new_registry(
 ) -> Result<(Arc<Registry>, mpsc::Receiver<UpgradeRequest>)> {
     let (upgrades, rx) = mpsc::channel(1);
     let (turns, turns_rx) = mpsc::unbounded_channel();
+    let (notes_written, notes_written_rx) = mpsc::unbounded_channel();
     let (answers, answers_rx) = mpsc::unbounded_channel();
     let (seen, seen_rx) = mpsc::unbounded_channel();
     let (order_tx, order_rx) = mpsc::unbounded_channel();
@@ -474,6 +526,7 @@ fn new_registry(
             changed: Arc::new(Notify::new()),
             stop: Mutex::new(Arc::new(StopPipe::new()?)),
             cell_px: Mutex::default(),
+            colors: Mutex::default(),
             context_dir: state_dir.join("context"),
         },
         queue: watch::Sender::new(Arc::default()),
@@ -488,6 +541,7 @@ fn new_registry(
         unrestored: Mutex::default(),
         restore_now: Notify::new(),
         layouts: Mutex::default(),
+        docs: Mutex::new(valkyrie_context::docs::Docs::new(state_dir.to_path_buf())),
         context: Mutex::new(valkyrie_context::Store::new(state_dir.join("context"))),
         proposals: watch::Sender::new(Arc::default()),
         stale: Mutex::default(),
@@ -495,6 +549,8 @@ fn new_registry(
         stale_check: tokio::sync::Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
+        notes_written,
+        notes_written_rx: Mutex::new(Some(notes_written_rx)),
         answers,
         answers_rx: Mutex::new(Some(answers_rx)),
         seen,
@@ -510,12 +566,18 @@ fn new_registry(
             "orders",
         ))),
         launches: watch::Sender::new(Arc::default()),
+        notices: broadcast::channel(16).0,
+        notice_viewers: AtomicU32::new(0),
         dispatch: Mutex::new(dispatch::Book::load(restore::per_daemon(
             state_dir,
             &own_socket,
             "dispatch",
         ))),
         dispatch_kick: Notify::new(),
+        quota: watch::Sender::new(quota::load(&quota::file(state_dir))),
+        quota_file: quota::file(state_dir),
+        presence: Mutex::new(digest::load(&digest::file(state_dir))),
+        presence_file: digest::file(state_dir),
         supervisor: Mutex::new(supervise::Supervisor::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -548,6 +610,9 @@ async fn serve_forever(
     tokio::spawn(publish_queue(registry.clone()));
     if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
         tokio::spawn(extract::run(registry.clone(), turns));
+    }
+    if let Some(written) = registry.notes_written_rx.lock().unwrap().take() {
+        tokio::spawn(promote::run(registry.clone(), written));
     }
     if let Some(answers) = registry.answers_rx.lock().unwrap().take() {
         tokio::spawn(habit::run(registry.clone(), answers));
@@ -925,9 +990,10 @@ async fn watch_stale(registry: Arc<Registry>) {
 /// How often backlog items' pull requests are read for a merge (ADR-0015 §2).
 const PRS_EVERY: Duration = Duration::from_secs(300);
 
-/// Ships items whose PRs merged. Only items with a PR are asked about, so with
-/// none open this costs nothing. Then the supervisor's watch on the branches of
-/// sessions no item covers (`branches`), once `gh` says who the user is.
+/// Notes agents that changed the same files (`overlap`), then ships items whose
+/// PRs merged. Only items with a PR are asked about, so with none open this costs
+/// nothing. Then the supervisor's watch on the branches of sessions no item covers
+/// (`branches`), once `gh` says who the user is.
 async fn watch_prs(registry: Arc<Registry>) {
     let lookup: work::PrLookup = Arc::new(|dir, url| work::gh_pr(dir, url, work::GH_TIMEOUT));
     // In a debug build, `$VALK_PRS_EVERY_MS` for trying the watchers out.
@@ -941,6 +1007,8 @@ async fn watch_prs(registry: Arc<Registry>) {
     let mut me: Option<String> = None;
     loop {
         interval.tick().await;
+        // Local git only, so it comes before the calls to `gh` that can be slow.
+        registry.watch_overlaps().await;
         registry.ship_merged_prs(lookup.clone()).await;
         if me.is_none() {
             me = tokio::task::spawn_blocking(branches::me)
@@ -1003,6 +1071,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // Every pane of the attached tab; one session for a tab that isn't split.
     let mut attachments: Vec<Attachment> = Vec::new();
     let mut queue_watch: Option<JoinHandle<()>> = None;
+    let mut notice_watch: Option<JoinHandle<()>> = None;
+    // This connection is one of `notice_viewers`.
+    let mut notice_viewer = false;
     // Hidden sessions this connection spawned: nobody else can find them, so they
     // go with it.
     let mut owned_hidden: Vec<SessionId> = Vec::new();
@@ -1048,6 +1119,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                             continue;
                         }
                         s.driven_by(agent);
+                    } else if !matches!(data.as_slice(), b"\x1b[I" | b"\x1b[O") {
+                        // A focus report is a window changing hands, not you.
+                        registry.you_typed();
                     }
                     s.typed(data);
                 }
@@ -1069,6 +1143,23 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                     if let Some(s) = session.and_then(|id| registry.get(id).ok()) {
                         s.set_cell_pixels((width, height));
                     }
+                }
+                continue;
+            }
+            ClientMsg::Quota { quota } => {
+                registry.set_quota(quota);
+                continue;
+            }
+            ClientMsg::TermColors { session, colors } => {
+                // One session's colors don't become the default: a phone's palette
+                // must not recolor what the desktop spawns next.
+                match session {
+                    Some(id) => {
+                        if let Ok(s) = registry.get(id) {
+                            s.set_colors(colors);
+                        }
+                    }
+                    None => *registry.host.colors.lock().unwrap() = colors,
                 }
                 continue;
             }
@@ -1114,26 +1205,44 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::WatchQueue { req } => {
                 reply(&out, req, Ok(Reply::Done)).await;
                 if queue_watch.is_none() {
-                    let rx = registry.queue.subscribe();
-                    let proposals = registry.proposals.subscribe();
-                    let items = registry.items.subscribe();
-                    let orders = registry.orders.subscribe();
-                    let launches = registry.launches.subscribe();
                     // Proposals as `Decisions` gives them: an agent sees their titles.
                     let agent = registry.caller(peer).agent.is_some();
                     queue_watch = Some(tokio::spawn(forward_queue(
-                        rx,
-                        proposals,
-                        items,
-                        orders,
-                        launches,
+                        registry.clone(),
                         agent,
                         out.clone(),
                     )));
                 }
                 continue;
             }
+            ClientMsg::WatchNotices { req, shows } => {
+                reply(&out, req, Ok(Reply::Done)).await;
+                // Counted once, however often it asks.
+                if shows && !notice_viewer {
+                    notice_viewer = true;
+                    registry.notice_viewers.fetch_add(1, Ordering::Relaxed);
+                }
+                if notice_watch.is_none() {
+                    notice_watch = Some(tokio::spawn(forward_notices(
+                        registry.notices.subscribe(),
+                        out.clone(),
+                    )));
+                }
+                continue;
+            }
+            ClientMsg::Notify { req, text, sound } => (req, registry.notify(&text, sound)),
             ClientMsg::Decide { req, decision } => (req, registry.decide(decision, peer)),
+            ClientMsg::Note { req, note } => (req, registry.note(note, peer)),
+            ClientMsg::Notes { req, cwd } => {
+                // Staleness runs `git` per note: off the connection's thread.
+                let registry = registry.clone();
+                let listed = tokio::task::spawn_blocking(move || registry.notes(&cwd)).await;
+                (
+                    req,
+                    listed.map_err(|e| anyhow::anyhow!("listing notes: {e}")),
+                )
+            }
+            ClientMsg::NoteRm { req, cwd, id } => (req, registry.note_rm(&cwd, id, peer)),
             ClientMsg::Review {
                 req,
                 project,
@@ -1292,6 +1401,52 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
             ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
             ClientMsg::Supervise { req, on } => (req, registry.supervise(on, peer)),
+            ClientMsg::WriteDoc { req, doc } => (req, registry.write_doc(doc, peer)),
+            ClientMsg::ReadDoc { req, which } => (req, registry.read_doc(&which)),
+            ClientMsg::EditDoc {
+                req,
+                id,
+                base,
+                body,
+            } => (req, registry.edit_doc(id, &base, &body, peer)),
+            ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
+            ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
+            ClientMsg::OpenDoc { req, key } => (req, registry.open_doc(&key)),
+            ClientMsg::DocComments { req, key } => (req, registry.doc_comments(&key)),
+            ClientMsg::CommentDoc {
+                req,
+                key,
+                quote,
+                text,
+            } => (
+                req,
+                registry.comment_doc(&key, quote.as_deref(), &text, peer),
+            ),
+            ClientMsg::ResolveComment { req, key, comment } => {
+                (req, registry.resolve_comment(&key, comment, peer))
+            }
+            ClientMsg::SaveDoc {
+                req,
+                key,
+                base,
+                body,
+            } => (req, registry.save_doc(&key, &base, &body, peer)),
+            ClientMsg::DocHistory { req, key, version } => {
+                (req, registry.doc_history(&key, version.as_deref()))
+            }
+            ClientMsg::RestoreDoc {
+                req,
+                key,
+                base,
+                version,
+            } => (req, registry.restore_doc(&key, &base, &version, peer)),
+            ClientMsg::DeleteDoc { req, key, base } => {
+                (req, registry.delete_doc(&key, &base, peer))
+            }
+            ClientMsg::UndeleteDoc { req, token } => (req, registry.undelete_doc(&token, peer)),
+            ClientMsg::DeletedDocs { req } => (req, registry.deleted_docs()),
+            ClientMsg::DocsSeen { req, at } => (req, registry.docs_seen(at, peer)),
+            ClientMsg::DocsRoot { req, root } => (req, registry.docs_root(root, peer)),
             ClientMsg::Vouch { req, what } => (
                 req,
                 registry.vouch_in_person(peer, &what).map(|()| Reply::Done),
@@ -1303,32 +1458,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 (req, Ok(Reply::Sessions { sessions, layouts }))
             }
             ClientMsg::Kill { req, session } => {
-                // Moved to `dying` under the sessions lock, so a handoff sees the
-                // session in one list or the other.
-                let removed = {
-                    let mut sessions = registry.sessions.lock().unwrap();
-                    let removed = sessions.remove(&session);
-                    registry.prune_layouts(&sessions);
-                    if let Some(s) = &removed
-                        && !s.exited()
-                    {
-                        let mut dying = registry.dying.lock().unwrap();
-                        dying.retain(|d| d.upgrade().is_some_and(|d| !d.exited()));
-                        dying.push(Arc::downgrade(s));
-                    }
-                    removed
-                };
-                let result = match removed {
-                    Some(s) => {
-                        s.kill();
-                        registry.host.changed.notify_one();
-                        // A kill just before a reboot must not come back.
-                        registry.restore_now.notify_one();
-                        Ok(Reply::Done)
-                    }
-                    None => Err(anyhow::anyhow!("no session {session}")),
-                };
-                (req, result)
+                (req, registry.kill_session(session).map(|()| Reply::Done))
             }
             ClientMsg::Dump { req, session } => (
                 req,
@@ -1414,6 +1544,12 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     }
     if let Some(task) = queue_watch {
         task.abort();
+    }
+    if let Some(task) = notice_watch {
+        task.abort();
+    }
+    if notice_viewer {
+        registry.notice_viewers.fetch_sub(1, Ordering::Relaxed);
     }
     registry.clients.lock().unwrap().remove(&conn);
     writer.abort();
@@ -1545,21 +1681,22 @@ fn spawn_with(
     registry.sessions.lock().unwrap().insert(id, session);
     registry.host.changed.notify_one();
     tracing::info!(session = id, command = ?info.command, "spawned");
-    Ok(Reply::Session { info })
+    Ok(Reply::Session {
+        info: Box::new(info),
+    })
 }
 
 /// Pushes the queue to one connection: the current one, then every change, and the
 /// decisions waiting on review likewise. Only the latest of each matters, so a slow
 /// client simply skips intermediate ones.
-async fn forward_queue(
-    mut rx: watch::Receiver<Queue>,
-    mut proposals: watch::Receiver<Proposals>,
-    mut backlog: watch::Receiver<backlog::Items>,
-    mut orders: watch::Receiver<order::Orders>,
-    mut launches: watch::Receiver<dispatch::Launches>,
-    agent: bool,
-    out: Out,
-) {
+async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
+    let mut rx = registry.queue.subscribe();
+    let mut proposals = registry.proposals.subscribe();
+    let mut backlog = registry.items.subscribe();
+    let mut orders = registry.orders.subscribe();
+    let mut launches = registry.launches.subscribe();
+    let mut quota = registry.quota.subscribe();
+    drop(registry);
     let send = async |msg| out.send(Arc::new(msg)).await.is_ok();
     let held = |mut items: Vec<valkyrie_proto::Decision>| {
         if agent {
@@ -1587,6 +1724,12 @@ async fn forward_queue(
     if !send(both(&mut backlog, &mut orders, &mut launches)).await {
         return;
     }
+    let reading = |quota: &mut watch::Receiver<quota::Held>| ServerMsg::Quota {
+        quota: quota.borrow_and_update().as_deref().cloned(),
+    };
+    if !send(reading(&mut quota)).await {
+        return;
+    }
     loop {
         let msg = tokio::select! {
             changed = rx.changed() => match changed {
@@ -1609,9 +1752,54 @@ async fn forward_queue(
                 Ok(()) => both(&mut backlog, &mut orders, &mut launches),
                 Err(_) => return,
             },
+            changed = quota.changed() => match changed {
+                Ok(()) => reading(&mut quota),
+                Err(_) => return,
+            },
         };
         if !send(msg).await {
             return;
+        }
+    }
+}
+
+/// The longest toast `valk notify` raises, in characters.
+const NOTICE_MAX: usize = 200;
+
+impl Registry {
+    /// Raises a toast on every watching client. Control characters become spaces,
+    /// since the text reaches terminals and desktop notifications.
+    fn notify(&self, text: &str, sound: Option<valkyrie_proto::NoticeSound>) -> Result<Reply> {
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(NOTICE_MAX)
+            .collect();
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "nothing to notify");
+        let msg = Arc::new(ServerMsg::Notice {
+            text: text.to_owned(),
+            sound,
+        });
+        // No receivers is an error to `send`; relays get it either way, but only the
+        // ones that show it to someone count.
+        let _ = self.notices.send(msg);
+        let watchers = self.notice_viewers.load(Ordering::Relaxed);
+        Ok(Reply::Notified { watchers })
+    }
+}
+
+/// Pushes each toast to one connection. A client too slow to take them misses some.
+async fn forward_notices(mut rx: broadcast::Receiver<Arc<ServerMsg>>, out: Out) {
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                if out.send(msg).await.is_err() {
+                    return;
+                }
+            }
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => return,
         }
     }
 }

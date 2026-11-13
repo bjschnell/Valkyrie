@@ -1,0 +1,46 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "appimage",
+      "dmg",
+      "msi"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Run and answer your coding agents",
+    "longDescription": "Valkyrie's desktop app: a window around the web app that valk serves on this machine, with a tray icon that counts the sessions that need you and notifications for them.",
+    "publisher": "Valkyrie",
+    "homepage": "https://github.com/bjschnell/Valkyrie",
+    "license": "AGPL-3.0-only",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/*"
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    },
+    "createUpdaterArtifacts": true,
+    "linux": {
+      "deb": {
+        "preRemoveScript": "installer/deb-prerm.sh"
+      }
+    },
+    "windows": {
+      "wix": {
+        "fragmentPaths": [
+          "installer/revoke.wxs"
+        ],
+        "componentRefs": [
+          "RevokeDesktopDevice"
+        ]
+      }
+    }
+  }
+}

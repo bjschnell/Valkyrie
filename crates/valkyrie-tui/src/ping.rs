@@ -9,16 +9,14 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use valkyrie_proto::{AgentState, QueueItem, SessionId};
+use valkyrie_proto::{AgentState, NoticeSound, QueueItem, SessionId};
 
 /// Back-to-back transitions make one sound; the toast still names the last one.
 const SOUND_GAP: Duration = Duration::from_secs(1);
-/// A player still running after this is stuck (herdr's hung for 15 s on a dead
-/// audio server) and gets killed.
-#[cfg(unix)]
+/// A player or notifier still running after this is stuck (herdr's hung for 15 s
+/// on a dead audio server) and gets killed.
 const PLAYER_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +42,27 @@ impl Kind {
     }
 }
 
+impl Ping {
+    /// A toast someone raised with `valk notify`: it sounds as asked (`None` is
+    /// silent) and its color follows the sound, `done` unless it asks for you.
+    pub fn notice(text: &str, sound: Option<NoticeSound>) -> Ping {
+        Ping {
+            kind: match sound {
+                Some(NoticeSound::Request) => Kind::Request,
+                _ => Kind::Done,
+            },
+            session: None,
+            text: text.to_owned(),
+            sound: sound.is_some(),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Ping {
     pub kind: Kind,
-    pub session: SessionId,
+    /// The session it is about; none for a `valk notify` toast.
+    pub session: Option<SessionId>,
     /// `api needs input`, `api finished`.
     pub text: String,
     /// Whether to make a sound (false inside the gap after the last one).
@@ -169,7 +184,7 @@ impl Pinger {
         };
         Some(Ping {
             kind: best.kind,
-            session: best.item.session,
+            session: Some(best.item.session),
             text: format!("{} {what}", best.item.name),
             sound,
         })
@@ -226,18 +241,18 @@ impl Noise {
 
 /// Plays `kind` in `noise` without blocking: a bell over SSH, else the sound file through the
 /// first audio player that works. Failures are silent; a ping is never worth an error.
-pub fn play(noise: Noise, kind: Kind) {
-    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+/// The thread that plays it, for a process that would exit before it ends; it
+/// returns whether a player worked.
+pub fn play(noise: Noise, kind: Kind) -> Option<std::thread::JoinHandle<bool>> {
+    if remote() {
         let mut out = std::io::stdout();
         let _ = out.write_all(b"\x07").and_then(|()| out.flush());
-        return;
+        return None;
     }
-    let Some(file) = sound_file(&valkyrie_proto::state_dir().join("sounds"), noise, kind) else {
-        return;
-    };
+    let file = sound_file(&valkyrie_proto::state_dir().join("sounds"), noise, kind)?;
     // Windows plays a WAV itself.
     #[cfg(windows)]
-    std::thread::spawn(move || {
+    return Some(std::thread::spawn(move || {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_FILENAME, SND_NODEFAULT};
         let wide: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
@@ -247,45 +262,131 @@ pub fn play(noise: Noise, kind: Kind) {
                 wide.as_ptr(),
                 std::ptr::null_mut(),
                 SND_FILENAME | SND_NODEFAULT,
-            )
-        };
-    });
+            ) != 0
+        }
+    }));
     #[cfg(unix)]
-    std::thread::spawn(move || {
+    Some(std::thread::spawn(move || {
         // macOS ships afplay; Linux has one of the others.
         for player in ["pw-play", "paplay", "aplay", "afplay"] {
             let mut cmd = Command::new(player);
             if player == "aplay" {
                 cmd.arg("-q");
             }
-            let Ok(mut child) = cmd
-                .arg(&file)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            else {
-                continue;
-            };
-            let deadline = Instant::now() + PLAYER_TIMEOUT;
-            let status = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(50))
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break None;
-                    }
-                }
-            };
-            if status.is_some_and(|s| s.success()) {
-                return;
+            if run_bounded(cmd.arg(&file)) {
+                return true;
             }
         }
-    });
+        false
+    }))
+}
+
+/// Runs `cmd` with its output discarded, killing it if it outlasts
+/// `PLAYER_TIMEOUT`. Whether it ran and succeeded.
+fn run_bounded(cmd: &mut Command) -> bool {
+    let Ok(mut child) = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + PLAYER_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// Whether this process runs over SSH, where the desktop and speakers aren't the
+/// ones you sit at.
+fn remote() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
+/// The command that raises one desktop notification here, or none where there
+/// isn't a way to. The text goes in as arguments or environment, never into a script.
+fn desktop_command(title: &str, body: &str) -> Option<Command> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("osascript");
+        cmd.args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 2 of argv) with title (item 1 of argv)",
+            "-e",
+            "end run",
+            "--",
+            title,
+            body,
+        ]);
+        Some(cmd)
+    }
+    #[cfg(windows)]
+    {
+        const SCRIPT: &str = "[void][Windows.UI.Notifications.ToastNotificationManager, \
+            Windows.UI.Notifications, ContentType = WindowsRuntime]; \
+            $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('ToastText02'); \
+            $t = $x.GetElementsByTagName('text'); \
+            [void]$t.Item(0).AppendChild($x.CreateTextNode($env:VALK_TITLE)); \
+            [void]$t.Item(1).AppendChild($x.CreateTextNode($env:VALK_BODY)); \
+            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Valkyrie').Show(\
+            [Windows.UI.Notifications.ToastNotification]::new($x))";
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("VALK_TITLE", title)
+            .env("VALK_BODY", body);
+        Some(cmd)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut cmd = Command::new("notify-send");
+        cmd.args(["--app-name=Valkyrie", "--", title, body]);
+        Some(cmd)
+    }
+}
+
+/// Raises a desktop notification without blocking: `notify-send`, `osascript` or a
+/// PowerShell toast. Nothing over SSH, where it would land on the wrong machine; the
+/// bell reaches yours. Failures are silent, like a ping's. The thread that runs it,
+/// for a process that would exit before it ends; it returns whether the notifier
+/// worked.
+pub fn desktop(title: &str, body: &str) -> Option<std::thread::JoinHandle<bool>> {
+    if remote() {
+        return None;
+    }
+    let mut cmd = desktop_command(title, body)?;
+    Some(std::thread::spawn(move || run_bounded(&mut cmd)))
+}
+
+/// Delivers a `valk notify` itself, for when no TUI is watching: its sound (when it
+/// asks for one and the settings allow) and a desktop notification (when they do),
+/// waiting for both. Whether anything was delivered.
+pub fn deliver(text: &str, sound: Option<NoticeSound>) -> bool {
+    let settings = crate::settings::Settings::load();
+    let ping = Ping::notice(text, sound);
+    let mut threads = Vec::new();
+    if ping.sound && settings.sound {
+        threads.extend(play(settings.noise, ping.kind));
+    }
+    if settings.desktop {
+        threads.extend(desktop("Valkyrie", &ping.text));
+    }
+    // Every one is waited for, whatever the first says.
+    let done: Vec<bool> = threads
+        .into_iter()
+        .map(|t| t.join().unwrap_or(false))
+        .collect();
+    done.contains(&true)
 }
 
 /// `<dir>/<noise>-<kind>.wav`, written with the generated sound when missing; the
@@ -567,7 +668,10 @@ mod tests {
             t0,
         )
         .unwrap();
-        assert_eq!((ping.kind, ping.session, ping.sound), (Kind::Done, 2, true));
+        assert_eq!(
+            (ping.kind, ping.session, ping.sound),
+            (Kind::Done, Some(2), true)
+        );
         assert_eq!(ping.text, "s2 finished");
         // Session 1 escalates to blocked right after: a request still sounds.
         let ping = settle(&mut p, &[item(1, AgentState::Blocked, 5)], None, t0).unwrap();
@@ -603,11 +707,11 @@ mod tests {
         // A summary update while settling keeps the ping.
         p.on_queue(&[item(2, AgentState::ReviewReady, 1)], &[], t0);
         p.on_queue(&[item(2, AgentState::ReviewReady, 2)], &[], t0 + SETTLE / 2);
-        assert_eq!(p.due(&[], t0 + SETTLE).unwrap().session, 2);
+        assert_eq!(p.due(&[], t0 + SETTLE).unwrap().session, Some(2));
         // Then the reviewer hands it to the human: that one holds.
         p.on_queue(&[item(1, AgentState::NeedsInput, 4)], &[], t0 + SETTLE * 2);
         assert_eq!(p.due(&[], t0 + SETTLE * 2), None);
-        assert_eq!(p.due(&[], t0 + SETTLE * 3).unwrap().session, 1);
+        assert_eq!(p.due(&[], t0 + SETTLE * 3).unwrap().session, Some(1));
     }
 
     #[test]
@@ -637,7 +741,7 @@ mod tests {
             t0,
         )
         .unwrap();
-        assert_eq!((ping.kind, ping.session), (Kind::Request, 5));
+        assert_eq!((ping.kind, ping.session), (Kind::Request, Some(5)));
         // After a daemon restart the queue primes again instead of re-pinging.
         p.reset();
         assert_eq!(
@@ -683,6 +787,34 @@ mod tests {
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b));
         }
+    }
+
+    #[test]
+    fn a_notice_sounds_as_asked() {
+        let n = Ping::notice("deploy done", Some(NoticeSound::Request));
+        assert_eq!((n.kind, n.session, n.sound), (Kind::Request, None, true));
+        let n = Ping::notice("deploy done", Some(NoticeSound::Done));
+        assert_eq!((n.kind, n.sound), (Kind::Done, true));
+        assert!(!Ping::notice("quiet", None).sound);
+    }
+
+    /// The text reaches the notifier as one argument each, after `--`, so a title
+    /// or body that looks like a flag is still just text.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn desktop_text_is_an_argument_not_a_flag() {
+        let cmd = desktop_command("Valkyrie", "--urgency=critical").unwrap();
+        assert_eq!(cmd.get_program(), "notify-send");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "--app-name=Valkyrie",
+                "--",
+                "Valkyrie",
+                "--urgency=critical"
+            ]
+        );
     }
 
     #[test]

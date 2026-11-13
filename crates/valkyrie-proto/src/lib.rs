@@ -9,9 +9,13 @@ pub mod backlog;
 pub mod client;
 pub mod codec;
 pub mod context;
+pub mod digest;
+pub mod docs;
 pub mod ipc;
 pub mod layout;
+pub mod notes;
 pub mod pastes;
+pub mod quota;
 pub mod screen;
 
 use serde::{Deserialize, Serialize};
@@ -26,14 +30,43 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
+pub use digest::{Digest, DigestEntry, DigestGroup, Outcome};
+pub use docs::{
+    CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, NewDoc,
+};
 pub use layout::{Axis, Pane, Side};
+pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
+pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 27;
+pub const PROTOCOL: u32 = 38;
+
+/// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
+/// the one thing the daemon vouches for a process with no terminal for, once
+/// someone has pressed Pair in the app's window (ADR-0020 §5).
+pub const VOUCH_DESKTOP_PAIRING: &str = "pairing the desktop app";
+
+/// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
+/// something that needs you, `done` for something that finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSound {
+    Request,
+    Done,
+}
 
 pub type ReqId = u64;
 pub type SessionId = u32;
+
+/// What a program is told its terminal looks like: default text and background,
+/// and the 16 ANSI colors (black to bright white), each as RGB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermColors {
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+    pub ansi: Vec<[u8; 3]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
@@ -193,6 +226,11 @@ pub struct SessionInfo {
     /// web app's Chat view reads it (DESIGN §8.7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<PathBuf>,
+    /// One line when another live agent in the same repository has changed the
+    /// same files, e.g. "overlaps session api on src/foo.rs" (ADR-0019 §1, protocol
+    /// 31). Shown beside the state, which it never changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,6 +321,15 @@ pub enum ClientMsg {
         width: u16,
         height: u16,
     },
+    /// The colors the client draws a session with, so a program that asks the
+    /// terminal for its background or palette (OSC 4/10/11) gets the answer a real
+    /// terminal would give. With `session`, that session only; without, the default
+    /// for sessions spawned from now on. `colors: None` puts the stock dark palette
+    /// back. No reply.
+    TermColors {
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    },
     /// An agent hook event, forwarded by `valk hook <agent>` (ADR-0005). No reply:
     /// the hook never waits on the daemon.
     Hook {
@@ -292,9 +339,32 @@ pub enum ClientMsg {
         sent_us: u64,
         payload: serde_json::Value,
     },
+    /// The plan's quota, as `valk statusline` read it from Claude Code (protocol
+    /// 30). No reply; pushed on to queue watchers as `Quota`.
+    Quota {
+        quota: Quota,
+    },
     /// Subscribe this connection to `Queue` pushes, starting with the current queue.
     WatchQueue {
         req: ReqId,
+    },
+    /// Subscribe this connection to `Notice` pushes (protocol 29). `shows` is for
+    /// clients that put them in front of someone (a TUI): a `Notify` counts those,
+    /// so a sender knows whether to deliver it itself. A relay, like the web
+    /// server's push, leaves it off and gets the notices without being counted.
+    WatchNotices {
+        req: ReqId,
+        #[serde(default)]
+        shows: bool,
+    },
+    /// Raise a toast and a ping on every client watching notices (`valk notify`,
+    /// protocol 29). `sound` is `request` or `done`, else the toast is silent.
+    /// Anyone may send one, agents included. Replies `Notified`.
+    Notify {
+        req: ReqId,
+        text: String,
+        #[serde(default)]
+        sound: Option<NoticeSound>,
     },
     /// Mark a session's current state seen (DESIGN §14.4). Ignored if the session has
     /// moved past `seq` since the client looked.
@@ -396,8 +466,8 @@ pub enum ClientMsg {
         req: ReqId,
         id: u32,
     },
-    /// Leaves a handoff note on an item: an agent only on the item its session was
-    /// launched for. Replies `Item`.
+    /// Leaves a note on an item. An agent's on an item its session wasn't
+    /// launched for is kept out of the item's brief. Replies `Item`.
     NoteItem {
         req: ReqId,
         id: u32,
@@ -530,6 +600,148 @@ pub enum ClientMsg {
         remote: bool,
         remove: bool,
     },
+    /// Writes a doc into the docs folder (ADR-0021, protocol 32). Replies `Doc`,
+    /// with its text and hash.
+    WriteDoc {
+        req: ReqId,
+        doc: NewDoc,
+    },
+    /// A doc by its `valk-id` or its path under the docs folder, giving one that has
+    /// no id an id. Replies `Doc`, with its text and hash.
+    ReadDoc {
+        req: ReqId,
+        which: String,
+    },
+    /// Replaces a doc's body, if `base` is still the hash of what's on disk; the
+    /// version replaced is kept. Replies `Doc`.
+    EditDoc {
+        req: ReqId,
+        id: u32,
+        base: String,
+        body: String,
+    },
+    /// Every doc, newest first, without their text. Replies `Docs`; with
+    /// `count_only`, with no docs, just the unread count (the Inbox's poll),
+    /// which the daemon may answer from a count up to 30 s old.
+    Docs {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        count_only: bool,
+    },
+    /// The web app's read (ADR-0021 §5, protocol 33): a doc by the `key` a list
+    /// gave it, never by path, and never writing to the file (a doc with no id
+    /// stays without one). Replies `Doc`.
+    OpenDoc {
+        req: ReqId,
+        key: String,
+    },
+    /// The user opened the Docs list the `Docs` reply stamped `at`: what agents
+    /// wrote until then is read. Replies `Done`.
+    DocsSeen {
+        req: ReqId,
+        at: u64,
+    },
+    /// The comments on the doc with this `key` (ADR-0021 §6, protocol 34).
+    /// Replies `DocComments`.
+    DocComments {
+        req: ReqId,
+        key: String,
+    },
+    /// The user comments on a doc, on the block `quote` reads, or the whole doc
+    /// with none; the session that wrote it hears it at its next prompt. Only a
+    /// human comments. Replies `DocComments`.
+    CommentDoc {
+        req: ReqId,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quote: Option<String>,
+        text: String,
+    },
+    /// The user closes comment `comment` on a doc. Replies `DocComments`.
+    ResolveComment {
+        req: ReqId,
+        key: String,
+        comment: u32,
+    },
+    /// The user's save from the web app's editor (ADR-0021 §7, protocol 35): the
+    /// doc with this key gets `body`, if `base` is still the hash of what's on
+    /// disk; the version replaced is kept. One of the user's own docs gets a
+    /// `valk-id` here. Replies `DocSaved`, refused (`conflict`) with what's on
+    /// disk now if anyone saved in between.
+    SaveDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+        body: String,
+    },
+    /// A doc's past versions, newest first (ADR-0021 §4); with `version`, that
+    /// one's text too. Replies `DocHistory`.
+    DocHistory {
+        req: ReqId,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
+    /// The user puts a past version back, under the same rule as a save; the
+    /// version it replaces is kept, so a restore can be undone. Replies `DocSaved`.
+    RestoreDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+        version: String,
+    },
+    /// The user deletes a doc, if `base` is still what's on disk. A copy is kept
+    /// so it can be put back (`UndeleteDoc`). Replies `DocDeleted`, or
+    /// `DocSaved` with `conflict` if it changed.
+    DeleteDoc {
+        req: ReqId,
+        key: String,
+        base: String,
+    },
+    /// Puts a doc the user deleted back where it was. Replies `Doc`.
+    UndeleteDoc {
+        req: ReqId,
+        token: String,
+    },
+    /// Docs the user deleted that can still be put back, newest first
+    /// (protocol 36). Replies `DeletedDocs`.
+    DeletedDocs {
+        req: ReqId,
+    },
+    /// Where docs go; with `root`, sets it first (the user only; `""` goes back
+    /// to the default). Replies `Text` with the folder.
+    DocsRoot {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<PathBuf>,
+    },
+    /// What every agent did since `since_ms`, or since you were last gone
+    /// (backlog #105, protocol 37). Read-only. Replies `Digest`.
+    Digest {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+        #[serde(default)]
+        by: DigestGroup,
+    },
+    /// Writes an agent note (ADR-0017, protocol 38). Replies `Note`.
+    Note {
+        req: ReqId,
+        note: NewNote,
+    },
+    /// The notes of the project holding `cwd`, every status, each live one's
+    /// staleness worked out, with the tombstones. Replies `Notes`.
+    Notes {
+        req: ReqId,
+        cwd: PathBuf,
+    },
+    /// Deletes a note and leaves a tombstone (ADR-0017 rule 4). Anyone may.
+    /// Replies `Tombstone`.
+    NoteRm {
+        req: ReqId,
+        cwd: PathBuf,
+        id: u32,
+    },
 }
 
 fn yes() -> bool {
@@ -555,6 +767,11 @@ pub enum ServerMsg {
         session: SessionId,
         code: Option<i32>,
     },
+    /// A toast someone raised on purpose with `Notify` (protocol 29).
+    Notice {
+        text: String,
+        sound: Option<NoticeSound>,
+    },
     /// The whole ranked queue, pushed whenever it changes.
     Queue {
         items: Vec<QueueItem>,
@@ -577,6 +794,11 @@ pub enum ServerMsg {
         /// (protocol 27).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         launches: Vec<LaunchOffer>,
+    },
+    /// The latest quota reading, if any; pushed to queue watchers after the first
+    /// `Queue` and whenever it changes (protocol 30).
+    Quota {
+        quota: Option<Quota>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.
@@ -622,7 +844,7 @@ pub enum Reply {
         clients: Vec<ConnectedClient>,
     },
     Session {
-        info: SessionInfo,
+        info: Box<SessionInfo>,
     },
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -633,11 +855,57 @@ pub enum Reply {
     Text {
         text: String,
     },
+    /// How many connections a `Notify` reached (protocol 29); none means nobody is
+    /// watching, so the sender should deliver it itself.
+    Notified {
+        watchers: u32,
+    },
     Decision {
         decision: Box<Decision>,
     },
     Decisions {
         decisions: Vec<Decision>,
+    },
+    Doc {
+        doc: Box<Doc>,
+    },
+    /// A save or restore from the web app: the doc as written, or, with
+    /// `conflict`, as it is on disk now, unchanged by this request.
+    DocSaved {
+        doc: Box<Doc>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        conflict: bool,
+    },
+    DocHistory {
+        versions: Vec<DocVersion>,
+        /// The asked-for version's whole text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// A doc was deleted; `token` puts it back with `UndeleteDoc`.
+    DocDeleted {
+        token: String,
+    },
+    DeletedDocs {
+        docs: Vec<DeletedDoc>,
+    },
+    DocComments {
+        comments: Vec<DocComment>,
+        /// On a new comment: the running session it will be told to at its next
+        /// prompt; none when the session that wrote the doc is gone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    Docs {
+        docs: Vec<Doc>,
+        /// The docs folder.
+        root: PathBuf,
+        /// How many an agent wrote or edited since the list was last opened.
+        #[serde(default)]
+        unread: u32,
+        /// When it was listed, in seconds, for `DocsSeen`.
+        #[serde(default)]
+        at: u64,
     },
     Item {
         item: Box<Item>,
@@ -682,6 +950,18 @@ pub enum Reply {
         /// empty when nothing is.
         against: Vec<String>,
         worktrees: Vec<Worktree>,
+    },
+    Digest {
+        digest: Box<Digest>,
+    },
+    Note {
+        note: Box<Note>,
+    },
+    Notes {
+        listing: NotesListing,
+    },
+    Tombstone {
+        tombstone: Tombstone,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

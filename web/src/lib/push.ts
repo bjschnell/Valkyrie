@@ -11,6 +11,8 @@ export type PushState =
   | "install-first"
   /** Plain http from another machine. */
   | "needs-https"
+  /** Inside the desktop app, which shows its own notifications. */
+  | "desktop-app"
   | "unsupported"
   | "off"
   | "on"
@@ -23,8 +25,16 @@ export const isStandalone = () =>
   matchMedia("(display-mode: standalone)").matches ||
   (navigator as Navigator & { standalone?: boolean }).standalone === true;
 
+/**
+ * The desktop app's window (ADR-0020 §3): its shell sets this before the page
+ * loads. Web push may not arrive in a system webview, and the shell notifies by
+ * itself, so the page leaves notifications to it.
+ */
+export const inDesktopApp = () => (window as Window & { __VALK_DESKTOP__?: boolean }).__VALK_DESKTOP__ === true;
+
 /** What this browser can do, before asking it anything. */
-function support(): PushState | "ok" {
+export function support(): PushState | "ok" {
+  if (inDesktopApp()) return "desktop-app";
   if (!window.isSecureContext) return "needs-https";
   if (isIos() && !isStandalone()) return "install-first";
   if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
@@ -34,7 +44,7 @@ function support(): PushState | "ok" {
 }
 
 export function registerWorker(): void {
-  if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+  if (inDesktopApp() || !("serviceWorker" in navigator) || !window.isSecureContext) return;
   void navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 

@@ -238,7 +238,7 @@ pub struct ItemLaunch {
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemNote {
     /// Seconds since the epoch.
     pub at: u64,
@@ -249,6 +249,35 @@ pub struct ItemNote {
     /// but never put into a launch's brief (ADR-0007).
     #[serde(default, skip_serializing_if = "is_false")]
     pub taken: bool,
+    /// Left by an agent on an item it was neither launched for nor took, from
+    /// work elsewhere: shown, never in a brief, and kept out of the prompts that
+    /// judge the item. `taken` is set with it, so older builds keep it out of a
+    /// brief too.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aside: bool,
+    /// For an aside, the item that agent was on, when it was on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u32>,
+}
+
+impl ItemNote {
+    /// Whether it goes into the brief of the item's next launch: the user's, or
+    /// from an earlier launch of the item. Anything else could be a way into a
+    /// prompt the user starts.
+    pub fn in_brief(&self) -> bool {
+        !self.taken && !self.aside
+    }
+
+    /// Where an agent's note came from when that kept it out of the brief, as
+    /// the CLI and TUI label it.
+    pub fn origin(&self) -> Option<String> {
+        match (self.aside, self.from, self.taken) {
+            (true, Some(from), _) => Some(format!("while on #{from}")),
+            (true, None, _) => Some("from outside the item".into()),
+            (false, _, true) => Some("from a take".into()),
+            _ => None,
+        }
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -314,6 +343,11 @@ pub enum ItemChange {
     /// Ships, drops or reopens it. Shipping also takes away a worktree its launch
     /// made, when nothing is left in it.
     Status { status: ItemStatus },
+    /// Puts a started item back in the backlog (protocol 28): the user only. The
+    /// daemon stops every live session on it and the item forgets them, so it
+    /// reads as not started; its branch and checkout stay for the next launch.
+    /// Refused for one with a pull request, or that nothing started on.
+    Return,
 }
 
 /// A build order for one repository's open items (ADR-0019 §2, `order`): what to
@@ -438,6 +472,13 @@ pub struct KeptItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_return_is_a_bare_tag() {
+        let back: ItemChange = serde_json::from_str(r#"{"do":"return"}"#).unwrap();
+        assert_eq!(back, ItemChange::Return);
+        assert_eq!(serde_json::to_string(&back).unwrap(), r#"{"do":"return"}"#);
+    }
 
     #[test]
     fn an_edit_carries_only_what_it_changes() {

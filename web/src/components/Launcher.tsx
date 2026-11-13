@@ -3,6 +3,7 @@ import { getJson, type Listing, type Place, type Places } from "../lib/api";
 import { spawn, toast, useApp } from "../store";
 import { Back, Chevron } from "./icons";
 import { MicButton } from "./Mic";
+import { QuotaMeter } from "./Quota";
 
 type Agent = "claude" | "codex" | "shell";
 
@@ -129,6 +130,7 @@ export function Launcher() {
       </header>
 
       <main className="launcher">
+        {agent === "claude" && <QuotaMeter />}
         <div className="modes agent-pick" role="radiogroup" aria-label="Agent">
           {AGENTS.map((a) => (
             <button key={a.id} role="radio" aria-checked={agent === a.id} className={agent === a.id ? "on" : ""} onClick={() => setAgent(a.id)}>

@@ -8,13 +8,14 @@ import {
 } from "../proto";
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
 import { age } from "../lib/time";
-import { answer, answerAll, kill, takeStep, useApp } from "../store";
+import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
-import { useLook } from "../lib/theme";
-import { Chevron, Gear, List, Pin, Plus } from "./icons";
+import { hasRain, useLook } from "../lib/theme";
+import { Chevron, Clock, Gear, List, Page, Pin, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { NotifyHint } from "./Notify";
+import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
 import { Mark, Wordmark } from "./Logo";
 
@@ -23,12 +24,21 @@ const go = (id: number) => {
 };
 
 /** Home: who needs you, with the answers right on the card, then every session. */
-export function Inbox() {
+export function Inbox({ beside }: { beside?: number | null } = {}) {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
   const openItems = useApp(
     (s) => s.items.filter((i) => i.status === "open").length,
   );
+  // Docs agents wrote since you last looked: a count, never a card (ADR-0021 §5).
+  const unreadDocs = useApp((s) => s.unreadDocs);
+  const status = useApp((s) => s.status);
+  useEffect(() => {
+    if (status !== "open") return;
+    void refreshUnreadDocs();
+    const every = setInterval(() => void refreshUnreadDocs(), 60_000);
+    return () => clearInterval(every);
+  }, [status]);
   const look = useLook();
   const working = sessions.filter(
     (s) => s.exited === null && s.status.state === "working",
@@ -44,6 +54,8 @@ export function Inbox() {
   // changes, b opens the backlog, d the decisions, `,` opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Beside an open session, the keys are that session's.
+      if (beside != null) return;
       if (
         (e.target as HTMLElement).closest("textarea, input") ||
         e.ctrlKey ||
@@ -62,6 +74,7 @@ export function Inbox() {
         n: () => (location.hash = "#/new"),
         b: () => (location.hash = "#/backlog"),
         d: () => (location.hash = "#/decisions"),
+        a: () => (location.hash = "#/digest"),
         ",": () => (location.hash = "#/settings"),
         j: () => pick(sel + 1),
         k: () => pick(sel - 1),
@@ -82,7 +95,7 @@ export function Inbox() {
 
   return (
     <div className="page">
-      {look !== "default" && <Rain key={look} />}
+      {hasRain(look) && <Rain key={look} />}
       <header className="topbar">
         <div className="brand">
           <Mark size={26} />
@@ -97,6 +110,23 @@ export function Inbox() {
         >
           <List />
           {openItems > 0 && <span className="icon-badge">{openItems}</span>}
+        </button>
+        <button
+          className="icon-btn"
+          aria-label={unreadDocs > 0 ? `Docs, ${unreadDocs} unread` : "Docs"}
+          title="Docs"
+          onClick={() => (location.hash = "#/docs")}
+        >
+          <Page />
+          {unreadDocs > 0 && <span className="icon-badge">{unreadDocs}</span>}
+        </button>
+        <button
+          className="icon-btn"
+          aria-label="Away digest"
+          title="While you were gone"
+          onClick={() => (location.hash = "#/digest")}
+        >
+          <Clock />
         </button>
         <button
           className="icon-btn"
@@ -124,6 +154,7 @@ export function Inbox() {
       </header>
 
       <main className="inbox">
+        <QuotaMeter />
         <NotifyHint />
         <AllowAll />
         <Proposals />
@@ -166,6 +197,7 @@ export function Inbox() {
                 s={s}
                 n={i + 1}
                 picked={sel === queue.length + i}
+                current={beside === s.id}
                 swiped={swiped === s.id}
                 onSwipe={(open) =>
                   setSwiped((was) => (open ? s.id : was === s.id ? null : was))
@@ -382,12 +414,15 @@ function SessionRow({
   s,
   n,
   picked,
+  current,
   swiped,
   onSwipe,
 }: {
   s: SessionInfo;
   n: number;
   picked: boolean;
+  /** Open in the pane beside the list. */
+  current: boolean;
   swiped: boolean;
   onSwipe: (open: boolean) => void;
 }) {
@@ -429,7 +464,8 @@ function SessionRow({
         {state === "exited" ? "Remove" : "Close"}
       </button>
       <button
-        className={`row ${queued ? "queued" : ""} ${picked ? "picked" : ""} ${drag !== null ? "dragging" : ""}`}
+        aria-current={current || undefined}
+        className={`row ${queued ? "queued" : ""} ${picked ? "picked" : ""} ${current ? "current" : ""} ${drag !== null ? "dragging" : ""}`}
         style={x ? { transform: `translateX(${x}px)` } : undefined}
         onPointerDown={(e) => {
           swallow.current = false;
@@ -476,6 +512,9 @@ function SessionRow({
               : STATE_LABEL[state]}
             {s.status.summary ? ` · ${s.status.summary}` : ""}
           </span>
+          {s.overlap ? (
+            <span className="row-sub row-overlap">⚠ {s.overlap}</span>
+          ) : null}
         </span>
         <span className="row-age">{age(s.status.since_ms, now)}</span>
         <Chevron />

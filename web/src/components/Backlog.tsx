@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, noteOrigin, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
@@ -377,6 +377,15 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
     return () => clearTimeout(t);
   }, [sure]);
   const remove = () => (sure ? act(() => deleteItem(item.id)) : setSure(true));
+  // Back to the backlog stops the agent on it, so with one running it asks twice too.
+  const [back, setBack] = useState(false);
+  useEffect(() => {
+    if (!back) return;
+    const t = setTimeout(() => setBack(false), 5000);
+    return () => clearTimeout(t);
+  }, [back]);
+  const startedBefore = (item.sessions?.length ?? 0) > 0 && !item.pr;
+  const sendBack = () => (live && !back ? setBack(true) : act(() => changeItem(item.id, { do: "return" })));
 
   // What its checkout holds, read from git when the card opens and as it changes.
   const [facts, setFacts] = useState<ItemFacts | null>(null);
@@ -440,7 +449,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
           <p className="item-handoff" onClick={() => setExpanded(true)}>
             <span className="item-handoff-by">
               {who(latest.by)}
-              {latest.taken && " · from a take"}:
+              {noteOrigin(latest)}:
             </span>{" "}
             {latest.text}
           </p>
@@ -479,7 +488,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
               <div key={i} className="item-note">
                 <div className="item-note-by">
                   {who(n.by)} · {age(n.at * 1000, now)}
-                  {n.taken && " · from a take"}
+                  {noteOrigin(n)}
                 </div>
                 <p>{n.text}</p>
               </div>
@@ -532,6 +541,11 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
               {expanded && (
                 <button className="ghost no" disabled={busy} onClick={() => void status("dropped")}>
                   Drop
+                </button>
+              )}
+              {expanded && startedBefore && (
+                <button className={`ghost ${back ? "item-sure" : ""}`} disabled={busy} onClick={() => void sendBack()}>
+                  {back ? "Stop it and return" : "Back to backlog"}
                 </button>
               )}
               {expanded && (
@@ -878,11 +892,11 @@ export function ItemEditor({ id }: { id: number | null }) {
       </main>
 
       <footer className="dock item-dock">
-        <button className="ghost" disabled={busy || sending || empty} onClick={() => void save(false)}>
+        <button className="primary save" disabled={busy || sending || empty} onClick={() => void save(false)}>
           Save
         </button>
         <button
-          className="primary start"
+          className="ghost launch"
           disabled={busy || sending || empty || !folder || running || (item !== null && item.status !== "open")}
           onClick={() => void save(true)}
         >

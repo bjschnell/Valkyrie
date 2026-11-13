@@ -1,0 +1,184 @@
+# The desktop app's installers (ADR-0020, phase 4): a .deb and an AppImage, a
+# .dmg and an .msi, each carrying the `valk` of the same release. release.yml
+# calls it once that release's `valk` binaries are up. Run by hand it is a dry
+# run: it builds the installers around the latest release's `valk` and uploads
+# nothing.
+#
+# Nothing here is signed with a certificate. The macOS app is signed ad hoc (an
+# unsigned one is refused outright as damaged on Apple silicon) and still has to
+# be allowed once in System Settings; Windows shows a SmartScreen prompt. The
+# hash check below catches a broken download, not a tampered release: the hash
+# comes from the same release as the file.
+#
+# The app's own updater (tauri-plugin-updater) is signed, though: with the
+# TAURI_SIGNING_PRIVATE_KEY secret (and its password) set, each runner also
+# builds the files the app updates from and their signatures, and `manifest`
+# writes the release's latest.json, which the app reads from the latest release.
+# Without the secret (a fork) the installers are built as before, with no
+# updates. Only the app updates this way; `valk` keeps its own path.
+name: desktop
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: "The GitHub release (its tag name) to take `valk` from and upload to"
+        type: string
+        required: true
+      ref:
+        description: "What to build: a tag or a commit"
+        type: string
+        required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An older Ubuntu, so the app runs against the glibc and WebKitGTK of
+          # distributions that are still in use.
+          - os: ubuntu-22.04
+            valk: valk-x86_64-unknown-linux-musl.tar.gz
+            bundles: deb,appimage
+          - os: macos-latest
+            valk: valk-aarch64-apple-darwin.tar.gz
+            # The .app is what the updater replaces; only the .dmg is uploaded.
+            bundles: app,dmg
+          - os: windows-latest
+            valk: valk-x86_64-pc-windows-msvc.zip
+            bundles: msi
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Empty on a dry run: the latest release's `valk`, and no upload.
+      TAG: ${{ inputs.release }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - name: WebKitGTK, the tray's library and what the AppImage needs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf file
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-bundle
+      # The same binary the release's own installers give out, checked against
+      # the hash published beside it.
+      - name: valk of this release
+        env:
+          VALK: ${{ matrix.valk }}
+        run: |
+          # sha256sum on Linux and in Git Bash on Windows; macOS has shasum.
+          sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          mkdir -p download crates/valkyrie-desktop/resources
+          # shellcheck disable=SC2086
+          gh release download $TAG --repo "$GITHUB_REPOSITORY" --dir download \
+            --pattern "$VALK" --pattern "$VALK.sha256"
+          # The Windows build writes its hash file with a CR at the end of the
+          # line, which shasum would take for part of the file's name.
+          (cd download && tr -d '\r' < "$VALK.sha256" | sha256 -c -)
+          case "$VALK" in
+            # Git Bash has no unzip; PowerShell has.
+            *.zip) pwsh -NoProfile -Command "Expand-Archive -Force -Path 'download/$VALK' -DestinationPath 'crates/valkyrie-desktop/resources'" ;;
+            *) tar -xzf "download/$VALK" -C crates/valkyrie-desktop/resources ;;
+          esac
+          ls -l crates/valkyrie-desktop/resources
+      # The version the bundle settings were tried with, not whatever is newest
+      # on the day of a release.
+      - name: Tauri's bundler
+        run: cargo install tauri-cli --version "=2.12.4" --locked
+      - name: bundle
+        working-directory: crates/valkyrie-desktop
+        run: |
+          config=tauri.bundle.conf.json
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::no updater signing key: building the installers without updates"
+            jq '.bundle.createUpdaterArtifacts = false' tauri.bundle.conf.json > "$RUNNER_TEMP/bundle.json"
+            config="$RUNNER_TEMP/bundle.json"
+          fi
+          cargo tauri build --features window --config "$config" --bundles "${{ matrix.bundles }}" -- --locked
+      - name: publish
+        run: |
+          # sha256sum on Linux and in Git Bash on Windows; macOS has shasum.
+          sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          shopt -s nullglob
+          files=(target/release/bundle/deb/*.deb target/release/bundle/appimage/*.AppImage
+                 target/release/bundle/dmg/*.dmg target/release/bundle/msi/*.msi)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no installer was built"; exit 1; }
+          for file in "${files[@]}"; do
+            (cd "$(dirname "$file")" && sha256 "$(basename "$file")" > "$(basename "$file").sha256")
+            ls -l "$file"
+          done
+          if [ -z "$TAG" ]; then
+            echo "dry run: nothing uploaded"
+            exit 0
+          fi
+          for file in "${files[@]}"; do
+            gh release upload "$TAG" "$file" "$file.sha256" --clobber
+          done
+          # What the app's updater downloads, each beside its signature: the
+          # AppImage and the .msi themselves, and the .app as a tarball.
+          updates=(target/release/bundle/appimage/*.AppImage.sig target/release/bundle/macos/*.app.tar.gz.sig
+                   target/release/bundle/msi/*.msi.sig)
+          for sig in "${updates[@]}"; do
+            gh release upload "$TAG" "$sig" --clobber
+            case "$sig" in *.app.tar.gz.sig) gh release upload "$TAG" "${sig%.sig}" --clobber ;; esac
+          done
+
+  # latest.json, from the signatures the runners uploaded: what the app checks
+  # for an update. A platform that failed to build is left out, and an app there
+  # finds no update until the next release.
+  manifest:
+    needs: bundle
+    if: ${{ !cancelled() && inputs.release != '' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.release }}
+    steps:
+      - run: |
+          mkdir sigs
+          cd sigs
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sig'
+          shopt -s nullglob
+          sigs=(*.sig)
+          if [ "${#sigs[@]}" -eq 0 ]; then
+            echo "::warning::no updater signatures in $TAG: no latest.json, so no app update"
+            exit 0
+          fi
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          platforms='{}'
+          for sig in "${sigs[@]}"; do
+            # Each key names its bundle, so an app installed another way (a .deb)
+            # never takes another bundle's file for its own.
+            case "$sig" in
+              *.AppImage.sig) key=linux-x86_64-appimage ;;
+              *.app.tar.gz.sig) key=darwin-aarch64-app ;;
+              *.msi.sig) key=windows-x86_64-msi ;;
+              *) continue ;;
+            esac
+            platforms=$(jq --arg k "$key" --arg url "$base/${sig%.sig}" --rawfile sig "$sig" \
+              '. + {($k): {url: $url, signature: ($sig | rtrimstr("\n"))}}' <<<"$platforms")
+          done
+          jq -n --arg v "${TAG#v}" --arg notes "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson p "$platforms" \
+            '{version: $v, notes: $notes, pub_date: $date, platforms: $p}' > latest.json
+          cat latest.json
+          gh release upload "$TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber

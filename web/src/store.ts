@@ -4,8 +4,15 @@
 import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
+import { termColors } from "./lib/theme";
 import type {
   Decision,
+  Digest,
+  DigestGroup,
+  Doc,
+  DeletedDoc,
+  DocComment,
+  DocVersion,
   Item,
   ItemChange,
   ItemFacts,
@@ -13,11 +20,15 @@ import type {
   NewItem,
   OrderProposal,
   LaunchOffer,
+  Quota,
   QueueItem,
   ReviewAction,
+  Row,
+  ScrollAnchor,
   ServerMsg,
   SessionId,
   SessionInfo,
+  Size,
   StepAction,
 } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
@@ -67,12 +78,16 @@ interface State {
   queue: QueueItem[];
   /** Decisions agents proposed, waiting on the human (ADR-0007). */
   proposals: Decision[];
+  /** Docs an agent wrote since the Docs list was last opened (ADR-0021 §5): a count, never cards. */
+  unreadDocs: number;
   /** The backlog (DESIGN §8.12), as the daemon pushes it. */
   items: Item[];
   /** Build orders waiting on the user (ADR-0019 §2), pushed with the items. */
   orders: OrderProposal[];
   /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
   launches: LaunchOffer[];
+  /** The plan's quota (protocol 30), pushed with the queue. */
+  quota: Quota | null;
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -83,7 +98,8 @@ interface State {
   chat: Chat | null;
   /** Choices on the screens of queued sessions, by session, for the inbox. */
   prompts: Record<SessionId, Prompt>;
-  toast: { text: string; at: number } | null;
+  /** `action`: a button on it, such as Undo; the toast stays longer. */
+  toast: { text: string; at: number; action?: { label: string; run: () => void } } | null;
   now: number;
   push: PushState;
   /** Turning notifications on: the browser's push service can take a while. */
@@ -99,9 +115,11 @@ export const useApp = create<State>(() => ({
   sessions: [],
   queue: [],
   proposals: [],
+  unreadDocs: 0,
   items: [],
   orders: [],
   launches: [],
+  quota: null,
   boot: 0,
   openId: null,
   screen: null,
@@ -120,8 +138,8 @@ const get = useApp.getState;
 let conn: Conn | null = null;
 let listTimer: number | null = null;
 
-export function toast(text: string): void {
-  set({ toast: { text, at: Date.now() } });
+export function toast(text: string, action?: { label: string; run: () => void }): void {
+  set({ toast: { text, at: Date.now(), action } });
 }
 
 export function saveToken(token: string): void {
@@ -200,9 +218,11 @@ function onPush(msg: ServerMsg): void {
     case "items":
       set({ items: msg.items, orders: msg.orders ?? [], launches: msg.launches ?? [] });
       break;
+    case "quota":
+      set({ quota: msg.quota });
+      break;
     case "screen":
-      if (msg.session === get().openId)
-        set({ screen: apply(get().screen, msg.update) });
+      if (msg.session === get().openId) showScreen(apply(latest(), msg.update));
       break;
     case "chat":
       if (msg.session === get().openId)
@@ -218,6 +238,39 @@ function onPush(msg: ServerMsg): void {
       );
       break;
   }
+}
+
+// The open session's screen is shown once a frame: a burst of output (a build log,
+// `cat` of a big file) arrives as many updates between two paints, and rendering
+// each would only fall behind. Every update is still applied, in order.
+let pending: Screen | null = null;
+let frame: { raf: number; timer: number } | null = null;
+/** A window that's covered gets a frame a second or none; the screen still moves on. */
+const FRAME_LATEST_MS = 100;
+
+function latest(): Screen | null {
+  return frame === null ? get().screen : pending;
+}
+
+function showScreen(screen: Screen): void {
+  pending = screen;
+  if (frame !== null) return;
+  const paint = () => {
+    const shown = pending;
+    clearScreen();
+    set({ screen: shown });
+  };
+  frame = { raf: requestAnimationFrame(paint), timer: window.setTimeout(paint, FRAME_LATEST_MS) };
+}
+
+/** Forgets the screen on show, and any update still waiting for its frame. */
+function clearScreen(): void {
+  if (frame !== null) {
+    cancelAnimationFrame(frame.raf);
+    clearTimeout(frame.timer);
+  }
+  frame = null;
+  pending = null;
 }
 
 /** Tells the server whether this app is on screen: notifications wait while it is. */
@@ -326,6 +379,7 @@ async function refreshPrompts(items: QueueItem[]): Promise<void> {
 
 export async function open(id: SessionId): Promise<void> {
   if (get().openId === id) return;
+  clearScreen();
   set({ openId: id, screen: null, exited: null, chat: null });
   // Followed whichever view shows, so switching to Chat is instant.
   conn?.send({ t: "chat", session: id });
@@ -345,6 +399,7 @@ async function attach(id: SessionId): Promise<void> {
 
 export async function close(): Promise<void> {
   if (get().openId === null) return;
+  clearScreen();
   set({ openId: null, screen: null, exited: null, chat: null });
   conn?.send({ t: "chat", session: null });
   await conn?.request({ t: "detach" }).catch(() => {});
@@ -354,6 +409,45 @@ function input(session: SessionId, data: number[]): boolean {
   const ok = conn?.send({ t: "input", session, data }) ?? false;
   if (!ok) toast("not connected; nothing was sent");
   return ok;
+}
+
+/** Keys typed into the open session's terminal, already as the bytes to send. */
+export function sendBytes(data: number[]): boolean {
+  const id = get().openId;
+  return id !== null && data.length > 0 && input(id, data);
+}
+
+/** Bytes for one session, whichever is open: what's owed to the one you just left. */
+export function sendBytesTo(session: SessionId, data: number[]): void {
+  conn?.send({ t: "input", session, data });
+}
+
+/** The modes of the open session's program as last heard, ahead of the frame that shows them. */
+export function openModes(): Modes | undefined {
+  return latest()?.modes;
+}
+
+/**
+ * Sizes the open session to the terminal you're typing in. Only the desktop
+ * terminal does, once it has the keyboard: watching never resizes a session.
+ */
+export function resizeOpen(size: Size): void {
+  const id = get().openId;
+  if (id !== null) conn?.send({ t: "resize", session: id, size });
+}
+
+/** A screenful of the open session's history, or `null` when it can't be had. */
+export async function scrollback(
+  anchor: ScrollAnchor,
+): Promise<{ from_top: number; history: number; rows: Row[] } | null> {
+  const id = get().openId;
+  if (id === null || !conn) return null;
+  try {
+    const reply = await conn.request({ t: "scrollback", session: id, anchor });
+    return reply.t === "scrollback" && get().openId === id ? reply : null;
+  } catch {
+    return null;
+  }
 }
 
 export function sendKey(key: Key): void {
@@ -515,9 +609,148 @@ export async function allDecisions(): Promise<Decision[] | null> {
   }
 }
 
+/** Every doc, newest first, and how many an agent wrote since the list was last
+ * opened (ADR-0021 §5); null when it can't be asked. */
+export async function allDocs(): Promise<{ docs: Doc[]; unread: number; at: number } | null> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const reply = await conn.request({ t: "docs" });
+    return reply.t === "docs" ? { docs: reply.docs, unread: reply.unread ?? 0, at: reply.at ?? 0 } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What every agent did since `sinceMs`, or since you were last gone (backlog
+ * #105). Throws with the daemon's reason. */
+export async function awayDigest(sinceMs: number | null, by: DigestGroup): Promise<Digest> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "digest", since_ms: sinceMs, by });
+  if (reply.t !== "digest") throw new Error("unexpected reply");
+  return reply.digest;
+}
+
+/** One doc's text, by the key its list entry carries. Throws with the daemon's reason. */
+export async function openDoc(key: string): Promise<Doc> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "open_doc", key });
+  if (reply.t !== "doc") throw new Error("unexpected reply");
+  return reply.doc;
+}
+
+/** A doc's comments (ADR-0021 §6); none on one without a valk-id. Throws with the daemon's reason. */
+export async function docComments(key: string): Promise<DocComment[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "doc_comments", key });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return reply.comments;
+}
+
+/** Comments on a doc, or on the block `quote` reads. Returns them all, and the
+ * running session that hears it at its next prompt, if any. */
+export async function commentDoc(
+  key: string,
+  quote: string | null,
+  text: string,
+): Promise<{ comments: DocComment[]; to?: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "comment_doc", key, text, ...(quote ? { quote } : {}) });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return { comments: reply.comments, to: reply.to };
+}
+
+/** Closes a comment; returns the doc's comments. */
+export async function resolveComment(key: string, comment: number): Promise<DocComment[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "resolve_comment", key, comment });
+  if (reply.t !== "doc_comments") throw new Error("unexpected reply");
+  return reply.comments;
+}
+
+/** A save or restore: the doc as written, or with `conflict`, as it is on disk now. */
+export type Saved = { doc: Doc; conflict: boolean };
+
+/** The user's save from the editor (ADR-0021 §7), over the version whose hash
+ * `base` is. Throws with the daemon's reason. */
+export async function saveDoc(key: string, base: string, body: string): Promise<Saved> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "save_doc", key, base, body });
+  if (reply.t !== "doc_saved") throw new Error("unexpected reply");
+  return { doc: reply.doc, conflict: !!reply.conflict };
+}
+
+/** A doc's past versions, newest first, and one's whole text when asked. */
+export async function docHistory(key: string, version?: string): Promise<{ versions: DocVersion[]; text?: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "doc_history", key, ...(version ? { version } : {}) });
+  if (reply.t !== "doc_history") throw new Error("unexpected reply");
+  return { versions: reply.versions, text: reply.text };
+}
+
+/** Puts a past version back over the version whose hash `base` is. */
+export async function restoreDoc(key: string, base: string, version: string): Promise<Saved> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "restore_doc", key, base, version });
+  if (reply.t !== "doc_saved") throw new Error("unexpected reply");
+  return { doc: reply.doc, conflict: !!reply.conflict };
+}
+
+/** Deletes a doc if `base` is still on disk: the token that puts it back, or
+ * the doc as it is now if someone saved since. */
+export async function deleteDoc(key: string, base: string): Promise<{ token: string } | { conflict: Doc }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "delete_doc", key, base });
+  if (reply.t === "doc_deleted") return { token: reply.token };
+  if (reply.t === "doc_saved") return { conflict: reply.doc };
+  throw new Error("unexpected reply");
+}
+
+/** Deleted docs that can still be put back, newest first; none when it can't be asked. */
+export async function deletedDocs(): Promise<DeletedDoc[]> {
+  try {
+    if (!conn) return [];
+    const reply = await conn.request({ t: "deleted_docs" });
+    return reply.t === "deleted_docs" ? reply.docs : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Puts a deleted doc back where it was. */
+export async function undeleteDoc(token: string): Promise<Doc> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "undelete_doc", token });
+  if (reply.t !== "doc") throw new Error("unexpected reply");
+  return reply.doc;
+}
+
+/** The Docs list listed `at` is open: clear the Inbox's unread count. What came
+ * in after `at` stays unread, since the list didn't show it. */
+export function docsSeen(at: number): void {
+  set({ unreadDocs: 0 });
+  void conn?.request({ t: "docs_seen", at }).catch(() => undefined);
+}
+
+/** Asks how many docs are unread, for the Inbox's count: the count alone, not the list. */
+export async function refreshUnreadDocs(): Promise<void> {
+  try {
+    if (!conn) return;
+    const reply = await conn.request({ t: "docs", count_only: true });
+    if (reply.t === "docs") set({ unreadDocs: reply.unread ?? 0 });
+  } catch {
+    // Not connected, or the daemon can't be asked: keep the last count.
+  }
+}
+
 /** The choices on the open session's screen right now. */
 export function openChoices(screen: Screen | null): Choice[] {
   return screen ? findChoices(screenText(screen)) : [];
+}
+
+/** Tells a session we started the colors it is shown in, so its programs can tell a light look from a dark one. */
+function reportColors(session: SessionId): void {
+  const colors = termColors();
+  if (colors) conn?.send({ t: "term_colors", session, colors });
 }
 
 /** The size a new session starts at; a TUI that attaches later resizes it. */
@@ -535,6 +768,7 @@ export async function spawn(
   const reply = await conn.request({ t: "spawn", spec });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 
@@ -672,7 +906,10 @@ export async function answerLaunch(offer: LaunchOffer, launch: boolean): Promise
   if (!conn) return null;
   try {
     const reply = await conn.request({ t: "answer_launch", project: offer.project, id: offer.id, launch });
-    if (reply.t === "session") return reply.info.id;
+    if (reply.t === "session") {
+      reportColors(reply.info.id);
+      return reply.info.id;
+    }
     if (reply.t === "text") toast(reply.text);
     return null;
   } catch (e) {
@@ -722,6 +959,7 @@ export async function launchItem(
   });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
+  reportColors(reply.info.id);
   return reply.info.id;
 }
 

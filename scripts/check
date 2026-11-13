@@ -22,6 +22,15 @@ say "cargo clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 say "cargo test"
 cargo test --workspace --locked --no-fail-fast
+# The desktop app is behind a feature and needs the system webview to build. With
+# it here (Linux: webkit2gtk-4.1), it's checked as CI's desktop job does.
+if [ "$(uname -s)" != Linux ] || pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+    say "desktop app: cargo clippy, cargo test"
+    cargo clippy -p valkyrie-desktop --features window --all-targets --locked -- -D warnings
+    cargo test -p valkyrie-desktop --features window --locked --no-fail-fast
+else
+    say "desktop app: skipped, no webkit2gtk-4.1 here (CI's desktop job checks it)"
+fi
 say "shellcheck"
 shellcheck install.sh install-release.sh .githooks/commit-msg scripts/check
 

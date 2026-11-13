@@ -4,6 +4,9 @@
 
 pub mod backlog;
 pub mod blocker;
+pub mod comments;
+pub mod digest;
+pub mod docs;
 pub mod extract;
 pub mod facts;
 mod file;
@@ -14,10 +17,13 @@ pub mod handoff;
 pub mod inject;
 pub mod mine;
 pub mod model;
+pub mod notes;
 pub mod order;
 pub mod outcome;
 pub mod policy;
 pub mod project;
+pub mod promote;
+pub mod recall;
 pub mod reply;
 pub mod retro;
 pub mod scope;
@@ -465,6 +471,13 @@ impl Store {
         {
             d.pinned |= self.supersede(root, old, id, now)?;
         }
+        // Proposed from recurring notes (ADR-0017 §7): the decision now carries
+        // what they said, so they leave search. The decision is already written,
+        // so a failure here doesn't undo the accept: the daemon's next recurrence
+        // check (`promote::Store::heal_promotions`) marks them.
+        if accepting {
+            let _ = self.promote_notes(root, &d);
+        }
         Ok(d)
     }
 
@@ -699,6 +712,53 @@ impl Store {
         Ok(Some(blocks + 1))
     }
 
+    /// Counts one `ci: agent` block on the pull request at `pr` when its branch is
+    /// at `head` (ADR-0016 §5) and returns the new count, or `None` when this head
+    /// was already blocked or the pull request has been blocked `limit` times. Kept
+    /// apart from [`Store::record_ci_fix`]: a different mode, its own count.
+    pub fn record_ci_agent(
+        &self,
+        root: &Path,
+        pr: &str,
+        head: &str,
+        now: u64,
+        limit: u32,
+    ) -> Result<Option<u32>> {
+        let path = self.base.join(project::key(root)).join("ci-agent.json");
+        let mut all = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let map = all
+            .as_object_mut()
+            .context("ci-agent.json isn't an object")?;
+        map.retain(|_, v| {
+            now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+        });
+        let entry = map.get(pr);
+        let blocks = entry.and_then(|v| v["blocks"].as_u64()).unwrap_or(0) as u32;
+        let mut heads: Vec<String> = entry
+            .and_then(|v| v["heads"].as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if blocks >= limit || heads.iter().any(|h| h == head) {
+            return Ok(None);
+        }
+        heads.push(head.to_owned());
+        map.insert(
+            pr.to_owned(),
+            serde_json::json!({"blocks": blocks + 1, "heads": heads, "at": now}),
+        );
+        self.mark_project(root)?;
+        write_atomic(&path, &format!("{all}\n"))?;
+        Ok(Some(blocks + 1))
+    }
+
     fn ci_fixes(&self, root: &Path) -> serde_json::Value {
         let path = self.base.join(project::key(root)).join("ci-fix.json");
         std::fs::read_to_string(path)
@@ -840,31 +900,55 @@ impl Store {
     /// batch is one small write. Once the oldest line is a week past
     /// [`served::SERVED_DAYS`], what no longer counts is dropped first: only
     /// that line is read, so a busy project's hooks don't re-read the log each
-    /// time. An append racing a compaction can be lost; it's only a measure.
+    /// time. Writers hold `served.lock` throughout, so an append can't land in
+    /// the file a prune is about to replace and be lost with it.
     pub fn record_served(&self, root: &Path, serves: &[served::Serve], now: u64) -> Result<()> {
+        self.record_lines(root, serves.iter().map(served::Serve::to_json), now)
+    }
+
+    /// Records notes and transcript lines a search served (ADR-0017 rule 3), in
+    /// the same log as decisions, the same way.
+    pub fn record_found(&self, root: &Path, found: &[served::FoundServe], now: u64) -> Result<()> {
+        self.record_lines(root, found.iter().map(served::FoundServe::to_json), now)
+    }
+
+    fn record_lines(
+        &self,
+        root: &Path,
+        lines: impl Iterator<Item = serde_json::Value>,
+        now: u64,
+    ) -> Result<()> {
         use std::io::{BufRead, Write};
-        if serves.is_empty() {
+        let lines: String = lines.map(|v| format!("{v}\n")).collect();
+        if lines.is_empty() {
             return Ok(());
         }
         self.mark_project(root)?;
         let path = self.served_file(root);
+        let lock_path = path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("open {}", lock_path.display()))?;
+        lock.lock()
+            .with_context(|| format!("lock {}", lock_path.display()))?;
         let oldest = std::fs::File::open(&path).ok().and_then(|f| {
             let mut first = String::new();
             std::io::BufReader::new(f).read_line(&mut first).ok()?;
             serde_json::from_str::<serde_json::Value>(&first).ok()?["at"].as_u64()
         });
         if oldest.is_some_and(|at| now.saturating_sub(at) > (served::SERVED_DAYS + 7) * 86_400) {
+            // Every kind of line is kept while it counts, not only the ones this
+            // reader knows: a note's serve must outlive a decision's prune.
             let kept: String = self
-                .served(root, now)
+                .served_values(root, now)
                 .iter()
-                .map(|s| format!("{}\n", s.to_json()))
+                .map(|v| format!("{v}\n"))
                 .collect();
             write_atomic(&path, &kept)?;
         }
-        let lines: String = serves
-            .iter()
-            .map(|s| format!("{}\n", s.to_json()))
-            .collect();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -874,15 +958,36 @@ impl Store {
         Ok(())
     }
 
-    /// What was served in `root` over the last [`served::SERVED_DAYS`] days,
-    /// oldest first.
-    pub fn served(&self, root: &Path, now: u64) -> Vec<served::Serve> {
+    /// Every line of `root`'s serving log from the last [`served::SERVED_DAYS`]
+    /// days, whatever it served, oldest first.
+    fn served_values(&self, root: &Path, now: u64) -> Vec<serde_json::Value> {
         std::fs::read_to_string(self.served_file(root))
             .unwrap_or_default()
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter_map(|v| served::Serve::from_json(&v))
-            .filter(|s| now.saturating_sub(s.at) <= served::SERVED_DAYS * 86_400)
+            .filter(|v| {
+                v["at"]
+                    .as_u64()
+                    .is_some_and(|at| now.saturating_sub(at) <= served::SERVED_DAYS * 86_400)
+            })
+            .collect()
+    }
+
+    /// The notes and transcript lines searches served in `root` over the last
+    /// [`served::SERVED_DAYS`] days, oldest first.
+    pub fn found_served(&self, root: &Path, now: u64) -> Vec<served::FoundServe> {
+        self.served_values(root, now)
+            .iter()
+            .filter_map(served::FoundServe::from_json)
+            .collect()
+    }
+
+    /// What was served in `root` over the last [`served::SERVED_DAYS`] days,
+    /// oldest first.
+    pub fn served(&self, root: &Path, now: u64) -> Vec<served::Serve> {
+        self.served_values(root, now)
+            .iter()
+            .filter_map(served::Serve::from_json)
             .collect()
     }
 
@@ -1129,16 +1234,87 @@ pub(crate) fn shown(text: &str, multiline: bool) -> String {
     }
 }
 
+/// Writes `text` to `path` through a temp file beside it and a rename. The temp
+/// file is made new (`O_EXCL`) under a name nobody can guess, so a symlink
+/// planted where it goes is never followed: in the docs folder, anything that can
+/// write there could otherwise aim the daemon's write at another file (#154).
 pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
-    Ok(())
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut attempt = 0;
+    let (tmp, mut file) = loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp-{}-{n}-{nanos:08x}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => {
+                attempt += 1;
+            }
+            Err(e) => return Err(e).with_context(|| format!("write {}", tmp.display())),
+        }
+    };
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("write {}", tmp.display()));
+    drop(file);
+    let renamed = written.and_then(|()| {
+        std::fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))
+    });
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_never_follows_a_planted_temp_symlink() {
+        let dir = std::env::temp_dir().join(format!("valk-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep me\n").unwrap();
+        let doc = dir.join("doc.md");
+        // The old temp name, and a spread of guesses at the new one's prefix.
+        std::os::unix::fs::symlink(
+            &victim,
+            doc.with_extension(format!("tmp-{}", std::process::id())),
+        )
+        .unwrap();
+        for n in 0..4 {
+            let _ = std::os::unix::fs::symlink(
+                &victim,
+                doc.with_extension(format!("tmp-{}-{n}", std::process::id())),
+            );
+        }
+        write_atomic(&doc, "new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n");
+        // No temp file is left behind.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.contains(".tmp-") && !e.file_type().unwrap().is_symlink()
+            })
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     struct Fixture {
         base: PathBuf,
@@ -1862,6 +2038,128 @@ mod tests {
             .unwrap();
         assert_eq!(lines(), 3);
         assert_eq!(f.store.served(&f.repo, much_later)[0].id, 2);
+    }
+
+    #[test]
+    fn a_prune_keeps_what_searches_served_beside_decisions() {
+        use served::{Found, FoundServe, Layer, Serve};
+        let f = Fixture::new("served-found");
+        let day = 86_400;
+        let old = Serve {
+            session: "s1".into(),
+            id: 1,
+            layer: Layer::Block,
+            at: day,
+        };
+        f.store.record_served(&f.repo, &[old], day).unwrap();
+        let note = FoundServe {
+            session: "valk:1".into(),
+            found: Found::Note(4),
+            layer: Layer::Search,
+            at: 60 * day,
+        };
+        let line = FoundServe {
+            found: Found::Transcript {
+                path: "/t.jsonl".into(),
+                line: 7,
+            },
+            ..note.clone()
+        };
+        f.store
+            .record_found(&f.repo, &[note.clone(), line.clone()], 60 * day)
+            .unwrap();
+        // The decision's line is past the window, so this write prunes.
+        let now = (served::SERVED_DAYS + 9) * day;
+        let new = Serve {
+            session: "s2".into(),
+            id: 2,
+            layer: Layer::Show,
+            at: now,
+        };
+        f.store
+            .record_served(&f.repo, std::slice::from_ref(&new), now)
+            .unwrap();
+        assert_eq!(f.store.found_served(&f.repo, now), [note, line]);
+        assert_eq!(f.store.served(&f.repo, now), [new]);
+        let file = std::fs::read_to_string(f.store.served_file(&f.repo)).unwrap();
+        assert_eq!(file.lines().count(), 3);
+    }
+
+    #[test]
+    fn a_prune_keeps_serves_another_session_appends_meanwhile() {
+        use served::{Layer, Serve};
+        let f = Fixture::new("served-race");
+        let day = 86_400;
+        let now = (served::SERVED_DAYS + 30) * day;
+        let file = f.store.served_file(&f.repo);
+        let serve = |session: &str, id, at| Serve {
+            session: session.into(),
+            id,
+            layer: Layer::Show,
+            at,
+        };
+        // Lets the store make its own folders.
+        f.store
+            .record_served(&f.repo, &[serve("old", 0, now)], now)
+            .unwrap();
+        // Recent lines the prune keeps, so its read-and-rewrite takes a while.
+        let recent: String = (0..2_000)
+            .map(|i| format!("{}\n", serve("old", i, now - day).to_json()))
+            .collect();
+        const APPENDERS: u32 = 8;
+        for round in 0..40 {
+            // An ancient first line, so the next write prunes.
+            std::fs::write(&file, format!("{}\n{recent}", serve("old", 0, 0).to_json())).unwrap();
+            let start = std::sync::Barrier::new(APPENDERS as usize + 1);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    start.wait();
+                    f.store
+                        .record_served(&f.repo, &[serve("pruner", 0, now)], now)
+                        .unwrap();
+                });
+                for n in 0..APPENDERS {
+                    let (start, store, repo) = (&start, &f.store, &f.repo);
+                    s.spawn(move || {
+                        start.wait();
+                        for k in 0..20 {
+                            store
+                                .record_served(repo, &[serve("other", n * 100 + k, now)], now)
+                                .unwrap();
+                        }
+                    });
+                }
+            });
+            let got = f.store.served(&f.repo, now);
+            let others = got.iter().filter(|s| s.session == "other").count();
+            assert_eq!(
+                others,
+                APPENDERS as usize * 20,
+                "round {round}: serves lost"
+            );
+            assert_eq!(got.iter().filter(|s| s.session == "pruner").count(), 1);
+        }
+    }
+
+    #[test]
+    fn ci_agent_blocks_once_per_head_and_twice_per_pull_request() {
+        let f = Fixture::new("ci-agent");
+        let pr = "https://github.com/o/r/pull/1";
+        let record = |head, at| f.store.record_ci_agent(&f.repo, pr, head, at, 2).unwrap();
+        assert_eq!(record("aaa", 1), Some(1));
+        assert_eq!(record("aaa", 2), None, "same head: once");
+        assert_eq!(record("bbb", 3), Some(2));
+        assert_eq!(record("ccc", 4), None, "two blocks is the limit");
+        let other = "https://github.com/o/r/pull/2";
+        assert_eq!(
+            f.store
+                .record_ci_agent(&f.repo, other, "aaa", 5, 2)
+                .unwrap(),
+            Some(1),
+            "another pull request has its own count"
+        );
+        let later = 3 + FAILURE_DAYS * 86_400 + 1;
+        assert_eq!(record("ccc", later), Some(1), "forgotten after a while");
     }
 
     #[test]

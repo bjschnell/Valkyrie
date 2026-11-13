@@ -245,6 +245,63 @@ code {
   }
 }
 
+/* Wide screens: the session list beside the open session ------------------ */
+
+.split {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  height: var(--app-height, 100dvh);
+}
+
+.split > .page {
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.split-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.split-pane > .page.session {
+  height: 100%;
+}
+
+/* The list's header says whether you're connected. */
+.split-pane .topbar .pill {
+  display: none;
+}
+
+.split-empty {
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  height: 100%;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.split-empty-title {
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.split-empty kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: 12px var(--mono);
+}
+
+.row.current {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 /* Inbox ---------------------------------------------------------------- */
 
 .inbox {
@@ -275,6 +332,65 @@ code {
   font-size: 12px;
   text-align: center;
 }
+
+/* The Claude plan's quota (protocol 30): one bar per window. */
+.quota {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin: 10px 4px 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.quota-who {
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--soft);
+}
+
+.quota-window {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  --level: var(--done);
+}
+
+.quota-low { --level: var(--needs); }
+.quota-full { --level: var(--blocked); }
+.quota.stale .quota-window,
+.quota-reset { --level: var(--muted); }
+
+.quota-bar {
+  width: 56px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.quota-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--level);
+}
+
+.quota-used {
+  min-width: 3ch;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-low .quota-used,
+.quota-full .quota-used {
+  color: var(--level);
+  font-weight: 650;
+}
+
+.quota.stale .quota-used { color: var(--muted); }
 
 .calm {
   padding: 28px 16px;
@@ -575,6 +691,10 @@ code {
   white-space: nowrap;
 }
 
+.row-overlap {
+  color: var(--interrupted);
+}
+
 .row-age {
   font-size: 12.5px;
 }
@@ -663,9 +783,14 @@ button.title-name {
 /* Session ------------------------------------------------------------- */
 
 .screen {
+  --screen-pad: 12px;
+  --screen-line: 1.38em;
   flex: 1;
   min-height: 0;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   background: var(--term-bg);
   color: var(--term-fg);
   -webkit-overflow-scrolling: touch;
@@ -678,12 +803,16 @@ button.title-name {
 }
 
 .screen pre {
+  position: relative;
+  flex: 1 0 auto;
+  box-sizing: content-box;
   margin: 0;
-  padding: 12px 12px 16px;
+  padding: var(--screen-pad) var(--screen-pad) 16px;
   font: 12.5px/1.38 var(--mono);
 }
 
 .screen.reflow pre {
+  align-self: stretch;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -693,7 +822,92 @@ button.title-name {
 }
 
 .line {
-  min-height: 1.38em;
+  min-height: var(--screen-line);
+}
+
+/* The terminal has the keyboard (desktop width): typing goes to the session. */
+.screen.typing {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  cursor: text;
+}
+
+.cursor {
+  position: absolute;
+  width: 1ch;
+  height: var(--screen-line);
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--term-fg) 60%, transparent);
+  pointer-events: none;
+}
+
+.screen.typing .cursor {
+  border: 0;
+  background: color-mix(in srgb, var(--term-fg) 55%, transparent);
+}
+
+.screen.typing .cursor-beam {
+  width: 2px;
+  background: var(--term-fg);
+}
+
+.screen.typing .cursor-underline {
+  height: 2px;
+  margin-top: calc(var(--screen-line) - 2px);
+  background: var(--term-fg);
+}
+
+/* Measures a cell; never seen. */
+.probe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Takes what an input method or a dead key types, at the cursor; never seen. */
+.typing-field {
+  position: absolute;
+  top: var(--screen-pad);
+  left: var(--screen-pad);
+  width: 2ch;
+  height: var(--screen-line);
+  padding: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow: hidden;
+  opacity: 0;
+  font: inherit;
+  color: transparent;
+  background: transparent;
+  caret-color: transparent;
+  pointer-events: none;
+}
+
+/* Stays at the pane's bottom right while its content scrolls. */
+.screen-note {
+  position: sticky;
+  right: 12px;
+  bottom: 10px;
+  align-self: flex-end;
+  flex: none;
+  display: block;
+  box-sizing: border-box;
+  margin: -28px 12px 0 0;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 26px;
+}
+
+.screen-note-quiet {
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 .banner {
@@ -991,6 +1205,23 @@ button.title-name {
 .toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+.toast.show.with-action {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toast-action {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 4px;
+  cursor: pointer;
 }
 
 @keyframes turn {
@@ -1461,7 +1692,8 @@ button.title-name {
   color: var(--muted);
 }
 
-.tool-pre.command {
+.tool-pre.command,
+.tool-pre.question {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1988,12 +2220,11 @@ button.title-name {
   word-break: break-word;
 }
 
-/* A skill is a procedure, often long: scroll it in place. */
+/* A skill is a procedure, often long: scroll it in place. Its commands are
+   markdown code, so the prose around them stays in the body font. */
 .decision-body.skill {
   max-height: 45vh;
   overflow-y: auto;
-  font-family: var(--mono);
-  font-size: 13px;
 }
 
 .decision-by {
@@ -2059,6 +2290,513 @@ button.title-name {
 
 .decision-card.stale {
   --state: var(--interrupted);
+}
+
+/* The TUI's other palettes: the popular editor themes, a few of them light, and
+   cyberpunk's neon with rain. Generated from crates/valkyrie-tui/src/theme.rs. */
+
+:root[data-theme="cyberpunk"] {
+  --page: #05060d;
+  --surface: #11132a;
+  --card: #0b0c1a;
+  --raised: #1b1e3d;
+  --line: #3a2a66;
+  --fg: #e6e9ff;
+  --muted: #6a6f9e;
+  --soft: #b4b8d8;
+  --accent: #ff2a6d;
+  --accent2: #05d9e8;
+  --needs: #f9f002;
+  --blocked: #ff003c;
+  --done: #00ff9f;
+  --working: #05d9e8;
+  --interrupted: #ff9e00;
+  --idle: #5a5f8a;
+  --term-bg: #11132a;
+  --term-fg: #e6e9ff;
+  --on-accent: #10101a;
+  --font: var(--mono);
+  --ansi-0: #1b1e3d;
+  --ansi-1: #ff003c;
+  --ansi-2: #00ff9f;
+  --ansi-3: #f9f002;
+  --ansi-4: #4f6bff;
+  --ansi-5: #ff2a6d;
+  --ansi-6: #05d9e8;
+  --ansi-7: #d0d4f5;
+  --ansi-8: #6a6f9e;
+  --ansi-9: #ff4d6d;
+  --ansi-10: #5affc0;
+  --ansi-11: #fff76b;
+  --ansi-12: #7f9cff;
+  --ansi-13: #ff6ea0;
+  --ansi-14: #6af0f8;
+  --ansi-15: #ffffff;
+  --glow: 255 42 109;
+  --glitch-a: #ff2a6d;
+  --glitch-b: #05d9e8;
+  --rain-head: #e6fdff;
+  --rain-trail: #ff2a6d;
+  --rain-glyphs: runes;
+}
+
+:root[data-theme="blackout"] {
+  --page: #000000;
+  --surface: #0a0a0c;
+  --card: #000000;
+  --raised: #141418;
+  --line: #2c2833;
+  --fg: #f0eef5;
+  --muted: #6f6a7d;
+  --soft: #bcb9c5;
+  --accent: #c9a7ff;
+  --accent2: #ff8fd0;
+  --needs: #fff3a0;
+  --blocked: #ff8a9e;
+  --done: #8dffbf;
+  --working: #9ae6ff;
+  --interrupted: #ffc39e;
+  --idle: #5a5666;
+  --term-bg: #0a0a0c;
+  --term-fg: #f0eef5;
+  --on-accent: #10101a;
+  --ansi-0: #1a1a1f;
+  --ansi-1: #ff8a9e;
+  --ansi-2: #8dffbf;
+  --ansi-3: #fff3a0;
+  --ansi-4: #a0b8ff;
+  --ansi-5: #ff8fd0;
+  --ansi-6: #9ae6ff;
+  --ansi-7: #e6e3ee;
+  --ansi-8: #6f6a7d;
+  --ansi-9: #ffadbb;
+  --ansi-10: #b5ffd6;
+  --ansi-11: #fff8c4;
+  --ansi-12: #c9a7ff;
+  --ansi-13: #ffb3e0;
+  --ansi-14: #c2f1ff;
+  --ansi-15: #ffffff;
+}
+
+:root[data-theme="catppuccin"] {
+  --page: #11111b;
+  --surface: #181825;
+  --card: #1e1e2e;
+  --raised: #313244;
+  --line: #45475a;
+  --fg: #cdd6f4;
+  --muted: #7f849c;
+  --soft: #aeb5d1;
+  --accent: #cba6f7;
+  --accent2: #f5c2e7;
+  --needs: #f9e2af;
+  --blocked: #f38ba8;
+  --done: #a6e3a1;
+  --working: #89dceb;
+  --interrupted: #fab387;
+  --idle: #6c7086;
+  --term-bg: #181825;
+  --term-fg: #cdd6f4;
+  --on-accent: #10101a;
+  --ansi-0: #45475a;
+  --ansi-1: #f38ba8;
+  --ansi-2: #a6e3a1;
+  --ansi-3: #f9e2af;
+  --ansi-4: #89b4fa;
+  --ansi-5: #f5c2e7;
+  --ansi-6: #94e2d5;
+  --ansi-7: #bac2de;
+  --ansi-8: #585b70;
+  --ansi-9: #f38ba8;
+  --ansi-10: #a6e3a1;
+  --ansi-11: #f9e2af;
+  --ansi-12: #89b4fa;
+  --ansi-13: #f5c2e7;
+  --ansi-14: #94e2d5;
+  --ansi-15: #a6adc8;
+}
+
+:root[data-theme="nord"] {
+  --page: #242933;
+  --surface: #292e39;
+  --card: #2e3440;
+  --raised: #3b4252;
+  --line: #4c566a;
+  --fg: #eceff4;
+  --muted: #7b88a1;
+  --soft: #bfc6d3;
+  --accent: #88c0d0;
+  --accent2: #b48ead;
+  --needs: #ebcb8b;
+  --blocked: #bf616a;
+  --done: #a3be8c;
+  --working: #81a1c1;
+  --interrupted: #d08770;
+  --idle: #616e88;
+  --term-bg: #292e39;
+  --term-fg: #eceff4;
+  --on-accent: #10101a;
+  --ansi-0: #3b4252;
+  --ansi-1: #bf616a;
+  --ansi-2: #a3be8c;
+  --ansi-3: #ebcb8b;
+  --ansi-4: #81a1c1;
+  --ansi-5: #b48ead;
+  --ansi-6: #88c0d0;
+  --ansi-7: #e5e9f0;
+  --ansi-8: #4c566a;
+  --ansi-9: #bf616a;
+  --ansi-10: #a3be8c;
+  --ansi-11: #ebcb8b;
+  --ansi-12: #81a1c1;
+  --ansi-13: #b48ead;
+  --ansi-14: #8fbcbb;
+  --ansi-15: #eceff4;
+}
+
+:root[data-theme="gruvbox"] {
+  --page: #141617;
+  --surface: #1d2021;
+  --card: #282828;
+  --raised: #32302f;
+  --line: #504945;
+  --fg: #ebdbb2;
+  --muted: #928374;
+  --soft: #c7b899;
+  --accent: #fe8019;
+  --accent2: #d3869b;
+  --needs: #fabd2f;
+  --blocked: #fb4934;
+  --done: #b8bb26;
+  --working: #83a598;
+  --interrupted: #8ec07c;
+  --idle: #7c6f64;
+  --term-bg: #1d2021;
+  --term-fg: #ebdbb2;
+  --on-accent: #10101a;
+  --ansi-0: #282828;
+  --ansi-1: #cc241d;
+  --ansi-2: #98971a;
+  --ansi-3: #d79921;
+  --ansi-4: #458588;
+  --ansi-5: #b16286;
+  --ansi-6: #689d6a;
+  --ansi-7: #a89984;
+  --ansi-8: #928374;
+  --ansi-9: #fb4934;
+  --ansi-10: #b8bb26;
+  --ansi-11: #fabd2f;
+  --ansi-12: #83a598;
+  --ansi-13: #d3869b;
+  --ansi-14: #8ec07c;
+  --ansi-15: #ebdbb2;
+}
+
+:root[data-theme="tokyonight"] {
+  --page: #101014;
+  --surface: #16161e;
+  --card: #1a1b26;
+  --raised: #24283b;
+  --line: #3b4261;
+  --fg: #c0caf5;
+  --muted: #737aa2;
+  --soft: #a1aad4;
+  --accent: #7aa2f7;
+  --accent2: #bb9af7;
+  --needs: #e0af68;
+  --blocked: #f7768e;
+  --done: #9ece6a;
+  --working: #7dcfff;
+  --interrupted: #ff9e64;
+  --idle: #565f89;
+  --term-bg: #16161e;
+  --term-fg: #c0caf5;
+  --on-accent: #10101a;
+  --ansi-0: #15161e;
+  --ansi-1: #f7768e;
+  --ansi-2: #9ece6a;
+  --ansi-3: #e0af68;
+  --ansi-4: #7aa2f7;
+  --ansi-5: #bb9af7;
+  --ansi-6: #7dcfff;
+  --ansi-7: #a9b1d6;
+  --ansi-8: #414868;
+  --ansi-9: #f7768e;
+  --ansi-10: #9ece6a;
+  --ansi-11: #e0af68;
+  --ansi-12: #7aa2f7;
+  --ansi-13: #bb9af7;
+  --ansi-14: #7dcfff;
+  --ansi-15: #c0caf5;
+}
+
+:root[data-theme="solarized"] {
+  --page: #001e26;
+  --surface: #00252f;
+  --card: #002b36;
+  --raised: #073642;
+  --line: #18505e;
+  --fg: #93a1a1;
+  --muted: #657b83;
+  --soft: #819295;
+  --accent: #268bd2;
+  --accent2: #6c71c4;
+  --needs: #b58900;
+  --blocked: #dc322f;
+  --done: #859900;
+  --working: #2aa198;
+  --interrupted: #cb4b16;
+  --idle: #586e75;
+  --term-bg: #00252f;
+  --term-fg: #93a1a1;
+  --on-accent: #10101a;
+  --ansi-0: #073642;
+  --ansi-1: #dc322f;
+  --ansi-2: #859900;
+  --ansi-3: #b58900;
+  --ansi-4: #268bd2;
+  --ansi-5: #d33682;
+  --ansi-6: #2aa198;
+  --ansi-7: #eee8d5;
+  --ansi-8: #002b36;
+  --ansi-9: #cb4b16;
+  --ansi-10: #586e75;
+  --ansi-11: #657b83;
+  --ansi-12: #839496;
+  --ansi-13: #6c71c4;
+  --ansi-14: #93a1a1;
+  --ansi-15: #fdf6e3;
+}
+
+:root[data-theme="onedark"] {
+  --page: #181a1f;
+  --surface: #21252b;
+  --card: #282c34;
+  --raised: #2c313a;
+  --line: #4b5263;
+  --fg: #abb2bf;
+  --muted: #5c6370;
+  --soft: #8b929f;
+  --accent: #61afef;
+  --accent2: #c678dd;
+  --needs: #e5c07b;
+  --blocked: #e06c75;
+  --done: #98c379;
+  --working: #56b6c2;
+  --interrupted: #d19a66;
+  --idle: #4b5263;
+  --term-bg: #21252b;
+  --term-fg: #abb2bf;
+  --on-accent: #10101a;
+  --ansi-0: #282c34;
+  --ansi-1: #e06c75;
+  --ansi-2: #98c379;
+  --ansi-3: #e5c07b;
+  --ansi-4: #61afef;
+  --ansi-5: #c678dd;
+  --ansi-6: #56b6c2;
+  --ansi-7: #abb2bf;
+  --ansi-8: #5c6370;
+  --ansi-9: #e06c75;
+  --ansi-10: #98c379;
+  --ansi-11: #e5c07b;
+  --ansi-12: #61afef;
+  --ansi-13: #c678dd;
+  --ansi-14: #56b6c2;
+  --ansi-15: #ffffff;
+}
+
+:root[data-theme="rosepine"] {
+  --page: #12101c;
+  --surface: #1f1d2e;
+  --card: #191724;
+  --raised: #26233a;
+  --line: #524f67;
+  --fg: #e0def4;
+  --muted: #6e6a86;
+  --soft: #b2b0c8;
+  --accent: #c4a7e7;
+  --accent2: #ebbcba;
+  --needs: #f6c177;
+  --blocked: #eb6f92;
+  --done: #9ccfd8;
+  --working: #3e8fb0;
+  --interrupted: #ea9a97;
+  --idle: #6e6a86;
+  --term-bg: #1f1d2e;
+  --term-fg: #e0def4;
+  --on-accent: #10101a;
+  --ansi-0: #26233a;
+  --ansi-1: #eb6f92;
+  --ansi-2: #31748f;
+  --ansi-3: #f6c177;
+  --ansi-4: #9ccfd8;
+  --ansi-5: #c4a7e7;
+  --ansi-6: #ebbcba;
+  --ansi-7: #e0def4;
+  --ansi-8: #6e6a86;
+  --ansi-9: #eb6f92;
+  --ansi-10: #31748f;
+  --ansi-11: #f6c177;
+  --ansi-12: #9ccfd8;
+  --ansi-13: #c4a7e7;
+  --ansi-14: #ebbcba;
+  --ansi-15: #e0def4;
+}
+
+:root[data-theme="monokai"] {
+  --page: #171814;
+  --surface: #1e1f1c;
+  --card: #272822;
+  --raised: #3e3d32;
+  --line: #5b5a4d;
+  --fg: #f8f8f2;
+  --muted: #75715e;
+  --soft: #c4c2b7;
+  --accent: #66d9ef;
+  --accent2: #f92672;
+  --needs: #e6db74;
+  --blocked: #f92672;
+  --done: #a6e22e;
+  --working: #ae81ff;
+  --interrupted: #fd971f;
+  --idle: #75715e;
+  --term-bg: #1e1f1c;
+  --term-fg: #f8f8f2;
+  --on-accent: #10101a;
+  --ansi-0: #272822;
+  --ansi-1: #f92672;
+  --ansi-2: #a6e22e;
+  --ansi-3: #f4bf75;
+  --ansi-4: #66d9ef;
+  --ansi-5: #ae81ff;
+  --ansi-6: #a1efe4;
+  --ansi-7: #f8f8f2;
+  --ansi-8: #75715e;
+  --ansi-9: #f92672;
+  --ansi-10: #a6e22e;
+  --ansi-11: #f4bf75;
+  --ansi-12: #66d9ef;
+  --ansi-13: #ae81ff;
+  --ansi-14: #a1efe4;
+  --ansi-15: #f9f8f5;
+}
+
+:root[data-theme="solarizedlight"] {
+  --page: #eee8d5;
+  --surface: #f7f0dc;
+  --card: #fdf6e3;
+  --raised: #f5eedb;
+  --line: #d3cbb7;
+  --fg: #586e75;
+  --muted: #93a1a1;
+  --soft: #708287;
+  --accent: #268bd2;
+  --accent2: #d33682;
+  --needs: #b58900;
+  --blocked: #dc322f;
+  --done: #859900;
+  --working: #2aa198;
+  --interrupted: #cb4b16;
+  --idle: #93a1a1;
+  --term-bg: #fdf6e3;
+  --term-fg: #586e75;
+  --on-accent: #10101a;
+  color-scheme: light;
+  --ansi-0: #073642;
+  --ansi-1: #dc322f;
+  --ansi-2: #859900;
+  --ansi-3: #b58900;
+  --ansi-4: #268bd2;
+  --ansi-5: #d33682;
+  --ansi-6: #2aa198;
+  --ansi-7: #eee8d5;
+  --ansi-8: #002b36;
+  --ansi-9: #cb4b16;
+  --ansi-10: #586e75;
+  --ansi-11: #657b83;
+  --ansi-12: #839496;
+  --ansi-13: #6c71c4;
+  --ansi-14: #93a1a1;
+  --ansi-15: #fdf6e3;
+}
+
+:root[data-theme="catppuccinlatte"] {
+  --page: #ccd0da;
+  --surface: #e6e9ef;
+  --card: #eff1f5;
+  --raised: #dce0e8;
+  --line: #acb0be;
+  --fg: #4c4f69;
+  --muted: #7c7f93;
+  --soft: #5f627a;
+  --accent: #8839ef;
+  --accent2: #ea76cb;
+  --needs: #df8e1d;
+  --blocked: #d20f39;
+  --done: #40a02b;
+  --working: #04a5e5;
+  --interrupted: #fe640b;
+  --idle: #9ca0b0;
+  --term-bg: #eff1f5;
+  --term-fg: #4c4f69;
+  --on-accent: #ffffff;
+  color-scheme: light;
+  --ansi-0: #5c5f77;
+  --ansi-1: #d20f39;
+  --ansi-2: #40a02b;
+  --ansi-3: #df8e1d;
+  --ansi-4: #1e66f5;
+  --ansi-5: #ea76cb;
+  --ansi-6: #179299;
+  --ansi-7: #acb0be;
+  --ansi-8: #6c6f85;
+  --ansi-9: #d20f39;
+  --ansi-10: #40a02b;
+  --ansi-11: #df8e1d;
+  --ansi-12: #1e66f5;
+  --ansi-13: #ea76cb;
+  --ansi-14: #179299;
+  --ansi-15: #bcc0cc;
+}
+
+:root[data-theme="gruvboxlight"] {
+  --page: #ebdbb2;
+  --surface: #f9f5d7;
+  --card: #fbf1c7;
+  --raised: #f2e5bc;
+  --line: #bdae93;
+  --fg: #3c3836;
+  --muted: #7c6f64;
+  --soft: #564e48;
+  --accent: #af3a03;
+  --accent2: #8f3f71;
+  --needs: #b57614;
+  --blocked: #9d0006;
+  --done: #79740e;
+  --working: #076678;
+  --interrupted: #427b58;
+  --idle: #928374;
+  --term-bg: #fbf1c7;
+  --term-fg: #3c3836;
+  --on-accent: #ffffff;
+  color-scheme: light;
+  --ansi-0: #fbf1c7;
+  --ansi-1: #cc241d;
+  --ansi-2: #98971a;
+  --ansi-3: #d79921;
+  --ansi-4: #458588;
+  --ansi-5: #b16286;
+  --ansi-6: #689d6a;
+  --ansi-7: #7c6f64;
+  --ansi-8: #928374;
+  --ansi-9: #9d0006;
+  --ansi-10: #79740e;
+  --ansi-11: #b57614;
+  --ansi-12: #076678;
+  --ansi-13: #8f3f71;
+  --ansi-14: #427b58;
+  --ansi-15: #3c3836;
 }
 
 /* Matrix, violet and valkyrie looks: palettes, then the effects they share */
@@ -2333,6 +3071,12 @@ button.title-name {
 /* Lift the page over the rain. Not the top bar: it stays sticky and above the
    content, or its menus end up under the cards. */
 [data-fx] .page:has(> .rain) > :not(.rain, .topbar) {
+  position: relative;
+  z-index: 1;
+}
+
+/* Beside the list the rain falls behind both panes. */
+[data-fx] .split-pane {
   position: relative;
   z-index: 1;
 }
@@ -2650,11 +3394,13 @@ button.title-name {
   flex-direction: row;
 }
 
-.item-dock .ghost {
-  flex: none;
+/* Save is the usual way out of a new item, so it gets the room; Save & launch
+   is the occasional one and takes half as much. */
+.item-dock .save {
+  flex: 2;
 }
 
-.item-dock .start {
+.item-dock .launch {
   flex: 1;
 }
 
@@ -2831,4 +3577,410 @@ button.as-text {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* Docs (ADR-0021 §5). */
+.kind-plan { --kind: var(--accent); }
+.kind-research { --kind: var(--working); }
+.kind-report { --kind: var(--done); }
+.kind-note { --kind: var(--soft); }
+
+.doc-row:disabled {
+  opacity: 0.6;
+}
+
+.doc-unread {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.doc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.doc-path {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.doc-edited {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.doc-body {
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+/* Comments on a doc (ADR-0021 §6). */
+.md-c {
+  position: relative;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.md-c:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.md-c.md-picked {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: -3px 0 0 var(--accent);
+}
+
+.md-c.md-commented {
+  box-shadow: -3px 0 0 color-mix(in srgb, var(--needs) 70%, transparent);
+}
+
+.md-c.md-commented::after {
+  content: attr(data-comments);
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font: 600 11px/18px var(--font);
+  text-align: center;
+  color: var(--needs);
+  background: color-mix(in srgb, var(--needs) 16%, var(--surface));
+}
+
+@media (hover: hover) {
+  .md-c:hover {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+}
+
+.doc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.doc-actions .ghost {
+  padding: 4px 10px;
+}
+
+.ghost.danger {
+  color: var(--blocked);
+}
+
+.ghost:disabled {
+  opacity: 0.5;
+}
+
+/* Light editing, history and delete (ADR-0021 §7). */
+.doc-editor,
+.doc-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-editor-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.doc-editor-tabs button {
+  padding: 5px 12px;
+  border-radius: 999px;
+  color: var(--soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.doc-editor-tabs button.on {
+  background: var(--raised);
+  color: var(--fg);
+}
+
+.doc-textarea {
+  width: 100%;
+  min-height: 55vh;
+  resize: vertical;
+  font: 13.5px/1.5 var(--mono);
+}
+
+.doc-preview {
+  min-height: 30vh;
+}
+
+.doc-editor-hint {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.doc-conflict-note {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--needs) 50%, transparent);
+  background: color-mix(in srgb, var(--needs) 8%, transparent);
+  font-size: 13px;
+}
+
+/* Side by side even on a phone, as asked: each side scrolls on its own. */
+.doc-sides {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.doc-side {
+  min-width: 0;
+}
+
+.doc-side-text {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.doc-line-new {
+  margin: 0 -10px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--needs) 14%, transparent);
+}
+
+.doc-version {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.doc-version-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-version-text {
+  flex-basis: 100%;
+}
+
+.doc-deleted {
+  margin-top: 18px;
+}
+
+.doc-deleted summary {
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.doc-deleted .list {
+  margin-top: 8px;
+}
+
+.doc-hint {
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.doc-composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px -4px 0;
+  padding: 12px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  border-radius: var(--radius) var(--radius) 0 0;
+  border: 1px solid var(--line);
+  background: var(--card);
+  box-shadow: 0 -6px 20px rgb(0 0 0 / 0.25);
+}
+
+.doc-composer-about {
+  font-size: 13px;
+  color: var(--muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.doc-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.doc-comments {
+  margin-top: 16px;
+}
+
+.doc-comment {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.doc-comment.state-resolved {
+  opacity: 0.6;
+}
+
+.doc-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.doc-comment-head .ghost {
+  margin-left: auto;
+  padding: 3px 8px;
+  font-size: 12.5px;
+}
+
+.comment-state {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--st, var(--soft));
+  background: color-mix(in srgb, var(--st, var(--soft)) 16%, transparent);
+}
+
+.comment-open { --st: var(--needs); }
+.comment-sent { --st: var(--working); }
+.comment-answered { --st: var(--done); }
+.comment-resolved { --st: var(--soft); }
+
+.doc-comment-quote {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.doc-comment-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-table-wrap {
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+
+.md-grid {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-grid th,
+.md-grid td {
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-grid th {
+  background: color-mix(in srgb, var(--line) 30%, transparent);
+  font-weight: 650;
+}
+
+.md ul.md-tasks {
+  padding-left: 4px;
+  list-style: none;
+}
+
+.md-task input {
+  margin: 0 7px 0 0;
+  vertical-align: -1px;
+  accent-color: var(--accent);
+}
+
+.md-task.done {
+  color: var(--muted);
+}
+
+.md-wiki.missing {
+  color: var(--muted);
+  text-decoration: underline dotted;
+}
+
+/* The away digest (backlog #105): where each session's work ended up. */
+.outcome-stuck { --kind: var(--needs); }
+.outcome-abandoned { --kind: var(--blocked); }
+.outcome-waiting { --kind: var(--interrupted); }
+.outcome-working { --kind: var(--working); }
+.outcome-shipped { --kind: var(--done); }
+.outcome-done { --kind: var(--soft); }
+
+.digest-about {
+  margin: 4px 2px 12px;
+  color: var(--soft);
+  font-size: 13.5px;
+}
+
+/* The chip on its own line, so titles line up and wrap instead of being cut. */
+.digest-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  text-align: left;
+}
+
+.digest-row .kind-chip {
+  align-self: flex-start;
+}
+
+.digest-row .row-name {
+  white-space: normal;
+  overflow: visible;
+}
+
+.digest-detail {
+  display: block;
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+.digest-said {
+  display: block;
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+  font-size: 12.5px;
+  color: var(--soft);
+  overflow-wrap: anywhere;
 }

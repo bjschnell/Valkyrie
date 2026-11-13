@@ -2,8 +2,8 @@
 
 use crate::codec::{read_frame, write_frame};
 use crate::{
-    ClientBuild, ClientMsg, ConnectedClient, Reply, ReqId, ServerMsg, SessionId, SessionInfo, Size,
-    SpawnSpec,
+    ClientBuild, ClientMsg, ConnectedClient, NoticeSound, Reply, ReqId, ServerMsg, SessionId,
+    SessionInfo, Size, SpawnSpec, TermColors,
 };
 use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
@@ -250,7 +250,7 @@ impl Client {
 
     pub async fn spawn(&self, spec: SpawnSpec) -> Result<SessionInfo> {
         match self.request(|req| ClientMsg::Spawn { req, spec }).await? {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -283,7 +283,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -357,6 +357,26 @@ impl Client {
             .map(drop)
     }
 
+    /// Start receiving `Notice` pushes; `shows` if this client puts them in front of
+    /// someone, so `notify` counts it.
+    pub async fn watch_notices(&self, shows: bool) -> Result<()> {
+        self.request(|req| ClientMsg::WatchNotices { req, shows })
+            .await
+            .map(drop)
+    }
+
+    /// Raises `text` as a toast on every client watching notices; how many it reached.
+    pub async fn notify(&self, text: &str, sound: Option<NoticeSound>) -> Result<u32> {
+        let text = text.to_owned();
+        match self
+            .request(|req| ClientMsg::Notify { req, text, sound })
+            .await?
+        {
+            Reply::Notified { watchers } => Ok(watchers),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn move_session(&self, session: SessionId, to: usize) -> Result<()> {
         self.request(|req| ClientMsg::Move { req, session, to })
             .await
@@ -381,6 +401,287 @@ impl Client {
             .await?
         {
             Reply::Decision { decision } => Ok(*decision),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn note(&self, note: crate::NewNote) -> Result<crate::Note> {
+        match self.request(|req| ClientMsg::Note { req, note }).await? {
+            Reply::Note { note } => Ok(*note),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn notes(&self, cwd: PathBuf) -> Result<crate::NotesListing> {
+        match self.request(|req| ClientMsg::Notes { req, cwd }).await? {
+            Reply::Notes { listing } => Ok(listing),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn note_rm(&self, cwd: PathBuf, id: u32) -> Result<crate::Tombstone> {
+        match self
+            .request(|req| ClientMsg::NoteRm { req, cwd, id })
+            .await?
+        {
+            Reply::Tombstone { tombstone } => Ok(tombstone),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn write_doc(&self, doc: crate::NewDoc) -> Result<crate::Doc> {
+        match self.request(|req| ClientMsg::WriteDoc { req, doc }).await? {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn read_doc(&self, which: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::ReadDoc { req, which })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn edit_doc(&self, id: u32, base: String, body: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::EditDoc {
+                req,
+                id,
+                base,
+                body,
+            })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Every doc, newest first, and the docs folder.
+    pub async fn docs(&self) -> Result<(Vec<crate::Doc>, PathBuf)> {
+        match self
+            .request(|req| ClientMsg::Docs {
+                req,
+                count_only: false,
+            })
+            .await?
+        {
+            Reply::Docs { docs, root, .. } => Ok((docs, root)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Every doc, newest first, with how many are unread and when it was listed
+    /// (for `docs_seen`).
+    pub async fn docs_listing(&self) -> Result<crate::DocsListing> {
+        match self
+            .request(|req| ClientMsg::Docs {
+                req,
+                count_only: false,
+            })
+            .await?
+        {
+            Reply::Docs {
+                docs,
+                root,
+                unread,
+                at,
+            } => Ok(crate::DocsListing {
+                docs,
+                root,
+                unread,
+                at,
+            }),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// A doc by the key a list gave it, never writing to the file.
+    pub async fn open_doc(&self, key: String) -> Result<crate::Doc> {
+        match self.request(|req| ClientMsg::OpenDoc { req, key }).await? {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The comments on the doc with this key.
+    pub async fn doc_comments(&self, key: String) -> Result<Vec<crate::DocComment>> {
+        match self
+            .request(|req| ClientMsg::DocComments { req, key })
+            .await?
+        {
+            Reply::DocComments { comments, .. } => Ok(comments),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user comments on a doc, on the block `quote` reads or the whole doc:
+    /// its comments now, and the session that will hear it, if one is running.
+    pub async fn comment_doc(
+        &self,
+        key: String,
+        quote: Option<String>,
+        text: String,
+    ) -> Result<(Vec<crate::DocComment>, Option<String>)> {
+        match self
+            .request(|req| ClientMsg::CommentDoc {
+                req,
+                key,
+                quote,
+                text,
+            })
+            .await?
+        {
+            Reply::DocComments { comments, to } => Ok((comments, to)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user's save: the doc with this key gets `body`, if `base` is still the
+    /// hash on disk. The doc as written, or with `true`, as it is on disk now
+    /// (someone saved in between, and this save didn't happen).
+    pub async fn save_doc(
+        &self,
+        key: String,
+        base: String,
+        body: String,
+    ) -> Result<(crate::Doc, bool)> {
+        match self
+            .request(|req| ClientMsg::SaveDoc {
+                req,
+                key,
+                base,
+                body,
+            })
+            .await?
+        {
+            Reply::DocSaved { doc, conflict } => Ok((*doc, conflict)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// A doc's past versions, newest first; with `version`, that one's text too.
+    pub async fn doc_history(
+        &self,
+        key: String,
+        version: Option<String>,
+    ) -> Result<(Vec<crate::DocVersion>, Option<String>)> {
+        match self
+            .request(|req| ClientMsg::DocHistory { req, key, version })
+            .await?
+        {
+            Reply::DocHistory { versions, text } => Ok((versions, text)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user puts a past version back, if `base` is still the hash on disk:
+    /// the doc as written, or with `true`, as it is on disk now.
+    pub async fn restore_doc(
+        &self,
+        key: String,
+        base: String,
+        version: String,
+    ) -> Result<(crate::Doc, bool)> {
+        match self
+            .request(|req| ClientMsg::RestoreDoc {
+                req,
+                key,
+                base,
+                version,
+            })
+            .await?
+        {
+            Reply::DocSaved { doc, conflict } => Ok((*doc, conflict)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user deletes a doc, if `base` is still the hash on disk: the token
+    /// that puts it back, or the doc as it is now if it changed.
+    pub async fn delete_doc(
+        &self,
+        key: String,
+        base: String,
+    ) -> Result<Result<String, crate::Doc>> {
+        match self
+            .request(|req| ClientMsg::DeleteDoc { req, key, base })
+            .await?
+        {
+            Reply::DocDeleted { token } => Ok(Ok(token)),
+            Reply::DocSaved { doc, .. } => Ok(Err(*doc)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Puts a doc the user deleted back.
+    pub async fn undelete_doc(&self, token: String) -> Result<crate::Doc> {
+        match self
+            .request(|req| ClientMsg::UndeleteDoc { req, token })
+            .await?
+        {
+            Reply::Doc { doc } => Ok(*doc),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Docs the user deleted that can still be put back, newest first.
+    pub async fn deleted_docs(&self) -> Result<Vec<crate::DeletedDoc>> {
+        match self.request(|req| ClientMsg::DeletedDocs { req }).await? {
+            Reply::DeletedDocs { docs } => Ok(docs),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user closes a comment on a doc.
+    pub async fn resolve_comment(
+        &self,
+        key: String,
+        comment: u32,
+    ) -> Result<Vec<crate::DocComment>> {
+        match self
+            .request(|req| ClientMsg::ResolveComment { req, key, comment })
+            .await?
+        {
+            Reply::DocComments { comments, .. } => Ok(comments),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The user opened the list stamped `at`: what agents wrote until then is read.
+    pub async fn docs_seen(&self, at: u64) -> Result<()> {
+        match self.request(|req| ClientMsg::DocsSeen { req, at }).await? {
+            Reply::Done => Ok(()),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// What every agent did since `since_ms`, or since you were last gone.
+    pub async fn digest(
+        &self,
+        since_ms: Option<u64>,
+        by: crate::DigestGroup,
+    ) -> Result<crate::Digest> {
+        match self
+            .request(|req| ClientMsg::Digest { req, since_ms, by })
+            .await?
+        {
+            Reply::Digest { digest } => Ok(*digest),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The docs folder; with `root`, sets it first (`""` for the default).
+    pub async fn docs_root(&self, root: Option<PathBuf>) -> Result<String> {
+        match self
+            .request(|req| ClientMsg::DocsRoot { req, root })
+            .await?
+        {
+            Reply::Text { text } => Ok(text),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -549,7 +850,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(Some(info)),
+            Reply::Session { info } => Ok(Some(*info)),
             Reply::Text { .. } => Ok(None),
             other => bail!("unexpected reply: {other:?}"),
         }
@@ -737,7 +1038,7 @@ impl Client {
             })
             .await?
         {
-            Reply::Session { info } => Ok(info),
+            Reply::Session { info } => Ok(*info),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -750,6 +1051,17 @@ impl Client {
                 width,
                 height,
             })
+            .map_err(|_| anyhow!("daemon connection closed"))
+    }
+
+    /// Fire-and-forget: the colors sessions draw with (see `ClientMsg::TermColors`).
+    pub fn term_colors(
+        &self,
+        session: Option<SessionId>,
+        colors: Option<TermColors>,
+    ) -> Result<()> {
+        self.out
+            .send(ClientMsg::TermColors { session, colors })
             .map_err(|_| anyhow!("daemon connection closed"))
     }
 
