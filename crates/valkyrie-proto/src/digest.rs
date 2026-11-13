@@ -117,3 +117,19 @@ pub struct Digest {
     /// The same, as markdown to paste: a standup, a message.
     pub markdown: String,
 }
+
+/// An agent session that has ended, as the history lists it (backlog #150).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PastSession {
+    /// What the digest says of it; `entry.key` is what `Resume` takes.
+    #[serde(flatten)]
+    pub entry: DigestEntry,
+    /// When it started (ms since the epoch).
+    pub started_ms: u64,
+    /// Why it can't be resumed; `None`: it can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cannot: Option<String>,
+    /// Its directory is gone: resuming adds its worktree back on this branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regrow: Option<String>,
+}

@@ -1204,6 +1204,14 @@ mod tests {
             token: "1".into(),
         }));
         assert!(allowed(&ClientMsg::DeletedDocs { req: 1 }));
+        // Resuming a past session is a spawn the phone can already make (#150).
+        assert!(allowed(&ClientMsg::History { req: 1 }));
+        assert!(allowed(&ClientMsg::Resume {
+            req: 1,
+            key: "1-1".into(),
+            size: valkyrie_proto::Size { cols: 80, rows: 24 },
+            env: Vec::new(),
+        }));
     }
 
     #[test]

@@ -3990,6 +3990,14 @@ button.as-text {
   overflow-wrap: anywhere;
 }
 
+/* Past sessions (backlog #150): one that can't come back says why, dimmed. */
+.past-cannot {
+  opacity: 0.6;
+}
+.past-cannot .digest-detail {
+  color: var(--needs);
+}
+
 /* The Memory page (#144): tabs, filters, ended entries and notes. */
 .memory-tabs {
   margin-bottom: 4px;

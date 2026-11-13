@@ -233,10 +233,11 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<notes::NotesCmd>,
     },
-    /// This repository's past agent sessions: search what failed and what fixed it.
+    /// Past agent sessions: resume one, or search this repository's for what
+    /// failed and what fixed it. Lists the ones that ended without a command.
     Sessions {
         #[command(subcommand)]
-        action: notes::SessionsCmd,
+        action: Option<notes::SessionsCmd>,
     },
     /// The backlog: bugs, features and chores written down for later, each of
     /// which can start an agent on itself. Lists the open ones without a command.
@@ -897,7 +898,49 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             force,
         }) => notes::write(&connect(&socket).await?.0, text, replaces, force).await,
         Some(Cmd::Notes { action }) => notes::run(&connect(&socket).await?.0, action).await,
-        Some(Cmd::Sessions { action }) => notes::sessions(action),
+        Some(Cmd::Sessions { action }) => {
+            let action = action.unwrap_or(notes::SessionsCmd::Recent {
+                limit: 20,
+                json: false,
+            });
+            match action {
+                notes::SessionsCmd::Search { words } => notes::search_sessions(&words),
+                notes::SessionsCmd::Recent { limit, json } => {
+                    let client = connect(&socket).await?.0;
+                    let mut sessions = client.history().await?;
+                    sessions.truncate(limit);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    } else {
+                        let tz = jiff::tz::TimeZone::system();
+                        print!("{}", notes::recent_text(&sessions, &tz));
+                    }
+                    Ok(())
+                }
+                notes::SessionsCmd::Resume { which, attach } => {
+                    if attach {
+                        require_tty()?;
+                    }
+                    let (client, pushes) = connect(&socket).await?;
+                    let sessions = client.history().await?;
+                    let key = notes::pick(&sessions, &which)?;
+                    let size = valkyrie_tui::session_size()
+                        .ok()
+                        .filter(|s| s.cols >= 20 && s.rows >= 4)
+                        .unwrap_or(Size {
+                            cols: 120,
+                            rows: 40,
+                        });
+                    let info = client.resume(key, size).await?;
+                    if attach {
+                        valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+                    } else {
+                        println!("{}", info.id);
+                        Ok(())
+                    }
+                }
+            }
+        }
         Some(Cmd::Worktree(cmd)) => worktree::run(&socket, cmd).await,
         Some(Cmd::Decisions { all, user, action }) => {
             context::decisions(&connect(&socket).await?.0, all, user, action).await

@@ -106,13 +106,21 @@ pub struct Run {
     /// Pull requests this log was told merged: any session in the repository is.
     pub merged: Vec<String>,
     pub exited_ms: Option<u64>,
+    /// The command it started with.
+    pub command: Vec<String>,
+    /// Where it started; older logs don't say, and its agent's first hook does.
+    pub home: Option<PathBuf>,
+    /// The repository it started in (its main checkout), and the linked worktree,
+    /// as the daemon wrote them down; older logs don't say.
+    pub repo: Option<PathBuf>,
+    pub worktree: Option<PathBuf>,
+    /// The agent's own conversation, the latest it was on (backlog #150).
+    pub conversation: Option<String>,
+    /// The daemon wrote down `conversation` itself: a hook's guess doesn't replace it.
+    pub conversation_logged: bool,
     /// First and last activity in the window; `None`: nothing happened in it.
     pub first_ms: Option<u64>,
     pub last_ms: u64,
-    /// The command it was started with, to resume it.
-    pub command: Vec<String>,
-    /// The agent's own conversation id, from its hooks.
-    pub conversation: Option<String>,
     /// What was said and written in the window, for search (`read_said`); the
     /// digest leaves it empty.
     pub said: Vec<Said>,
@@ -212,6 +220,19 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
                 })
                 .unwrap_or_default();
             run.agent = agent_name(&v["agent"]).or(run.agent.take());
+            if let Some(cwd) = v["cwd"].as_str().filter(|c| !c.is_empty()) {
+                run.home = Some(PathBuf::from(cwd));
+            }
+            if let Some(name) = text(&v["name"]) {
+                run.name = Some(name);
+            }
+            let path = |k: &str| v[k].as_str().filter(|p| !p.is_empty()).map(PathBuf::from);
+            run.repo = path("repo");
+            run.worktree = path("worktree");
+        }
+        "conversation" => {
+            run.conversation = text(&v["id"]);
+            run.conversation_logged = true;
         }
         "foreground" => run.agent = agent_name(&v["agent"]).or(run.agent.take()),
         "rename" => run.name = text(&v["name"]),
@@ -229,10 +250,13 @@ fn fold(run: &mut Run, v: &Value, since: u64, until: u64) {
             let p = &v["payload"];
             if let Some(cwd) = p["cwd"].as_str().filter(|c| !c.is_empty()) {
                 run.cwd = Some(PathBuf::from(cwd));
+                run.home.get_or_insert_with(|| PathBuf::from(cwd));
             }
             // A session start names the conversation (`/clear` starts another);
             // an agent that started before the daemon names it on its next hook.
-            if let Some(id) = p["session_id"].as_str().filter(|c| !c.is_empty())
+            // A log where the daemon wrote it down itself (#150) keeps that.
+            if !run.conversation_logged
+                && let Some(id) = p["session_id"].as_str().filter(|c| !c.is_empty())
                 && (p["hook_event_name"] == "SessionStart" || run.conversation.is_none())
             {
                 run.conversation = Some(id.to_owned());
@@ -624,7 +648,8 @@ fn clock(ms: u64, tz: &TimeZone) -> String {
     zoned(ms, tz).map_or_else(|| "?".into(), |z| z.strftime("%H:%M").to_string())
 }
 
-pub(crate) fn when(ms: u64, tz: &TimeZone) -> String {
+/// A day and a time, `Thu 12 Nov 14:03`.
+pub fn when(ms: u64, tz: &TimeZone) -> String {
     zoned(ms, tz).map_or_else(|| "?".into(), |z| z.strftime("%a %-d %b %H:%M").to_string())
 }
 
@@ -848,12 +873,55 @@ mod tests {
         assert_eq!(run.topic.as_deref(), Some("Flaky test"));
         assert_eq!(run.first_ms, Some(NOON - H));
         assert_eq!(run.last_ms, NOON - H + 3);
+        assert_eq!(run.command, vec!["fish".to_owned()]);
+        // An old log names no start directory: its agent's first hook does.
+        assert_eq!(run.home.as_deref(), Some(Path::new("/r/app")));
 
         let quiet = read_run(&path, NOON - 30 * 60_000, NOON).unwrap();
         assert_eq!(
             quiet.first_ms, None,
             "nothing happened in the last half hour"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_knows_where_and_on_what_conversation_to_resume() {
+        let dir = tempdir("resume");
+        let start_hook = |t: u64, id: &str| {
+            json!({"k": "hook", "t": t, "off": 0, "agent": "claude", "ignored": false,
+                "payload": {"cwd": "/r/app/sub", "hook_event_name": "SessionStart", "session_id": id}})
+        };
+        // An older log: the session start's hook names the conversation.
+        let old = write_log(
+            &dir,
+            "1-1",
+            &[
+                json!({"k": "start", "t": NOON - H, "off": 0, "agent": "claude", "command": ["claude", "--model", "opus"]}),
+                start_hook(NOON - H + 1, "first"),
+                start_hook(NOON - H + 2, "after-clear"),
+            ],
+        );
+        let run = read_run(&old, 0, NOON).unwrap();
+        assert_eq!(run.conversation.as_deref(), Some("after-clear"));
+        assert_eq!(run.home.as_deref(), Some(Path::new("/r/app/sub")));
+        // A newer one: the daemon's own word wins over any hook's.
+        let new = write_log(
+            &dir,
+            "1-2",
+            &[
+                json!({"k": "start", "t": NOON - H, "off": 0, "agent": "claude", "command": ["claude"],
+                    "cwd": "/r/app-x", "name": "fixer", "repo": "/r/app", "worktree": "/r/app-x"}),
+                json!({"k": "conversation", "t": NOON - H + 1, "off": 0, "id": "kept"}),
+                start_hook(NOON - H + 2, "a codex exec's"),
+            ],
+        );
+        let run = read_run(&new, 0, NOON).unwrap();
+        assert_eq!(run.conversation.as_deref(), Some("kept"));
+        assert_eq!(run.home.as_deref(), Some(Path::new("/r/app-x")));
+        assert_eq!(run.name.as_deref(), Some("fixer"));
+        assert_eq!(run.repo.as_deref(), Some(Path::new("/r/app")));
+        assert_eq!(run.worktree.as_deref(), Some(Path::new("/r/app-x")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

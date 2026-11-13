@@ -31,7 +31,7 @@ pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
     ReviewAction,
 };
-pub use digest::{Digest, DigestEntry, DigestGroup, Outcome};
+pub use digest::{Digest, DigestEntry, DigestGroup, Outcome, PastSession};
 pub use docs::{
     CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, NewDoc,
 };
@@ -42,7 +42,7 @@ pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Sty
 pub use search::{SearchField, SearchHit, SearchResults};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 41;
+pub const PROTOCOL: u32 = 42;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -772,6 +772,23 @@ pub enum ClientMsg {
         cwd: PathBuf,
         id: u32,
     },
+    /// Agent sessions of the last weeks that have ended, newest first, to
+    /// resume one (backlog #150, protocol 42). Read-only. Replies `History`.
+    History {
+        req: ReqId,
+    },
+    /// Starts a past agent session again on its own conversation, in its own
+    /// directory, re-adding its worktree if that was removed (backlog #150). `key`
+    /// is a `PastSession`'s. One still running is answered with itself. Replies
+    /// `Session`.
+    Resume {
+        req: ReqId,
+        key: String,
+        size: Size,
+        /// As `SpawnSpec::env`.
+        #[serde(default)]
+        env: Vec<(String, Option<String>)>,
+    },
 }
 
 fn yes() -> bool {
@@ -983,6 +1000,9 @@ pub enum Reply {
     },
     Digest {
         digest: Box<Digest>,
+    },
+    History {
+        sessions: Vec<PastSession>,
     },
     Search {
         results: Box<SearchResults>,

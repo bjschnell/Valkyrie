@@ -697,6 +697,32 @@ impl Client {
         }
     }
 
+    /// Agent sessions that have ended, newest first (backlog #150).
+    pub async fn history(&self) -> Result<Vec<crate::PastSession>> {
+        match self.request(|req| ClientMsg::History { req }).await? {
+            Reply::History { sessions } => Ok(sessions),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Starts the past session `key` again on its own conversation.
+    pub async fn resume(&self, key: &str, size: Size) -> Result<SessionInfo> {
+        let key = key.to_owned();
+        let env = crate::login_env();
+        match self
+            .request(|req| ClientMsg::Resume {
+                req,
+                key,
+                size,
+                env,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(*info),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Sessions whose history holds every word of `query`, newest first.
     pub async fn search(
         &self,

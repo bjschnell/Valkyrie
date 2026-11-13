@@ -12,6 +12,8 @@ valk pings                 # where agents stopped and waited on you, last 30 day
 valk notes                 # findings agents left about this repo (unreviewed, never injected)
 valk notes search WORDS    # those notes and past sessions here: what failed, what fixed it
 valk digest                # what every agent did while you were gone, as markdown
+valk sessions              # agent sessions that ended, newest first, numbered
+valk sessions resume 1 -a  # pick the newest back up where it left off, and attach
 valk search WORDS          # the session where you (or an agent) said or did something
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v
@@ -72,6 +74,24 @@ The TUI has it too: `w` on the home screen. `w` steps through since you left,
 12 hours, today and 3 days, `t` switches between repository and day, `↩` opens a
 session that's still running and `y` copies the markdown. The web app has the
 same view behind the clock on the home screen, with a Copy button.
+
+## Picking up a session you closed
+
+`valk sessions` lists the Claude and Codex sessions of the last 31 days that
+have ended, newest first: what each was about, where its work ended up and when.
+`valk sessions resume N` starts number N again in a new tab, on its own
+conversation, in its own directory, with the options it started with (its
+first prompt isn't sent again). If its worktree has been taken away since, it
+is added back on the session's branch first. A session whose conversation is
+already running again isn't listed, and resuming one twice opens the same tab.
+
+```sh
+valk sessions                     # the list (also `valk sessions recent --json`)
+valk sessions resume 2 --attach   # by number, or by the key `--json` gives
+```
+
+In the TUI it's `h` on the home screen, then `↩` on a session. On the phone,
+the arrow-in-a-circle on the home screen, then tap one.
 
 ## Find the session where you said something
 

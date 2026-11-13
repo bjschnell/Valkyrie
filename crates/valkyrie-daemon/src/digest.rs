@@ -82,18 +82,18 @@ impl Registry {
 }
 
 /// What the daemon knows beside the logs, gathered to take off its thread.
-struct Around {
-    items: Vec<Item>,
+pub(crate) struct Around {
+    pub(crate) items: Vec<Item>,
     /// The conversations live sessions are in: one is never offered again.
-    talking: HashSet<String>,
+    pub(crate) talking: HashSet<String>,
     /// Live sessions by log key. Exited ones stay listed until closed, but
     /// aren't running.
-    live: BTreeMap<String, u32>,
-    roots: Vec<PathBuf>,
+    pub(crate) live: BTreeMap<String, u32>,
+    pub(crate) roots: Vec<PathBuf>,
 }
 
 impl Around {
-    fn known(&self) -> Known<'_> {
+    pub(crate) fn known(&self) -> Known<'_> {
         Known {
             items: &self.items,
             live: &self.live,
@@ -103,7 +103,7 @@ impl Around {
 }
 
 impl Registry {
-    fn around(&self) -> Around {
+    pub(crate) fn around(&self) -> Around {
         let items: Vec<_> = self.items.borrow().iter().cloned().collect();
         let sessions = self.all();
         let live = sessions
@@ -186,7 +186,7 @@ impl Registry {
 /// rule for bringing a session back after a restart. An agent started from a
 /// shell in it resumes as the agent alone, its options unknown. `None` while a
 /// live session is in that conversation: two agents would write one transcript.
-fn resume(run: &digest::Run, talking: &HashSet<String>) -> Option<Vec<String>> {
+pub(crate) fn resume(run: &digest::Run, talking: &HashSet<String>) -> Option<Vec<String>> {
     let conversation = run
         .conversation
         .as_deref()
@@ -206,7 +206,7 @@ fn resume(run: &digest::Run, talking: &HashSet<String>) -> Option<Vec<String>> {
 
 /// The runs of every log written to since `since` that started by `until`, each
 /// folded by `read`.
-fn read_runs(
+pub(crate) fn read_runs(
     dir: &Path,
     since: u64,
     until: u64,

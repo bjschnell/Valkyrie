@@ -132,6 +132,15 @@ export interface Digest {
   markdown: string;
 }
 
+/** An agent session that has ended, as the history lists it (backlog #150). */
+export interface PastSession extends DigestEntry {
+  started_ms: number;
+  /** Why it can't be resumed; absent: it can. */
+  cannot?: string;
+  /** Its directory is gone: resuming adds its worktree back on this branch. */
+  regrow?: string;
+}
+
 /** Where in a session a search hit was found (backlog #106): your prompt, the
  * agent's closing reply, a file it wrote, or what it was about. */
 export type SearchField = "you" | "agent" | "file" | "about";
@@ -645,6 +654,10 @@ export type Request =
   | { t: "docs"; count_only?: boolean }
   /** What every agent did since `since_ms`, or since you were last gone (protocol 37). */
   | { t: "digest"; since_ms?: number | null; by: DigestGroup }
+  /** Agent sessions that have ended, newest first (protocol 42); replies `history`. */
+  | { t: "history" }
+  /** Starts a past session again on its own conversation; replies `session`. */
+  | { t: "resume"; key: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   /** Sessions whose history holds every word of `query` (backlog #106, protocol 40). */
   | { t: "search"; query: string; since_ms?: number | null; repo?: string | null; limit?: number | null }
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
@@ -758,6 +771,7 @@ export type Reply =
    * above the screen, so `from_top == history` is the live screen. */
   | { t: "scrollback"; from_top: number; history: number; rows: Row[] }
   | { t: "digest"; digest: Digest }
+  | { t: "history"; sessions: PastSession[] }
   | { t: "search"; results: SearchResults };
 
 export type ServerMsg =

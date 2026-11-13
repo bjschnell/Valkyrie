@@ -14,6 +14,7 @@ mod facts;
 mod foreground;
 mod guard;
 mod habit;
+mod history;
 mod merged;
 mod order;
 mod overlap;
@@ -1425,6 +1426,25 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             } => (req, registry.edit_doc(id, &base, &body, peer)),
             ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
+            ClientMsg::History { req } => (req, registry.history().await),
+            ClientMsg::Resume {
+                req,
+                key,
+                size,
+                env,
+            } => {
+                let result = match registry.resume(&key, size, env).await {
+                    Ok((reply, started)) => {
+                        let reply = Ok(reply);
+                        if started {
+                            mark_driven(&registry, &reply, &mut driver, peer);
+                        }
+                        reply
+                    }
+                    Err(e) => Err(e),
+                };
+                (req, result)
+            }
             ClientMsg::Search {
                 req,
                 query,
