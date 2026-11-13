@@ -706,9 +706,10 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// takes from a human only. `WriteDoc` and `EditDoc` are the agents' path, and
 /// moving the folder is the CLI's.
 ///
-/// Agent notes (ADR-0017): the web app has no notes view yet, and the bridge
-/// counts as the user, so writing (`--force` past a tombstone included) and
-/// deleting stay the CLI's until it does. Listing is read-only and goes through.
+/// Agent notes (ADR-0017): the web app's Memory page lists, corrects (a note
+/// with `replaces`) and deletes them, as the user. Writing past a tombstone
+/// (`force`) stays the user's own terminal's; the daemon refuses it from the
+/// bridge too.
 fn allowed(msg: &ClientMsg) -> bool {
     !matches!(
         msg,
@@ -721,8 +722,10 @@ fn allowed(msg: &ClientMsg) -> bool {
             | ClientMsg::WriteDoc { .. }
             | ClientMsg::EditDoc { .. }
             | ClientMsg::DocsRoot { root: Some(_), .. }
-            | ClientMsg::Note { .. }
-            | ClientMsg::NoteRm { .. }
+            | ClientMsg::Note {
+                note: valkyrie_proto::NewNote { force: true, .. },
+                ..
+            }
     )
 }
 
@@ -1099,21 +1102,20 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_lists_notes_but_neither_writes_nor_deletes_one() {
-        assert!(allowed(&ClientMsg::Notes {
-            req: 1,
-            cwd: "/r".into(),
-        }));
-        assert!(!allowed(&ClientMsg::Note {
+    fn a_browser_lists_corrects_and_deletes_notes_but_never_forces_one() {
+        assert!(allowed(&ClientMsg::Notes { req: 1, cwd: None }));
+        let note = |force| ClientMsg::Note {
             req: 1,
             note: valkyrie_proto::NewNote {
                 cwd: "/r".into(),
                 text: "x".into(),
-                replaces: None,
-                force: true,
+                replaces: Some(1),
+                force,
             },
-        }));
-        assert!(!allowed(&ClientMsg::NoteRm {
+        };
+        assert!(allowed(&note(false)));
+        assert!(!allowed(&note(true)), "past a tombstone is the terminal's");
+        assert!(allowed(&ClientMsg::NoteRm {
             req: 1,
             cwd: "/r".into(),
             id: 1,

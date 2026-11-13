@@ -156,8 +156,9 @@ function ScopeCard({ d }: { d: Decision }) {
   );
 }
 
-/** Rewords a proposal, then accepts it: the usual reason to edit one. */
-function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDone: () => void }) {
+/** Rewords a decision. A proposal is accepted as it's saved (`revise`), the
+ * usual reason to edit one; an active one keeps its status (`edit`). */
+export function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDone: () => void }) {
   const [title, setTitle] = useState(d.title);
   const [body, setBody] = useState(d.body);
   const [kind, setKind] = useState<DecisionKind>(d.kind);
@@ -166,7 +167,8 @@ function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDon
   const habit = d.project === USER_SCOPE;
   const save = async () => {
     setSaving(true);
-    const ok = await review(d, { a: "revise", title, body, kind, ...(habit ? {} : { scope: parseScope(scope) }) });
+    const a = d.status === "proposed" ? "revise" : "edit";
+    const ok = await review(d, { a, title, body, kind, ...(habit ? {} : { scope: parseScope(scope) }) });
     setSaving(false);
     if (ok) onDone();
   };
@@ -204,7 +206,7 @@ function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean; onDon
           Cancel
         </button>
         <button className="primary" disabled={busy || saving || !title.trim()} onClick={() => void save()}>
-          Save &amp; accept
+          {d.status === "proposed" ? "Save & accept" : "Save"}
         </button>
       </div>
     </div>

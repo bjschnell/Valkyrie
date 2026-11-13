@@ -38,7 +38,7 @@ type Route =
 /**
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
- * writing an item down and changing item 3, `#/decisions` every active decision,
+ * writing an item down and changing item 3, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
  * `#/digest` what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {

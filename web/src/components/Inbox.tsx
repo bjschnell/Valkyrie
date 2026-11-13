@@ -148,8 +148,8 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         </button>
         <button
           className="icon-btn"
-          aria-label="Decisions"
-          title="Decisions"
+          aria-label="Memory"
+          title="Memory: decisions, skills, habits and notes"
           onClick={() => (location.hash = "#/decisions")}
         >
           <Pin />

@@ -429,7 +429,13 @@ impl Client {
     }
 
     pub async fn notes(&self, cwd: PathBuf) -> Result<crate::NotesListing> {
-        match self.request(|req| ClientMsg::Notes { req, cwd }).await? {
+        match self
+            .request(|req| ClientMsg::Notes {
+                req,
+                cwd: Some(cwd),
+            })
+            .await?
+        {
             Reply::Notes { listing } => Ok(listing),
             other => bail!("unexpected reply: {other:?}"),
         }

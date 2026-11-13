@@ -8,6 +8,7 @@ valk note --replaces 3 "src/net.rs retry flakes only with --release"
 valk notes                # live notes, stale ones last (--all: replaced ones too)
 valk notes show 4         # one in full, where it came from, its correction chain
 valk notes rm 4           # delete it; a tombstone keeps it from coming back
+                          # (the web app's Memory page corrects and deletes too)
 valk notes health         # counts, and every note an agent deleted
 valk notes search socket path   # notes and past sessions with those words
 valk sessions search socket     # past sessions only
