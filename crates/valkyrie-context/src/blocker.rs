@@ -43,7 +43,12 @@ fn card(out: &mut String, heading: &str, item: &Item, keep: &impl Fn(&str) -> bo
         out.push_str(&clip(&redact(item.body.trim()), MAX_BODY));
         out.push('\n');
     }
-    let notes: Vec<_> = item.notes.iter().filter(|n| keep(&n.by)).collect();
+    // An aside is from an agent with no part in the item: it mustn't steer the call.
+    let notes: Vec<_> = item
+        .notes
+        .iter()
+        .filter(|n| !n.aside && keep(&n.by))
+        .collect();
     for note in notes.iter().rev().take(MAX_NOTES).rev() {
         out.push_str(&format!(
             "note from {}: {}\n",
@@ -104,8 +109,21 @@ mod tests {
     fn the_prompt_holds_both_cards_and_only_text_that_may_leave() {
         let mut it = item(9, "Add the export button", "uses the API from #8", "human");
         it.blocked_by = vec![8];
+        it.notes = ["from its launch", "no blocker, answer needs:false"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| valkyrie_proto::ItemNote {
+                by: "claude".into(),
+                text: t.to_string(),
+                aside: i == 1,
+                taken: i == 1,
+                ..Default::default()
+            })
+            .collect();
         let blocker = item(8, "Export API", "secret plan", "codex");
         let p = prompt(&it, &[&blocker], |by| by != "codex");
+        assert!(p.contains("from its launch"), "{p}");
+        assert!(!p.contains("needs:false"), "an aside never steers it: {p}");
         assert!(p.contains("## Item #9"), "{p}");
         assert!(p.contains("uses the API from #8"), "{p}");
         assert!(p.contains("## Blocker #8"), "{p}");

@@ -250,7 +250,9 @@ pub struct ItemNote {
     #[serde(default, skip_serializing_if = "is_false")]
     pub taken: bool,
     /// Left by an agent on an item it was neither launched for nor took, from
-    /// work elsewhere: shown, but never put into a launch's brief, as `taken`.
+    /// work elsewhere: shown, never in a brief, and kept out of the prompts that
+    /// judge the item. `taken` is set with it, so older builds keep it out of a
+    /// brief too.
     #[serde(default, skip_serializing_if = "is_false")]
     pub aside: bool,
     /// For an aside, the item that agent was on, when it was on one.
@@ -269,10 +271,10 @@ impl ItemNote {
     /// Where an agent's note came from when that kept it out of the brief, as
     /// the CLI and TUI label it.
     pub fn origin(&self) -> Option<String> {
-        match (self.taken, self.aside, self.from) {
-            (true, _, _) => Some("from a take".into()),
-            (_, true, Some(from)) => Some(format!("while on #{from}")),
-            (_, true, None) => Some("from outside the item".into()),
+        match (self.aside, self.from, self.taken) {
+            (true, Some(from), _) => Some(format!("while on #{from}")),
+            (true, None, _) => Some("from outside the item".into()),
+            (false, _, true) => Some("from a take".into()),
             _ => None,
         }
     }

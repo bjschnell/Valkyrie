@@ -181,7 +181,9 @@ impl Backlog {
         let (taken, aside, from) = match origin {
             NoteOrigin::Brief => (false, false, None),
             NoteOrigin::Take => (true, false, None),
-            NoteOrigin::Aside(from) => (false, true, from),
+            // Taken too, so a binary from before asides still keeps it out of
+            // the brief.
+            NoteOrigin::Aside(from) => (true, true, from),
         };
         item.notes.push(ItemNote {
             at: now,
@@ -1304,6 +1306,8 @@ mod tests {
         // Read back from disk, as the next launch would.
         let again = b.get(1).unwrap();
         assert_eq!((again.notes[1].aside, again.notes[1].from), (true, Some(9)));
+        // A build from before asides reads only `taken`, and must keep it out too.
+        assert!(again.notes.iter().skip(1).all(|n| n.taken));
         assert!(!again.notes[1].in_brief() && again.notes[0].in_brief());
     }
 

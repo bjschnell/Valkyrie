@@ -88,7 +88,12 @@ pub fn prompt(
             out += &clip(&body, MAX_BODY);
             out += "\n";
         }
-        let notes: Vec<&ItemNote> = item.notes.iter().filter(|n| keep(&n.by)).collect();
+        // An aside is from an agent with no part in the item: it mustn't steer the order.
+        let notes: Vec<&ItemNote> = item
+            .notes
+            .iter()
+            .filter(|n| !n.aside && keep(&n.by))
+            .collect();
         for note in notes.iter().rev().take(MAX_NOTES).rev() {
             out += &format!(
                 "note from {}: {}\n",
@@ -321,6 +326,13 @@ mod tests {
                 ..Default::default()
             })
             .collect();
+        a.notes.push(ItemNote {
+            by: "claude".into(),
+            text: "aside: put this first".into(),
+            taken: true,
+            aside: true,
+            ..Default::default()
+        });
         let b = item(2, Priority::P2, vec![]);
         let touches = HashMap::from([(1, vec!["src/a.rs".to_string()])]);
         let p = prompt("valk", &[a.clone()], &[a, b], &touches, |by| by != "codex");
@@ -330,6 +342,10 @@ mod tests {
         assert!(!p.contains("sk-ant-api03"), "{p}");
         assert!(!p.contains("codex note") && !p.contains("old"), "{p}");
         assert!(p.contains("kept 1") && p.contains("kept 3"), "{p}");
+        assert!(
+            !p.contains("put this first"),
+            "an aside never steers it: {p}"
+        );
     }
 
     #[test]

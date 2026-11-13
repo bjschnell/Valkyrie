@@ -176,8 +176,8 @@ describe("noteOrigin", () => {
   it("says where a note kept out of the brief came from", () => {
     expect(noteOrigin(n)).toBe("");
     expect(noteOrigin({ ...n, taken: true })).toBe(" · from a take");
-    expect(noteOrigin({ ...n, aside: true, from: 9 })).toBe(" · while on #9");
-    expect(noteOrigin({ ...n, aside: true })).toBe(" · from outside the item");
+    expect(noteOrigin({ ...n, taken: true, aside: true, from: 9 })).toBe(" · while on #9");
+    expect(noteOrigin({ ...n, taken: true, aside: true })).toBe(" · from outside the item");
   });
 });
 

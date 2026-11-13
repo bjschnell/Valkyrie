@@ -147,8 +147,8 @@ export function repoChoices(items: Item[]): { repo: string; label: string }[] {
 /** Where an agent's note came from when that kept it out of the brief, as the
  * CLI and TUI say it (`ItemNote::origin`): ` · while on #9`, or empty. */
 export function noteOrigin(n: ItemNote): string {
-  if (n.taken) return " · from a take";
   if (n.aside) return n.from ? ` · while on #${n.from}` : " · from outside the item";
+  if (n.taken) return " · from a take";
   return "";
 }
 
