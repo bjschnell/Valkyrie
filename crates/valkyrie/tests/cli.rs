@@ -1577,6 +1577,84 @@ fn an_agent_drives_the_panes_of_its_tab() {
         "--timeout",
         "10",
     ]));
+    // `prompt`: the pane's agent reports through hooks, fired here by hand.
+    let agent = ok(pane(&["split", "-d", "down"])).trim().to_string();
+    let fire = |event: &str| {
+        let payload = serde_json::json!({"hook_event_name": event, "cwd": dir}).to_string();
+        let mut cmd = valk(&socket, &dir);
+        cmd.env("VALK_SESSION", &agent);
+        assert_silent_success(&hook(cmd, payload.as_bytes()));
+    };
+    let prompt = |args: &[&str]| {
+        valk(&socket, &dir)
+            .env("VALK_SESSION", &me)
+            .args(["pane", "prompt"])
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // The last turn's `done` is on show; only the new turn's end may count.
+    fire("UserPromptSubmit");
+    fire("Stop");
+    let mut waiting = prompt(&[&agent, "echo prompt-$((6*7))", "--wait", "--timeout", "20"]);
+    ok(pane(&[
+        "wait",
+        &agent,
+        "--match",
+        "prompt-42",
+        "--timeout",
+        "10",
+    ]));
+    std::thread::sleep(Duration::from_millis(500));
+    fire("UserPromptSubmit");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        waiting.try_wait().unwrap().is_none(),
+        "returned before the turn ended"
+    );
+    fire("Stop");
+    let out = waiting.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let said = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        said.starts_with("done") || said.starts_with("idle"),
+        "{said:?}"
+    );
+
+    // A turn that stops on a question fails at once, and the next prompt is refused.
+    let waiting = prompt(&[&agent, "true", "--wait", "--timeout", "20"]);
+    std::thread::sleep(Duration::from_millis(500));
+    fire("UserPromptSubmit");
+    let ask = serde_json::json!({
+        "hook_event_name": "Notification",
+        "notification_type": "permission_prompt",
+        "message": "Claude needs your permission to use Bash",
+        "cwd": dir,
+    })
+    .to_string();
+    let mut cmd = valk(&socket, &dir);
+    cmd.env("VALK_SESSION", &agent);
+    assert_silent_success(&hook(cmd, ask.as_bytes()));
+    let out = waiting.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("needs input"),
+        "{out:?}"
+    );
+    let refused = prompt(&[&agent, "true"]).wait_with_output().unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+
+    // A pane whose program reports nothing: the prompt never lands.
+    let started = Instant::now();
+    let out = prompt(&[&other, "true", "--wait"])
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    ok(pane(&["close", &agent]));
+
     ok(pane(&["close", &other]));
     let left = list();
     assert_eq!(left.len(), 1);

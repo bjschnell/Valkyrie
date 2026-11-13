@@ -39,6 +39,20 @@ pub enum PaneCmd {
     },
     /// Type TEXT into a pane and press Enter. `valk send` sends keys without Enter.
     Run { session: SessionId, text: String },
+    /// Send TEXT to the agent in a pane, as `run` does, refusing a pane that is
+    /// blocked or needs input. With --wait, wait for the turn it starts to end and
+    /// print how it ended. Exits 1 when the turn stops on a human (blocked or
+    /// needs input), 3 when nothing happened within 5s (the prompt never landed),
+    /// 124 when the timeout runs out first.
+    Prompt {
+        session: SessionId,
+        text: String,
+        #[arg(long)]
+        wait: bool,
+        /// Seconds, with --wait.
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
     /// Print a pane's screen as plain text, or its last N lines, scrollback included.
     Read {
         session: SessionId,
@@ -207,6 +221,12 @@ pub async fn run(client: &Client, cmd: PaneCmd) -> Result<()> {
             data.push(b'\r');
             send(client, session, data).await
         }
+        PaneCmd::Prompt {
+            session,
+            text,
+            wait,
+            timeout,
+        } => prompt(client, session, &text, wait, timeout).await,
         PaneCmd::Read { session, lines } => {
             let text = match lines {
                 None => client.dump(session).await?,
@@ -267,6 +287,125 @@ pub async fn run(client: &Client, cmd: PaneCmd) -> Result<()> {
                 true => client.ratio(session, other, share).await,
                 false => client.ratio(other, session, RATIO_SCALE - share).await,
             }
+        }
+    }
+}
+
+/// How long a prompt gets to move the pane's status before it counts as lost.
+const LANDED_WITHIN: Duration = Duration::from_secs(5);
+/// `prompt --wait`'s exit when the prompt never landed.
+const STALLED: i32 = 3;
+
+/// Where a prompted turn stands, from the pane's status after the prompt went in.
+#[derive(Debug, PartialEq, Eq)]
+enum Turn {
+    /// Not started yet, or still working.
+    Going,
+    /// Over: the state it ended in.
+    Over(AgentState),
+    /// Stopped on a human: blocked, or needs input.
+    Stuck(AgentState),
+    /// The pane's program exited.
+    Exited,
+    /// The status never moved: the prompt didn't land.
+    Stalled,
+}
+
+/// `seq` is the status transition before the prompt went in; `waited`, how long
+/// ago that was. A turn counts once the status moved past `seq`, so the state the
+/// pane was already in (an idle prompt, `done` from the last turn) never matches.
+fn turn(seq: u64, s: &SessionInfo, waited: Duration) -> Turn {
+    if s.exited.is_some() {
+        return Turn::Exited;
+    }
+    if s.status.seq == seq {
+        return match waited >= LANDED_WITHIN {
+            true => Turn::Stalled,
+            false => Turn::Going,
+        };
+    }
+    match s.status.state {
+        AgentState::Working | AgentState::Stale => Turn::Going,
+        state @ (AgentState::Blocked | AgentState::NeedsInput) => Turn::Stuck(state),
+        AgentState::Exited => Turn::Exited,
+        state => Turn::Over(state),
+    }
+}
+
+/// `state: summary`, or the state alone.
+fn outcome(s: &SessionInfo) -> String {
+    let state = state_label(s);
+    match s.status.summary.as_deref() {
+        Some(summary) if !summary.is_empty() => format!("{state}: {summary}"),
+        _ => state,
+    }
+}
+
+async fn prompt(
+    client: &Client,
+    session: SessionId,
+    text: &str,
+    wait: bool,
+    timeout: u64,
+) -> Result<()> {
+    let mut data = crate::unescape(text)?;
+    data.push(b'\r');
+    let find = |sessions: Vec<SessionInfo>| {
+        sessions
+            .into_iter()
+            .find(|s| s.id == session)
+            .with_context(|| format!("pane {session} has ended (or never was)"))
+    };
+    let before = find(client.list().await?)?;
+    if before.exited.is_some() {
+        bail!("pane {session} has exited");
+    }
+    match before.status.state {
+        AgentState::Blocked | AgentState::NeedsInput => bail!(
+            "pane {session} is {}; it needs a human first",
+            outcome(&before)
+        ),
+        // Its turn's end would read as this prompt's.
+        AgentState::Working | AgentState::Stale if wait => bail!(
+            "pane {session} is still working; `valk pane wait {session} --state stopped` first"
+        ),
+        _ => {}
+    }
+    let seq = before.status.seq;
+    client.input(session, data)?;
+    if !wait {
+        // A round trip, so the input is flushed before exit.
+        return client.list().await.map(drop);
+    }
+    let sent = Instant::now();
+    let deadline = sent + Duration::from_secs(timeout);
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let now = find(client.list().await?)?;
+        match turn(seq, &now, sent.elapsed()) {
+            Turn::Going => {}
+            Turn::Over(_) => {
+                println!("{}", outcome(&now));
+                return Ok(());
+            }
+            Turn::Stuck(_) => {
+                println!("{}", outcome(&now));
+                eprintln!("valk: pane {session} needs a human");
+                std::process::exit(1);
+            }
+            Turn::Exited => bail!("pane {session} {} during the turn", state_label(&now)),
+            Turn::Stalled => {
+                eprintln!(
+                    "valk: pane {session} didn't react within {}s; the prompt never landed \
+                     (no agent there, or it isn't reporting hooks)",
+                    LANDED_WITHIN.as_secs()
+                );
+                std::process::exit(STALLED);
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!("valk: timed out after {timeout}s waiting on pane {session}'s turn");
+            std::process::exit(124);
         }
     }
 }
@@ -439,6 +578,57 @@ mod tests {
         assert_eq!(one.len(), 1);
         assert_eq!(place(one[0].1), "whole tab");
         assert!(tab(9, &sessions, &layouts).is_err());
+    }
+
+    fn pane(state: AgentState, seq: u64) -> SessionInfo {
+        let mut s: SessionInfo = serde_json::from_value(json!({
+            "id": 1, "name": "s", "command": ["claude"], "cwd": "/",
+            "pid": null, "created_unix": 0, "title": null, "clients": 0, "exited": null,
+        }))
+        .unwrap();
+        s.status.state = state;
+        s.status.seq = seq;
+        s
+    }
+
+    #[test]
+    fn a_prompted_turn_counts_only_once_the_status_moves() {
+        let soon = Duration::from_millis(400);
+        // Still on the transition before the prompt: `done` from the last turn
+        // isn't this turn's end.
+        assert_eq!(
+            turn(4, &pane(AgentState::ReviewReady, 4), soon),
+            Turn::Going
+        );
+        assert_eq!(
+            turn(4, &pane(AgentState::Idle, 4), LANDED_WITHIN),
+            Turn::Stalled
+        );
+        assert_eq!(
+            turn(4, &pane(AgentState::Working, 5), LANDED_WITHIN),
+            Turn::Going
+        );
+        assert_eq!(turn(4, &pane(AgentState::Stale, 6), soon), Turn::Going);
+        // A fast turn, over between two looks, still counts.
+        assert_eq!(
+            turn(4, &pane(AgentState::ReviewReady, 6), soon),
+            Turn::Over(AgentState::ReviewReady)
+        );
+        assert_eq!(
+            turn(4, &pane(AgentState::Interrupted, 6), soon),
+            Turn::Over(AgentState::Interrupted)
+        );
+        assert_eq!(
+            turn(4, &pane(AgentState::NeedsInput, 6), soon),
+            Turn::Stuck(AgentState::NeedsInput)
+        );
+        assert_eq!(
+            turn(4, &pane(AgentState::Blocked, 6), soon),
+            Turn::Stuck(AgentState::Blocked)
+        );
+        let mut gone = pane(AgentState::Working, 4);
+        gone.exited = Some(Some(1));
+        assert_eq!(turn(4, &gone, soon), Turn::Exited);
     }
 
     #[test]
