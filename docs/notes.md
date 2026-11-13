@@ -39,6 +39,12 @@ The session-start block says search exists, in one line. It never carries a note
 
 Transcripts are files Claude Code keeps in `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR`). Search reads them where they are and never sends them anywhere, and Valkyrie can't delete them.
 
+## The retro writes notes
+
+When an agent's turn ends after a tool failed, the retro ([decisions](decisions.md), item 5) writes each lesson it finds as a note, by `valkyrie`, with the failure's signature. Lessons don't go to your review queue directly. They wait as notes until they recur (below). The limit of two per retro, the hourly limits and `valk decisions auto` stay as they are.
+
+Before it writes, the retro is shown the live notes on the same failure. When this session was served one of them by a search and hit the failure anyway, the retro may replace that note instead of adding a second one. A lesson that matches a deleted note's tombstone isn't written. A skill the session followed is still rewritten as a proposal, since it changes something you accepted.
+
 ## Recurring notes become a proposal
 
 When agents in three separate sessions write notes about the same trap, Valkyrie proposes it as one `gotcha` or `fix` for you to review. Notes belong together when they share a failure signature or mostly the same words, the test that keeps a rejected decision from being proposed again. Sessions are told apart by their conversation, or by the session's name when there's no conversation. A note written outside any session doesn't count. Neither do replaced, deleted or stale notes.

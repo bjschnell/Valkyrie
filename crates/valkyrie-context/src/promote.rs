@@ -27,6 +27,11 @@ const LINKS: &str = "promotions.jsonl";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub decision: u32,
+    /// The decision's `created`, so a link doesn't attach to a later decision
+    /// given the same id after the first one's file was deleted by hand. Absent
+    /// for [`KNOWN`] and for links written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
     pub notes: Vec<u32>,
     pub at: u64,
     /// The drafted proposal matched decision `decision`, which was already there,
@@ -60,47 +65,53 @@ pub fn sessions(cluster: &[&Note]) -> usize {
     conversations.len() + bare.len()
 }
 
-/// The clusters among `notes`, each oldest first: two notes are in one when they
-/// share a signature or most of their words, and so is anything either is in one
-/// with. Live notes, stale ones too, and promoted ones are clustered, so a note
-/// that joins a proposed cluster is still found to belong to it after the notes
-/// it matched go stale or are promoted; [`ready`] counts only the live, fresh ones.
+/// The clusters among `notes`, each oldest first. Each cluster is seeded by its
+/// newest note, and an older note joins the newest cluster whose seed it shares
+/// a signature or most of its words with. Matching the seed, not any member,
+/// keeps a chain of loosely worded notes (A like B, B like C) from pulling A and
+/// C into one cluster. Live notes, stale ones too, and promoted ones are
+/// clustered, so a note that joins a proposed cluster is still found to belong
+/// to it after the notes it matched go stale or are promoted; [`ready`] counts
+/// only the live, fresh ones.
 pub fn clusters(notes: &[Note]) -> Vec<Vec<&Note>> {
-    let notes: Vec<&Note> = notes
+    let mut notes: Vec<&Note> = notes
         .iter()
         .filter(|n| matches!(n.status, NoteStatus::Live | NoteStatus::Promoted))
         .collect();
-    let words: Vec<BTreeSet<String>> = notes.iter().map(|n| extract::words(&n.text)).collect();
-    let mut parent: Vec<usize> = (0..notes.len()).collect();
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
+    notes.sort_by_key(|n| std::cmp::Reverse((n.created, n.id)));
+    // (seed's words, members newest first)
+    let mut groups: Vec<(BTreeSet<String>, Vec<&Note>)> = Vec::new();
+    for n in notes {
+        let words = extract::words(&n.text);
+        let seed = groups.iter_mut().find(|(seed_words, members)| {
+            let seed = members[0];
+            let same_sig = n.sig.is_some() && n.sig == seed.sig;
+            let same_words = !words.is_empty() && extract::similar(&words, seed_words);
+            same_sig || same_words
+        });
+        match seed {
+            Some((_, members)) => members.push(n),
+            None => groups.push((words, vec![n])),
         }
-        i
-    }
-    for i in 0..notes.len() {
-        for j in i + 1..notes.len() {
-            let same_sig = notes[i].sig.is_some() && notes[i].sig == notes[j].sig;
-            let same_words = !words[i].is_empty() && extract::similar(&words[i], &words[j]);
-            if same_sig || same_words {
-                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
-                parent[a.max(b)] = a.min(b);
-            }
-        }
-    }
-    let mut groups: BTreeMap<usize, Vec<&Note>> = BTreeMap::new();
-    for (i, n) in notes.iter().enumerate() {
-        let root = find(&mut parent, i);
-        groups.entry(root).or_default().push(n);
     }
     groups
-        .into_values()
-        .map(|mut g| {
-            g.sort_by_key(|n| (n.created, n.id));
+        .into_iter()
+        .map(|(_, mut g)| {
+            g.reverse();
             g
         })
         .collect()
+}
+
+/// A decision a link is to: its id, and its `created` (`None` for [`KNOWN`]).
+pub type Target = (u32, Option<u64>);
+
+impl Link {
+    /// Whether this link is to `d`: the same id, and the same decision rather
+    /// than a later one given that id again.
+    pub fn is_to(&self, d: &Decision) -> bool {
+        self.decision == d.id && self.created.is_none_or(|c| c == d.created)
+    }
 }
 
 /// The decision id a link records when the model, asked to draft, said the
@@ -111,11 +122,10 @@ pub const KNOWN: u32 = 0;
 /// Each note's newest link, among links that still hold: to a decision that
 /// exists, or [`KNOWN`].
 fn held<'a>(links: &'a [Link], decisions: &[Decision]) -> BTreeMap<u32, &'a Link> {
-    let exists: HashSet<u32> = decisions.iter().map(|d| d.id).collect();
     let mut out = BTreeMap::new();
     for l in links
         .iter()
-        .filter(|l| l.decision == KNOWN || exists.contains(&l.decision))
+        .filter(|l| l.decision == KNOWN || decisions.iter().any(|d| l.is_to(d)))
     {
         for n in &l.notes {
             out.insert(*n, l);
@@ -129,12 +139,13 @@ fn held<'a>(links: &'a [Link], decisions: &[Decision]) -> BTreeMap<u32, &'a Link
 /// the cluster stays held once the notes it was proposed from go stale or are
 /// deleted, and accepting a waiting proposal promotes the notes that joined it
 /// too. A note that joins after the proposal was accepted or rejected is only
-/// held (`matched`), never promoted by it.
+/// held (`matched`), never promoted by it. The decision comes as its id and
+/// `created`, for [`Store::record_promotion`].
 pub fn joined(
     notes: &[Note],
     links: &[Link],
     decisions: &[Decision],
-) -> Vec<(u32, bool, Vec<u32>)> {
+) -> Vec<(Target, bool, Vec<u32>)> {
     use valkyrie_proto::DecisionStatus;
     let held = held(links, decisions);
     let mut out = Vec::new();
@@ -152,8 +163,8 @@ pub fn joined(
         }
         let waiting = decisions
             .iter()
-            .any(|d| d.id == link.decision && d.status == DecisionStatus::Proposed);
-        out.push((link.decision, link.matched || !waiting, new));
+            .any(|d| link.is_to(d) && d.status == DecisionStatus::Proposed);
+        out.push(((link.decision, link.created), link.matched || !waiting, new));
     }
     out
 }
@@ -317,12 +328,13 @@ impl Store {
             .collect()
     }
 
-    /// Records that decision `decision` was proposed from (or, `matched`, was
-    /// found to say the same as) `notes`.
+    /// Records that decision `decision`, as its id and `created` (`None` for
+    /// [`KNOWN`]), was proposed from (or, `matched`, was found to say the same
+    /// as) `notes`.
     pub fn record_promotion(
         &self,
         root: &Path,
-        decision: u32,
+        (decision, created): Target,
         notes: &[u32],
         matched: bool,
         now: u64,
@@ -330,6 +342,7 @@ impl Store {
         use std::io::Write;
         let link = Link {
             decision,
+            created,
             notes: notes.to_vec(),
             at: now,
             matched,
@@ -352,11 +365,11 @@ impl Store {
     /// Marks the live notes decision `decision` was proposed from `promoted`, now
     /// it's accepted: the decision carries what they said, so they leave search.
     /// Returns their ids.
-    pub fn promote_notes(&self, root: &Path, decision: u32) -> Result<Vec<u32>> {
+    pub fn promote_notes(&self, root: &Path, decision: &Decision) -> Result<Vec<u32>> {
         let ids: BTreeSet<u32> = self
             .promotion_links(root)
             .into_iter()
-            .filter(|l| l.decision == decision && !l.matched)
+            .filter(|l| l.is_to(decision) && !l.matched)
             .flat_map(|l| l.notes)
             .collect();
         if ids.is_empty() {
@@ -382,12 +395,11 @@ impl Store {
     /// when the write at accept time didn't happen. Returns how many.
     pub fn heal_promotions(&self, root: &Path, decisions: &[Decision]) -> Result<usize> {
         use valkyrie_proto::DecisionStatus;
-        let accepted: BTreeSet<u32> = decisions
+        let accepted: Vec<&Decision> = decisions
             .iter()
             .filter(|d| {
                 d.status != DecisionStatus::Proposed && d.status != DecisionStatus::Rejected
             })
-            .map(|d| d.id)
             .collect();
         let live: HashSet<u32> = self
             .notes(root)
@@ -395,16 +407,15 @@ impl Store {
             .filter(|n| n.status == NoteStatus::Live)
             .map(|n| n.id)
             .collect();
-        let due: BTreeSet<u32> = self
-            .promotion_links(root)
-            .into_iter()
-            .filter(|l| !l.matched && accepted.contains(&l.decision))
-            .filter(|l| l.notes.iter().any(|n| live.contains(n)))
-            .map(|l| l.decision)
-            .collect();
+        let links = self.promotion_links(root);
         let mut n = 0;
-        for d in due {
-            n += self.promote_notes(root, d)?.len();
+        for d in accepted {
+            let due = links
+                .iter()
+                .any(|l| !l.matched && l.is_to(d) && l.notes.iter().any(|n| live.contains(n)));
+            if due {
+                n += self.promote_notes(root, d)?.len();
+            }
         }
         Ok(n)
     }
@@ -534,6 +545,46 @@ mod tests {
     }
 
     #[test]
+    fn notes_linked_only_through_a_third_dont_cluster() {
+        let (_d, store, repo) = store();
+        // A matches B and B matches C, but A and C share two words of six.
+        write(
+            &store,
+            &repo,
+            "cargo build needs protoc",
+            Some("c1"),
+            None,
+            1,
+        );
+        write(
+            &store,
+            &repo,
+            "cargo build needs protoc installed locally",
+            Some("c2"),
+            None,
+            2,
+        );
+        write(
+            &store,
+            &repo,
+            "needs protoc installed locally",
+            Some("c3"),
+            None,
+            3,
+        );
+        let notes = store.notes(&repo);
+        let groups: Vec<Vec<u32>> = clusters(&notes)
+            .iter()
+            .map(|c| c.iter().map(|n| n.id).collect())
+            .collect();
+        assert!(
+            !groups.iter().any(|g| g.contains(&1) && g.contains(&3)),
+            "{groups:?}"
+        );
+        assert!(ready(&notes, &[], &[]).is_none(), "{groups:?}");
+    }
+
+    #[test]
     fn a_shared_signature_clusters_whatever_the_words() {
         let (_d, store, repo) = store();
         write(
@@ -650,7 +701,7 @@ mod tests {
         }
         let d = propose(&store, &repo, FLAKY[2]);
         store
-            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], false, 5)
             .unwrap();
         let links = store.promotion_links(&repo);
         let known = store.load(&repo);
@@ -701,7 +752,7 @@ mod tests {
         write(&store, &repo, "builds need protoc", Some("c9"), None, 9);
         let d = propose(&store, &repo, FLAKY[2]);
         store
-            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], false, 5)
             .unwrap();
         store.rm_note(&repo, 2, "user", None, 6).unwrap();
         store
@@ -752,7 +803,7 @@ mod tests {
         }
         let d = propose(&store, &repo, "Something worded otherwise entirely");
         store
-            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], false, 5)
             .unwrap();
         store
             .review(
@@ -789,7 +840,7 @@ mod tests {
         }
         let d = propose(&store, &repo, FLAKY[2]);
         store
-            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], false, 5)
             .unwrap();
         write(&store, &repo, FLAKY[0], Some("c7"), None, 7);
         assert!(!due(&store, &repo));
@@ -865,7 +916,7 @@ mod tests {
             )
             .unwrap();
         store
-            .record_promotion(&repo, d.id, &[1, 2, 3], false, 5)
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], false, 5)
             .unwrap();
         assert!(
             store
@@ -885,6 +936,64 @@ mod tests {
     }
 
     #[test]
+    fn a_link_doesnt_attach_to_a_decision_that_reused_its_id() {
+        let (_d, store, repo) = store();
+        for (i, t) in FLAKY.iter().enumerate() {
+            write(&store, &repo, t, Some(&format!("c{i}")), None, i as u64);
+        }
+        let old = propose(&store, &repo, FLAKY[2]);
+        store
+            .record_promotion(&repo, (old.id, Some(old.created)), &[1, 2, 3], false, 5)
+            .unwrap();
+        // The user deletes the proposal's file by hand; its id is given out again.
+        let (path, _) = store.files(&repo).remove(&old.id).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let new = NewDecision {
+            cwd: repo.clone(),
+            title: "use rustls, not openssl".into(),
+            body: String::new(),
+            kind: DecisionKind::Decision,
+            propose: true,
+            supersedes: None,
+            review_every: None,
+            session: None,
+            scope: None,
+        };
+        let prov = || Provenance {
+            by: "agent".into(),
+            session: None,
+            conversation: None,
+            commit: None,
+            cwd: None,
+        };
+        let reused = store.decide(&new, prov(), 50).unwrap();
+        assert_eq!(reused.id, old.id, "the id is reused");
+        let links = store.promotion_links(&repo);
+        assert!(
+            ready(&store.notes(&repo), &links, &store.load(&repo)).is_some(),
+            "the old link no longer holds the cluster"
+        );
+        store
+            .review(
+                &repo,
+                reused.id,
+                &valkyrie_proto::ReviewAction::Accept,
+                None,
+                None,
+                60,
+            )
+            .unwrap();
+        assert!(
+            store
+                .notes(&repo)
+                .iter()
+                .all(|n| n.status == NoteStatus::Live),
+            "accepting the unrelated decision promotes nothing"
+        );
+        assert_eq!(store.heal_promotions(&repo, &store.load(&repo)).unwrap(), 0);
+    }
+
+    #[test]
     fn accepting_a_matched_decision_promotes_nothing() {
         let (_d, store, repo) = store();
         for (i, t) in FLAKY.iter().enumerate() {
@@ -892,7 +1001,7 @@ mod tests {
         }
         let d = propose(&store, &repo, FLAKY[2]);
         store
-            .record_promotion(&repo, d.id, &[1, 2, 3], true, 5)
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], true, 5)
             .unwrap();
         store
             .review(

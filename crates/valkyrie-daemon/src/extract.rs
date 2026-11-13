@@ -6,7 +6,8 @@
 //!
 //! A turn that ended after a tool failed also gets a retro (ADR-0011): the failed
 //! calls and what worked next are read for the lasting lesson in them, under the
-//! same limits.
+//! same limits. A lesson is written as an agent note (ADR-0017 §5), which reaches
+//! review only once it recurs; a skill's rewrite is still proposed.
 
 use crate::Registry;
 use std::collections::{HashMap, VecDeque};
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use valkyrie_context::{extract, retro, skill};
-use valkyrie_proto::{AutoMode, NewDecision, Provenance, SessionId};
+use valkyrie_proto::{AutoMode, NewDecision, NewNote, Provenance, SessionId};
 
 /// How much of a transcript's end is read: a few exchanges.
 const TAIL: u64 = 256 * 1024;
@@ -228,7 +229,9 @@ async fn look(
 
 /// The retro of one session's latest turns: reads its failed calls and what
 /// worked next, records the ones not recorded before, and asks the model about
-/// those. Returns whether the model was asked.
+/// those, showing it the live notes on the same failures. Each lesson becomes a
+/// note, replacing one this session was served if the model says so; a skill's
+/// rewrite is proposed. Returns whether the model was asked.
 async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[String]) -> bool {
     let Ok(session) = registry.get(id) else {
         return false;
@@ -287,14 +290,30 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
             (m, count)
         })
         .collect();
-    let mut known = registry.context.lock().unwrap().load(&root);
+    // The live notes on these failures, and which this session was served: a
+    // search before its session started was another session's.
+    let (known, priors) = {
+        let store = registry.context.lock().unwrap();
+        let reader = format!("valk:{id}");
+        let served: std::collections::BTreeSet<u32> = store
+            .found_served(&root, now)
+            .into_iter()
+            .filter(|s| s.session == reader && s.at >= info.created_unix)
+            .filter_map(|s| match s.found {
+                valkyrie_context::served::Found::Note(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        let priors = retro::priors(&store.notes(&root), &moments, &served);
+        (store.load(&root), priors)
+    };
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     // Skills the session read: a failure may show one of them wrong.
     let followed = skill::active(&known, &skill::read(&tail));
-    let (prompt, shown) = retro::prompt(&name, &known, &moments, &followed);
+    let (prompt, shown) = retro::prompt(&name, &known, &moments, &priors, &followed);
     let dir = registry.host.context_dir.clone();
     let command = command.to_vec();
     let checkout = valkyrie_context::project::checkout(&info.cwd);
@@ -329,31 +348,68 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
             retro::quote(error)
         )
     };
-    // Each proposal, the skill it rewrites, and the moment it came from.
-    let mut found: Vec<(extract::Found, Option<u32>, usize)> = Vec::new();
-    for (f, n) in retro::parse_reply(&reply, moments.len()) {
-        if !extract::already_known(&f.title, &known) {
-            found.push((f, None, n));
+    // Lessons become notes (ADR-0017 §5).
+    let lessons: Vec<retro::Lesson> = retro::parse_reply(&reply, moments.len(), &priors)
+        .into_iter()
+        .filter(|l| !extract::already_known(&l.found.title, &known))
+        .collect();
+    if !lessons.is_empty() {
+        let cwd = info.cwd.clone();
+        let commit = tokio::task::spawn_blocking(move || valkyrie_context::project::head(&cwd))
+            .await
+            .ok()
+            .flatten();
+        let mut wrote = false;
+        for l in lessons {
+            let (m, _) = &moments[l.moment];
+            let new = NewNote {
+                cwd: info.cwd.clone(),
+                text: retro::note_text(&l.found, &source(&moments[l.moment])),
+                replaces: l.replaces,
+                force: false,
+            };
+            let provenance = Provenance {
+                by: "valkyrie".into(),
+                session: Some(info.name.clone()),
+                conversation: session.conversation(),
+                commit: commit.clone(),
+                cwd: Some(info.cwd.clone()),
+            };
+            let written = registry.context.lock().unwrap().note(
+                &new,
+                provenance,
+                Some(retro::sig(m.signature)),
+                now,
+            );
+            match written {
+                Ok(n) => {
+                    tracing::info!(
+                        session = id,
+                        id = n.id,
+                        replaces = n.replaces,
+                        "noted from a failure"
+                    );
+                    wrote = true;
+                }
+                // A tombstone's words, most likely: deleted stays deleted.
+                Err(e) => tracing::info!(session = id, "didn't note a failure: {e:#}"),
+            }
+        }
+        if wrote {
+            let _ = registry.notes_written.send(root.clone());
         }
     }
-    // One rewrite waiting at a time: the store refuses a second.
+    // One rewrite waiting at a time: the store refuses a second. Skill patches
+    // still go to review (ADR-0011 §3): they rewrite something you accepted.
     if let Some((f, skill, n)) = retro::parse_patch(&reply, &shown, moments.len()) {
-        found.push((f, Some(skill), n));
-    }
-    let mut proposed = 0;
-    for (f, patch, n) in found {
         let m = &moments[n].0;
-        let because = match patch {
-            Some(_) => "Rewritten after",
-            None => "From",
-        };
         let new = NewDecision {
             cwd: info.cwd.clone(),
             title: f.title,
-            body: format!("{}\n\n{because} {}", f.body, source(&moments[n])),
+            body: format!("{}\n\nRewritten after {}", f.body, source(&moments[n])),
             kind: f.kind,
             propose: true,
-            supersedes: patch,
+            supersedes: Some(skill),
             review_every: None,
             session: Some(id),
             scope: model_scope(&f.scope, &checkout),
@@ -372,7 +428,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
             .decide(&new, provenance, now);
         match decided {
             Ok(d) => {
-                tracing::info!(session = id, id = d.id, "proposed from a failure");
+                tracing::info!(session = id, id = d.id, "skill rewritten after a failure");
                 let recorded =
                     registry
                         .context
@@ -382,14 +438,10 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
                 if let Err(e) = recorded {
                     tracing::warn!(session = id, "couldn't record the proposal: {e:#}");
                 }
-                known.push(d);
-                proposed += 1;
+                registry.refresh_proposals();
             }
             Err(e) => tracing::warn!(session = id, "couldn't propose: {e:#}"),
         }
-    }
-    if proposed > 0 {
-        registry.refresh_proposals();
     }
     true
 }

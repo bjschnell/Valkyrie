@@ -39,13 +39,15 @@ How it works:
    you repeat. Codex transcripts are read only with `valk decisions auto all`, and
    with `auto off` nothing is sent. Transcripts from worktrees you've since removed
    can't be traced to the repo, so they're skipped.
-5. **What goes wrong becomes proposals.** When an agent's turn ends after a tool
-   failed, the same small model reads the failed call, a few lines of its error,
-   and what worked next, and proposes the gotcha or fix in it, quoting the failure.
-   Most failures teach nothing and are skipped. Each failure is remembered by a
-   signature, so the ones that keep coming back are asked about first, and
-   `valk decisions health` says when a decision's failure kept happening after you
-   accepted it. Same consent as corrections: `valk decisions auto`.
+5. **What goes wrong becomes notes, then proposals.** When an agent's turn ends
+   after a tool failed, the same small model reads the failed call, a few lines of
+   its error, and what worked next, and writes the gotcha or fix in it as an
+   [agent note](notes.md), quoting the failure. Most failures teach nothing and are
+   skipped. Each failure is remembered by a signature, so the ones that keep coming
+   back are asked about first. A note reaches you as a proposal once agents in
+   three sessions have hit the same trap, and `valk decisions health` says when a
+   decision's failure kept happening after you accepted it. Same consent as
+   corrections: `valk decisions auto`.
 6. **Procedures become skills.** A skill is a decision of kind `skill`: its title
    says when to use it, its body holds the steps. Agents get a one-line index of
    the project's skills and read one in full with `valk decisions show <id>` (or

@@ -85,8 +85,16 @@ pub fn listed(d: &Decision, inactive: bool) -> bool {
     d.status == DecisionStatus::Active || (inactive && d.status != DecisionStatus::Proposed)
 }
 
-/// A search's words: lowercase, two characters or more. Agent notes and past
-/// sessions are searched with them too (ADR-0017 §4).
+/// Two-letter words every sentence has. Ones that name something ("ci", "ui",
+/// "db") aren't here.
+const SHORT_FILLER: &[&str] = &[
+    "an", "as", "at", "be", "by", "do", "if", "in", "is", "it", "me", "my", "no", "of", "on", "or",
+    "so", "to", "up", "us", "we",
+];
+
+/// A search's words: lowercase, two characters or more, without the words every
+/// sentence has unless that leaves none. Agent notes and past sessions are
+/// searched with them too (ADR-0017 §4).
 pub fn query_words(query: &str) -> Vec<String> {
     let mut words: Vec<String> = query
         .to_lowercase()
@@ -96,14 +104,37 @@ pub fn query_words(query: &str) -> Vec<String> {
         .collect();
     words.sort();
     words.dedup();
+    let filler = |w: &String| {
+        SHORT_FILLER.contains(&w.as_str()) || crate::mine::STOPWORDS.contains(&w.as_str())
+    };
+    if !words.iter().all(filler) {
+        words.retain(|w| !filler(w));
+    }
     words
 }
 
-/// How many of `words` are in `text`, each inside any word of it ("proto"
-/// finds "protocol"): a search is asked for, so it errs on finding.
+/// How many of `words` are in `text`. A word of three letters or more matches
+/// inside any word of it ("proto" finds "protocol"): a search is asked for, so
+/// it errs on finding. A two-letter word only matches a whole word, or "it"
+/// would find "exit" and "ci" "decision".
 pub fn score(words: &[String], text: &str) -> usize {
     let text = text.to_lowercase();
-    words.iter().filter(|w| text.contains(w.as_str())).count()
+    // Only built when there's a short word: this runs once per transcript line.
+    let whole: BTreeSet<&str> = if words.iter().any(|w| w.len() <= 2) {
+        text.split(|c: char| !c.is_alphanumeric()).collect()
+    } else {
+        BTreeSet::new()
+    };
+    words
+        .iter()
+        .filter(|w| {
+            if w.len() > 2 {
+                text.contains(w.as_str())
+            } else {
+                whole.contains(w.as_str())
+            }
+        })
+        .count()
 }
 
 /// Decisions with any of `query`'s words in their kind, title or body, most
@@ -205,6 +236,23 @@ mod tests {
             provenance: Default::default(),
             fresh: Default::default(),
         }
+    }
+
+    #[test]
+    fn short_words_match_whole_words_and_filler_is_dropped() {
+        // "it" says nothing.
+        assert_eq!(query_words("nothing like it"), vec!["like", "nothing"]);
+        assert_eq!(query_words("zebra it"), vec!["zebra"]);
+        // A query that's all filler still searches for something.
+        assert_eq!(query_words("it is"), vec!["is", "it"]);
+        let ci = query_words("ci");
+        assert_eq!(ci, vec!["ci"]);
+        assert_eq!(score(&ci, "the exit code was 1"), 0);
+        assert_eq!(score(&ci, "a decision about logging"), 0);
+        assert_eq!(score(&ci, "CI failed on main"), 1);
+        assert_eq!(score(&ci, "ci/windows: red"), 1);
+        // Three letters and up still match inside a word.
+        assert_eq!(score(&query_words("proto"), "the protocol types"), 1);
     }
 
     fn ids(v: &[&Decision]) -> Vec<u32> {
