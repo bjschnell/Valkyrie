@@ -9,7 +9,7 @@ use std::path::Path;
 use valkyrie_context::recall;
 use valkyrie_context::served::{Found, FoundServe, Layer};
 use valkyrie_proto::client::Client;
-use valkyrie_proto::{NewNote, Note, NoteStatus, NotesListing};
+use valkyrie_proto::{NewNote, Note, NoteStatus, NotesListing, PastSession};
 
 #[derive(Subcommand)]
 pub enum NotesCmd {
@@ -39,6 +39,24 @@ pub enum NotesCmd {
 
 #[derive(Subcommand)]
 pub enum SessionsCmd {
+    /// Agent sessions of the last 31 days that have ended, newest first, numbered
+    /// for `valk sessions resume` (the default).
+    Recent {
+        /// Only this many.
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a past agent session again on its own conversation, in a new tab:
+    /// by its number in `valk sessions recent`, or its key. A worktree since
+    /// taken away is added back on its branch first.
+    Resume {
+        which: String,
+        /// Attach right after.
+        #[arg(short, long)]
+        attach: bool,
+    },
     /// Search this repository's past Claude sessions (main checkout and
     /// worktrees) for words: failed tool calls with what worked next, and what
     /// the user typed. `valk notes search` searches notes too.
@@ -48,13 +66,56 @@ pub enum SessionsCmd {
     },
 }
 
-/// `valk sessions`: reads Claude's transcripts directly, no daemon needed.
-pub fn sessions(cmd: SessionsCmd) -> Result<()> {
+/// `valk sessions search`: reads Claude's transcripts directly, no daemon needed.
+pub fn search_sessions(words: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    match cmd {
-        SessionsCmd::Search { words } => print!("{}", search(&[], &cwd, &words.join(" "))),
-    }
+    print!("{}", search(&[], &cwd, &words.join(" ")));
     Ok(())
+}
+
+/// `valk sessions recent`, as text: two lines a session, a third when it
+/// can't come back as it was.
+pub fn recent_text(sessions: &[PastSession], tz: &jiff::tz::TimeZone) -> String {
+    use valkyrie_context::digest::when;
+    if sessions.is_empty() {
+        return "No agent sessions have ended in the last 31 days.\n".into();
+    }
+    let mut out = String::new();
+    for (i, p) in sessions.iter().enumerate() {
+        let e = &p.entry;
+        let at = when(e.ended_ms.unwrap_or(e.last_ms), tz);
+        out.push_str(&format!(
+            "{:>3}  {at}  {} · {}  {}\n",
+            i + 1,
+            e.repo,
+            e.agent,
+            e.what
+        ));
+        let mut sub = vec![format!("{}: {}", e.outcome.label(), e.detail)];
+        if let Some(branch) = &e.branch {
+            sub.push(branch.clone());
+        }
+        out.push_str(&format!("     {}\n", sub.join(" · ")));
+        if let Some(why) = &p.cannot {
+            out.push_str(&format!("     can't resume: {why}\n"));
+        } else if let Some(branch) = &p.regrow {
+            out.push_str(&format!(
+                "     resumes in its worktree, added back on {branch}\n"
+            ));
+        }
+    }
+    out
+}
+
+/// The key `which` names: a number in the list, else a key as it is.
+pub fn pick<'a>(sessions: &'a [PastSession], which: &'a str) -> Result<&'a str> {
+    match which.parse::<usize>() {
+        Ok(n) if !which.contains('-') => sessions
+            .get(n.wrapping_sub(1))
+            .map(|p| p.entry.key.as_str())
+            .with_context(|| format!("no session {n}: `valk sessions` lists {}", sessions.len())),
+        _ => Ok(which),
+    }
 }
 
 /// The heading every listing carries: a note is what an agent saw, not a rule.
@@ -336,6 +397,52 @@ fn health(listing: &NotesListing, root: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn past(key: &str, cannot: Option<&str>, regrow: Option<&str>) -> PastSession {
+        PastSession {
+            entry: valkyrie_proto::DigestEntry {
+                key: key.into(),
+                session: None,
+                repo: "app".into(),
+                cwd: None,
+                agent: "claude".into(),
+                what: format!("work {key}"),
+                item: None,
+                branch: Some("feat-x".into()),
+                pr: None,
+                outcome: valkyrie_proto::Outcome::Abandoned,
+                detail: "ended with commits not pushed".into(),
+                summary: None,
+                prompts: 1,
+                first_ms: 0,
+                last_ms: 0,
+                ended_ms: Some(0),
+            },
+            started_ms: 0,
+            cannot: cannot.map(Into::into),
+            regrow: regrow.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn recent_sessions_are_numbered_and_picked_by_number_or_key() {
+        let list = [
+            past("9-1", None, Some("feat-x")),
+            past("9-2", Some("gone"), None),
+        ];
+        let text = recent_text(&list, &jiff::tz::TimeZone::UTC);
+        assert!(
+            text.contains("  1  Thu 1 Jan 00:00  app · claude  work 9-1"),
+            "{text}"
+        );
+        assert!(text.contains("added back on feat-x"), "{text}");
+        assert!(text.contains("can't resume: gone"), "{text}");
+        assert_eq!(pick(&list, "2").unwrap(), "9-2");
+        assert_eq!(pick(&list, "9-1").unwrap(), "9-1");
+        assert!(pick(&list, "3").is_err());
+        assert!(pick(&list, "0").is_err());
+        assert!(recent_text(&[], &jiff::tz::TimeZone::UTC).starts_with("No agent"));
+    }
+
     use super::*;
     use valkyrie_proto::Tombstone;
 

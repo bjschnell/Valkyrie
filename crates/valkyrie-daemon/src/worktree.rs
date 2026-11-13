@@ -175,6 +175,61 @@ pub fn remove(
     }
 }
 
+/// Adds back a worktree that was taken away, at the same `path` and on `branch`,
+/// for a past session resuming in it (backlog #150): its agent finds its
+/// conversation by that path. `checkout` is any checkout of the repository. A
+/// branch only on the remote is checked out as git does by default, tracking it.
+pub(crate) fn regrow(checkout: &Path, path: &Path, branch: &str) -> Result<()> {
+    valid(checkout, branch)?;
+    if path.exists() {
+        bail!("{} already exists", path.display());
+    }
+    forget_missing(checkout, path)?;
+    let target = path.to_string_lossy();
+    git(checkout, &["worktree", "add", "--quiet", &target, branch])
+}
+
+/// Drops git's record of the one worktree at `path`, if it still lists it though
+/// the folder is gone (deleted, not `git worktree remove`d): git won't add one
+/// there again until it forgets. What `git worktree prune` does, for this path
+/// only, leaving any other missing worktree (one on a disk not mounted) alone.
+fn forget_missing(checkout: &Path, path: &Path) -> Result<()> {
+    let common = git_out(
+        checkout,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let Ok(entries) = std::fs::read_dir(Path::new(&common).join("worktrees")) else {
+        return Ok(());
+    };
+    let want = path.join(".git");
+    for entry in entries.flatten() {
+        let admin = entry.path();
+        let Ok(gitdir) = std::fs::read_to_string(admin.join("gitdir")) else {
+            continue;
+        };
+        if Path::new(gitdir.trim()) == want && !want.exists() && !admin.join("locked").exists() {
+            std::fs::remove_dir_all(&admin)
+                .with_context(|| format!("couldn't drop {}", admin.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `branch` is in the repository at `dir`, locally or on a remote.
+pub(crate) fn knows_branch(dir: &Path, branch: &str) -> bool {
+    has_branch(dir, branch)
+        || git_out(
+            dir,
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                &format!("refs/remotes/*/{branch}"),
+            ],
+        )
+        .is_ok_and(|o| !o.is_empty())
+}
+
 /// Refuses what git couldn't name a branch, and what it would read as an option or
 /// expand (`-f`, `@{-1}`) rather than take as a name.
 pub(crate) fn valid(checkout: &Path, branch: &str) -> Result<()> {

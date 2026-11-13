@@ -82,6 +82,11 @@ export const Clock = () => (
     <path d="M12 7v5l3 2" />
   </svg>
 );
+export const Rewind = () => (
+  <svg {...base}>
+    <path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8M3 3v5h5" />
+  </svg>
+);
 export const Pin = () => (
   <svg {...base}>
     <path d="M9 4h6l-1 6 4 4H6l4-4-1-6zM12 14v7" />

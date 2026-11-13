@@ -4,9 +4,10 @@
 //! where you left.
 
 use crate::Registry;
-use crate::session::now_ms;
+use crate::session::{Session, now_ms};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use valkyrie_context::digest::{self, Known, Presence};
 use valkyrie_context::project;
@@ -67,19 +68,7 @@ impl Registry {
             .collect();
         let dir = self.host.transcript_dir.clone();
         let mut digest = tokio::task::spawn_blocking(move || {
-            let mut roots: Vec<PathBuf> = items
-                .iter()
-                .filter_map(|i| i.project.clone())
-                .chain(
-                    sessions
-                        .iter()
-                        .map(|s| s.info().cwd)
-                        .filter(|c| c.exists())
-                        .map(|c| project::root(&c)),
-                )
-                .collect();
-            roots.sort();
-            roots.dedup();
+            let roots = roots(&items, &sessions);
             let runs = read_runs(&dir, since, now);
             let known = Known {
                 items: &items,
@@ -103,8 +92,26 @@ impl Registry {
     }
 }
 
+/// Repository roots known to exist: the backlog's and the sessions'.
+pub(crate) fn roots(items: &[valkyrie_proto::Item], sessions: &[Arc<Session>]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = items
+        .iter()
+        .filter_map(|i| i.project.clone())
+        .chain(
+            sessions
+                .iter()
+                .map(|s| s.info().cwd)
+                .filter(|c| c.exists())
+                .map(|c| project::root(&c)),
+        )
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 /// The runs of every log written to since `since` that started by `until`.
-fn read_runs(dir: &Path, since: u64, until: u64) -> Vec<digest::Run> {
+pub(crate) fn read_runs(dir: &Path, since: u64, until: u64) -> Vec<digest::Run> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

@@ -19,6 +19,7 @@ mod markdown;
 mod mini;
 mod mouse;
 mod panes;
+mod past;
 mod ping;
 mod quiet;
 mod quota;
@@ -253,6 +254,8 @@ struct App {
     keys_page: Option<KeysPage>,
     /// The away digest is open (`w` on the home screen).
     digest: Option<digest::Page>,
+    /// Past sessions, to resume one (`h` on the home screen).
+    past: Option<past::Page>,
     /// The Docs page is open (`D` on the home screen).
     docs: Option<docs::Page>,
     /// A doc open in your editor, in a session of its own.
@@ -426,6 +429,7 @@ impl App {
             settings_cursor: None,
             keys_page: None,
             digest: None,
+            past: None,
             docs: None,
             editing: None,
             preview: None,
@@ -771,6 +775,9 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
+        if self.past.is_some() {
+            return self.past_keys(&bytes).await;
+        }
         // Over a session, the Docs page waits: your editor on a doc is one.
         if self.docs_shown() {
             return self.docs_keys(&bytes).await;
@@ -847,6 +854,9 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
+        if self.past.is_some() {
+            return self.past_keys(&bytes).await;
+        }
         if self.docs.is_some() {
             return self.docs_keys(&bytes).await;
         }
@@ -877,6 +887,7 @@ impl App {
         }
         if self.keys_page.is_some()
             || self.digest.is_some()
+            || self.past.is_some()
             || self.settings_cursor.is_some()
             || self.renaming.is_some()
         {
@@ -2531,6 +2542,7 @@ impl App {
             HomeKey::AddDevice => self.add_device().await,
             HomeKey::Backlog => self.open_backlog().await,
             HomeKey::Digest => self.open_digest().await,
+            HomeKey::Past => self.open_past().await,
             HomeKey::Docs => self.open_docs().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
@@ -2663,6 +2675,49 @@ impl App {
                     Err(e) => self.say(format!("couldn't copy: {e}")),
                 },
                 digest::Do::Say(text) => self.say(text),
+            }
+        }
+    }
+
+    async fn open_past(&mut self) {
+        self.past = Some(past::Page::default());
+        self.load_past().await;
+    }
+
+    async fn load_past(&mut self) {
+        let got = self.client.history().await.map_err(|e| e.to_string());
+        if let Some(page) = &mut self.past {
+            page.loaded(got);
+        }
+    }
+
+    /// Keys while past sessions are open: a resume opens the session it started.
+    async fn past_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.past else {
+            return;
+        };
+        for act in page.keys(bytes) {
+            match act {
+                past::Do::Close => self.past = None,
+                past::Do::Load => self.load_past().await,
+                past::Do::Resume(key) => {
+                    let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+                    match self.client.resume(&key, size).await {
+                        Ok(info) => {
+                            self.past = None;
+                            self.refresh().await;
+                            self.attach(info.id).await;
+                            return;
+                        }
+                        Err(e) => {
+                            if let Some(page) = &mut self.past {
+                                page.resuming = false;
+                            }
+                            self.say(format!("resume failed: {e:#}"));
+                        }
+                    }
+                }
+                past::Do::Say(text) => self.say(text),
             }
         }
     }
@@ -3467,6 +3522,7 @@ impl App {
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
                         && self.digest.is_none()
+                        && self.past.is_none()
                         && !self.docs_shown()
                         && self.backlog.is_none()
                         && !self.mini_open()
@@ -3507,6 +3563,9 @@ impl App {
             }
             if let Some(page) = &self.digest {
                 page.draw(frame, self.settings.theme);
+            }
+            if let Some(page) = &self.past {
+                page.draw(frame, self.settings.theme, &jiff::tz::TimeZone::system());
             }
             if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, self.settings.theme);
@@ -5527,6 +5586,7 @@ fn footer_line(
         ("n", "new"),
         ("b", "backlog"),
         ("w", "digest"),
+        ("h", "history"),
         ("D", "docs"),
         (",", "settings"),
         (".", "keys"),
@@ -5559,6 +5619,7 @@ fn chip_key(label: &str) -> HomeKey {
         "n" => HomeKey::NewShell,
         "b" => HomeKey::Backlog,
         "w" => HomeKey::Digest,
+        "h" => HomeKey::Past,
         "D" => HomeKey::Docs,
         "," => HomeKey::Settings,
         "." => HomeKey::Keys,
@@ -6154,6 +6215,8 @@ enum HomeKey {
     Backlog,
     /// Open the away digest.
     Digest,
+    /// Open past sessions, to resume one.
+    Past,
     /// Open the Docs page.
     Docs,
     /// Write the selected agent session down as a backlog item.
@@ -6219,6 +6282,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
             b'w' => Some(HomeKey::Digest),
+            b'h' => Some(HomeKey::Past),
             b'D' => Some(HomeKey::Docs),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),

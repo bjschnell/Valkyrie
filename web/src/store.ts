@@ -9,6 +9,7 @@ import type {
   Decision,
   Digest,
   DigestGroup,
+  PastSession,
   Doc,
   DeletedDoc,
   DocComment,
@@ -628,6 +629,26 @@ export async function awayDigest(sinceMs: number | null, by: DigestGroup): Promi
   const reply = await conn.request({ t: "digest", since_ms: sinceMs, by });
   if (reply.t !== "digest") throw new Error("unexpected reply");
   return reply.digest;
+}
+
+/** Agent sessions that have ended, newest first (backlog #150). Throws with the
+ * daemon's reason. */
+export async function pastSessions(): Promise<PastSession[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "history" });
+  if (reply.t !== "history") throw new Error("unexpected reply");
+  return reply.sessions;
+}
+
+/** Starts the past session `key` again and returns the session it runs in.
+ * Throws with the daemon's reason. */
+export async function resume(key: string): Promise<SessionId> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "resume", key, size: SPAWN_SIZE, env: [] });
+  if (reply.t !== "session") throw new Error("unexpected reply");
+  void refresh();
+  reportColors(reply.info.id);
+  return reply.info.id;
 }
 
 /** One doc's text, by the key its list entry carries. Throws with the daemon's reason. */

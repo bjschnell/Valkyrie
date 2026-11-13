@@ -132,6 +132,15 @@ export interface Digest {
   markdown: string;
 }
 
+/** An agent session that has ended, as the history lists it (backlog #150). */
+export interface PastSession extends DigestEntry {
+  started_ms: number;
+  /** Why it can't be resumed; absent: it can. */
+  cannot?: string;
+  /** Its directory is gone: resuming adds its worktree back on this branch. */
+  regrow?: string;
+}
+
 export type DocKind = "plan" | "research" | "report" | "note";
 
 /** A doc in the docs folder (ADR-0021). `key` is what it's opened by: its
@@ -569,6 +578,10 @@ export type Request =
   | { t: "docs"; count_only?: boolean }
   /** What every agent did since `since_ms`, or since you were last gone (protocol 37). */
   | { t: "digest"; since_ms?: number | null; by: DigestGroup }
+  /** Agent sessions that have ended, newest first (protocol 40); replies `history`. */
+  | { t: "history" }
+  /** Starts a past session again on its own conversation; replies `session`. */
+  | { t: "resume"; key: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   /** A doc by the key a list gave it, never by path; replies `doc`. Writes nothing. */
   | { t: "open_doc"; key: string }
   /** A doc's comments; replies `doc_comments`. */
@@ -676,7 +689,8 @@ export type Reply =
   /** `from_top`: the first row's line, from the oldest in history; `history`: lines
    * above the screen, so `from_top == history` is the live screen. */
   | { t: "scrollback"; from_top: number; history: number; rows: Row[] }
-  | { t: "digest"; digest: Digest };
+  | { t: "digest"; digest: Digest }
+  | { t: "history"; sessions: PastSession[] };
 
 export type ServerMsg =
   | { t: "ok"; req: number; reply: Reply }

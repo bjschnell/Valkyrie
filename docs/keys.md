@@ -12,6 +12,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 |---|---|---|
 | Home | `↩` | open the selected session |
 | | `n` · `x` · `r` | new shell · kill · rename |
+| | `w` · `h` | away digest · past sessions, `↩` resumes one |
 | | `,` · `.` | settings · keys |
 | Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |

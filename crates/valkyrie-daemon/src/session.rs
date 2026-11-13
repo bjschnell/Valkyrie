@@ -421,10 +421,29 @@ impl Session {
             watch: Default::default(),
             pairing: Default::default(),
         };
+        // The repository, and the linked worktree it started in if any, so a
+        // resume can add that worktree back to the right repository (#150).
+        let (repo, worktree) = if valkyrie_context::project::in_git(&cwd) {
+            let repo = valkyrie_context::project::root(&cwd);
+            let top = valkyrie_context::project::checkout(&cwd);
+            let linked = (top != repo).then_some(top);
+            (Some(repo), linked)
+        } else {
+            (None, None)
+        };
         state.log(
             now_ms,
             "start",
-            json!({"agent": adapter.name(), "command": spec.command, "size": size}),
+            // Where and as what it started, so the history can resume it (#150).
+            json!({
+                "agent": adapter.name(),
+                "command": spec.command,
+                "size": size,
+                "cwd": cwd,
+                "name": spec.name,
+                "repo": repo,
+                "worktree": worktree,
+            }),
         );
 
         let pid = child.process_id();
@@ -972,6 +991,9 @@ impl Session {
             if state.conversation.as_ref().is_some_and(|was| *was != id) {
                 self.drop_topic(&mut state, now);
             }
+            if state.conversation.as_ref() != Some(&id) {
+                state.log(now, "conversation", json!({"id": id}));
+            }
             state.conversation = Some(id);
         }
         // Its transcript too, by the same rule; a prompt names it as well, for an
@@ -1449,7 +1471,11 @@ impl Session {
     /// Starts the restore list off with the conversation a restored agent resumes, so
     /// it is kept even if the daemon stops before the agent's first hook.
     pub fn set_conversation(&self, id: Option<String>) {
-        self.state.lock().unwrap().conversation = id;
+        let mut state = self.state.lock().unwrap();
+        if let Some(id) = &id {
+            state.log(now_ms(), "conversation", json!({"id": id}));
+        }
+        state.conversation = id;
     }
 
     /// The agent's own conversation id, once a hook named it.
