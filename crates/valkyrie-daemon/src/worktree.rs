@@ -201,13 +201,30 @@ fn forget_missing(checkout: &Path, path: &Path) -> Result<()> {
     let Ok(entries) = std::fs::read_dir(Path::new(&common).join("worktrees")) else {
         return Ok(());
     };
-    let want = path.join(".git");
+    if path.exists() {
+        return Ok(());
+    }
+    // Git writes the path as it resolved it (`/private/var/…` on macOS, a long
+    // name for `RUNNER~1` on Windows), and the worktree itself is gone, so the
+    // two are compared by name and by the folder holding them, which is there.
+    let canonical = |p: &Path| valkyrie_proto::canonical(p).unwrap_or_else(|_| p.to_path_buf());
+    let same = |a: &Path, b: &Path| {
+        a.file_name() == b.file_name()
+            && match (a.parent(), b.parent()) {
+                (Some(x), Some(y)) => canonical(x) == canonical(y),
+                _ => false,
+            }
+    };
     for entry in entries.flatten() {
         let admin = entry.path();
         let Ok(gitdir) = std::fs::read_to_string(admin.join("gitdir")) else {
             continue;
         };
-        if Path::new(gitdir.trim()) == want && !want.exists() && !admin.join("locked").exists() {
+        // `<worktree>/.git`.
+        let Some(tree) = Path::new(gitdir.trim()).parent() else {
+            continue;
+        };
+        if same(tree, path) && !admin.join("locked").exists() {
             std::fs::remove_dir_all(&admin)
                 .with_context(|| format!("couldn't drop {}", admin.display()))?;
         }

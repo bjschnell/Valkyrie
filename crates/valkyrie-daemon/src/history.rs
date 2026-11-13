@@ -438,7 +438,18 @@ mod tests {
             );
             std::fs::remove_dir_all(&tree).unwrap();
         }
-        crate::worktree::regrow(&repo, &dir.join("app-a"), "a").unwrap();
+        // Through a link, as macOS's `/var` is to `/private/var`: git wrote the
+        // path it resolved, not the one asked with.
+        #[cfg(unix)]
+        let at = {
+            let link = dir.with_extension("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&dir, &link).unwrap();
+            link
+        };
+        #[cfg(not(unix))]
+        let at = dir.clone();
+        crate::worktree::regrow(&repo, &at.join("app-a"), "a").unwrap();
         assert!(dir.join("app-a/.git").exists());
         let list = std::process::Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -450,6 +461,8 @@ mod tests {
             list.contains("app-b"),
             "the other one is still listed: {list}"
         );
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&at);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -572,6 +585,73 @@ mod tests {
 
         assert!(registry.resume("../x-1", size, Vec::new()).await.is_err());
         registry.get(info.id).unwrap().kill();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session started in a worktree through a link (macOS's `/var`) writes
+    /// down that worktree as its cwd spells it, so a resume finds the cwd in it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_start_line_spells_the_worktree_as_the_cwd_does() {
+        let dir = scratch("spell");
+        let state = dir.join("state");
+        std::fs::create_dir_all(state.join("sessions")).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &state,
+            Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let repo = dir.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(
+            &repo,
+            &["commit", "--quiet", "--allow-empty", "-m", "first"],
+        );
+        let tree = dir.join("app-x");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "x",
+                &tree.to_string_lossy(),
+            ],
+        );
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        let link = dir.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let cwd = link.join("app-x").join("sub");
+        let spec = SpawnSpec {
+            command: vec!["sleep".into(), "30".into()],
+            cwd: Some(cwd.clone()),
+            name: None,
+            size: Size { cols: 80, rows: 24 },
+            env: Vec::new(),
+            worktree: None,
+            hidden: false,
+        };
+        let Reply::Session { info } = spawn_with(&registry, spec, None).unwrap() else {
+            panic!("not spawned");
+        };
+        let session = registry.get(info.id).unwrap();
+        let log = state.join(format!("sessions/{}.events.jsonl", session.key()));
+        let run = digest::read_run(&log, 0, now_ms()).unwrap();
+        session.kill();
+        let home = run.home.expect("start cwd");
+        let worktree = run.worktree.expect("a linked worktree");
+        assert!(home.starts_with(&worktree), "{home:?} in {worktree:?}");
+        assert_eq!(worktree.file_name().unwrap(), "app-x");
+        assert!(run.repo.is_some());
+        let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

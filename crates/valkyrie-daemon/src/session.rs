@@ -426,7 +426,16 @@ impl Session {
         let (repo, worktree) = if valkyrie_context::project::in_git(&cwd) {
             let repo = valkyrie_context::project::root(&cwd);
             let top = valkyrie_context::project::checkout(&cwd);
-            let linked = (top != repo).then_some(top);
+            // Spelled as the cwd is (`checkout` resolves links, `/var` to
+            // `/private/var` on macOS), so a resume finds the cwd inside it.
+            let depth = std::fs::canonicalize(&cwd)
+                .ok()
+                .and_then(|c| c.strip_prefix(&top).ok().map(|r| r.components().count()));
+            let linked = (top != repo).then(|| {
+                depth
+                    .and_then(|d| cwd.ancestors().nth(d))
+                    .map_or(top, Path::to_path_buf)
+            });
             (Some(repo), linked)
         } else {
             (None, None)
