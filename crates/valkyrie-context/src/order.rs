@@ -318,7 +318,7 @@ mod tests {
                 }
                 .into(),
                 text: t.to_string(),
-                taken: false,
+                ..Default::default()
             })
             .collect();
         let b = item(2, Priority::P2, vec![]);

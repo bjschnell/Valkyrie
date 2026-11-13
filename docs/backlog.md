@@ -16,6 +16,7 @@ valk todo adopt 12         # a claude session you started by hand becomes an ite
 valk todo add --take -k bug "Off-by-one in resize" --branch fix/resize  # an agent tracks a fix nobody planned
 valk todo ship --merged    # fetch, then list the items whose branch is merged; --yes ships them
 valk todo note -i 4 "left: X"   # a handoff, kept for the item's next launch
+valk todo note -i 9 "seen: Y"   # an agent on other work: shown on #9, kept out of its brief
 valk todo return 5         # back to the backlog: stops its sessions, keeps the branch and worktree
 valk todo accept 5         # also: show, drop, reopen, rm
 ```
@@ -28,4 +29,6 @@ you. Edit a card there, with `e` on the TUI's backlog page (`b`), or with
 and ask before writing code. Agents can add items too, as proposals you accept
 before anything can start them. An agent that fixes something along the way files
 and takes it in one go (`--take`), so its card follows the work; `ship --merged`
-lists it as agent-filed, and shipping it accepts it.
+lists it as agent-filed, and shipping it accepts it. An agent can note any item,
+say a find that bears on it; only notes from its own launch, and yours, go into
+that item's next brief, so the rest are labelled with where they came from.

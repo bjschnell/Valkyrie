@@ -679,12 +679,13 @@ impl Registry {
             if let Some(note) = note {
                 text = format!("{text}\n{note}");
             }
-            if let Err(e) =
-                self.backlog
-                    .lock()
-                    .unwrap()
-                    .note(id, "valkyrie", &text, false, now_secs())
-            {
+            if let Err(e) = self.backlog.lock().unwrap().note(
+                id,
+                "valkyrie",
+                &text,
+                backlog::NoteOrigin::Brief,
+                now_secs(),
+            ) {
                 tracing::warn!(id, "couldn't note the ship on its card: {e:#}");
             }
             tracing::info!(id, pr = url, "shipped a backlog item: its PR merged");
@@ -796,32 +797,34 @@ impl Registry {
         .await?)
     }
 
-    /// Leaves a handoff note. An agent may only on an item its own session was
-    /// launched for or took: a note goes into the brief of the item's next launch,
-    /// so one from anywhere else would be a way into a prompt the user starts.
+    /// Leaves a note on item `id`, from anyone. An agent's reaches the item's
+    /// next brief only on an item its own session was launched for: a brief is a
+    /// prompt the user starts, so one from anywhere else, a take included, is
+    /// shown on the card and kept out of it. One from an agent on another item
+    /// says which, so the user can follow it back.
     pub(crate) fn note_item(&self, id: u32, text: &str, peer: Option<Peer>) -> Result<Reply> {
         let caller = self.caller(peer);
         let by = caller.agent.clone().unwrap_or_else(|| "human".into());
-        let mut taken = false;
+        let mut origin = backlog::NoteOrigin::Brief;
         if caller.agent.is_some() {
             let item = self.backlog.lock().unwrap().get(id)?;
-            let session = caller
-                .session
-                .as_ref()
-                .map(|s| s.info().id)
-                .filter(|s| item.boot == self.boot && item.sessions.contains(s));
-            let Some(session) = session else {
-                bail!("an agent notes only the item its session was launched for, not #{id}");
+            let session = caller.session.as_ref().map(|s| s.info().id);
+            let on = session.filter(|s| item.boot == self.boot && item.sessions.contains(s));
+            origin = match on {
+                // Any agent may take any accepted item, so its notes inform the
+                // user but never reach a prompt the user starts.
+                Some(s) if item.taken.contains(&s) => backlog::NoteOrigin::Take,
+                Some(_) => backlog::NoteOrigin::Brief,
+                None => {
+                    backlog::NoteOrigin::Aside(session.and_then(|s| self.item_of(s)).map(|i| i.id))
+                }
             };
-            // Any agent may take any accepted item, so its notes inform the user but
-            // never reach a prompt the user starts.
-            taken = item.taken.contains(&session);
         }
         let item = self
             .backlog
             .lock()
             .unwrap()
-            .note(id, &by, text, taken, now_secs())?;
+            .note(id, &by, text, origin, now_secs())?;
         tracing::info!(id, by, "backlog note left");
         self.refresh_items();
         if let Some(project) = item.project.clone()
@@ -1756,7 +1759,7 @@ mod tests {
             .backlog
             .lock()
             .unwrap()
-            .note(first, "claude", "done here", true, 30)
+            .note(first, "claude", "done here", backlog::NoteOrigin::Take, 30)
             .unwrap();
         assert_eq!(registry.item_of(session).map(|i| i.id), Some(second));
         // Taking the first again, say to record its PR, is moving back to it.

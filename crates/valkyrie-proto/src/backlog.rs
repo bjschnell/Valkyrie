@@ -238,7 +238,7 @@ pub struct ItemLaunch {
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemNote {
     /// Seconds since the epoch.
     pub at: u64,
@@ -249,6 +249,33 @@ pub struct ItemNote {
     /// but never put into a launch's brief (ADR-0007).
     #[serde(default, skip_serializing_if = "is_false")]
     pub taken: bool,
+    /// Left by an agent on an item it was neither launched for nor took, from
+    /// work elsewhere: shown, but never put into a launch's brief, as `taken`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aside: bool,
+    /// For an aside, the item that agent was on, when it was on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u32>,
+}
+
+impl ItemNote {
+    /// Whether it goes into the brief of the item's next launch: the user's, or
+    /// from an earlier launch of the item. Anything else could be a way into a
+    /// prompt the user starts.
+    pub fn in_brief(&self) -> bool {
+        !self.taken && !self.aside
+    }
+
+    /// Where an agent's note came from when that kept it out of the brief, as
+    /// the CLI and TUI label it.
+    pub fn origin(&self) -> Option<String> {
+        match (self.taken, self.aside, self.from) {
+            (true, _, _) => Some("from a take".into()),
+            (_, true, Some(from)) => Some(format!("while on #{from}")),
+            (_, true, None) => Some("from outside the item".into()),
+            _ => None,
+        }
+    }
 }
 
 fn is_false(b: &bool) -> bool {

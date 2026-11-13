@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, noteOrigin, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
@@ -449,7 +449,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
           <p className="item-handoff" onClick={() => setExpanded(true)}>
             <span className="item-handoff-by">
               {who(latest.by)}
-              {latest.taken && " · from a take"}:
+              {noteOrigin(latest)}:
             </span>{" "}
             {latest.text}
           </p>
@@ -488,7 +488,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
               <div key={i} className="item-note">
                 <div className="item-note-by">
                   {who(n.by)} · {age(n.at * 1000, now)}
-                  {n.taken && " · from a take"}
+                  {noteOrigin(n)}
                 </div>
                 <p>{n.text}</p>
               </div>

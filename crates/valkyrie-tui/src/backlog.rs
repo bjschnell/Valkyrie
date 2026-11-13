@@ -1667,9 +1667,9 @@ fn detail_lines(
         let by = if n.by == "human" { "you" } else { &n.by };
         let ago = crate::age(n.at * 1000, now);
         out.push(Line::default());
-        let took = if n.taken { " · from a take" } else { "" };
+        let origin = n.origin().map(|o| format!(" · {o}")).unwrap_or_default();
         out.push(Line::from(
-            format!(" {by} · {ago}{took}").fg(t.muted).bold(),
+            format!(" {by} · {ago}{origin}").fg(t.muted).bold(),
         ));
         for l in n.text.lines() {
             out.push(Line::from(format!(" {l}").fg(t.fg)));

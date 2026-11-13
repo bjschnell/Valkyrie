@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -168,6 +168,16 @@ describe("byColumn", () => {
       [2, "proposed"],
       [1, "backlog"],
     ]);
+  });
+});
+
+describe("noteOrigin", () => {
+  const n = { at: 0, by: "claude", text: "x" };
+  it("says where a note kept out of the brief came from", () => {
+    expect(noteOrigin(n)).toBe("");
+    expect(noteOrigin({ ...n, taken: true })).toBe(" · from a take");
+    expect(noteOrigin({ ...n, aside: true, from: 9 })).toBe(" · while on #9");
+    expect(noteOrigin({ ...n, aside: true })).toBe(" · from outside the item");
   });
 });
 
