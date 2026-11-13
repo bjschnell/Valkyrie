@@ -105,6 +105,22 @@ enum Cmd {
         session: SessionId,
         name: Option<String>,
     },
+    /// Publish a short status on this session's tab and home row, e.g.
+    /// `valk status "tests 41/50"`. A new one replaces it; it goes after --ttl.
+    Status {
+        /// What to show (40 characters at most); leave it out with --clear.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        text: Option<String>,
+        /// Seconds it shows for; 0 keeps it until it is replaced or cleared.
+        #[arg(long, default_value_t = 600, value_name = "SECS")]
+        ttl: u64,
+        /// Take the status down.
+        #[arg(long)]
+        clear: bool,
+        /// The session to publish on, when not run inside one.
+        #[arg(long, short)]
+        session: Option<SessionId>,
+    },
     /// Print a session's visible screen as plain text.
     Dump { session: SessionId },
     /// Send input to a session. Understands \r \n \t \e and \xHH escapes.
@@ -654,6 +670,9 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 if let Some(summary) = &s.status.summary {
                     println!("     {summary}");
                 }
+                if let Some(report) = &s.report {
+                    println!("     ▸ {report}");
+                }
             }
             Ok(())
         }
@@ -745,6 +764,18 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         Some(Cmd::Kill { session }) => connect(&socket).await?.0.kill(session).await,
         Some(Cmd::Rename { session, name }) => {
             connect(&socket).await?.0.rename(session, name).await
+        }
+        Some(Cmd::Status {
+            text,
+            ttl,
+            clear,
+            session,
+        }) => {
+            let session = session.or_else(pane::me).context(
+                "not in a Valkyrie session: say which with --session (`valk ls` lists them)",
+            )?;
+            let text = if clear { None } else { text };
+            connect(&socket).await?.0.report(session, text, ttl).await
         }
         Some(Cmd::Dump { session }) => {
             print!("{}", connect(&socket).await?.0.dump(session).await?);

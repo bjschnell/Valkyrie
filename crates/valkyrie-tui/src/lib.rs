@@ -4544,7 +4544,8 @@ impl App {
                     };
                     let room =
                         width.saturating_sub(1 + number.width() + icon.width() + panes.width());
-                    let mut name = fit(&s.name, room).fg(name_color);
+                    let (name, tail) = name_and_report(s, room, minimal && !shut);
+                    let mut name = name.fg(name_color);
                     if here || queued {
                         name = name.bold();
                     }
@@ -4556,13 +4557,15 @@ impl App {
                         number.fg(t.muted),
                         icon.fg(color),
                         name,
+                        tail.fg(t.accent2),
                         format!(" {panes}").trim_end().to_string().fg(t.muted),
                     ])
                 }
             };
             let mut bottom = vec![mark.fg(t.accent).bold()];
             bottom.extend(detail_spans(
-                &format!("{panes}{}", program(s)),
+                &format!("{panes}{}", s.report.clone().unwrap_or_else(|| program(s))),
+                s.report.is_some(),
                 label,
                 state_icon(state, spin),
                 color,
@@ -4765,7 +4768,7 @@ impl App {
                     let room =
                         width.saturating_sub(1 + number.width() + icon.width() + panes.width());
                     // Bright when attached, the state's color when it needs you.
-                    let name = fit(&s.name, room);
+                    let (name, tail) = name_and_report(s, room, minimal && !shut);
                     let name = match (here, queued) {
                         (_, true) => name.fg(color).bold(),
                         (true, false) => name.fg(t.fg).bold(),
@@ -4782,13 +4785,15 @@ impl App {
                         number,
                         icon.fg(color),
                         name,
+                        tail.fg(t.accent2),
                         format!(" {panes}").trim_end().to_string().fg(t.muted),
                     ])
                 }
             };
             let mut bottom = vec![Span::raw(" ")];
             bottom.extend(detail_spans(
-                &format!("{panes}{}", program(s)),
+                &format!("{panes}{}", s.report.clone().unwrap_or_else(|| program(s))),
+                s.report.is_some(),
                 label,
                 state_icon(state, spin),
                 color,
@@ -5109,16 +5114,36 @@ fn tab_width(s: &SessionInfo, panes: usize, minimal: bool) -> u16 {
     };
     if minimal {
         // Mark, number, icon and a space, the name, then ` ⊞2` on a split tab.
-        return ((5 + s.name.width() + split) as u16 + 1).clamp(MINIMAL_TAB_MIN, TAB_MAX);
+        // and ` · tests 41/50` while it shows a status.
+        let report = s.report.as_ref().map_or(0, |r| 3 + r.width());
+        return ((5 + s.name.width() + report + split) as u16 + 1).clamp(MINIMAL_TAB_MIN, TAB_MAX);
     }
-    let detail = 1 + split + program(s).width() + 5 + s.status.state.label().width();
+    let lead = s
+        .report
+        .as_ref()
+        .map_or_else(|| program(s).width(), |r| r.width());
+    let detail = 1 + split + lead + 5 + s.status.state.label().width();
     (name.max(detail) as u16 + 1).clamp(TAB_MIN, TAB_MAX)
 }
 
 /// A tab's second line, `claude · ⠋ working` in `width`: the program muted, the
 /// icon and state in the state's color.
+/// A one-line tab's name cut to `room`, and, when `inline`, the status it
+/// published after it (` · tests 41/50`), the name keeping a few columns.
+fn name_and_report(s: &SessionInfo, room: usize, inline: bool) -> (String, String) {
+    let Some(report) = s.report.as_ref().filter(|_| inline) else {
+        return (fit(&s.name, room), String::new());
+    };
+    let keep = s.name.width().min(6);
+    let tail = fit(&format!(" · {report}"), room.saturating_sub(keep));
+    (fit(&s.name, room.saturating_sub(tail.width())), tail)
+}
+
+/// A tab card's second line: what runs there, or the status it published
+/// (`report`, in the second accent), then its state.
 fn detail_spans(
     program: &str,
+    report: bool,
     label: &str,
     icon: &str,
     color: style::Color,
@@ -5131,8 +5156,9 @@ fn detail_spans(
     while !detail.is_char_boundary(split) {
         split -= 1;
     }
+    let lead = if report { t.accent2 } else { t.muted };
     vec![
-        detail[..split].to_string().fg(t.muted),
+        detail[..split].to_string().fg(lead),
         detail[split..].to_string().fg(color),
     ]
 }
@@ -5296,6 +5322,10 @@ fn queue_row(q: &QueueItem, now: u64, spin: usize, t: &Theme) -> TableRow<'stati
         summary.push("  → ".fg(t.muted));
         summary.push(step.action.label().fg(t.accent2).bold());
     }
+    if let Some(report) = &q.report {
+        summary.push("  ▸ ".fg(t.muted));
+        summary.push(report.clone().fg(t.accent2));
+    }
     TableRow::new([
         badge(s.state, s.state.label().into(), spin, t),
         name_cell(q.session, &q.name, q.auto_name, t),
@@ -5316,6 +5346,11 @@ fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'s
     if let Some(summary) = &s.status.summary {
         detail.push("  ".into());
         detail.push(summary.clone().fg(t.fg));
+    }
+    // What it published on its tab with `valk status`.
+    if let Some(report) = &s.report {
+        detail.push("  ▸ ".fg(t.muted));
+        detail.push(report.clone().fg(t.accent2));
     }
     if s.status.agent != "generic" && !s.status.hooked {
         detail.push("  no hooks yet".fg(t.interrupted).italic());
@@ -6380,6 +6415,7 @@ mod tests {
             last_input_ms: 0,
             chat: None,
             overlap: None,
+            report: None,
         }
     }
 
@@ -6391,6 +6427,7 @@ mod tests {
             cwd: "/".into(),
             status: AgentStatus::default(),
             flag: None,
+            report: None,
         }
     }
 
@@ -6688,6 +6725,7 @@ mod tests {
                     cwd: s.cwd.clone(),
                     status: s.status.clone(),
                     flag: None,
+                    report: None,
                 }
             })
             .collect();
@@ -6851,6 +6889,7 @@ mod tests {
                         cwd: s.cwd.clone(),
                         status: s.status.clone(),
                         flag: None,
+                        report: None,
                     }
                 })
                 .collect();

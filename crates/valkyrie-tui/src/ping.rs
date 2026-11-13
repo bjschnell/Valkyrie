@@ -626,6 +626,7 @@ mod tests {
             cwd: "/".into(),
             status,
             flag: None,
+            report: None,
         }
     }
 

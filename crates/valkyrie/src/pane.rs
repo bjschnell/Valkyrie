@@ -121,7 +121,7 @@ impl WaitState {
 }
 
 /// The session this process runs in, if it runs in one.
-fn me() -> Option<SessionId> {
+pub(crate) fn me() -> Option<SessionId> {
     std::env::var("VALK_SESSION").ok()?.trim().parse().ok()
 }
 

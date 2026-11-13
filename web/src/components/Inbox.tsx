@@ -327,7 +327,10 @@ function QueueCard({
           <span className="card-prog">{info ? program(info) : s.agent}</span>
           <span className="card-age">{age(s.since_ms, now)}</span>
         </button>
-        <div className="card-state">{STATE_LABEL[s.state]}</div>
+        <div className="card-state">
+          {STATE_LABEL[s.state]}
+          {item.report ? <span className="report"> · {item.report}</span> : null}
+        </div>
         {weakSummary(s.summary) && prompt?.context ? (
           <p className="card-summary">{prompt.context}</p>
         ) : (
@@ -511,6 +514,7 @@ function SessionRow({
               ? `exited ${s.exited ?? ""}`
               : STATE_LABEL[state]}
             {s.status.summary ? ` · ${s.status.summary}` : ""}
+            {s.report ? <span className="report"> · {s.report}</span> : null}
           </span>
           {s.overlap ? (
             <span className="row-sub row-overlap">⚠ {s.overlap}</span>

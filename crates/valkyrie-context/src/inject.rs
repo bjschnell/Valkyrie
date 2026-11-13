@@ -42,7 +42,7 @@ fn how_to_propose(valk: &str) -> String {
          -i N` for what's left, so the user can follow and ship it. Never ship, accept or \
          merge on your own: those are the user's.\n\nYou run in a Valkyrie tab: `{valk} \
          pane` splits it and runs, reads and waits on commands in the other panes \
-         (`{valk} pane --help`).\n\nMarkdown meant for the user to read (a plan, \
+         (`{valk} pane --help`); `{valk} status \"tests 41/50\"` shows progress on it.\n\nMarkdown meant for the user to read (a plan, \
          research, a report) goes in their docs folder, not a file in the repository or \
          /tmp: `{valk} doc write \"<title>\" -k <plan|research|report|note> -` with the \
          markdown on stdin (`--global` for one that isn't about this repository). To \

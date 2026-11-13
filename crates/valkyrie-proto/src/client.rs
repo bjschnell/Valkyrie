@@ -389,6 +389,22 @@ impl Client {
             .map(drop)
     }
 
+    pub async fn report(
+        &self,
+        session: SessionId,
+        text: Option<String>,
+        ttl_secs: u64,
+    ) -> Result<()> {
+        self.request(|req| ClientMsg::Report {
+            req,
+            session,
+            text,
+            ttl_secs,
+        })
+        .await
+        .map(drop)
+    }
+
     pub async fn mark_seen(&self, session: SessionId, seq: u64) -> Result<()> {
         self.request(|req| ClientMsg::MarkSeen { req, session, seq })
             .await

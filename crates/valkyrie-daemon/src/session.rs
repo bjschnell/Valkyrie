@@ -260,6 +260,9 @@ struct State {
     /// Which live agents in the repository changed the same files as this one
     /// (`overlap`), shown beside its state.
     overlap: Option<String>,
+    /// The status published on it with `valk status` (`report`), and when it
+    /// expires (ms since the epoch; `u64::MAX`: never).
+    report: Option<(String, u64)>,
     /// Prompts the agent's hooks have reported, the supervisor's own included:
     /// how a policy's step sees the user prompting first (ADR-0019 §3).
     prompts: u64,
@@ -411,6 +414,7 @@ impl Session {
             live_cwd: None,
             flagged: None,
             overlap: None,
+            report: None,
             prompts: 0,
             topic: None,
             guard: Default::default(),
@@ -505,6 +509,7 @@ impl Session {
             live_cwd: None,
             flagged: None,
             overlap: None,
+            report: None,
             prompts: 0,
             topic: saved.topic,
             // Not carried over: a confirm up across an upgrade is a narrow window.
@@ -1027,6 +1032,11 @@ impl Session {
         changed |= state.tracker.tick(now, self.watching());
         if changed {
             self.after_change(&mut state, now);
+        }
+        // A published status whose time is up goes, and the queue drops it.
+        if state.report.as_ref().is_some_and(|r| r.1 <= now) {
+            state.report = None;
+            self.changed.notify_one();
         }
     }
 
@@ -1646,7 +1656,31 @@ impl Session {
             last_input_ms: self.last_input_ms.load(Ordering::Relaxed),
             chat: state.chat.clone(),
             overlap: state.overlap.clone(),
+            report: live_report(&state.report, now_ms()),
         }
+    }
+
+    /// Publishes a short status on the session (`valk status`), replacing any it
+    /// had; `None` or blank text clears it. It lasts `ttl_secs`, 0 for good.
+    pub fn report(&self, text: Option<String>, ttl_secs: u64) {
+        let now = now_ms();
+        let report = text.and_then(|t| clean_report(&t)).map(|text| {
+            let expires = match ttl_secs {
+                0 => u64::MAX,
+                secs => now.saturating_add(secs.saturating_mul(1000)),
+            };
+            (text, expires)
+        });
+        let mut state = self.state.lock().unwrap();
+        // A test runner may count up once a second: only a new text is logged.
+        let text = report.as_ref().map(|r| &r.0);
+        if live_report(&state.report, now).as_ref() != text {
+            state.log(now, "report", json!({"text": text, "ttl_secs": ttl_secs}));
+        }
+        state.report = report;
+        drop(state);
+        // The queue carries it too.
+        self.changed.notify_one();
     }
 
     /// Sets the note on files this agent shares with another's (`overlap`), and
@@ -1665,6 +1699,38 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.input.set(|state| state.closed = true);
     }
+}
+
+/// The longest status `valk status` keeps, in characters: it shares a tab card's
+/// line with the state.
+pub const REPORT_MAX: usize = 40;
+
+/// A published status as it is shown: on one line, control characters gone,
+/// runs of spaces squeezed, at most `REPORT_MAX` characters. `None` if blank.
+fn clean_report(text: &str) -> Option<String> {
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let line = words.join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= REPORT_MAX {
+        return Some(line);
+    }
+    let mut cut: String = line.chars().take(REPORT_MAX - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    Some(cut)
+}
+
+/// The status to show at `now`: none once it expired.
+fn live_report(report: &Option<(String, u64)>, now: u64) -> Option<String> {
+    report
+        .as_ref()
+        .filter(|(_, expires)| *expires > now)
+        .map(|(text, _)| text.clone())
 }
 
 /// Whether to scan on this tick: `Some(true)` quiet scan, `Some(false)` glance.
@@ -1947,6 +2013,33 @@ fn default_name(command: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_published_status_is_one_short_line() {
+        use super::{REPORT_MAX, clean_report};
+        assert_eq!(clean_report("tests 41/50").as_deref(), Some("tests 41/50"));
+        assert_eq!(
+            clean_report("  tests\n41/50\x1b[31m  ok\t").as_deref(),
+            Some("tests 41/50 [31m ok")
+        );
+        assert_eq!(clean_report(" \n\t "), None);
+        let long = clean_report(&"x".repeat(100)).unwrap();
+        assert_eq!(long.chars().count(), REPORT_MAX);
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn a_published_status_goes_when_its_time_is_up() {
+        use super::live_report;
+        let report = Some(("tests 41/50".to_string(), 1_000));
+        assert_eq!(live_report(&report, 999).as_deref(), Some("tests 41/50"));
+        assert_eq!(live_report(&report, 1_000), None);
+        assert_eq!(
+            live_report(&Some(("x".into(), u64::MAX)), u64::MAX - 1).as_deref(),
+            Some("x")
+        );
+        assert_eq!(live_report(&None, 0), None);
+    }
+
     #[test]
     fn a_claude_title_gives_its_topic() {
         use super::topic;

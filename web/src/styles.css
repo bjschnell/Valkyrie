@@ -695,6 +695,11 @@ code {
   color: var(--interrupted);
 }
 
+/* What the agent published with `valk status`, beside its state. */
+.report {
+  color: var(--accent2);
+}
+
 .row-age {
   font-size: 12.5px;
 }

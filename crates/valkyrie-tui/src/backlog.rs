@@ -1997,6 +1997,7 @@ mod tests {
             last_input_ms: 0,
             chat: None,
             overlap: None,
+            report: None,
         }
     }
 

@@ -40,7 +40,7 @@ pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 38;
+pub const PROTOCOL: u32 = 39;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -231,6 +231,10 @@ pub struct SessionInfo {
     /// 31). Shown beside the state, which it never changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlap: Option<String>,
+    /// A short status the agent or a script published on it with `valk status`,
+    /// e.g. "tests 41/50" (backlog #117, protocol 39). Gone once its time is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -379,6 +383,15 @@ pub enum ClientMsg {
         req: ReqId,
         session: SessionId,
         to: usize,
+    },
+    /// Publish a short status on a session's tab and home row, e.g. "tests 41/50"
+    /// (`valk status`, protocol 39), replacing any it had. `None` clears it. It
+    /// lasts `ttl_secs` (0: until replaced or cleared). Replies `Done`.
+    Report {
+        req: ReqId,
+        session: SessionId,
+        text: Option<String>,
+        ttl_secs: u64,
     },
     /// Give a session its own name; `None` goes back to the default, its directory.
     Rename {
