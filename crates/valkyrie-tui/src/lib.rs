@@ -296,6 +296,9 @@ struct App {
     others: Vec<Attached>,
     /// The attached tab's split layout (`None`: one pane).
     layout: Option<Pane>,
+    /// The focused pane fills the screen, the others hidden but running
+    /// (`toggle_zoom`). This TUI's alone; the layout doesn't change.
+    zoomed: bool,
     /// Every split tab's layout, from the last session list.
     layouts: Vec<Pane>,
     /// The divider being dragged, and the ratio it was last dragged to.
@@ -443,6 +446,7 @@ impl App {
             hover_tab: None,
             others: Vec::new(),
             layout: None,
+            zoomed: false,
             layouts: Vec::new(),
             divider_drag: None,
             mouse_owner: None,
@@ -1076,6 +1080,7 @@ impl App {
                 }
             }
             Action::Pane => self.cycle_focus(1),
+            Action::Zoom => self.toggle_zoom(),
             Action::Mini => self.toggle_mini().await,
             Action::Capture => {
                 self.open_backlog().await;
@@ -1165,6 +1170,10 @@ impl App {
                         _ => Side::Left,
                     };
                     self.split(side).await;
+                }
+                b"z" => {
+                    self.tab_mode = false;
+                    self.toggle_zoom();
                 }
                 b"p" => {
                     self.tab_mode = false;
@@ -1450,12 +1459,25 @@ impl App {
         };
         attached_bar(
             view,
+            self.bar_panes(view.id),
             mode,
             self.proposals.len(),
             self.settings.hints,
             self.settings.theme,
             &self.settings.keys,
         )
+    }
+
+    /// Where `id` is among the attached tab's panes (from 1), how many there are,
+    /// and whether it is zoomed; `None` for a tab of one pane.
+    fn bar_panes(&self, id: SessionId) -> Option<BarPanes> {
+        let order = self.layout.as_ref()?.sessions();
+        let at = order.iter().position(|&p| p == id)?;
+        Some(BarPanes {
+            at: at + 1,
+            of: order.len(),
+            zoomed: self.is_zoomed(),
+        })
     }
 
     /// A click on the bar under a session: a key's chip does what the key does, and
@@ -3345,6 +3367,8 @@ impl App {
             .map(|main| self.pane_layout(main).0)
             .and_then(|panes| panes.into_iter().find(|p| p.0 == session))
             .map_or((0, 0), |(_, r)| (r.x, r.y));
+        // A pane hidden behind a zoom has nowhere on screen to put an image.
+        let hidden = self.is_zoomed() && self.others.iter().any(|p| p.id == session);
         let Some(msg) = self.mini_push(msg)? else {
             return Ok(false);
         };
@@ -3363,6 +3387,7 @@ impl App {
                 }
                 mouse_changed = mouse::modes(before.0) != mouse::modes(view.modes);
             }
+            ServerMsg::Graphics { .. } if hidden => {}
             ServerMsg::Graphics { x, y, data, .. } => {
                 // At the cell the program's cursor was on, then the cursor back where
                 // ratatui left it. Unicode placeholders (yazi, `kitten icat`) are
@@ -4206,6 +4231,7 @@ impl Menu {
                 "Split down",
                 "Split left",
                 "Split up",
+                "Zoom / unzoom",
                 "Close pane",
             ],
         }
@@ -4509,9 +4535,14 @@ impl App {
             };
             let color = t.state(state);
             let queued = self.queue.iter().any(|q| q.session == s.id);
-            // A split tab says how many panes it has.
+            // A split tab says how many panes it has, and `⊡` once zoomed here.
             let panes = if tab.len() > 1 {
-                format!("⊞{} ", tab.len())
+                let mark = if here && self.is_zoomed() {
+                    '⊡'
+                } else {
+                    '⊞'
+                };
+                format!("{mark}{} ", tab.len())
             } else {
                 String::new()
             };
@@ -4730,9 +4761,14 @@ impl App {
             let tab = &tabs[i];
             let s = &self.sessions[self.face(tab)];
             let here = Some(i) == attached;
-            // A split tab says how many panes it has.
+            // A split tab says how many panes it has, and `⊡` once zoomed here.
             let panes = if tab.len() > 1 {
-                format!("⊞{} ", tab.len())
+                let mark = if here && self.is_zoomed() {
+                    '⊡'
+                } else {
+                    '⊞'
+                };
+                format!("{mark}{} ", tab.len())
             } else {
                 String::new()
             };
@@ -5547,8 +5583,17 @@ struct Bar {
 
 /// The bar under an attached session. Without `hints` it shows no keys until
 /// you're in tab mode, a menu or a rename.
+/// The attached pane's place in a split tab, for the bar.
+#[derive(Debug, Clone, Copy)]
+struct BarPanes {
+    at: usize,
+    of: usize,
+    zoomed: bool,
+}
+
 fn attached_bar(
     view: &Attached,
+    panes: Option<BarPanes>,
     mode: BarMode,
     proposals: usize,
     hints: bool,
@@ -5581,6 +5626,18 @@ fn attached_bar(
         }
         (None, None) => {}
     }
+    // Zoomed, the bar says so, and which pane it is; a click shows the split.
+    if let Some(p) = panes.filter(|p| p.zoomed) {
+        let from = width(&spans);
+        spans.push(
+            format!(" ⊡ zoomed {}/{} ", p.at, p.of)
+                .fg(t.bg)
+                .bg(t.accent2)
+                .bold(),
+        );
+        clicks.push((from, width(&spans), BarClick::Action(Action::Zoom)));
+        spans.push(" ".into());
+    }
     if proposals > 0 {
         let from = width(&spans);
         spans.push(
@@ -5608,13 +5665,23 @@ fn attached_bar(
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
     let session = match mode {
-        BarMode::Session if hints => session_hints(map),
+        BarMode::Session if hints => {
+            let mut h = session_hints(map);
+            // A split tab can zoom; once zoomed, the chip above says so.
+            if panes.is_some_and(|p| !p.zoomed)
+                && let Some(key) = map.get(Action::Zoom)
+            {
+                h.push((key.label(), "zoom", Some(Action::Zoom)));
+            }
+            h
+        }
         _ => Vec::new(),
     };
     let keys: &[(&str, &str)] = match mode {
         BarMode::Session => &[],
         BarMode::Tabs => &[
             ("s/v", "split"),
+            ("z", "zoom"),
             ("p", "pane menu"),
             ("r", "rename"),
             ("d", "decisions"),
@@ -7038,6 +7105,7 @@ mod tests {
                         Paragraph::new(
                             attached_bar(
                                 view,
+                                app.bar_panes(view.id),
                                 BarMode::Session,
                                 0,
                                 app.settings.hints,
@@ -7925,7 +7993,7 @@ mod tests {
         let view = Attached::new(2, "proj2".into(), None);
         let settings = Settings::default();
         let bar = |mode, hints| {
-            attached_bar(&view, mode, 0, hints, settings.theme, &settings.keys)
+            attached_bar(&view, None, mode, 0, hints, settings.theme, &settings.keys)
                 .line
                 .spans
                 .iter()
@@ -8393,6 +8461,7 @@ mod tests {
                     }
                     let line = attached_bar(
                         view,
+                        app.bar_panes(view.id),
                         BarMode::Session,
                         app.proposals.len(),
                         app.settings.hints,
@@ -8732,6 +8801,83 @@ mod tests {
         // Tab mode leaves getting around to the direct keys.
         app.on_keys(vec![TABS_KEY, b'o', b'\x1b']).await;
         assert_eq!(app.view.as_ref().unwrap().id, 1);
+
+        // Alt-z zooms the focused pane: drawn alone over the whole area, with all
+        // its room; the other keeps its split size and runs on, hidden.
+        let bar_text = |app: &App| -> String {
+            let view = app.view.as_ref().unwrap();
+            app.bar(view)
+                .line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert!(bar_text(&app).contains("zoom"), "a split tab hints the key");
+        let split = app.pane_sizes();
+        let hidden = app.pane_mut(2).unwrap().size;
+        app.on_keys(b"\x1bz".to_vec()).await;
+        assert!(app.is_zoomed());
+        let full = Size { cols: 81, rows: 21 };
+        assert_eq!(app.pane_mut(1).unwrap().size, full);
+        assert_eq!(app.pane_mut(2).unwrap().size, hidden);
+        let lines = draw(&app);
+        assert!(lines[1].contains("⊡2 fish"), "{}", lines[1]);
+        assert!(lines[2].starts_with("left pane"), "{}", lines[2]);
+        assert!(
+            lines[2..23]
+                .iter()
+                .all(|l| !l.contains('│') && !l.contains("right pane")),
+            "{lines:?}"
+        );
+        assert!(
+            bar_text(&app).contains("⊡ zoomed 1/2"),
+            "{}",
+            bar_text(&app)
+        );
+        // Both panes are still watched, at the sizes the daemon gets.
+        assert_eq!(app.pane_ids().len(), 2);
+        // A click anywhere lands in the zoomed pane.
+        app.on_mouse(Mouse::at(MouseKind::Press, 60, 5)).await;
+        app.on_mouse(Mouse::at(MouseKind::Release, 60, 5)).await;
+        assert_eq!(app.view.as_ref().unwrap().id, 1);
+
+        // The zoom follows Alt-o: the next pane fills the screen, the last one goes
+        // back to its split size.
+        app.on_keys(b"\x1bo".to_vec()).await;
+        assert_eq!(app.view.as_ref().unwrap().id, 2);
+        assert!(app.is_zoomed());
+        assert_eq!(app.pane_mut(2).unwrap().size, full);
+        assert_eq!(
+            Some(app.pane_mut(1).unwrap().size),
+            split.iter().find(|p| p.0 == 1).map(|p| p.1)
+        );
+        assert!(draw(&app)[2].starts_with("right pane"));
+        assert!(bar_text(&app).contains("⊡ zoomed 2/2"));
+
+        // Alt-z again brings the split back, as it was.
+        app.on_keys(b"\x1bz".to_vec()).await;
+        assert!(!app.is_zoomed());
+        assert_eq!(app.pane_sizes(), split);
+        let lines = draw(&app);
+        assert!(lines[1].contains("⊞2 fish"), "{}", lines[1]);
+        assert!(lines[2].contains("right pane"), "{}", lines[2]);
+
+        // `z` in tab mode and the pane menu's item toggle it too.
+        app.on_keys(vec![TABS_KEY, b'z']).await;
+        assert!(app.is_zoomed() && !app.tab_mode);
+        app.open_focused_pane_menu();
+        assert_eq!(app.menu.unwrap().items()[4], "Zoom / unzoom");
+        app.pick(4).await;
+        assert!(!app.is_zoomed() && app.menu.is_none());
+
+        // A tab of one pane has nothing to zoom.
+        app.toggle_zoom();
+        app.layout = None;
+        assert!(!app.is_zoomed());
+        app.zoomed = false;
+        app.toggle_zoom();
+        assert!(!app.zoomed);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -26,6 +26,8 @@ pub enum Action {
     Close,
     /// The next pane of a split tab.
     Pane,
+    /// The focused pane full-size for a while, and back to the split.
+    Zoom,
     /// The backlog page, straight into a new item, then back where you were.
     Capture,
     /// A small shell over whatever is on screen: type a command, press the key
@@ -36,7 +38,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 20] = [
+    pub const ALL: [Action; 21] = [
         Action::Tabs,
         Action::Home,
         Action::NewTab,
@@ -46,6 +48,7 @@ impl Action {
         Action::Needing,
         Action::Close,
         Action::Pane,
+        Action::Zoom,
         Action::Capture,
         Action::Mini,
         Action::Tab(0),
@@ -75,6 +78,7 @@ impl Action {
             Action::Needing => "needs_you".into(),
             Action::Close => "close_tab".into(),
             Action::Pane => "next_pane".into(),
+            Action::Zoom => "zoom_pane".into(),
             Action::Capture => "capture".into(),
             Action::Mini => "mini_terminal".into(),
             Action::Tab(i) => format!("tab_{}", i + 1),
@@ -93,6 +97,7 @@ impl Action {
             Action::Needing => "Next needing you".into(),
             Action::Close => "Close tab".into(),
             Action::Pane => "Next pane".into(),
+            Action::Zoom => "Zoom pane".into(),
             Action::Capture => "Add to backlog".into(),
             Action::Mini => "Mini terminal".into(),
             Action::Tab(i) => format!("Tab {}", i + 1),
@@ -110,6 +115,7 @@ impl Action {
             Action::Needing => Key::Alt(b'n'),
             Action::Close => Key::Alt(b'w'),
             Action::Pane => Key::Alt(b'o'),
+            Action::Zoom => Key::Alt(b'z'),
             Action::Capture => Key::Alt(b'a'),
             Action::Mini => Key::Alt(b'm'),
             Action::Tab(i) => Key::Alt(b'1' + i),
