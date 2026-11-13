@@ -44,6 +44,9 @@ valk pane split -d right -- npm run dev   # prints the new pane's id
 valk pane run 4 "cargo test"       # type it and press Enter
 valk pane wait 4 --match "test result" --timeout 300   # exits 124 on timeout
 valk pane read 4 -n 40             # the last 40 lines, scrollback included
+valk pane prompt 5 "fix the lint" --wait   # an agent's whole turn: prints how it
+                                   # ended; exits 1 if it needs a human, 3 if the
+                                   # prompt never landed
 valk pane resize 4 30 · valk pane close 4
 ```
 

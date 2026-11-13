@@ -873,7 +873,7 @@ impl App {
     /// selection, or scrolls a proposal's text over the preview.
     async fn on_home_mouse(&mut self, m: Mouse) {
         if self.docs.is_some() {
-            return self.on_docs_mouse(m);
+            return self.on_docs_mouse(m).await;
         }
         if self.keys_page.is_some()
             || self.digest.is_some()
@@ -2251,7 +2251,10 @@ impl App {
             .borrow()
             .iter()
             .find(|l| l.row == row && (l.from..l.to).contains(&col))
-            .map(|l| l.url.clone())
+            .and_then(|l| match &l.target {
+                markdown::Target::Url(url) => Some(url.clone()),
+                markdown::Target::Doc(_) => None,
+            })
     }
 
     /// Opens `url` from the home screen, and says so.
@@ -2705,6 +2708,7 @@ impl App {
     async fn docs_do(&mut self, act: docs::Do) {
         match act {
             docs::Do::Close => self.docs = None,
+            docs::Do::Url(url) => self.open_url(&url),
             docs::Do::Load => self.load_docs().await,
             docs::Do::Open(key) => {
                 let got = self
@@ -2976,8 +2980,9 @@ impl App {
         }
     }
 
-    /// The wheel scrolls the doc being read; a click on a link in it opens it.
-    fn on_docs_mouse(&mut self, m: Mouse) {
+    /// The wheel scrolls the doc being read; a click on a link in it opens it,
+    /// and on a wikilink reads that doc.
+    async fn on_docs_mouse(&mut self, m: Mouse) {
         let Some(page) = &mut self.docs else { return };
         match m.kind {
             MouseKind::WheelUp | MouseKind::WheelDown => {
@@ -2985,8 +2990,14 @@ impl App {
             }
             MouseKind::Press => {
                 page.pressed();
-                if let Some(url) = page.link_at(m.x, m.y) {
-                    self.open_url(&url);
+                match page.link_at(m.x, m.y) {
+                    Some(markdown::Target::Url(url)) => self.open_url(&url),
+                    Some(markdown::Target::Doc(key)) => {
+                        if let Some(act) = page.follow(&key) {
+                            Box::pin(self.docs_do(act)).await;
+                        }
+                    }
+                    None => {}
                 }
             }
             _ => {}

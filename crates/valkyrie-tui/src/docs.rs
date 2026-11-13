@@ -1,19 +1,21 @@
 //! The Docs page (ADR-0021 §5, backlog #164): `D` on the home screen. The docs
 //! agents wrote, agent-level ones first, then each repository's, newest first,
 //! with what an agent wrote since you last looked marked unread. `↩` reads one,
-//! drawn as markdown; links in it open on a click, and `c` shows its comments
+//! drawn as markdown; links in it, `[[wikilinks]]` to other docs among them,
+//! open on a click or with tab and ↩ (esc comes back), and `c` shows its comments
 //! and leaves new ones (`comments.rs`); `e` edits it in your editor, and a
 //! save that finds it changed shows both versions (`conflict.rs`). `h` shows its
 //! past versions to restore (`history.rs`); `d d` deletes it, `u` on the list
 //! undoes that, and `t` there shows Recently deleted to put back.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use crate::backlog::fit_hints;
 use crate::comments::{self, Comments};
 use crate::conflict::{Choice, Conflict};
 use crate::history::{self, History};
-use crate::markdown::{self, Rendered};
+use crate::markdown::{self, Rendered, Target};
 use crate::next_key;
 use crate::theme::Theme;
 use jiff::tz::TimeZone;
@@ -31,6 +33,8 @@ pub(crate) enum Do {
     Load,
     /// Read the doc with this key.
     Open(String),
+    /// Open this http(s) link in the browser.
+    Url(String),
     /// Put this on the clipboard.
     Copy(String),
     Say(String),
@@ -114,6 +118,8 @@ struct Reader {
     history: Option<History>,
     /// `d` was pressed once: another deletes it.
     deleting: bool,
+    /// The link tab picked, by the index of its first piece in the drawn links.
+    focus: Cell<Option<usize>>,
 }
 
 /// Docs you deleted that can still be put back.
@@ -137,6 +143,8 @@ pub(crate) struct Page {
     undo: Option<(String, String)>,
     /// Recently deleted, while `t` has it open.
     trash: Option<Trash>,
+    /// The docs a wikilink was followed from, by key and scroll, for esc.
+    back: Vec<(String, u16)>,
 }
 
 /// The group a doc is listed under, as the web app has it: "" for agent-level
@@ -169,6 +177,75 @@ pub(crate) fn body(text: &str) -> String {
         }
         None => String::new(),
     }
+}
+
+/// A file's name without its folder.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// `name` without a `.md` on the end, case aside.
+fn strip_md(name: &str) -> &str {
+    match name.len().checked_sub(3) {
+        Some(at) if name.is_char_boundary(at) && name[at..].eq_ignore_ascii_case(".md") => {
+            &name[..at]
+        }
+        _ => name,
+    }
+}
+
+/// The docs a `[[wikilink]]` can name, as the web app's `resolver()` has it: by
+/// path under the folder, file name or title (Obsidian's forms), case aside.
+/// Only docs the daemon listed resolve, so a wikilink can't reach anything else.
+#[derive(Debug, Default)]
+struct Names(HashMap<String, String>);
+
+impl Names {
+    fn new(docs: &[Doc]) -> Self {
+        let mut by = HashMap::new();
+        let mut add = |name: &str, key: &str| {
+            let k = name.trim().to_lowercase();
+            if !k.is_empty() {
+                by.entry(k).or_insert_with(|| key.to_string());
+            }
+        };
+        let docs: Vec<&Doc> = docs.iter().filter(|d| !d.key.is_empty()).collect();
+        // Paths first: they're unique, so they win over a title another doc shares.
+        for d in &docs {
+            add(strip_md(&d.path), &d.key);
+        }
+        for d in &docs {
+            add(strip_md(file_name(&d.path)), &d.key);
+        }
+        for d in &docs {
+            add(&d.title, &d.key);
+        }
+        Names(by)
+    }
+
+    /// The key of the doc `target` names, if one goes by it. A `#heading` on the
+    /// end is dropped: the doc opens at its top.
+    fn key(&self, target: &str) -> Option<String> {
+        let name = strip_md(target.split('#').next().unwrap_or_default());
+        self.0.get(&name.trim().to_lowercase()).cloned()
+    }
+}
+
+/// The links drawn, as runs of pieces: a link that wraps is drawn as one piece
+/// a row, and tab picks it once. Each run is `start..end` in `links`.
+fn link_runs(links: &[markdown::Link]) -> Vec<std::ops::Range<usize>> {
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    for (i, l) in links.iter().enumerate() {
+        match runs.last_mut() {
+            Some(run)
+                if links[run.end - 1].target == l.target && links[run.end - 1].row + 1 == l.row =>
+            {
+                run.end = i + 1
+            }
+            _ => runs.push(i..i + 1),
+        }
+    }
+    runs
 }
 
 /// `created` (RFC 3339) as a short local date and time.
@@ -215,6 +292,10 @@ impl Page {
                 }
                 self.listing = Some(listing);
                 self.failed = None;
+                // Wikilinks resolve against the list: draw them again.
+                if let Some(r) = &self.reader {
+                    *r.drawn.borrow_mut() = None;
+                }
             }
             Err(e) => {
                 self.listing = None;
@@ -333,6 +414,7 @@ impl Page {
     pub(crate) fn deleted(&mut self, key: &str, token: String, title: String) {
         if self.reader.as_ref().is_some_and(|r| r.key == key) {
             self.reader = None;
+            self.back.clear();
         }
         self.undo = Some((token, title));
     }
@@ -360,6 +442,7 @@ impl Page {
         if doc.key.is_empty() {
             return None;
         }
+        self.back.clear();
         self.reader = Some(Reader {
             key: doc.key.clone(),
             ..Default::default()
@@ -435,6 +518,7 @@ impl Page {
                         out.push(Do::Say("that doc can't be opened from here".into()));
                     } else {
                         let key = d.key.clone();
+                        self.back.clear();
                         self.reader = Some(Reader {
                             key: key.clone(),
                             ..Default::default()
@@ -451,7 +535,9 @@ impl Page {
     }
 
     /// ↑/↓ (j/k) scroll a row, space/PgDn and b/PgUp a page, g/G to the ends;
-    /// `y` copies the doc's markdown; `r` reads it again; Esc or `q` goes back.
+    /// tab/shift-tab pick a link and ↩ follows it; `y` copies the doc's markdown;
+    /// `r` reads it again; Esc goes back to the doc a wikilink came from, else
+    /// to the list, and `q` to the list.
     fn reader_key(&mut self, key: &[u8], whole: bool, out: &mut Vec<Do>) {
         if let Some(reader) = &mut self.reader
             && let Some(c) = &reader.conflict
@@ -577,6 +663,13 @@ impl Page {
             b"b" | b"\x1b[5~" => reader.scroll(-page),
             b"g" | b"\x1b[H" | b"\x1b[1~" => reader.top.set(0),
             b"G" | b"\x1b[F" | b"\x1b[4~" => reader.scroll(i32::from(u16::MAX)),
+            b"\t" => reader.pick(true),
+            b"\x1b[Z" => reader.pick(false),
+            b"\r" | b"\n" => match reader.picked() {
+                Some(Target::Doc(key)) => out.extend(self.follow(&key)),
+                Some(Target::Url(url)) => out.push(Do::Url(url)),
+                None => {}
+            },
             b"h" => match &reader.doc {
                 Some(d) if d.id > 0 => {
                     reader.history = Some(History::default());
@@ -628,10 +721,38 @@ impl Page {
                 });
                 out.push(Do::Open(key));
             }
-            b"\x1b" if whole => self.reader = None,
-            b"q" | [0x03] => self.reader = None,
+            b"\x1b" if whole => match self.back.pop() {
+                Some((key, top)) => {
+                    self.reader = Some(Reader {
+                        key: key.clone(),
+                        top: Cell::new(top),
+                        ..Default::default()
+                    });
+                    out.push(Do::Open(key));
+                }
+                None => self.reader = None,
+            },
+            b"q" | [0x03] => {
+                self.reader = None;
+                self.back.clear();
+            }
             _ => {}
         }
+    }
+
+    /// Reads the doc with `key` in place of the one open, which esc comes back to.
+    pub(crate) fn follow(&mut self, key: &str) -> Option<Do> {
+        let r = self.reader.as_ref()?;
+        if r.key == key {
+            r.top.set(0);
+            return None;
+        }
+        self.back.push((r.key.clone(), r.top.get()));
+        self.reader = Some(Reader {
+            key: key.to_string(),
+            ..Default::default()
+        });
+        Some(Do::Open(key.to_string()))
     }
 
     /// The wheel over the doc being read scrolls it.
@@ -657,7 +778,7 @@ impl Page {
     }
 
     /// The link at screen cell (`x`, `y`) of the doc being read, if any.
-    pub(crate) fn link_at(&self, x: u16, y: u16) -> Option<String> {
+    pub(crate) fn link_at(&self, x: u16, y: u16) -> Option<Target> {
         // Not through a panel over the doc: its links are hidden.
         let r = self.reader.as_ref().filter(|r| !r.covered())?;
         let area = r.area.get();
@@ -671,7 +792,7 @@ impl Page {
         body.links
             .iter()
             .find(|l| l.row == row && (l.from..l.to).contains(&col))
-            .map(|l| l.url.clone())
+            .map(|l| l.target.clone())
     }
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, t: &Theme) {
@@ -818,7 +939,32 @@ impl Page {
         }
     }
 
+    /// The doc's body drawn `width` wide into `r.drawn`, unless it is already,
+    /// its wikilinks going to the docs listed.
+    fn render_body(&self, r: &Reader, text: &str, width: u16, t: &Theme) {
+        let mut drawn = r.drawn.borrow_mut();
+        if drawn.as_ref().is_some_and(|(w, _)| *w == width) {
+            return;
+        }
+        let names = Names::new(
+            self.listing
+                .as_ref()
+                .map(|l| l.docs.as_slice())
+                .unwrap_or_default(),
+        );
+        let wiki = |target: &str| names.key(target);
+        *drawn = Some((width, markdown::render_with(text, width, t, Some(&wiki))));
+        // The links moved: tab starts over.
+        r.focus.set(None);
+    }
+
     fn draw_reader(&self, frame: &mut ratatui::Frame, rect: Rect, r: &Reader, t: &Theme) {
+        // The text is as wide as the page inside its border and margins. Drawn
+        // first, so the hints know whether it has links to tab through.
+        if let (Some(d), None) = (&r.doc, &r.failed) {
+            let text = body(d.text.as_deref().unwrap_or_default());
+            self.render_body(r, &text, rect.width.saturating_sub(4), t);
+        }
         let listed = self.docs().find(|d| d.key == r.key);
         let doc = r.doc.as_ref().or(listed);
         let title = doc.map_or_else(|| "Doc".to_string(), |d| d.title.clone());
@@ -850,6 +996,16 @@ impl Page {
             hint(" y ", "copy ", t),
             hint(" r ", "reload ", t),
             hint(" esc ", "back ", t),
+            // Last: on a narrow screen it gives way before esc does.
+            if r.drawn
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, b)| !b.links.is_empty())
+            {
+                hint(" tab ", "links ", t)
+            } else {
+                Vec::new()
+            },
         ]
         .concat();
         let hints = if r.conflict.is_some() {
@@ -929,13 +1085,7 @@ impl Page {
             }
             (Some(d), None) => body(d.text.as_deref().unwrap_or_default()),
         };
-        let width = text_area.width;
-        {
-            let mut drawn = r.drawn.borrow_mut();
-            if drawn.as_ref().is_none_or(|(w, _)| *w != width) {
-                *drawn = Some((width, markdown::render(&body_text, width, t)));
-            }
-        }
+        self.render_body(r, &body_text, text_area.width, t);
         let drawn = r.drawn.borrow();
         let Some((_, rendered)) = drawn.as_ref() else {
             return;
@@ -954,6 +1104,30 @@ impl Page {
             .cloned()
             .collect();
         frame.render_widget(Paragraph::new(shown), text_area);
+        // The link tab picked, reversed where it shows.
+        if let Some(run) = r.run(rendered) {
+            let top = usize::from(r.top.get());
+            for l in &rendered.links[run] {
+                let Some(y) = l
+                    .row
+                    .checked_sub(top)
+                    .filter(|y| *y < usize::from(text_area.height))
+                else {
+                    continue;
+                };
+                let cells = Rect::new(
+                    text_area.x + l.from,
+                    text_area.y + y as u16,
+                    l.to.saturating_sub(l.from),
+                    1,
+                )
+                .intersection(text_area);
+                frame.buffer_mut().set_style(
+                    cells,
+                    style::Style::new().add_modifier(style::Modifier::REVERSED),
+                );
+            }
+        }
         if r.top.get() < last && text_area.height > 0 {
             let more = format!(" ↓ {} more rows ", last - r.top.get());
             let w = (more.chars().count() as u16).min(text_area.width);
@@ -1047,6 +1221,58 @@ impl Reader {
     /// A panel is over the doc (comments, history, a conflict).
     fn covered(&self) -> bool {
         self.comments.is_open() || self.history.is_some() || self.conflict.is_some()
+    }
+
+    /// The run of links tab picked, if it's still drawn.
+    fn run(&self, body: &Rendered) -> Option<std::ops::Range<usize>> {
+        let at = self.focus.get()?;
+        link_runs(&body.links).into_iter().find(|r| r.start == at)
+    }
+
+    /// Picks the next link (or the previous one), from the first on screen when
+    /// none is picked yet, and scrolls it into view.
+    fn pick(&self, next: bool) {
+        let drawn = self.drawn.borrow();
+        let Some((_, body)) = drawn.as_ref() else {
+            return;
+        };
+        let runs = link_runs(&body.links);
+        if runs.is_empty() {
+            return;
+        }
+        let n = runs.len();
+        let top = usize::from(self.top.get());
+        let bottom = top + usize::from(self.rows.get().max(1));
+        let row = |r: &std::ops::Range<usize>| body.links[r.start].row;
+        let at = match self
+            .focus
+            .get()
+            .and_then(|f| runs.iter().position(|r| r.start == f))
+        {
+            Some(i) if next => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            None if next => runs.iter().position(|r| row(r) >= top).unwrap_or(0),
+            None => runs.iter().rposition(|r| row(r) < bottom).unwrap_or(n - 1),
+        };
+        let run = &runs[at];
+        self.focus.set(Some(run.start));
+        // Into view: its first row, and as much of the rest as fits.
+        let (first, last) = (row(run), body.links[run.end - 1].row);
+        let rows = usize::from(self.rows.get().max(1));
+        if first < top {
+            self.top.set(first as u16);
+        } else if last >= top + rows {
+            self.top
+                .set(last.saturating_sub(rows - 1).min(first) as u16);
+        }
+    }
+
+    /// Where the link tab picked goes.
+    fn picked(&self) -> Option<Target> {
+        let drawn = self.drawn.borrow();
+        let (_, body) = drawn.as_ref()?;
+        let run = self.run(body)?;
+        Some(body.links[run.start].target.clone())
     }
 
     fn scroll(&self, rows: i32) {
@@ -1241,7 +1467,10 @@ mod tests {
         let y = (area.y..area.bottom())
             .find(|&y| page.link_at(area.x, y).is_some())
             .expect("a link row");
-        assert_eq!(page.link_at(area.x, y).as_deref(), Some("https://x.dev"));
+        assert_eq!(
+            page.link_at(area.x, y),
+            Some(Target::Url("https://x.dev".into()))
+        );
         assert_eq!(page.link_at(area.x + 40, y), None);
     }
 
@@ -1547,6 +1776,112 @@ mod tests {
         let mut page = reading("p0123456789abcdef", "mine\n");
         page.reader.as_mut().unwrap().doc.as_mut().unwrap().id = 0;
         assert!(matches!(page.keys(b"h").as_slice(), [Do::Say(s)] if s.contains("valk-id")));
+    }
+
+    #[test]
+    fn wikilinks_name_a_doc_by_path_file_name_or_title() {
+        let mut a = doc("1", "repos/valk/plan.md", false);
+        a.title = "The Plan".into();
+        let mut b = doc("2", "notes/plan.md", false);
+        b.title = "notes/plan".into();
+        let mut hidden = doc("", "secret.md", false);
+        hidden.title = "Secret".into();
+        let names = Names::new(&[a, b, hidden]);
+        // Path, then file name (the first doc listed), then title, case aside.
+        assert_eq!(names.key("notes/plan").as_deref(), Some("2"));
+        assert_eq!(names.key("repos/valk/plan.md").as_deref(), Some("1"));
+        assert_eq!(names.key("PLAN").as_deref(), Some("1"));
+        assert_eq!(names.key("the plan#Steps").as_deref(), Some("1"));
+        assert_eq!(names.key(" the plan ").as_deref(), Some("1"));
+        // Only docs the daemon listed with a key.
+        assert_eq!(names.key("secret"), None);
+        assert_eq!(names.key("nowhere"), None);
+    }
+
+    /// A doc open that links to doc 2 by name, and to one no doc goes by.
+    fn linking() -> Page {
+        let mut page = Page::default();
+        let mut two = doc("2", "b.md", false);
+        two.title = "Second".into();
+        page.loaded(Ok(listing(vec![doc("1", "a.md", false), two])));
+        page.keys(b"\r");
+        let mut read = doc("1", "a.md", false);
+        read.text = Some("See [[nowhere]] and [[second|the next one]].\n".into());
+        page.opened("1", Ok(read));
+        page
+    }
+
+    #[test]
+    fn a_wikilink_shows_its_label_and_a_click_reads_that_doc() {
+        let mut page = linking();
+        let shown = screen(&page, 120, 20);
+        assert!(shown.contains("See nowhere and the next one."), "{shown}");
+        assert!(shown.contains("tab links"), "{shown}");
+        let area = page.reader.as_ref().unwrap().area.get();
+        let at = |page: &Page, col: u16| page.link_at(area.x + col, area.y);
+        assert_eq!(at(&page, 4), None, "a missing one isn't a link");
+        assert_eq!(at(&page, 16), Some(Target::Doc("2".into())));
+        assert_eq!(page.follow("2"), Some(Do::Open("2".into())));
+        assert_eq!(page.reader.as_ref().unwrap().key, "2");
+        // Esc comes back to the doc it was followed from, then to the list.
+        assert_eq!(page.keys(b"\x1b"), vec![Do::Open("1".into())]);
+        assert_eq!(page.reader.as_ref().unwrap().key, "1");
+        assert!(page.keys(b"\x1b").is_empty());
+        assert!(!page.reading());
+    }
+
+    #[test]
+    fn tab_picks_a_link_and_return_follows_it() {
+        let mut page = linking();
+        screen(&page, 60, 20);
+        // Nothing picked: return does nothing.
+        assert!(page.keys(b"\r").is_empty());
+        assert!(page.keys(b"\t").is_empty());
+        let shown = screen(&page, 60, 20);
+        let area = page.reader.as_ref().unwrap().area.get();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+        term.draw(|f| page.draw(f, &crate::theme::DRACULA)).unwrap();
+        let cell = &term.backend().buffer()[(area.x + 16, area.y)];
+        assert!(
+            cell.modifier.contains(style::Modifier::REVERSED),
+            "picked link shows: {shown}"
+        );
+        assert_eq!(page.keys(b"\r"), vec![Do::Open("2".into())]);
+        // q goes to the list, and leaves nothing to come back to.
+        page.keys(b"q");
+        assert!(!page.reading());
+        assert!(page.back.is_empty());
+    }
+
+    #[test]
+    fn tab_on_a_web_link_opens_it_in_the_browser() {
+        let mut page = reading("7", "[x](https://x.dev)\n");
+        screen(&page, 60, 20);
+        page.keys(b"\t");
+        assert_eq!(page.keys(b"\r"), vec![Do::Url("https://x.dev".into())]);
+        // Shift-tab wraps to the last link: the URL shown after the text.
+        page.keys(b"\x1b[Z");
+        assert_eq!(page.keys(b"\r"), vec![Do::Url("https://x.dev".into())]);
+    }
+
+    #[test]
+    fn tab_scrolls_a_link_below_into_view() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![
+            doc("1", "a.md", false),
+            doc("2", "b.md", false),
+        ])));
+        page.keys(b"\r");
+        let mut read = doc("1", "a.md", false);
+        let mut text: String = (0..60).map(|i| format!("line {i}\n\n")).collect();
+        text.push_str("[[b]]\n");
+        read.text = Some(text);
+        page.opened("1", Ok(read));
+        screen(&page, 60, 20);
+        page.keys(b"\t");
+        let shown = screen(&page, 60, 20);
+        assert!(shown.contains("line 59"), "{shown}");
+        assert_eq!(page.keys(b"\r"), vec![Do::Open("2".into())]);
     }
 
     #[test]
