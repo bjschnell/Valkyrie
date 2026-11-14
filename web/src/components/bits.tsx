@@ -1,4 +1,5 @@
 import type { AgentState } from "../proto";
+import { useSpike } from "../lib/trial";
 import { useApp } from "../store";
 
 /** The TUI's state glyphs; a spinner while working. */
@@ -46,5 +47,25 @@ export function ConnectionPill() {
       <span className="pill-dot" />
       {LABEL[status]}
     </span>
+  );
+}
+
+/** A page still loading: rows shaped like the list it will show (#104 trial),
+ * or the plain word with the trial off. */
+export function Loading({ rows = 4 }: { rows?: number }) {
+  const shaped = useSpike("cache");
+  if (!shaped) return <div className="empty">Loading…</div>;
+  return (
+    <div className="list skeleton" aria-busy="true" aria-label="Loading">
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="row">
+          <span className="sk sk-chip" />
+          <span className="row-main">
+            <span className="sk sk-line" style={{ width: `${70 - ((i * 17) % 35)}%` }} />
+            <span className="sk sk-line sk-sub" style={{ width: `${45 - ((i * 11) % 20)}%` }} />
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }

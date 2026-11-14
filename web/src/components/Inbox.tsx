@@ -15,6 +15,7 @@ import { Chevron, Clock, Gear, List, Page, Pin, Plus, Rewind, Search } from "./i
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
 import { SupervisorStrip } from "./Supervisor";
+import { useSpike } from "../lib/trial";
 import { NotifyHint } from "./Notify";
 import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
@@ -34,6 +35,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
   // Docs agents wrote since you last looked: a count, never a card (ADR-0021 §5).
   const unreadDocs = useApp((s) => s.unreadDocs);
   const status = useApp((s) => s.status);
+  const nav = useSpike("nav");
   useEffect(() => {
     if (status !== "open") return;
     void refreshUnreadDocs();
@@ -106,6 +108,8 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
           <Wordmark />
         </div>
         <ConnectionPill />
+        {!nav && (
+          <>
         <button
           className="icon-btn"
           aria-label="Backlog"
@@ -164,6 +168,8 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         >
           <Gear />
         </button>
+          </>
+        )}
         <button
           className="icon-btn"
           aria-label="New session"

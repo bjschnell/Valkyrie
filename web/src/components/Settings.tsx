@@ -1,3 +1,4 @@
+import { SPIKES, SPIKE_TEXT, setSpike, useSpike, type Spike } from "../lib/trial";
 import { useEffect } from "react";
 import { LOOKS, LOOK_TEXT, hasRain, setLook, useLook } from "../lib/theme";
 import { AddDeviceSettings } from "./AddDevice";
@@ -39,6 +40,7 @@ export function Settings() {
       </header>
 
       <main className="inbox">
+        <TrialSettings />
         <section>
           <h2 className="section-title">Look</h2>
           <div className="list" role="radiogroup" aria-label="Look">
@@ -57,5 +59,29 @@ export function Settings() {
         <AddDeviceSettings />
       </main>
     </div>
+  );
+}
+
+/** #104 trial: switch each UI spike off to compare it with the app as it was. */
+function TrialSettings() {
+  const nav = useSpike("nav");
+  const cache = useSpike("cache");
+  const motion = useSpike("motion");
+  const on: Record<Spike, boolean> = { nav, cache, motion };
+  return (
+    <section>
+      <h2 className="section-title">Trial: new UI</h2>
+      <div className="list">
+        {SPIKES.map((s) => (
+          <button key={s} className="row" role="switch" aria-checked={on[s]} onClick={() => setSpike(s, !on[s])}>
+            <span className="row-main">
+              <span className="row-name">{SPIKE_TEXT[s].name}</span>
+              <span className="row-sub">{SPIKE_TEXT[s].about}</span>
+            </span>
+            <span className={`trial-switch${on[s] ? " on" : ""}`} />
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { Backlog, ItemEditor, OrderPage } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
 import { DigestView } from "./components/Digest";
@@ -16,6 +17,8 @@ import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
 import { Settings } from "./components/Settings";
 import { Toast } from "./components/Toast";
+import { Rail, TabBar, type NavKey } from "./components/Nav";
+import { trialOn, useSpike } from "./lib/trial";
 import { close, connect, open, useApp } from "./store";
 
 /** Alt on most keyboards, Option on a Mac's. */
@@ -72,13 +75,65 @@ function route(): Route {
   return { page: "inbox" };
 }
 
+/** Where a page sits in the app's pages (#104 trial nav). */
+function navKey(r: Route): NavKey | null {
+  switch (r.page) {
+    case "inbox":
+    case "session":
+    case "review":
+      return "inbox";
+    case "backlog":
+    case "item":
+    case "order":
+      return "backlog";
+    case "docs":
+    case "doc":
+      return "docs";
+    case "decisions":
+      return "memory";
+    case "past":
+      return "past";
+    case "new":
+      return null;
+    default:
+      return r.page;
+  }
+}
+
+/** Pages reached from the nav, where a phone shows its tab bar. Deeper pages
+ * (a session, a doc, an item) keep their back arrow and the whole screen. */
+const TOP = new Set<Route["page"]>(["inbox", "backlog", "docs", "decisions", "digest", "past", "search", "supervisor", "settings"]);
+
+/** How deep a page is, so a transition knows forward from back. */
+const depth = (r: Route) => (TOP.has(r.page) ? 0 : r.page === "review" ? 2 : 1);
+
 export function App() {
   const token = useApp((s) => s.token);
   const status = useApp((s) => s.status);
   const [at, setAt] = useState(route);
+  const atRef = useRef(at);
+  atRef.current = at;
 
   useEffect(() => {
-    const onHash = () => setAt(route());
+    const onHash = () => {
+      const next = route();
+      const from = atRef.current;
+      const swap = () => flushSync(() => setAt(next));
+      // #104 trial: a transition between pages. Stepping between sessions
+      // (Alt+J/K) stays instant; so does a device asking for less motion.
+      if (
+        !trialOn("motion") ||
+        !document.startViewTransition ||
+        matchMedia("(prefers-reduced-motion: reduce)").matches ||
+        (from.page === "session" && next.page === "session")
+      ) {
+        setAt(next);
+        return;
+      }
+      const d = depth(next) - depth(from);
+      document.documentElement.dataset.vt = d > 0 ? "forward" : d < 0 ? "back" : "fade";
+      document.startViewTransition(swap);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -143,6 +198,24 @@ export function App() {
   // With the room for it, the session list stays beside the open session.
   const wide = useWide();
 
+  // #104 trial: a rail on a desktop, a tab bar on a phone's top pages.
+  const nav = useSpike("nav");
+  const rail = nav && desktop && paired;
+  const tabs = nav && !desktop && paired && TOP.has(at.page);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("with-rail", rail);
+    root.classList.toggle("with-tabs", tabs);
+    root.dataset.page = at.page;
+  }, [rail, tabs, at.page]);
+  const chrome = (
+    <>
+      {rail && <Rail at={navKey(at)} />}
+      {tabs && <TabBar at={navKey(at)} />}
+      <Toast />
+    </>
+  );
+
   if (!token || status === "unpaired") return <Pair />;
   if (status === "outdated") return <Outdated />;
   if (wide && (at.page === "inbox" || at.page === "session" || at.page === "review")) {
@@ -164,7 +237,7 @@ export function App() {
             )}
           </div>
         </div>
-        <Toast />
+        {chrome}
       </>
     );
   }
@@ -185,7 +258,7 @@ export function App() {
       {at.page === "order" && <OrderPage key={at.project} project={at.project} />}
       {at.page === "session" && <SessionView id={at.id} />}
       {at.page === "review" && <ReviewView id={at.id} />}
-      <Toast />
+      {chrome}
     </>
   );
 }
