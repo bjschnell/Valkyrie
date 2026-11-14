@@ -170,14 +170,16 @@ impl StepAction {
         }
     }
 
-    /// What taking it does, for a button or a key hint.
+    /// What taking it does, for a button or a key hint. The steps that type into
+    /// the flagged session say so, apart from `launch`, which starts a new one: a
+    /// bare "fix CI" read as starting an agent to do it (backlog #170).
     pub fn label(self) -> &'static str {
         match self {
-            StepAction::MergeBase => "merge the base in",
-            StepAction::CiFix => "fix CI",
+            StepAction::MergeBase => "ask its agent to merge the base in",
+            StepAction::CiFix => "ask its agent to fix CI",
             StepAction::Rerun => "rerun failed jobs",
             StepAction::Leave => "leave it",
-            StepAction::Launch => "start it",
+            StepAction::Launch => "start an agent on it",
         }
     }
 }
