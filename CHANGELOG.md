@@ -3,6 +3,30 @@
 Releases from 0.1.0 on follow [Semantic Versioning](https://semver.org) and are
 written by release-please from [Conventional Commits](docs/releasing.md).
 
+## [0.6.0](https://github.com/bjschnell/Valkyrie/compare/v0.5.0...v0.6.0) (2026-11-14)
+
+
+### Features
+
+* **backlog:** build order gets its own review page; TUI window handles long orders ([#143](https://github.com/bjschnell/Valkyrie/issues/143)) ([77fc715](https://github.com/bjschnell/Valkyrie/commit/77fc7153878978bdadc0366dc305adc442220a73))
+* **backlog:** give a build order its own review page and a usable TUI window ([#143](https://github.com/bjschnell/Valkyrie/issues/143)) ([508da2e](https://github.com/bjschnell/Valkyrie/commit/508da2ed18aa703ef7bcedabab4cfc82b9b07669))
+* **supervisor:** a page for what it waits on and what it did ([#180](https://github.com/bjschnell/Valkyrie/issues/180)) ([3cfd129](https://github.com/bjschnell/Valkyrie/commit/3cfd1296f73ae6dc76db16fec8a1ed59c6c84c8d))
+* **supervisor:** a page for what it waits on and what it did ([#180](https://github.com/bjschnell/Valkyrie/issues/180)) ([9eda6d8](https://github.com/bjschnell/Valkyrie/commit/9eda6d8f2ffbe6f0e06282758e97e902835405c5))
+* **supervisor:** show the PRs it watches and when it reads them next ([#181](https://github.com/bjschnell/Valkyrie/issues/181)) ([df86d3b](https://github.com/bjschnell/Valkyrie/commit/df86d3be9b152d9654f0ff85901c1ff1f2734714))
+* **supervisor:** show the PRs it watches and when it reads them next ([#181](https://github.com/bjschnell/Valkyrie/issues/181)) ([bc31bfd](https://github.com/bjschnell/Valkyrie/commit/bc31bfd0c446fe24673792d6f43fd0f4abd3941c))
+
+
+### Bug Fixes
+
+* **digest:** name a removed worktree's session by its repository ([#177](https://github.com/bjschnell/Valkyrie/issues/177)) ([7983eef](https://github.com/bjschnell/Valkyrie/commit/7983eef9f52d3e3bf14d80de9db7545e49a0adba))
+* **digest:** name a removed worktree's session by its repository ([#177](https://github.com/bjschnell/Valkyrie/issues/177)) ([6f345c9](https://github.com/bjschnell/Valkyrie/commit/6f345c914c3f289019a405ff753ee510794493eb))
+* **supervise:** ci: gh wakes the agent when CI goes red after its stop ([#170](https://github.com/bjschnell/Valkyrie/issues/170)) ([b5268a1](https://github.com/bjschnell/Valkyrie/commit/b5268a1654113a98ba845a2ed4dae0832df3087a))
+* **supervise:** ci: gh wakes the agent when CI goes red after its stop ([#170](https://github.com/bjschnell/Valkyrie/issues/170)) ([503961a](https://github.com/bjschnell/Valkyrie/commit/503961ac1686fb635314f15db9ae7171054409bd))
+* **supervise:** step labels say they ask the flagged session's agent ([#170](https://github.com/bjschnell/Valkyrie/issues/170)) ([02eb46e](https://github.com/bjschnell/Valkyrie/commit/02eb46e82269f0ba038e34f1c23bfcda28db3e17))
+* **supervisor:** keep a branch PR gh can't read on the Watching list, unread ([#182](https://github.com/bjschnell/Valkyrie/issues/182)) ([2d78051](https://github.com/bjschnell/Valkyrie/commit/2d78051d78cbc1afcf27143c4bf5e24cae5d6ad6))
+* **supervisor:** keep a branch PR gh can't read on the Watching list, unread ([#182](https://github.com/bjschnell/Valkyrie/issues/182)) ([7752f0c](https://github.com/bjschnell/Valkyrie/commit/7752f0c57807b566116d096bd1e70292997b4c00))
+* **supervisor:** sort the log with sort_by_key ([fdd861b](https://github.com/bjschnell/Valkyrie/commit/fdd861bb24423f56fb6de68359fb8c22c6f713ce))
+
 ## [0.5.0](https://github.com/bjschnell/Valkyrie/compare/v0.4.0...v0.5.0) (2026-11-13)
 
 
