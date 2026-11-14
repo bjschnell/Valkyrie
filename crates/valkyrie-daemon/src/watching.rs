@@ -8,7 +8,7 @@ use crate::Registry;
 use crate::backlog::pr_summary;
 use crate::work::Pr;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use valkyrie_proto::{PrState, Reply, WatchedPr};
 
@@ -70,6 +70,19 @@ impl Watching {
             _ => pr,
         };
         self.prs.insert(url.to_owned(), (pr, self.pass));
+    }
+
+    /// `gh` couldn't say which PR `branch` in `project` has: the one last read for
+    /// it, if any, stays on the page marked unread, as an item's would.
+    pub(crate) fn unread_branch(&mut self, project: &Path, branch: &str, now: u64) {
+        let known = self.prs.values().find_map(|(p, _)| {
+            (p.item.is_none() && p.project == project && p.branch.as_deref() == Some(branch))
+                .then(|| p.url.clone())
+        });
+        if let Some(url) = known {
+            let branch = Some(branch.to_owned());
+            self.saw(&url, project.to_owned(), None, branch, &Pr::Unknown, now);
+        }
     }
 
     /// The reply: red and conflicting first, then the rest, each oldest read last.
@@ -215,6 +228,26 @@ mod tests {
                 "couldn't read it this time; last green".to_owned()
             )]
         );
+        // A branch PR `gh` can't find this pass stays, unread; an unknown branch adds nothing.
+        let branch = "https://github.com/o/r/pull/9";
+        w.begin();
+        w.saw(
+            branch,
+            "/r".into(),
+            None,
+            Some("b".into()),
+            &open(&[], None, true),
+            420,
+        );
+        w.end(430, Duration::from_secs(300));
+        w.begin();
+        w.saw(URL, "/r".into(), Some(3), None, &Pr::Unknown, 440);
+        w.unread_branch(Path::new("/r"), "b", 440);
+        w.unread_branch(Path::new("/r"), "other", 440);
+        w.end(450, Duration::from_secs(300));
+        let (prs, ..) = seen(&w);
+        assert_eq!(prs.len(), 2, "{prs:?}");
+        assert!(prs.iter().any(|p| p.0 == branch && p.1 == PrState::Unknown));
         // Merged: no longer watched.
         w.begin();
         w.saw(

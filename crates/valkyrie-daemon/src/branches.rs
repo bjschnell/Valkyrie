@@ -129,7 +129,14 @@ impl Registry {
                         .insert(key, (first.head.clone(), Instant::now()));
                     continue;
                 }
-                Pr::Unknown => continue,
+                Pr::Unknown => {
+                    let now = crate::session::now_ms() / 1000;
+                    self.watching
+                        .lock()
+                        .unwrap()
+                        .unread_branch(&key.0, &key.1, now);
+                    continue;
+                }
                 Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => url.clone(),
             };
             self.supervisor.lock().unwrap().no_pr.remove(&key);
