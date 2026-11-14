@@ -14,7 +14,10 @@ main") and one step offered:
 
 - `merge-base`: the agent merges the base in, resolves conflicts, runs your
   checks and pushes. It never rebases a pushed branch.
-- `ci-fix`: the agent reads the failing logs and fixes them.
+- `ci-fix`: the agent reads the failing logs and fixes them. With `ci: gh`
+  set for the repository ([ci-fix](policies.md#ci-fix-staying-on-a-red-pull-request)),
+  this one isn't offered: the agent is woken with it right away, up to ci-fix's
+  two tries per pull request, and offered to you after that.
 - `rerun`: when every failed check is a known flake, the failed jobs are rerun
   once, without waking the agent.
 

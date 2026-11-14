@@ -623,7 +623,10 @@ impl Registry {
     }
 
     /// The active policy that takes `step` on `offer`'s flag without asking:
-    /// not with the Context setting off, and once per pull request head.
+    /// not with the Context setting off, and once per pull request head. Past a
+    /// step policy, the repository's accepted `ci: gh` is one for `ci-fix` on red:
+    /// it already keeps an agent on a red pull request at its stop, and CI that
+    /// was still running then goes red only after it (backlog #170).
     fn policy_for(&self, offer: &Offer, step: &Step) -> Option<u32> {
         let key = (offer.pr.clone(), step.action, offer.head.clone());
         {
@@ -634,7 +637,16 @@ impl Registry {
         }
         let root = project::root(&offer.project);
         let decisions = self.context.lock().unwrap().load(&root);
-        policy::step_policy(&decisions, step.action, offer.trigger())
+        let trigger = offer.trigger();
+        policy::step_policy(&decisions, step.action, trigger).or_else(|| {
+            if (step.action, trigger) != (StepAction::CiFix, Trigger::Red) {
+                return None;
+            }
+            match policy::ci(&decisions)? {
+                (policy::Ci::Gh, policy::Source::Project(id)) => Some(id),
+                _ => None,
+            }
+        })
     }
 
     /// Takes `action` on `offer`, for the user or for `policy`, on a session still
@@ -1561,6 +1573,184 @@ mod tests {
         for s in [a, b, c, d] {
             s.kill();
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The repository's accepted `ci: gh` is the user's ci-fix: CI that goes red
+    /// after the agent's last stop (still pending when it stopped, so the Stop
+    /// hook let it through) wakes the agent with ci-fix's text without asking,
+    /// within the limit the Stop hook shares; past it, the step is offered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ci_gh_wakes_the_agent_when_ci_goes_red_after_its_stop() {
+        use crate::context::{AS_CALLER, Caller};
+        use crate::work::PrLookup;
+        use std::sync::Arc;
+        use valkyrie_proto::{ItemChange, NewItem, ReviewAction, Size, SpawnSpec};
+        let dir = std::env::temp_dir().join(format!("valkyrie-cigh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status();
+        assert!(git.unwrap().success());
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        registry.supervisor.lock().unwrap().context_on = Some(|| true);
+        let root = project::root(&dir);
+        let now = crate::session::now_ms() / 1000;
+        let ci = {
+            let store = registry.context.lock().unwrap();
+            let new = NewDecision {
+                cwd: root.clone(),
+                title: "Checks to run before shipping".into(),
+                body: "template: ship\nci: gh\nchecks: cargo test".into(),
+                kind: DecisionKind::Policy,
+                propose: true,
+                supersedes: None,
+                review_every: None,
+                session: None,
+                scope: None,
+            };
+            let d = store.decide(&new, Provenance::default(), now).unwrap();
+            store
+                .review(&root, d.id, &ReviewAction::Accept, None, None, now)
+                .unwrap();
+            d.id
+        };
+        let spawn = || {
+            let spec = SpawnSpec {
+                command: vec!["sleep".into(), "30".into()],
+                cwd: Some(dir.clone()),
+                name: None,
+                size: Size { cols: 40, rows: 10 },
+                env: Vec::new(),
+                worktree: None,
+                hidden: false,
+            };
+            let Reply::Session { info } = crate::spawn(&registry, spec).unwrap() else {
+                panic!("no session");
+            };
+            registry.get(info.id).unwrap()
+        };
+        let url = "https://github.com/o/r/pull/1";
+        let s = spawn();
+        {
+            let b = registry.backlog.lock().unwrap();
+            let new = NewItem {
+                title: "item".into(),
+                cwd: Some(dir.clone()),
+                ..Default::default()
+            };
+            let item = b.add(&new, "human", 1).unwrap();
+            let open = ItemChange::Status {
+                status: ItemStatus::Open,
+            };
+            b.change(item.id, &open, 1).unwrap();
+            b.taken(
+                item.id,
+                s.info().id,
+                registry.boot,
+                &[],
+                None,
+                Some(url),
+                None,
+                1,
+            )
+            .unwrap();
+        }
+        AS_CALLER.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|| Caller {
+                agent: None,
+                session: None,
+                bridge: false,
+                desktop: false,
+            }))
+        });
+        // A check outside GitHub Actions: nothing to rerun, so it's ci-fix.
+        fn red(head: &'static str) -> PrLookup {
+            Arc::new(move |_, pr| Pr::Open {
+                url: pr.to_owned(),
+                failed: vec![Check {
+                    name: "bamboo".into(),
+                    url: String::new(),
+                    run: None,
+                }],
+                conflicts: None,
+                head: head.into(),
+                settled: true,
+                author: String::new(),
+            })
+        }
+        let id = s.info().id;
+        registry.ship_merged_prs(red("h1")).await;
+        let flag = registry.flag_of(&s, id).unwrap();
+        assert!(
+            flag.step.is_none() && !flag.working,
+            "ci-fix waited for the user: {flag:?}"
+        );
+        let steps = registry.context.lock().unwrap().steps(&root, now + 1);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|r| (r.taken, r.policy))
+                .collect::<Vec<_>>(),
+            vec![(StepAction::CiFix, Some(ci))]
+        );
+        assert_eq!(
+            registry
+                .context
+                .lock()
+                .unwrap()
+                .ci_fix_blocks(&root, url, now + 1),
+            1
+        );
+        let log = std::fs::read_to_string(
+            dir.join("state/sessions")
+                .join(format!("{}.events.jsonl", s.key())),
+        )
+        .unwrap();
+        assert!(log.contains("\"policy\":") && log.contains("\"auto\":true"));
+
+        // The agent pushes, stops, and CI's red again on the new head: the second
+        // try, then it's the user's, offered.
+        let stop = || {
+            s.hook(
+                "claude",
+                1,
+                json!({"hook_event_name": "UserPromptSubmit", "prompt": "fix"}),
+            );
+            s.hook("claude", 1, json!({"hook_event_name": "Stop"}));
+        };
+        stop();
+        registry.ship_merged_prs(red("h2")).await;
+        assert_eq!(
+            registry
+                .context
+                .lock()
+                .unwrap()
+                .ci_fix_blocks(&root, url, now + 1),
+            2
+        );
+        stop();
+        registry.ship_merged_prs(red("h3")).await;
+        let flag = registry.flag_of(&s, id).unwrap();
+        assert_eq!(
+            flag.step.map(|s| s.action),
+            Some(StepAction::CiFix),
+            "past the limit the step is the user's"
+        );
+        AS_CALLER.with(|cell| *cell.borrow_mut() = None);
+        s.kill();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

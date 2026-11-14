@@ -64,11 +64,11 @@ export interface QueueItem {
 export type StepAction = "merge-base" | "ci-fix" | "rerun" | "leave" | "launch";
 
 export const STEP_LABEL: Record<StepAction, string> = {
-  "merge-base": "Merge the base in",
-  "ci-fix": "Fix CI",
+  "merge-base": "Ask its agent to merge the base in",
+  "ci-fix": "Ask its agent to fix CI",
   rerun: "Rerun failed jobs",
   leave: "Leave it",
-  launch: "Start it",
+  launch: "Start an agent on it",
 };
 
 export interface Step {

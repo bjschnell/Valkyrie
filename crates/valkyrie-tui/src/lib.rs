@@ -7111,7 +7111,7 @@ mod tests {
         for want in [
             "→ rerun",
             " a  rerun failed jobs",
-            " o  fix CI",
+            " o  ask its agent to fix CI",
             " d  leave it",
             "ci / windows matches #17",
         ] {
