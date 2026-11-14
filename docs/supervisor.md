@@ -63,6 +63,25 @@ Accept or Decline. In the TUI's backlog, `O` opens it over the page: `␣` ticks
 `t` ticks or unticks every change, `g`/`G` and PgUp/PgDn move through a long
 one, `↩` accepts and `d` declines.
 
+## The supervisor page
+
+Everything the supervisor waits on you for, and what it did, in one place.
+Press `s` on the TUI's home screen; the header counts what waits ("3 for the
+supervisor: s"). On the web, a strip on the home screen says what waits and the
+latest thing it did, and opens the page (`s` from the keyboard).
+
+- **Waiting on you:** flagged pull requests with the step offered, ready items
+  it offers to start, build orders to review, and step policies it learned from
+  your answers. Each is answered right there (`a` takes, `o` the other step, `d`
+  leaves or rejects in the TUI; ↩ on a build order opens it). They still show
+  where they always did, on the session and the board, too.
+- **What it did:** the last 90 days, newest first: each step you answered, each
+  one a policy took without asking (named by the policy, so you can see what it
+  does on its own), and each build order you answered.
+
+The page is opened on purpose and closed again; it never stays up beside your
+sessions.
+
 ## Turning it off
 
 ```sh

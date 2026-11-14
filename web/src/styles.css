@@ -4135,3 +4135,120 @@ button.as-text {
 .search-resume {
   align-self: flex-start;
 }
+
+/* The supervisor (backlog #180): a strip on home, a page of its own. */
+.supervisor-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 12px;
+  background: var(--card);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.supervisor-strip-name {
+  flex: none;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.supervisor-strip-line {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.supervisor-card {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.supervisor-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.supervisor-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent2) 22%, transparent);
+  color: var(--accent2);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.supervisor-card-title {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.supervisor-card-sub {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.supervisor-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+
+.supervisor-log li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+  font-size: 14px;
+}
+
+.supervisor-when {
+  flex: none;
+  width: 4ch;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.supervisor-said {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.supervisor-said a {
+  color: inherit;
+}
+
+/* What a policy did without asking stands out from what you answered. */
+.supervisor-log li.by-policy .supervisor-said {
+  color: var(--accent);
+}
+
+.supervisor-repo {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}

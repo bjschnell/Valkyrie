@@ -761,6 +761,16 @@ impl Page {
         }
     }
 
+    /// Opens `order` over the page, as `O` would (the supervisor page's ↩).
+    pub(crate) fn show_order(&mut self, order: &OrderProposal) {
+        self.order = Some(OrderView {
+            id: order.id,
+            project: order.project.clone(),
+            cursor: 0,
+            skip: Vec::new(),
+        });
+    }
+
     /// The open build order, if it still waits.
     pub(crate) fn open_order(&self) -> Option<(&OrderView, &OrderProposal)> {
         let view = self.order.as_ref()?;

@@ -4,6 +4,7 @@ import { DecisionList } from "./components/DecisionList";
 import { DigestView } from "./components/Digest";
 import { PastView } from "./components/Past";
 import { SearchView } from "./components/Search";
+import { SupervisorView } from "./components/Supervisor";
 import { DocView, DocsList } from "./components/Docs";
 import { Inbox } from "./components/Inbox";
 import { Launcher } from "./components/Launcher";
@@ -30,6 +31,7 @@ type Route =
   | { page: "digest" }
   | { page: "past" }
   | { page: "search" }
+  | { page: "supervisor" }
   | { page: "doc"; key: string }
   | { page: "item"; id: number | null }
   | { page: "order"; project: string }
@@ -40,7 +42,7 @@ type Route =
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
  * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
- * `#/digest` what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
+ * `#/digest` what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/supervisor` what the supervisor waits on and did, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
@@ -53,6 +55,7 @@ function route(): Route {
   if (location.hash === "#/digest") return { page: "digest" };
   if (location.hash === "#/history") return { page: "past" };
   if (location.hash === "#/search") return { page: "search" };
+  if (location.hash === "#/supervisor") return { page: "supervisor" };
   const d = /^#\/docs\/([^/]+)$/.exec(location.hash);
   // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
   if (d) return { page: "doc", key: d[1] };
@@ -176,6 +179,7 @@ export function App() {
       {at.page === "digest" && <DigestView />}
       {at.page === "past" && <PastView />}
       {at.page === "search" && <SearchView />}
+      {at.page === "supervisor" && <SupervisorView />}
       {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}
       {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}
       {at.page === "order" && <OrderPage key={at.project} project={at.project} />}
