@@ -283,6 +283,8 @@ export function ScreenView({
     const onBlur = () => report(false);
     // A click anywhere else (the composer, the header) takes the keyboard back.
     const onPointer = (e: PointerEvent) => {
+      // The palette over it is a detour: closing it gives the keyboard back.
+      if ((e.target as Element | null)?.closest?.(".palette")) return;
       if (!ref.current?.contains(e.target as Node)) onTyping(false);
     };
 

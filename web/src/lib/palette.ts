@@ -70,6 +70,11 @@ export function entries(s: Sources): Entry[] {
       do: { go: `#/s/${s.needs[0]}` },
     });
   }
+  // What only moves you comes first, so Enter on an unsearched palette never accepts.
+  out.push(
+    { key: "new-session", group: "Actions", label: "New session", also: "start launch agent", do: { go: "#/new" } },
+    { key: "new-item", group: "Actions", label: "New backlog item", also: "add todo", do: { go: "#/backlog/new" } },
+  );
   for (const d of s.proposals.filter((d) => d.status === "proposed")) {
     out.push({
       key: `decision-${d.project}-${d.id}`,
@@ -100,10 +105,6 @@ export function entries(s: Sources): Entry[] {
       do: { go: `#/backlog/order/${encodeURIComponent(o.project)}` },
     });
   }
-  out.push(
-    { key: "new-session", group: "Actions", label: "New session", also: "start launch agent", do: { go: "#/new" } },
-    { key: "new-item", group: "Actions", label: "New backlog item", also: "add todo", do: { go: "#/backlog/new" } },
-  );
   for (const x of s.sessions) {
     out.push({
       key: `session-${x.id}`,

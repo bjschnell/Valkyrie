@@ -23,6 +23,9 @@ const GROUP: Record<Entry["group"], string> = {
   Themes: "Theme",
 };
 
+/** An option's element id, by its entry's key so it stays with the entry. */
+const optionId = (key: string) => `palette-${key.replace(/[^\w-]/g, "_")}`;
+
 function run(d: Entry["do"]) {
   if ("go" in d) {
     if (location.hash !== d.go) location.hash = d.go;
@@ -43,7 +46,9 @@ export function Palette({ onClose }: { onClose: () => void }) {
   const docs = useCached("docs", allDocs).data?.docs;
   const look = useLook();
   const [query, setQuery] = useState("");
-  const [at, setAt] = useState(0);
+  // The row picked, by its key: rows the daemon adds while it's open (a new
+  // proposal at the top) must not slide another action under Enter.
+  const [sel, setSel] = useState<string | null>(null);
 
   const all = useMemo(
     () =>
@@ -61,14 +66,19 @@ export function Palette({ onClose }: { onClose: () => void }) {
     [sessions, queue, proposals, items, orders, docs, look],
   );
   const shown = useMemo(() => rank(all, query).slice(0, SHOWN), [all, query]);
-  const pick = Math.min(at, Math.max(0, shown.length - 1));
+  const pick = Math.max(0, shown.findIndex((e) => e.key === sel));
+  const picked = shown[pick]?.key ?? null;
+  useEffect(() => {
+    if (sel === null && picked !== null) setSel(picked);
+  }, [sel, picked]);
 
   // Opened as a modal, so the rest of the page is inert under it; closed, the
   // keyboard goes back where it was (a session's terminal, say).
+  const back = useRef<HTMLElement | null | undefined>(undefined);
+  if (back.current === undefined) back.current = document.activeElement as HTMLElement | null;
   useEffect(() => {
-    const back = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
-    return () => back?.focus?.({ preventScroll: true });
+    if (!dialog.current?.open) dialog.current?.showModal();
+    return () => back.current?.focus?.({ preventScroll: true });
   }, []);
   // Moving away by any route (an Alt chord, the back button) closes it.
   useEffect(() => {
@@ -78,17 +88,20 @@ export function Palette({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     list.current?.querySelector(`[data-i="${pick}"]`)?.scrollIntoView({ block: "nearest" });
   }, [pick]);
+  // A click that started in the box (selecting its text) isn't one on the backdrop.
+  const downOn = useRef<EventTarget | null>(null);
 
   const choose = (e: Entry | undefined) => {
     if (!e) return;
     onClose();
     run(e.do);
   };
-  const move = (by: number) => shown.length && setAt((pick + by + shown.length) % shown.length);
+  const move = (by: number) => {
+    if (shown.length) setSel(shown[(pick + by + shown.length) % shown.length].key);
+  };
   const onKey = (e: React.KeyboardEvent) => {
-    const ctrl = e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
-    if (e.key === "ArrowDown" || (ctrl && e.key === "n")) move(1);
-    else if (e.key === "ArrowUp" || (ctrl && e.key === "p")) move(-1);
+    if (e.key === "ArrowDown") move(1);
+    else if (e.key === "ArrowUp") move(-1);
     else if (e.key === "Enter" && !e.nativeEvent.isComposing) choose(shown[pick]);
     else return;
     e.preventDefault();
@@ -100,7 +113,8 @@ export function Palette({ onClose }: { onClose: () => void }) {
       className="palette"
       aria-label="Command palette"
       onClose={onClose}
-      onClick={(e) => e.target === dialog.current && onClose()}
+      onPointerDown={(e) => (downOn.current = e.target)}
+      onClick={(e) => e.target === dialog.current && downOn.current === dialog.current && onClose()}
     >
       <div className="palette-box">
         <input
@@ -109,7 +123,8 @@ export function Palette({ onClose }: { onClose: () => void }) {
           role="combobox"
           aria-expanded
           aria-controls="palette-list"
-          aria-activedescendant={shown.length ? `palette-${pick}` : undefined}
+          aria-label="Search sessions, pages, docs and actions"
+          aria-activedescendant={shown.length ? optionId(shown[pick].key) : undefined}
           aria-autocomplete="list"
           placeholder="Jump to a session, page or doc, or run an action"
           spellCheck={false}
@@ -117,7 +132,7 @@ export function Palette({ onClose }: { onClose: () => void }) {
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);
-            setAt(0);
+            setSel(null);
           }}
           onKeyDown={onKey}
         />
@@ -125,12 +140,12 @@ export function Palette({ onClose }: { onClose: () => void }) {
           {shown.map((e, i) => (
             <div
               key={e.key}
-              id={`palette-${i}`}
+              id={optionId(e.key)}
               data-i={i}
               role="option"
               aria-selected={i === pick}
               className="palette-row"
-              onPointerMove={() => i !== pick && setAt(i)}
+              onPointerMove={() => i !== pick && setSel(e.key)}
               onClick={() => choose(e)}
             >
               <span className="palette-main">

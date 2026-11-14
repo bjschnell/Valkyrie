@@ -76,6 +76,8 @@ describe("entries", () => {
     const accepts = list.filter((e) => e.label.startsWith("Accept"));
     expect(accepts.map((e) => e.label)).toEqual(["Accept gotcha: d1", "Accept #3: i3"]);
     expect(accepts[1].do).toEqual({ item: 3 });
+    // Enter straight away goes somewhere; it never accepts.
+    expect(list[0].label).toBe("New session");
     // Open and proposed items can be jumped to; shipped ones can't.
     expect(list.filter((e) => e.group === "Backlog").map((e) => e.do)).toEqual([{ go: "#/backlog/3" }, { go: "#/backlog/4" }]);
   });
