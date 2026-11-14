@@ -507,12 +507,7 @@ pub fn repo_name(cwd: Option<&Path>, roots: &[PathBuf]) -> String {
     let Some(cwd) = cwd else {
         return "unknown".into();
     };
-    let name = |p: &Path| {
-        p.file_name().map_or_else(
-            || p.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        )
-    };
+    let name = folder_name;
     if cwd.exists() {
         return name(&project::root(cwd));
     }
@@ -532,16 +527,71 @@ pub fn repo_name(cwd: Option<&Path>, roots: &[PathBuf]) -> String {
                 .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with(&prefix))
         })
         .max_by_key(|r| r.as_os_str().len())
-        .map_or_else(|| name(cwd), |r| name(r))
+        .cloned()
+        // No known root: a repository on disk beside the gone worktree.
+        .or_else(|| top_gone(cwd).and_then(|top| repos_beside(&top).into_iter().next()))
+        .map_or_else(|| name(cwd), |r| name(&r))
 }
 
-/// The repository a run worked in: its directory while that exists, else its
-/// backlog item's.
+fn folder_name(p: &Path) -> String {
+    p.file_name().map_or_else(
+        || p.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// The highest folder of `dir` that's gone, under one that's there: the
+/// worktree a removal took.
+pub fn top_gone(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .take_while(|p| !p.exists())
+        .last()
+        .filter(|p| p.parent().is_some_and(Path::is_dir))
+        .map(Path::to_path_buf)
+}
+
+/// The folders beside a gone worktree `<repo>-<branch>` that could be its
+/// repository: named `<repo>`, in git. Longest name first, so `app-web` comes
+/// before `app` for `app-web-feat-x`.
+pub fn repos_beside(gone: &Path) -> Vec<PathBuf> {
+    let (Some(parent), Some(leaf)) = (gone.parent(), gone.file_name()) else {
+        return Vec::new();
+    };
+    let leaf = leaf.to_string_lossy();
+    let mut found: Vec<PathBuf> = std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| leaf.starts_with(&format!("{}-", n.to_string_lossy())))
+        })
+        .filter(|p| p.is_dir() && project::in_git(p))
+        .collect();
+    found.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+    found
+}
+
+/// Where a run worked: its agent's last directory, else where it started (an
+/// agent that ended before any hook said).
+pub fn cwd_of(run: &Run) -> Option<&Path> {
+    run.cwd.as_deref().or(run.home.as_deref())
+}
+
+/// The repository a run worked in: its directory while that exists, else the
+/// repository the daemon wrote down when it started, else its backlog item's.
 pub fn repo_of(run: &Run, item: Option<&Item>, roots: &[PathBuf]) -> String {
-    match (&run.cwd, item.and_then(|i| i.project.as_deref())) {
-        (Some(c), _) if c.exists() => repo_name(Some(c), roots),
-        (_, Some(project)) => repo_name(Some(project), roots),
-        (c, None) => repo_name(c.as_deref(), roots),
+    let cwd = cwd_of(run);
+    if let Some(c) = cwd.filter(|c| c.exists()) {
+        return repo_name(Some(c), roots);
+    }
+    if let Some(repo) = &run.repo {
+        return folder_name(repo);
+    }
+    match item.and_then(|i| i.project.as_deref()) {
+        Some(project) => repo_name(Some(project), roots),
+        None => repo_name(cwd, roots),
     }
 }
 
@@ -603,7 +653,7 @@ pub fn entries(runs: &[Run], known: &Known, now: u64) -> Vec<DigestEntry> {
             let item = item_for(run, known.items);
             let session = known.live.get(&run.key).copied();
             let (outcome, detail) = classify(run, item, &merged, session.is_some(), now);
-            let cwd = run.cwd.clone();
+            let cwd = cwd_of(run).map(Path::to_path_buf);
             let repo = repo_of(run, item, known.roots);
             Some(DigestEntry {
                 key: run.key.clone(),
@@ -1191,6 +1241,54 @@ mod tests {
         assert_eq!(got[1].item, Some(9));
         assert_eq!(got[1].what, "#9 item 9");
         assert_eq!(got[1].repo, "app", "a gone worktree is placed by its name");
+    }
+
+    /// #177: a removed worktree's session is named after its repository with no
+    /// backlog item or live session to say which, and one whose agent never
+    /// fired a hook after where it started.
+    #[test]
+    fn a_gone_worktree_or_a_hookless_run_is_named_by_its_repository() {
+        let dir = tempdir("repo-of");
+        for name in ["app", "app-web"] {
+            let repo = dir.join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            let ok = std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        }
+        let gone = |leaf: &str| Some(dir.join(leaf).join("src"));
+        let by = |run: &Run| repo_of(run, None, &[]);
+        // Beside it on disk, the longest name that fits.
+        let run = Run {
+            cwd: gone("app-feat-x"),
+            ..Run::default()
+        };
+        assert_eq!(by(&run), "app");
+        let run = Run {
+            cwd: gone("app-web-feat-x"),
+            ..Run::default()
+        };
+        assert_eq!(by(&run), "app-web");
+        // No hook said where it worked: where it started.
+        let run = Run {
+            home: Some(dir.join("app-web")),
+            ..Run::default()
+        };
+        assert_eq!(by(&run), "app-web");
+        assert_eq!(cwd_of(&run), Some(dir.join("app-web").as_path()));
+        // The repository the daemon wrote down beats a guess from the name.
+        let run = Run {
+            cwd: gone("app-web-feat-x"),
+            repo: Some(dir.join("app")),
+            ..Run::default()
+        };
+        assert_eq!(by(&run), "app");
+        // Nothing to go on.
+        assert_eq!(by(&Run::default()), "unknown");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
