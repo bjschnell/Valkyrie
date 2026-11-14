@@ -760,6 +760,21 @@ mod tests {
         assert_eq!(agent_of(&[]), None);
     }
 
+    /// Set for the copy of this binary that `finds_an_agent_under_a_wrapper` runs.
+    #[cfg(unix)]
+    const FAKE_AGENT: &str = "VALKYRIE_TEST_FAKE_AGENT";
+
+    /// The fake agent: waits to be found and killed. A no-op in a plain
+    /// `--ignored` run.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "run by finds_an_agent_under_a_wrapper as its fake agent"]
+    fn fake_agent() {
+        if std::env::var_os(FAKE_AGENT).is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
     /// A wrapper script in the foreground, the agent its child: found below it.
     #[cfg(unix)]
     #[test]
@@ -767,14 +782,21 @@ mod tests {
         use std::os::unix::process::CommandExt;
         let dir = std::env::temp_dir().join(format!("valkyrie-fg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // `sleep` under the name `claude`: argv[0] keeps the name it was started by.
+        // This test binary under the name `claude`, running `fake_agent`, which
+        // waits: argv[0] keeps the name it was started by. Not `sleep`: where
+        // coreutils is one multicall binary (Ubuntu 26.04), it goes by argv[0] and
+        // started as `claude` exits at once.
         let fake = dir.join("claude");
         let _ = std::fs::remove_file(&fake);
-        std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &fake).unwrap();
         // `sh -c` in its own group, like a job the shell put in the foreground.
         let mut wrapper = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!("{} 30 & wait", fake.display()))
+            .arg(format!(
+                "{} --ignored --exact foreground::tests::fake_agent & wait",
+                fake.display()
+            ))
+            .env(FAKE_AGENT, "1")
             .process_group(0)
             .spawn()
             .unwrap();
