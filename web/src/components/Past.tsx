@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import type { PastSession } from "../proto";
 import { clockOf, dayLabel, outcomeLabel } from "../lib/digest";
-import { pastSessions, resume, toast, useApp } from "../store";
+import { pastSessions, resume, toast } from "../store";
+import { useCached } from "../cache";
+import { Loading } from "./bits";
 import { Back } from "./icons";
 
 const home = () => {
@@ -14,26 +16,8 @@ const home = () => {
  * adding its worktree back if that was taken away, and opens it.
  */
 export function PastView() {
-  const status = useApp((s) => s.status);
-  const [list, setList] = useState<PastSession[] | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
+  const { data: list, failed } = useCached("past", pastSessions);
   const [busy, setBusy] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (status !== "open") return;
-    let live = true;
-    pastSessions().then(
-      (l) => {
-        if (!live) return;
-        setList(l);
-        setFailed(null);
-      },
-      (e: Error) => live && setFailed(e.message),
-    );
-    return () => {
-      live = false;
-    };
-  }, [status]);
 
   // q or Esc goes back, when you aren't typing.
   useEffect(() => {
@@ -76,7 +60,7 @@ export function PastView() {
       </header>
 
       <main className="inbox">
-        {list === null && <div className="empty">{failed ? `Couldn't load past sessions: ${failed}` : "Loading…"}</div>}
+        {list === null && (failed ? <div className="empty">Couldn't load past sessions: {failed}</div> : <Loading rows={6} />)}
         {list !== null && list.length === 0 && (
           <div className="empty">No agent sessions have ended in the last 31 days.</div>
         )}

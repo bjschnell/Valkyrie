@@ -4278,3 +4278,433 @@ button.as-text {
 .supervisor-state.state-green {
   color: var(--done);
 }
+
+/* #104 trial ------------------------------------------------------------------ */
+/* Each spike is switched in Settings; its rules hang off html[data-trial-*]. */
+
+.trial-switch {
+  flex: none;
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  transition: background 0.18s ease;
+}
+
+.trial-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--soft);
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.trial-switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.trial-switch.on::after {
+  transform: translateX(16px);
+  background: var(--on-accent);
+}
+
+/* Instant pages: rows shaped like the list, shimmering until it lands. */
+.skeleton .row {
+  pointer-events: none;
+}
+
+.sk {
+  display: block;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    var(--raised) 0%,
+    color-mix(in srgb, var(--raised) 55%, var(--line)) 50%,
+    var(--raised) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+
+.sk-chip {
+  flex: none;
+  width: 44px;
+  height: 18px;
+  border-radius: 999px;
+}
+
+.sk-line {
+  height: 12px;
+  margin: 3px 0;
+}
+
+.sk-sub {
+  height: 10px;
+  opacity: 0.6;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* Navigation: shared bits of the rail and the tab bar. */
+.nav-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.nav-badge {
+  position: absolute;
+  top: -6px;
+  left: calc(50% + 6px);
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--fg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.nav-badge.needs {
+  background: var(--needs);
+  color: var(--page);
+}
+
+/* The pages the nav reaches don't need a way back to the inbox. */
+html.with-rail:is([data-page="backlog"], [data-page="docs"], [data-page="decisions"], [data-page="digest"], [data-page="past"], [data-page="search"], [data-page="supervisor"], [data-page="settings"])
+  .topbar
+  > .icon-btn[aria-label="Back"]:first-child,
+html.with-tabs .topbar > .icon-btn[aria-label="Back"]:first-child {
+  display: none;
+}
+
+/* The rail has New; the inbox's top bar doesn't repeat it. */
+html.with-rail .topbar > .icon-btn[aria-label="New session"] {
+  display: none;
+}
+
+/* Desktop: a rail down the left; the page moves over for it. */
+html.with-rail body {
+  padding-left: 68px;
+}
+
+.rail {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 20;
+  width: 68px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 0;
+  background: var(--surface);
+  border-right: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  view-transition-name: rail;
+}
+
+.rail-new {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.rail-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 60px;
+  padding: 7px 0 6px;
+  border-radius: 12px;
+  color: var(--muted);
+}
+
+.rail-item .nav-icon {
+  width: 40px;
+  height: 26px;
+  border-radius: 999px;
+}
+
+.rail-item[aria-current="page"] {
+  color: var(--fg);
+}
+
+.rail-item[aria-current="page"] .nav-icon {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.rail-item .nav-label {
+  font-size: 10.5px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+}
+
+.rail-gap {
+  flex: 1;
+}
+
+/* Phone: a tab bar at the thumb on the top pages, More for the rest. */
+html.with-tabs .page {
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
+}
+
+.tabbar {
+  position: fixed;
+  inset: auto 0 0 0;
+  /* Over the More sheet's backdrop, so More closes it again. */
+  z-index: 26;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding: 6px 6px calc(env(safe-area-inset-bottom) + 6px);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  view-transition-name: tabbar;
+}
+
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 0 2px;
+  color: var(--muted);
+  min-height: 48px;
+}
+
+.tab .nav-icon {
+  width: 56px;
+  height: 28px;
+  border-radius: 999px;
+  transition: background 0.2s ease;
+}
+
+.tab[aria-current="page"] {
+  color: var(--fg);
+}
+
+.tab[aria-current="page"] .nav-icon {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.tab .nav-label {
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgb(0 0 0 / 45%);
+  animation: fade-in 0.16s ease-out;
+}
+
+.sheet {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 8px 12px calc(env(safe-area-inset-bottom) + 76px);
+  border-radius: 20px 20px 0 0;
+  background: var(--page);
+  border-top: 1px solid var(--line);
+  animation: sheet-up 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.sheet-grip {
+  width: 36px;
+  height: 4px;
+  margin: 2px auto 10px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.sheet-row {
+  color: var(--fg);
+}
+
+.sheet-row[aria-current="page"] {
+  color: var(--accent);
+}
+
+.sheet-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--soft);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+/* The toast clears the tab bar. */
+html.with-tabs .toast {
+  top: auto;
+  bottom: calc(env(safe-area-inset-bottom) + 76px);
+  transform: translate(-50%, 12px);
+}
+
+html.with-tabs .toast.show {
+  transform: translate(-50%, 0);
+}
+
+html.with-rail .toast {
+  left: calc(50% + 34px);
+}
+
+/* Motion: page transitions (View Transitions API) and press and hover feedback. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.2s;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+html[data-vt="forward"]::view-transition-old(root) {
+  animation-name: vt-out-left;
+}
+html[data-vt="forward"]::view-transition-new(root) {
+  animation-name: vt-in-right;
+}
+html[data-vt="back"]::view-transition-old(root) {
+  animation-name: vt-out-right;
+}
+html[data-vt="back"]::view-transition-new(root) {
+  animation-name: vt-in-left;
+}
+
+/* The list beside a session stays put; only the pane would move, so fade. */
+@media (min-width: 1120px) and (pointer: fine) {
+  html[data-vt]::view-transition-old(root) {
+    animation-name: vt-fade-out;
+  }
+  html[data-vt]::view-transition-new(root) {
+    animation-name: vt-fade-in;
+  }
+}
+
+html[data-vt="fade"]::view-transition-old(root) {
+  animation-name: vt-fade-out;
+  animation-duration: 0.12s;
+}
+html[data-vt="fade"]::view-transition-new(root) {
+  animation-name: vt-fade-in;
+  animation-duration: 0.16s;
+}
+
+@keyframes vt-in-right {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+}
+@keyframes vt-out-left {
+  to {
+    transform: translateX(-18px);
+    opacity: 0;
+  }
+}
+@keyframes vt-in-left {
+  from {
+    transform: translateX(-28px);
+    opacity: 0;
+  }
+}
+@keyframes vt-out-right {
+  to {
+    transform: translateX(18px);
+    opacity: 0;
+  }
+}
+@keyframes vt-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes vt-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+html[data-trial-motion] :is(.row, .icon-btn, .tab, .rail-item, .rail-new, button.card, .chip) {
+  transition:
+    transform 0.12s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+html[data-trial-motion] :is(.row, .tab, .rail-item, button.card):active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+html[data-trial-motion] :is(.icon-btn, .rail-new):active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  html[data-trial-motion] button.row:hover:not(:disabled),
+  html[data-trial-motion] a.row:hover {
+    background: color-mix(in srgb, var(--card) 70%, transparent);
+    color: var(--fg);
+  }
+  html[data-trial-motion] .icon-btn:hover {
+    background: var(--raised);
+    color: var(--fg);
+  }
+  html[data-trial-motion] .rail-item:hover {
+    color: var(--fg);
+  }
+  html[data-trial-motion] .rail-item:hover .nav-icon {
+    background: var(--raised);
+  }
+  html[data-trial-motion] .rail-item[aria-current="page"]:hover .nav-icon {
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
+  }
+  html[data-trial-motion] .rail-new:hover {
+    filter: brightness(1.1);
+  }
+}
+
+html[data-trial-motion] :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

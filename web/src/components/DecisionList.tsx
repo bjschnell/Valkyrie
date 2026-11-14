@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Decision, Note } from "../proto";
 import { SHELVES, type Shelf, byProject, ended, inFull, matches, pinnable, shelf } from "../lib/decisions";
 import { live, notesByProject } from "../lib/notes";
@@ -6,8 +6,16 @@ import { scopeName } from "../lib/scope";
 import { age } from "../lib/time";
 import { allDecisions, allNotes, correctNote, deleteNote, review, useApp } from "../store";
 import { DecisionEditor } from "./Decisions";
+import { useCached } from "../cache";
+import { Loading } from "./bits";
 import { Back } from "./icons";
 import { Markdown } from "./Markdown";
+
+/** Decisions and notes together; null when either can't be asked. */
+export async function fetchMemory(): Promise<{ decisions: Decision[]; notes: Note[] } | null> {
+  const [decisions, notes] = await Promise.all([allDecisions(), allNotes()]);
+  return decisions && notes ? { decisions, notes } : null;
+}
 
 const home = () => {
   location.hash = "#/";
@@ -32,26 +40,16 @@ const ABOUT: Record<Tab, string> = {
  * agents' notes (ADR-0017). Proposals wait in the inbox, not here.
  */
 export function DecisionList() {
-  const status = useApp((s) => s.status);
-  const [decisions, setDecisions] = useState<Decision[] | null>(null);
-  const [notes, setNotes] = useState<Note[] | null>(null);
-  const [failed, setFailed] = useState(false);
+  const { data: memory, failed: why, reload: load } = useCached("memory", fetchMemory);
+  const decisions = memory?.decisions ?? null;
+  const notes = memory?.notes ?? null;
+  const failed = why !== null;
   const [tab, setTab] = useState<Tab>("decisions");
   const [only, setOnly] = useState<string | null>(null);
   const [showEnded, setShowEnded] = useState(false);
   const [words, setWords] = useState("");
   const filter = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    const [ds, ns] = await Promise.all([allDecisions(), allNotes()]);
-    setFailed(ds === null || ns === null);
-    if (ds) setDecisions(ds);
-    if (ns) setNotes(ns);
-  }, []);
-
-  useEffect(() => {
-    if (status === "open") void load();
-  }, [status, load]);
 
   // q or Esc goes back and / filters, when you aren't typing.
   useEffect(() => {
@@ -166,7 +164,7 @@ export function DecisionList() {
             ))}
           </div>
         )}
-        {!loaded && <div className="empty">{failed ? "Couldn't load them." : "Loading…"}</div>}
+        {!loaded && (failed ? <div className="empty">Couldn't load them.</div> : <Loading rows={5} />)}
         {loaded && shown.length === 0 && (
           <div className="empty">{words.trim() ? "Nothing matches those words." : `No ${showEnded ? "ended " : ""}${tab} yet.`}</div>
         )}

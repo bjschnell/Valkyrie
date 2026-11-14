@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import type { Digest, DigestEntry, DigestGroup } from "../proto";
+import type { DigestEntry, DigestGroup } from "../proto";
 import { counts, dayLabel, clockOf, groupDigest, outcomeLabel, spanOf, windowStart, type Window } from "../lib/digest";
 import { age } from "../lib/time";
-import { awayDigest, toast, useApp } from "../store";
+import { awayDigest, toast } from "../store";
+import { useCached } from "../cache";
+import { Loading } from "./bits";
 import { Back } from "./icons";
 
 const home = () => {
@@ -45,30 +47,11 @@ async function copy(text: string): Promise<boolean> {
  * paste as a standup.
  */
 export function DigestView() {
-  const status = useApp((s) => s.status);
   const [win, setWin] = useState<Window>("away");
   const [by, setBy] = useState<DigestGroup>("repo");
-  const [digest, setDigest] = useState<Digest | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (status !== "open") return;
-    let live = true;
-    // The old window's digest would pass for the new one's, and hide a failure.
-    setDigest(null);
-    setFailed(null);
-    awayDigest(windowStart(win, Date.now()), by).then(
-      (d) => {
-        if (!live) return;
-        setDigest(d);
-        setFailed(null);
-      },
-      (e: Error) => live && setFailed(e.message),
-    );
-    return () => {
-      live = false;
-    };
-  }, [status, win, by]);
+  const { data: digest, failed } = useCached(`digest:${win}:${by}`, () =>
+    awayDigest(windowStart(win, Date.now()), by),
+  );
 
   // q or Esc goes back, when you aren't typing.
   useEffect(() => {
@@ -130,7 +113,7 @@ export function DigestView() {
             </button>
           ))}
         </div>
-        {digest === null && <div className="empty">{failed ? `Couldn't load the digest: ${failed}` : "Loading…"}</div>}
+        {digest === null && (failed ? <div className="empty">Couldn't load the digest: {failed}</div> : <Loading rows={5} />)}
         {digest !== null && (
           <p className="digest-about">
             {digest.away ? "Since you left, " : "Since "}
