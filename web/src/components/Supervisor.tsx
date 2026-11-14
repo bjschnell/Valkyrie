@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
-import type { SupervisorEntry, WatchedPr } from "../proto";
+import { useEffect, useRef, useState } from "react";
+import type { WatchedPr } from "../proto";
 import { base, launchesOn, orderHref, orderSize } from "../lib/backlog";
 import { stepChoices } from "../lib/step";
 import { stripLine, waitingOnYou, watchLine, type Wait } from "../lib/supervisor";
 import { age } from "../lib/time";
 import { answerLaunch, review, supervisorLog, supervisorWatch, takeStep, useApp } from "../store";
+import { useCached } from "../cache";
+import { Loading } from "./bits";
 import { Back, Chevron } from "./icons";
 
 const home = () => {
@@ -13,24 +15,12 @@ const home = () => {
 
 /** The log as last fetched, refetched while `key` changes (an answer lands). */
 function useLog(key: unknown) {
-  const status = useApp((s) => s.status);
-  const [log, setLog] = useState<{ entries: SupervisorEntry[]; on: boolean } | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
+  const { data: log, failed, reload } = useCached("supervisor-log", supervisorLog);
+  const first = useRef(true);
   useEffect(() => {
-    if (status !== "open") return;
-    let live = true;
-    supervisorLog().then(
-      (l) => {
-        if (!live) return;
-        setLog(l);
-        setFailed(null);
-      },
-      (e: Error) => live && setFailed(e.message),
-    );
-    return () => {
-      live = false;
-    };
-  }, [status, key]);
+    if (first.current) first.current = false;
+    else void reload();
+  }, [key, reload]);
   return { log, failed };
 }
 
@@ -120,7 +110,7 @@ export function SupervisorView() {
             What it did <span className="count">{log?.entries.length ?? ""}</span>
           </h2>
           {failed && <div className="empty">Couldn't load it: {failed}</div>}
-          {!failed && !log && <div className="empty">Loading…</div>}
+          {!failed && !log && <Loading rows={3} />}
           {log && log.entries.length === 0 && <div className="empty">Nothing in the last 90 days.</div>}
           {log && log.entries.length > 0 && (
             <ol className="supervisor-log">
@@ -240,27 +230,13 @@ const STATE_LABEL: Record<WatchedPr["state"], string> = {
 function Watching({ refresh }: { refresh: number }) {
   const status = useApp((s) => s.status);
   const now = useApp((s) => s.now);
-  const [watch, setWatch] = useState<Awaited<ReturnType<typeof supervisorWatch>> | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
+  const { data: watch, failed, reload } = useCached("supervisor-watch", supervisorWatch);
   useEffect(() => {
     if (status !== "open") return;
-    let live = true;
-    const load = () =>
-      supervisorWatch().then(
-        (w) => {
-          if (!live) return;
-          setWatch(w);
-          setFailed(null);
-        },
-        (e: Error) => live && setFailed(e.message),
-      );
-    void load();
-    const every = setInterval(() => void load(), 60_000);
-    return () => {
-      live = false;
-      clearInterval(every);
-    };
-  }, [status, refresh]);
+    if (refresh) void reload();
+    const every = setInterval(() => void reload(), 60_000);
+    return () => clearInterval(every);
+  }, [status, refresh, reload]);
   return (
     <section>
       <h2 className="section-title">
@@ -268,7 +244,7 @@ function Watching({ refresh }: { refresh: number }) {
       </h2>
       {watch && <div className="supervisor-watch-line">{watchLine(watch, now)}</div>}
       {failed && <div className="empty">Couldn't load it: {failed}</div>}
-      {!failed && !watch && <div className="empty">Loading…</div>}
+      {!failed && !watch && <Loading rows={2} />}
       {watch && watch.on && watch.prs.length === 0 && <div className="empty">No open pull request of yours.</div>}
       {watch && watch.prs.length > 0 && (
         <ol className="supervisor-log supervisor-watch">

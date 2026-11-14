@@ -18,6 +18,8 @@ import {
   undeleteDoc,
   useApp,
 } from "../store";
+import { useCached } from "../cache";
+import { Loading } from "./bits";
 import { Back } from "./icons";
 import { Markdown, type BlockComments } from "./Markdown";
 
@@ -53,22 +55,15 @@ function byline(d: Doc): string {
  */
 export function DocsList() {
   const status = useApp((s) => s.status);
-  const [docs, setDocs] = useState<Doc[] | null>(null);
-  const [failed, setFailed] = useState(false);
+  // The marks show what was new before this visit; then it's all read.
+  const { data, failed } = useCached("docs", allDocs, (got) => docsSeen(got.at));
+  const docs = data?.docs ?? null;
   const [gone, setGone] = useState<DeletedDoc[]>([]);
   useBack("#/");
 
   useEffect(() => {
     if (status !== "open") return;
     let live = true;
-    void allDocs().then((got) => {
-      if (!live) return;
-      setFailed(got === null);
-      if (!got) return;
-      // The marks show what was new before this visit; then it's all read.
-      setDocs(got.docs);
-      docsSeen(got.at);
-    });
     void deletedDocs().then((ds) => live && setGone(ds));
     return () => {
       live = false;
@@ -87,7 +82,7 @@ export function DocsList() {
         </div>
       </header>
       <main className="inbox">
-        {docs === null && <div className="empty">{failed ? "Couldn't load the docs." : "Loading…"}</div>}
+        {docs === null && (failed ? <div className="empty">Couldn't load the docs.</div> : <Loading />)}
         {docs !== null && docs.length === 0 && (
           <div className="empty">No docs yet. Agents write plans, research and reports here.</div>
         )}
@@ -288,7 +283,7 @@ export function DocView({ docKey }: { docKey: string }) {
       </header>
       <main className="inbox doc-page">
         {error && <div className="empty">{error}</div>}
-        {!doc && !error && <div className="empty">Loading…</div>}
+        {!doc && !error && <Loading rows={6} />}
         {doc && (
           <>
             <div className="doc-meta">

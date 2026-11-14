@@ -48,3 +48,20 @@ export function ConnectionPill() {
     </span>
   );
 }
+
+/** A page still loading: rows shaped like the list it will show. */
+export function Loading({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className="list skeleton" aria-busy="true" aria-label="Loading">
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="row">
+          <span className="sk sk-chip" />
+          <span className="row-main">
+            <span className="sk sk-line" style={{ width: `${70 - ((i * 17) % 35)}%` }} />
+            <span className="sk sk-line sk-sub" style={{ width: `${45 - ((i * 11) % 20)}%` }} />
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
