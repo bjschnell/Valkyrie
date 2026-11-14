@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripLine, waitingOnYou } from "./supervisor";
+import { stripLine, waitingOnYou, watchLine } from "./supervisor";
 import type { Decision, LaunchOffer, OrderProposal, QueueItem } from "../proto";
 
 const queued = (session: number, step: boolean): QueueItem =>
@@ -36,5 +36,14 @@ describe("stripLine", () => {
     expect(stripLine(3, latest)).toBe("3 waiting on you · policy #12: fix CI on PR #101");
     expect(stripLine(0, latest)).toBe("policy #12: fix CI on PR #101");
     expect(stripLine(0, undefined)).toBeNull();
+  });
+});
+
+describe("watchLine", () => {
+  it("says how many, when read and when next, or why not", () => {
+    expect(watchLine({ prs: [1, 2], polled_at: 880, next_at: 1180, on: true }, 1_000_000)).toBe("2 PRs · read 2m ago · next in 3m");
+    expect(watchLine({ prs: [1], polled_at: 880, next_at: 900, on: true }, 1_000_000)).toBe("1 PR · read 2m ago");
+    expect(watchLine({ prs: [], on: true }, 1_000_000)).toBe("the poll hasn't run yet");
+    expect(watchLine({ prs: [], polled_at: 1, on: false }, 1_000_000)).toBe("off: nothing is read");
   });
 });

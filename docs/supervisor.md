@@ -78,6 +78,10 @@ latest thing it did, and opens the page (`s` from the keyboard).
   your answers. Each is answered right there (`a` takes, `o` the other step, `d`
   leaves or rejects in the TUI; ↩ on a build order opens it). They still show
   where they always did, on the session and the board, too.
+- **Watching:** each open pull request of yours the poll read on its last
+  pass, red and conflicting first, with why, and when it reads them next. One
+  that merges, closes, or stops being read (its item shipped, its session
+  ended) drops off.
 - **What it did:** the last 90 days, newest first: each step you answered, each
   one a policy took without asking (named by the policy, so you can see what it
   does on its own), and each build order you answered.

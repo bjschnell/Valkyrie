@@ -133,6 +133,19 @@ impl Registry {
                 Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => url.clone(),
             };
             self.supervisor.lock().unwrap().no_pr.remove(&key);
+            // Watched only while it's the user's own and open, as flags are.
+            let mine = matches!(&pr, Pr::Open { author, .. } if author == me);
+            if mine || !matches!(pr, Pr::Open { .. }) {
+                let now = crate::session::now_ms() / 1000;
+                self.watching.lock().unwrap().saw(
+                    &url,
+                    key.0.clone(),
+                    None,
+                    Some(key.1.clone()),
+                    &pr,
+                    now,
+                );
+            }
             // How the steps policies took on it turned out.
             self.judge_steps(&url, &pr);
             if let Pr::Merged { base, author, .. } = &pr {

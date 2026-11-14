@@ -4252,3 +4252,29 @@ button.as-text {
   color: var(--muted);
   font-size: 12px;
 }
+
+/* What the supervisor watches (backlog #181). */
+.supervisor-watch-line {
+  margin: -4px 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.supervisor-state {
+  flex: none;
+  min-width: 10ch;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.supervisor-state.state-red,
+.supervisor-state.state-conflicting {
+  color: var(--blocked);
+}
+
+.supervisor-state.state-green {
+  color: var(--done);
+}

@@ -25,6 +25,7 @@ mod quota;
 mod restore;
 mod session;
 mod supervise;
+mod watching;
 pub mod work;
 mod worktree;
 
@@ -182,6 +183,8 @@ struct Registry {
     /// Build orders waiting on the user (ADR-0019 §2), pushed with the items.
     orders: watch::Sender<order::Orders>,
     order_book: Mutex<order::Book>,
+    /// What the PR poll read on its last pass (backlog #181).
+    watching: Mutex<watching::Watching>,
     /// Ready items the supervisor offers to start (ADR-0019 §2 `launch`), pushed
     /// with the items.
     launches: watch::Sender<dispatch::Launches>,
@@ -562,6 +565,7 @@ fn new_registry(
         )),
         items: watch::Sender::new(Arc::default()),
         orders: watch::Sender::new(Arc::default()),
+        watching: Mutex::default(),
         order_book: Mutex::new(order::Book::load(restore::per_daemon(
             state_dir,
             &own_socket,
@@ -1011,6 +1015,7 @@ async fn watch_prs(registry: Arc<Registry>) {
         interval.tick().await;
         // Local git only, so it comes before the calls to `gh` that can be slow.
         registry.watch_overlaps().await;
+        registry.watching.lock().unwrap().begin();
         registry.ship_merged_prs(lookup.clone()).await;
         if me.is_none() {
             me = tokio::task::spawn_blocking(branches::me)
@@ -1021,6 +1026,8 @@ async fn watch_prs(registry: Arc<Registry>) {
         if let Some(me) = &me {
             registry.watch_branches(lookup.clone(), me).await;
         }
+        let now = session::now_ms() / 1000;
+        registry.watching.lock().unwrap().end(now, every);
     }
 }
 
@@ -1427,6 +1434,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
             ClientMsg::SupervisorLog { req } => (req, registry.supervisor_log()),
+            ClientMsg::SupervisorWatch { req } => (req, registry.supervisor_watch()),
             ClientMsg::History { req } => (req, registry.history().await),
             ClientMsg::Resume {
                 req,

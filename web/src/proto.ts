@@ -104,6 +104,22 @@ export interface SupervisorEntry {
   pr?: string;
 }
 
+/** An open PR as the supervisor's poll last read it (backlog #181, protocol 44). */
+export type PrState = "green" | "pending" | "red" | "conflicting" | "unknown";
+
+export interface WatchedPr {
+  url: string;
+  project: string;
+  /** The backlog item it was read from; absent: found from a session's branch. */
+  item?: number;
+  branch?: string;
+  state: PrState;
+  /** One line: "CI red on PR #101: lint", "checks still running". */
+  detail: string;
+  /** Seconds since the epoch. */
+  read_at: number;
+}
+
 /** How the away digest is grouped (backlog #105). */
 export type DigestGroup = "repo" | "day";
 /** Where a session's work ended up, most urgent first. */
@@ -704,6 +720,7 @@ export type Request =
   /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
   | { t: "plan_order"; cwd: string }
   | { t: "supervisor_log" }
+  | { t: "supervisor_watch" }
   /** The user only: `items` accepts only those items' changes, absent all of them. */
   | {
       t: "answer_order";
@@ -780,6 +797,7 @@ export type Reply =
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
   | { t: "supervisor_log"; entries: SupervisorEntry[]; on: boolean }
+  | { t: "supervisor_watch"; prs: WatchedPr[]; polled_at?: number; next_at?: number; on: boolean }
   | { t: "step_taken"; said: string }
   | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] }
   /** `from_top`: the first row's line, from the oldest in history; `history`: lines

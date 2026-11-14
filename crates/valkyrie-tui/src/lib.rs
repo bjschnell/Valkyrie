@@ -2707,8 +2707,14 @@ impl App {
             .supervisor_log()
             .await
             .map_err(|e| e.to_string());
+        let watch = self
+            .client
+            .supervisor_watch()
+            .await
+            .map_err(|e| e.to_string());
         if let Some(page) = &mut self.supervisor {
             page.loaded(got);
+            page.watched(watch);
         }
     }
 

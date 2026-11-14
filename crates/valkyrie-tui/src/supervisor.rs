@@ -11,6 +11,8 @@ use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use std::path::PathBuf;
+use valkyrie_proto::PrState;
+use valkyrie_proto::supervisor::Watch;
 use valkyrie_proto::{
     Decision, DecisionKind, DecisionStatus, LaunchOffer, OrderProposal, QueueItem, SessionId, Step,
     StepAction, SupervisorEntry,
@@ -110,10 +112,16 @@ pub(crate) enum Do {
 pub(crate) struct Page {
     log: Option<(Vec<SupervisorEntry>, bool)>,
     failed: Option<String>,
+    /// The pull requests it watches, as the poll last read them (backlog #181).
+    watch: Option<Result<Watch, String>>,
     cursor: usize,
 }
 
 impl Page {
+    pub(crate) fn watched(&mut self, got: Result<Watch, String>) {
+        self.watch = Some(got);
+    }
+
     pub(crate) fn loaded(&mut self, got: Result<(Vec<SupervisorEntry>, bool), String>) {
         match got {
             Ok(log) => {
@@ -214,6 +222,8 @@ impl Page {
             lines.push(line);
         }
         lines.push(Line::default());
+        lines.extend(watch_lines(self.watch.as_ref(), inner, now_ms / 1000, t));
+        lines.push(Line::default());
         let on = self.log.as_ref().is_none_or(|(_, on)| *on);
         lines.push(Line::from(vec![
             " What it did ".fg(t.accent2).bold(),
@@ -275,6 +285,73 @@ impl Page {
             .style(style::Style::new().bg(t.panel).fg(t.fg));
         frame.render_widget(Paragraph::new(lines).block(block), rect);
     }
+}
+
+/// The "Watching" section: each open PR the poll read, its state and why, and
+/// when the poll reads them next.
+fn watch_lines(
+    watch: Option<&Result<Watch, String>>,
+    inner: usize,
+    now: u64,
+    t: &Theme,
+) -> Vec<Line<'static>> {
+    let ago = |at: u64| crate::age(at * 1000, now * 1000);
+    let mut lines = Vec::new();
+    let (head, note) = match watch {
+        Some(Ok(w)) if !w.on => (" Watching ", "· off: nothing is read".to_owned()),
+        Some(Ok(w)) => (
+            " Watching ",
+            match (w.polled_at, w.next_at) {
+                (Some(at), Some(next)) if next > now => format!(
+                    "· {} PRs, read {} ago, next in {}",
+                    w.prs.len(),
+                    ago(at),
+                    crate::age(now * 1000, next * 1000)
+                ),
+                (Some(at), _) => format!("· {} PRs, read {} ago", w.prs.len(), ago(at)),
+                (None, _) => "· the poll hasn't run yet".to_owned(),
+            },
+        ),
+        _ => (" Watching ", String::new()),
+    };
+    lines.push(Line::from(vec![
+        head.fg(t.accent2).bold(),
+        note.fg(t.muted),
+    ]));
+    match watch {
+        None => lines.push("   Loading…".fg(t.muted).into()),
+        Some(Err(e)) => lines.push(
+            format!("   Couldn't load it: {}", fit(e, inner.saturating_sub(20)))
+                .fg(t.needs)
+                .into(),
+        ),
+        Some(Ok(w)) if w.prs.is_empty() && w.on => {
+            lines.push("   No open pull request of yours.".fg(t.muted).into())
+        }
+        Some(Ok(w)) => {
+            for pr in &w.prs {
+                let color = match pr.state {
+                    PrState::Red | PrState::Conflicting => t.needs,
+                    PrState::Green => t.done,
+                    PrState::Pending | PrState::Unknown => t.muted,
+                };
+                let whose = match (pr.item, &pr.branch) {
+                    (Some(i), _) => format!("#{i}"),
+                    (None, Some(b)) => b.clone(),
+                    (None, None) => String::new(),
+                };
+                let state = format!(" {:<11} ", pr.state.label());
+                let room = inner.saturating_sub(state.len() + whose.len() + 8);
+                lines.push(Line::from(vec![
+                    "   ".into(),
+                    state.fg(color).bold(),
+                    fit(&pr.detail, room).fg(t.fg),
+                    format!("  {whose}").fg(t.muted),
+                ]));
+            }
+        }
+    }
+    lines
 }
 
 /// What `a` (`yes`) or `d` does on `w`.
@@ -451,5 +528,35 @@ mod tests {
         // Past the end stays on the last; Esc closes.
         assert!(page.keys(b"jjj", &waits).is_empty());
         assert_eq!(page.keys(b"\x1b", &waits), [Do::Close]);
+    }
+
+    #[test]
+    fn watching_says_each_pr_and_when_it_reads_them_next() {
+        let text = |w: Option<&Result<Watch, String>>| {
+            watch_lines(w, 80, 1_000, &crate::theme::VALKYRIE)
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+        };
+        let pr: valkyrie_proto::WatchedPr = serde_json::from_value(serde_json::json!({
+            "url": "u", "project": "/r/app", "item": 12, "state": "red",
+            "detail": "CI red on PR #101: lint", "read_at": 880
+        }))
+        .unwrap();
+        let w = Ok(Watch {
+            prs: vec![pr],
+            polled_at: Some(880),
+            next_at: Some(1_180),
+            on: true,
+        });
+        let lines = text(Some(&w));
+        assert!(
+            lines[0].contains("1 PRs, read 2m ago, next in 3m"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("red") && lines[1].contains("lint") && lines[1].contains("#12"));
+        let off = Ok(Watch::default());
+        assert!(text(Some(&off))[0].contains("off"));
+        assert!(text(None)[1].contains("Loading"));
     }
 }

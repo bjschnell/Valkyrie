@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import type { SupervisorEntry } from "../proto";
+import type { SupervisorEntry, WatchedPr } from "../proto";
 import { base, launchesOn, orderHref, orderSize } from "../lib/backlog";
 import { stepChoices } from "../lib/step";
-import { stripLine, waitingOnYou, type Wait } from "../lib/supervisor";
+import { stripLine, waitingOnYou, watchLine, type Wait } from "../lib/supervisor";
 import { age } from "../lib/time";
-import { answerLaunch, review, supervisorLog, takeStep, useApp } from "../store";
+import { answerLaunch, review, supervisorLog, supervisorWatch, takeStep, useApp } from "../store";
 import { Back, Chevron } from "./icons";
 
 const home = () => {
@@ -114,6 +114,7 @@ export function SupervisorView() {
             </div>
           )}
         </section>
+        <Watching refresh={answered} />
         <section>
           <h2 className="section-title">
             What it did <span className="count">{log?.entries.length ?? ""}</span>
@@ -221,4 +222,71 @@ function WaitCard({ w, onDone }: { w: Wait; onDone: () => void }) {
         </button>,
       ]);
   }
+}
+
+const STATE_LABEL: Record<WatchedPr["state"], string> = {
+  green: "green",
+  pending: "pending",
+  red: "red",
+  conflicting: "conflicting",
+  unknown: "unread",
+};
+
+/**
+ * What the supervisor watches (backlog #181): each open PR its poll read, red and
+ * conflicting first, with why, and when the poll reads them next. Read again
+ * every minute while the page is open, since the poll runs every five.
+ */
+function Watching({ refresh }: { refresh: number }) {
+  const status = useApp((s) => s.status);
+  const now = useApp((s) => s.now);
+  const [watch, setWatch] = useState<Awaited<ReturnType<typeof supervisorWatch>> | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    if (status !== "open") return;
+    let live = true;
+    const load = () =>
+      supervisorWatch().then(
+        (w) => {
+          if (!live) return;
+          setWatch(w);
+          setFailed(null);
+        },
+        (e: Error) => live && setFailed(e.message),
+      );
+    void load();
+    const every = setInterval(() => void load(), 60_000);
+    return () => {
+      live = false;
+      clearInterval(every);
+    };
+  }, [status, refresh]);
+  return (
+    <section>
+      <h2 className="section-title">
+        Watching <span className="count">{watch?.prs.length ?? ""}</span>
+      </h2>
+      {watch && <div className="supervisor-watch-line">{watchLine(watch, now)}</div>}
+      {failed && <div className="empty">Couldn't load it: {failed}</div>}
+      {!failed && !watch && <div className="empty">Loading…</div>}
+      {watch && watch.on && watch.prs.length === 0 && <div className="empty">No open pull request of yours.</div>}
+      {watch && watch.prs.length > 0 && (
+        <ol className="supervisor-log supervisor-watch">
+          {watch.prs.map((p) => (
+            <li key={p.url}>
+              <span className={`supervisor-state state-${p.state}`}>{STATE_LABEL[p.state]}</span>
+              <span className="supervisor-said">
+                <a href={p.url} target="_blank" rel="noreferrer">
+                  {p.detail}
+                </a>
+              </span>
+              <span className="supervisor-repo">
+                {p.item !== undefined ? `#${p.item}` : p.branch} · {base(p.project)}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
 }
