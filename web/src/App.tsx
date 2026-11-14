@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Backlog, ItemEditor } from "./components/Backlog";
+import { Backlog, ItemEditor, OrderPage } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
 import { DigestView } from "./components/Digest";
 import { PastView } from "./components/Past";
@@ -32,13 +32,14 @@ type Route =
   | { page: "search" }
   | { page: "doc"; key: string }
   | { page: "item"; id: number | null }
+  | { page: "order"; project: string }
   | { page: "session"; id: number }
   | { page: "review"; id: number };
 
 /**
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
- * writing an item down and changing item 3, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
+ * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
  * `#/digest` what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {
@@ -55,6 +56,14 @@ function route(): Route {
   const d = /^#\/docs\/([^/]+)$/.exec(location.hash);
   // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
   if (d) return { page: "doc", key: d[1] };
+  const o = /^#\/backlog\/order\/(.+)$/.exec(location.hash);
+  if (o) {
+    try {
+      return { page: "order", project: decodeURIComponent(o[1]) };
+    } catch {
+      return { page: "backlog" };
+    }
+  }
   const b = /^#\/backlog\/(new|\d+)$/.exec(location.hash);
   if (b) return { page: "item", id: b[1] === "new" ? null : Number(b[1]) };
   return { page: "inbox" };
@@ -169,6 +178,7 @@ export function App() {
       {at.page === "search" && <SearchView />}
       {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}
       {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}
+      {at.page === "order" && <OrderPage key={at.project} project={at.project} />}
       {at.page === "session" && <SessionView id={at.id} />}
       {at.page === "review" && <ReviewView id={at.id} />}
       <Toast />
