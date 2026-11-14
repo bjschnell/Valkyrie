@@ -18,6 +18,7 @@ pub mod pastes;
 pub mod quota;
 pub mod screen;
 pub mod search;
+pub mod supervisor;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -40,9 +41,10 @@ pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 pub use search::{SearchField, SearchHit, SearchResults};
+pub use supervisor::SupervisorEntry;
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 42;
+pub const PROTOCOL: u32 = 43;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -523,6 +525,12 @@ pub enum ClientMsg {
         id: u64,
         launch: bool,
     },
+    /// What the supervisor did over the last 90 days, newest first (backlog
+    /// #180, protocol 43): steps you answered, steps policies took, build orders
+    /// answered. Read-only. Replies `SupervisorLog`.
+    SupervisorLog {
+        req: ReqId,
+    },
     /// Whether the supervisor runs (ADR-0019 §6, protocol 26): off, it offers no
     /// steps and takes none on its own, though the PR poll still flags sessions.
     /// `None` only asks; setting it is for the user only. Replies `Text`, `on` or
@@ -976,6 +984,11 @@ pub enum Reply {
     },
     OrderApplied {
         applied: OrderApplied,
+    },
+    /// What `SupervisorLog` asked for, and whether the supervisor is on.
+    SupervisorLog {
+        entries: Vec<SupervisorEntry>,
+        on: bool,
     },
     /// What a step did, in a line: "typed merge-base into session 4".
     StepTaken {

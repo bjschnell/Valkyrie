@@ -55,6 +55,10 @@ pub(crate) struct Book {
     /// The newest proposal's id, so the next is always larger.
     #[serde(default)]
     last_id: u64,
+    /// Build orders answered, oldest first, for the supervisor page (backlog
+    /// #180). Only the newest [`ANSWERED_KEEP`] stay.
+    #[serde(default)]
+    answered: Vec<Answered>,
     #[serde(skip)]
     calls: VecDeque<Instant>,
     /// Repositories with a model call under way.
@@ -64,7 +68,57 @@ pub(crate) struct Book {
     path: PathBuf,
 }
 
+/// How many answered build orders the book keeps.
+const ANSWERED_KEEP: usize = 100;
+
+/// A build order you answered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Answered {
+    pub(crate) at: u64,
+    pub(crate) project: PathBuf,
+    pub(crate) accept: bool,
+    /// The items whose changes were applied.
+    #[serde(default)]
+    pub(crate) changed: Vec<u32>,
+    /// How many items it ordered.
+    pub(crate) steps: usize,
+}
+
+impl Answered {
+    /// One line for the supervisor page.
+    pub(crate) fn said(&self) -> String {
+        let n = match self.steps {
+            1 => "1 item".to_owned(),
+            n => format!("{n} items"),
+        };
+        match (self.accept, self.changed.as_slice()) {
+            (false, _) => format!("you declined a build order of {n}"),
+            (true, []) => format!("you accepted a build order of {n}: nothing changed"),
+            (true, changed) => format!(
+                "you accepted a build order: changed {}",
+                changed
+                    .iter()
+                    .map(|i| format!("#{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        }
+    }
+}
+
 impl Book {
+    /// Build orders answered, oldest first.
+    pub(crate) fn answered(&self) -> &[Answered] {
+        &self.answered
+    }
+
+    fn answer(&mut self, answered: Answered) {
+        self.answered.push(answered);
+        let over = self.answered.len().saturating_sub(ANSWERED_KEEP);
+        self.answered.drain(..over);
+        self.save();
+    }
+
     pub(crate) fn load(path: PathBuf) -> Self {
         let mut book: Book = std::fs::read_to_string(&path)
             .ok()
@@ -313,8 +367,16 @@ impl Registry {
         };
         self.refresh_orders();
         let mut applied = OrderApplied::default();
+        let record = |changed: Vec<u32>| Answered {
+            at: now_secs(),
+            project: project.clone(),
+            accept,
+            changed,
+            steps: proposal.steps.len(),
+        };
         if !accept {
             tracing::info!(project = %project.display(), "build order declined");
+            self.order_book.lock().unwrap().answer(record(Vec::new()));
             return Ok(Reply::OrderApplied { applied });
         }
         for step in &proposal.steps {
@@ -342,6 +404,10 @@ impl Registry {
                 Err(e) => applied.skipped.push((step.item, format!("{e:#}"))),
             }
         }
+        self.order_book
+            .lock()
+            .unwrap()
+            .answer(record(applied.changed.clone()));
         tracing::info!(
             project = %project.display(),
             changed = applied.changed.len(),
@@ -583,6 +649,43 @@ mod tests {
         let file = registry.order_book.lock().unwrap().path.clone();
         let saved = std::fs::read_to_string(file).unwrap();
         assert!(saved.contains("\"pending\": []"), "{saved}");
+        // The supervisor page lists the answer, newest first beside the steps.
+        let root = valkyrie_context::project::root(Path::new("/repo"));
+        let step = valkyrie_context::steps::Record {
+            at: 1,
+            session: "s".into(),
+            trigger: valkyrie_context::policy::Trigger::Red,
+            offered: valkyrie_proto::StepAction::CiFix,
+            taken: valkyrie_proto::StepAction::CiFix,
+            pr: "https://github.com/o/r/pull/7".into(),
+            policy: Some(3),
+            features: None,
+            via: valkyrie_context::steps::Via::Item,
+        };
+        let now = now_secs();
+        let step = valkyrie_context::steps::Record {
+            at: now - 60,
+            ..step
+        };
+        registry
+            .context
+            .lock()
+            .unwrap()
+            .record_step(&root, &step, now)
+            .unwrap();
+        let Ok(Reply::SupervisorLog { entries, on }) = registry.supervisor_log() else {
+            panic!("no log");
+        };
+        assert!(on);
+        let said: Vec<&str> = entries.iter().map(|e| e.said.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                "you declined a build order of 1 item",
+                "policy #3: fix CI on PR #7"
+            ]
+        );
+        assert_eq!(entries[1].policy, Some(3));
         AS_CALLER.with(|c| *c.borrow_mut() = None);
         std::fs::remove_dir_all(&dir).unwrap();
     }

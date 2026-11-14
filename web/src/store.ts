@@ -10,6 +10,7 @@ import type {
   Note,
   Digest,
   DigestGroup,
+  SupervisorEntry,
   PastSession,
   SearchResults,
   Doc,
@@ -669,6 +670,15 @@ export async function awayDigest(sinceMs: number | null, by: DigestGroup): Promi
   const reply = await conn.request({ t: "digest", since_ms: sinceMs, by });
   if (reply.t !== "digest") throw new Error("unexpected reply");
   return reply.digest;
+}
+
+/** What the supervisor did, newest first, and whether it's on (backlog #180).
+ * Throws with the daemon's reason. */
+export async function supervisorLog(): Promise<{ entries: SupervisorEntry[]; on: boolean }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "supervisor_log" });
+  if (reply.t !== "supervisor_log") throw new Error("unexpected reply");
+  return { entries: reply.entries, on: reply.on };
 }
 
 /** Agent sessions that have ended, newest first (backlog #150). Throws with the

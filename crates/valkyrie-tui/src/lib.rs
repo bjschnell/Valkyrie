@@ -25,6 +25,7 @@ mod quiet;
 mod quota;
 mod rain;
 mod settings;
+mod supervisor;
 mod theme;
 
 use anyhow::Result;
@@ -254,6 +255,8 @@ struct App {
     keys_page: Option<KeysPage>,
     /// The away digest is open (`w` on the home screen).
     digest: Option<digest::Page>,
+    /// The supervisor page is open (`s` on the home screen).
+    supervisor: Option<supervisor::Page>,
     /// Past sessions, to resume one (`h` on the home screen).
     past: Option<past::Page>,
     /// The Docs page is open (`D` on the home screen).
@@ -429,6 +432,7 @@ impl App {
             settings_cursor: None,
             keys_page: None,
             digest: None,
+            supervisor: None,
             past: None,
             docs: None,
             editing: None,
@@ -775,6 +779,9 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
+        if self.supervisor.is_some() {
+            return self.supervisor_keys(&bytes).await;
+        }
         if self.past.is_some() {
             return self.past_keys(&bytes).await;
         }
@@ -854,6 +861,9 @@ impl App {
         if self.digest.is_some() {
             return self.digest_keys(&bytes).await;
         }
+        if self.supervisor.is_some() {
+            return self.supervisor_keys(&bytes).await;
+        }
         if self.past.is_some() {
             return self.past_keys(&bytes).await;
         }
@@ -887,6 +897,7 @@ impl App {
         }
         if self.keys_page.is_some()
             || self.digest.is_some()
+            || self.supervisor.is_some()
             || self.past.is_some()
             || self.settings_cursor.is_some()
             || self.renaming.is_some()
@@ -2542,6 +2553,7 @@ impl App {
             HomeKey::AddDevice => self.add_device().await,
             HomeKey::Backlog => self.open_backlog().await,
             HomeKey::Digest => self.open_digest().await,
+            HomeKey::Supervisor => self.open_supervisor().await,
             HomeKey::Past => self.open_past().await,
             HomeKey::Docs => self.open_docs().await,
             HomeKey::Adopt => self.adopt(selected).await,
@@ -2675,6 +2687,104 @@ impl App {
                     Err(e) => self.say(format!("couldn't copy: {e}")),
                 },
                 digest::Do::Say(text) => self.say(text),
+            }
+        }
+    }
+
+    /// What the supervisor waits on you for, from what the app holds.
+    fn waiting(&self) -> Vec<supervisor::Wait> {
+        supervisor::waiting(&self.queue, &self.launches, &self.orders, &self.proposals)
+    }
+
+    async fn open_supervisor(&mut self) {
+        self.supervisor = Some(supervisor::Page::default());
+        self.load_supervisor().await;
+    }
+
+    async fn load_supervisor(&mut self) {
+        let got = self
+            .client
+            .supervisor_log()
+            .await
+            .map_err(|e| e.to_string());
+        if let Some(page) = &mut self.supervisor {
+            page.loaded(got);
+        }
+    }
+
+    /// Keys while the supervisor page is open.
+    async fn supervisor_keys(&mut self, bytes: &[u8]) {
+        let waits = self.waiting();
+        let Some(page) = &mut self.supervisor else {
+            return;
+        };
+        for act in page.keys(bytes, &waits) {
+            match act {
+                supervisor::Do::Close => self.supervisor = None,
+                supervisor::Do::Load => self.load_supervisor().await,
+                supervisor::Do::Say(text) => self.say(text),
+                supervisor::Do::TakeStep {
+                    session,
+                    seq,
+                    action,
+                } => {
+                    let said = match self.client.take_step(session, seq, action).await {
+                        Ok(said) => said,
+                        Err(e) => format!("{} failed: {e:#}", action.as_str()),
+                    };
+                    self.say(said);
+                    self.refresh().await;
+                    self.load_supervisor().await;
+                }
+                supervisor::Do::AnswerLaunch {
+                    project,
+                    id,
+                    launch,
+                } => {
+                    let said = match self.client.answer_launch(project, id, launch).await {
+                        Ok(Some(s)) => format!("started session #{}", s.id),
+                        Ok(None) => "left it: the next ready item is offered instead".into(),
+                        Err(e) => format!("{e:#}"),
+                    };
+                    self.say(said);
+                    self.refresh().await;
+                    self.load_supervisor().await;
+                }
+                supervisor::Do::OpenOrder(project) => {
+                    let Some(order) = self.orders.iter().find(|o| o.project == project).cloned()
+                    else {
+                        self.say("that build order is gone".into());
+                        continue;
+                    };
+                    self.supervisor = None;
+                    self.open_backlog().await;
+                    if let Some(page) = &mut self.backlog {
+                        page.show_order(&order);
+                    }
+                    return;
+                }
+                supervisor::Do::Review {
+                    project,
+                    id,
+                    seen,
+                    accept,
+                } => {
+                    let action = if accept {
+                        ReviewAction::Accept
+                    } else {
+                        ReviewAction::Reject
+                    };
+                    let said = match self.client.review(project, id, action, Some(seen)).await {
+                        Ok(d) => format!(
+                            "{} policy #{id} {}",
+                            if accept { "accepted" } else { "rejected" },
+                            d.title
+                        ),
+                        Err(e) => format!("review failed: {e:#}"),
+                    };
+                    self.say(said);
+                    self.refresh().await;
+                }
             }
         }
     }
@@ -3522,6 +3632,7 @@ impl App {
                         && self.settings_cursor.is_none()
                         && self.keys_page.is_none()
                         && self.digest.is_none()
+                        && self.supervisor.is_none()
                         && self.past.is_none()
                         && !self.docs_shown()
                         && self.backlog.is_none()
@@ -3563,6 +3674,9 @@ impl App {
             }
             if let Some(page) = &self.digest {
                 page.draw(frame, self.settings.theme);
+            }
+            if let Some(page) = &self.supervisor {
+                page.draw(frame, &self.waiting(), now_ms(), self.settings.theme);
             }
             if let Some(page) = &self.past {
                 page.draw(frame, self.settings.theme, &jiff::tz::TimeZone::system());
@@ -3707,6 +3821,7 @@ impl App {
                 &self.queue,
                 &self.sessions,
                 self.proposals.len(),
+                self.waiting().len(),
                 now,
                 t,
             )),
@@ -3729,7 +3844,14 @@ impl App {
             .clone()
             .zip(quota.clone())
             .map(|(notice, quota)| [quota, notice].concat());
-        let left = header_line(&self.queue, &self.sessions, self.proposals.len(), now, t);
+        let left = header_line(
+            &self.queue,
+            &self.sessions,
+            self.proposals.len(),
+            self.waiting().len(),
+            now,
+            t,
+        );
         if let Some(right) = [both, quota, notice]
             .into_iter()
             .flatten()
@@ -5483,6 +5605,7 @@ fn header_line(
     queue: &[QueueItem],
     sessions: &[SessionInfo],
     proposals: usize,
+    supervisor: usize,
     now: u64,
     t: &Theme,
 ) -> Line<'static> {
@@ -5511,6 +5634,14 @@ fn header_line(
             format!(" {proposals} to review ")
                 .fg(t.bg)
                 .bg(t.accent2)
+                .bold(),
+        );
+    }
+    if supervisor > 0 {
+        spans.push(" ".into());
+        spans.push(
+            format!(" {supervisor} for the supervisor: s ")
+                .fg(t.accent)
                 .bold(),
         );
     }
@@ -5585,6 +5716,7 @@ fn footer_line(
     let general = [
         ("n", "new"),
         ("b", "backlog"),
+        ("s", "supervisor"),
         ("w", "digest"),
         ("h", "history"),
         ("D", "docs"),
@@ -5619,6 +5751,7 @@ fn chip_key(label: &str) -> HomeKey {
         "n" => HomeKey::NewShell,
         "b" => HomeKey::Backlog,
         "w" => HomeKey::Digest,
+        "s" => HomeKey::Supervisor,
         "h" => HomeKey::Past,
         "D" => HomeKey::Docs,
         "," => HomeKey::Settings,
@@ -6215,6 +6348,8 @@ enum HomeKey {
     Backlog,
     /// Open the away digest.
     Digest,
+    /// Open the supervisor page.
+    Supervisor,
     /// Open past sessions, to resume one.
     Past,
     /// Open the Docs page.
@@ -6282,6 +6417,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'p' => Some(HomeKey::AddDevice),
             b'b' => Some(HomeKey::Backlog),
             b'w' => Some(HomeKey::Digest),
+            b's' => Some(HomeKey::Supervisor),
             b'h' => Some(HomeKey::Past),
             b'D' => Some(HomeKey::Docs),
             b'A' => Some(HomeKey::Adopt),

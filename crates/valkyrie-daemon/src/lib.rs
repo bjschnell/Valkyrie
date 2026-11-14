@@ -1426,6 +1426,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             } => (req, registry.edit_doc(id, &base, &body, peer)),
             ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
+            ClientMsg::SupervisorLog { req } => (req, registry.supervisor_log()),
             ClientMsg::History { req } => (req, registry.history().await),
             ClientMsg::Resume {
                 req,

@@ -14,6 +14,7 @@ import { hasRain, useLook } from "../lib/theme";
 import { Chevron, Clock, Gear, List, Page, Pin, Plus, Rewind, Search } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { Proposals } from "./Decisions";
+import { SupervisorStrip } from "./Supervisor";
 import { NotifyHint } from "./Notify";
 import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
@@ -76,6 +77,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         d: () => (location.hash = "#/decisions"),
         a: () => (location.hash = "#/digest"),
         h: () => (location.hash = "#/history"),
+        s: () => (location.hash = "#/supervisor"),
         "/": () => (location.hash = "#/search"),
         ",": () => (location.hash = "#/settings"),
         j: () => pick(sel + 1),
@@ -175,6 +177,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         <QuotaMeter />
         <NotifyHint />
         <AllowAll />
+        <SupervisorStrip />
         <Proposals />
         <section>
           <h2 className="section-title">
