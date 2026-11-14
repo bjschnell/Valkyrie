@@ -28,7 +28,7 @@ use valkyrie_context::policy::{self, Trigger};
 use valkyrie_context::{outcome, project, steps};
 use valkyrie_proto::{
     AutoMode, DecisionKind, Flag, Item, ItemKind, ItemStatus, NewDecision, NoWindow, Provenance,
-    Reply, SessionId, Step, StepAction,
+    Reply, SessionId, Step, StepAction, SupervisorEntry,
 };
 
 /// Flake calls asked of the model per hour, at most.
@@ -918,6 +918,49 @@ impl Registry {
         })
     }
 
+    /// `ClientMsg::SupervisorLog`: what the supervisor did in every repository
+    /// the daemon knows, newest first (backlog #180).
+    pub(crate) fn supervisor_log(&self) -> Result<Reply> {
+        let now = crate::session::now_ms() / 1000;
+        let answered = self.order_book.lock().unwrap().answered().to_vec();
+        let mut roots = self.around().roots;
+        roots.extend(answered.iter().map(|a| a.project.clone()));
+        let mut roots: Vec<PathBuf> = roots.iter().map(|r| project::root(r)).collect();
+        roots.sort();
+        roots.dedup();
+        let mut entries: Vec<SupervisorEntry> = {
+            let store = self.context.lock().unwrap();
+            roots
+                .iter()
+                .flat_map(|root| {
+                    store.steps(root, now).into_iter().map(|r| SupervisorEntry {
+                        at: r.at,
+                        project: root.clone(),
+                        said: steps::said(&r),
+                        policy: r.policy,
+                        pr: (!r.pr.is_empty()).then(|| r.pr.clone()),
+                    })
+                })
+                .collect()
+        };
+        entries.extend(
+            answered
+                .iter()
+                .filter(|a| now.saturating_sub(a.at) <= steps::STEP_DAYS * 86_400)
+                .map(|a| SupervisorEntry {
+                    at: a.at,
+                    project: project::root(&a.project),
+                    said: a.said(),
+                    policy: None,
+                    pr: None,
+                }),
+        );
+        entries.sort_by_key(|e| std::cmp::Reverse(e.at));
+        entries.truncate(LOG_SHOWN);
+        let on = self.supervisor.lock().unwrap().on();
+        Ok(Reply::SupervisorLog { entries, on })
+    }
+
     pub(crate) fn drop_offer(&self, id: SessionId) {
         self.supervisor.lock().unwrap().offers.remove(&id);
         self.host.changed.notify_one();
@@ -930,6 +973,9 @@ impl Registry {
         policy::checks(&decisions).map(|(c, _)| c)
     }
 }
+
+/// The most entries `SupervisorLog` answers with.
+const LOG_SHOWN: usize = 300;
 
 /// Whether the Context setting is on (ADR-0019 §6): off, policies stop, the
 /// supervisor's with them. It's kept in `settings.toml`, which the daemon reads as

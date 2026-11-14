@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -344,6 +344,16 @@ describe("build order", () => {
     expect(planScope(null, [...items, item({ id: 4, project: "/c" })])).toBeNull();
     expect(ordersShown([order("/a"), order("/b")], "/b").map((o) => o.project)).toEqual(["/b"]);
     expect(ordersShown([order("/a"), order("/b")], null)).toHaveLength(2);
+  });
+
+  it("sizes a build order for its banner and links its page", () => {
+    const o = order("/home/me/my app");
+    o.steps = [{ item: 1, reason: "" }, { item: 2, reason: "", priority: "p1" }, { item: 3, reason: "", blocked_by: [1] }];
+    expect(orderSize(o)).toBe("3 items, 2 to change");
+    o.steps = [{ item: 1, reason: "" }];
+    expect(orderSize(o)).toBe("1 item, nothing to change");
+    expect(orderHref("/home/me/my app")).toBe("#/backlog/order/%2Fhome%2Fme%2Fmy%20app");
+    expect(decodeURIComponent(orderHref("/a/#b").slice("#/backlog/order/".length))).toBe("/a/#b");
   });
 
   it("says what each step changes and what accepting did", () => {

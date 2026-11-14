@@ -788,6 +788,14 @@ impl Client {
     }
 
     /// Whether the supervisor runs; with `on`, sets it first.
+    /// What the supervisor did, newest first, and whether it's on.
+    pub async fn supervisor_log(&self) -> Result<(Vec<crate::SupervisorEntry>, bool)> {
+        match self.request(|req| ClientMsg::SupervisorLog { req }).await? {
+            Reply::SupervisorLog { entries, on } => Ok((entries, on)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn supervise(&self, on: Option<bool>) -> Result<String> {
         match self.request(|req| ClientMsg::Supervise { req, on }).await? {
             Reply::Text { text } => Ok(text),

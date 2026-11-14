@@ -91,6 +91,19 @@ export interface Flag {
 }
 
 /** A project decision (ADR-0007). */
+/** One thing the supervisor did, or offered and got an answer to (backlog #180, protocol 43). */
+export interface SupervisorEntry {
+  /** Seconds since the epoch. */
+  at: number;
+  project: string;
+  /** One line: "you took: fix CI on PR #101", "policy #12: start #45". */
+  said: string;
+  /** The policy that took it without asking; absent when you answered. */
+  policy?: number;
+  /** The pull request it was about, as a URL. */
+  pr?: string;
+}
+
 /** How the away digest is grouped (backlog #105). */
 export type DigestGroup = "repo" | "day";
 /** Where a session's work ended up, most urgent first. */
@@ -690,6 +703,7 @@ export type Request =
   | { t: "item_facts"; id: number }
   /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
   | { t: "plan_order"; cwd: string }
+  | { t: "supervisor_log" }
   /** The user only: `items` accepts only those items' changes, absent all of them. */
   | {
       t: "answer_order";
@@ -765,6 +779,7 @@ export type Reply =
   | { t: "item_facts"; facts: ItemFacts | null }
   | { t: "order"; order: OrderProposal }
   | { t: "order_applied"; applied: OrderApplied }
+  | { t: "supervisor_log"; entries: SupervisorEntry[]; on: boolean }
   | { t: "step_taken"; said: string }
   | { t: "shipped"; shipped: ShippedItem[]; kept: KeptItem[] }
   /** `from_top`: the first row's line, from the oldest in history; `history`: lines

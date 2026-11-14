@@ -114,6 +114,35 @@ impl Record {
     }
 }
 
+/// One line for the supervisor page (backlog #180): who acted and what on.
+/// `policy #12: fix CI on PR #101`, `you took: merge the base into PR #98`,
+/// `you left: rerun failed jobs on PR #9`, `you took: start #45`.
+pub fn said(r: &Record) -> String {
+    let on = if r.pr.is_empty() {
+        // A launch names its item as its session: "item #45".
+        r.session.trim_start_matches("item ").to_owned()
+    } else {
+        crate::digest::pr_label(&r.pr)
+    };
+    let what = |a: StepAction| match a {
+        StepAction::MergeBase => format!("merge the base into {on}"),
+        StepAction::CiFix => format!("fix CI on {on}"),
+        StepAction::Rerun => format!("rerun failed jobs on {on}"),
+        StepAction::Launch => format!("start {on}"),
+        StepAction::Leave => format!("leave {on}"),
+    };
+    match (r.policy, r.taken) {
+        (Some(id), taken) => format!("policy #{id}: {}", what(taken)),
+        (None, StepAction::Leave) => format!("you left: {}", what(r.offered)),
+        (None, taken) if taken == r.offered => format!("you took: {}", what(taken)),
+        (None, taken) => format!(
+            "you chose: {} (offered: {})",
+            what(taken),
+            r.offered.label()
+        ),
+    }
+}
+
 /// How the supervisor fares on pull requests it found from a branch against
 /// ones on backlog items (ADR-0019 §7): the user's answers and how often they
 /// left the flag, and how policies' steps turned out. `None` until it has
@@ -530,5 +559,47 @@ mod tests {
         let mut old = all[0].to_json();
         old.as_object_mut().unwrap().remove("via");
         assert_eq!(Record::from_json(&old).unwrap().via, Via::Item);
+    }
+
+    #[test]
+    fn a_step_says_who_acted_and_on_what() {
+        let r = |taken, offered, policy: Option<u32>, pr: &str, session: &str| Record {
+            at: 0,
+            session: session.into(),
+            trigger: Trigger::Red,
+            offered,
+            taken,
+            pr: pr.into(),
+            policy,
+            features: None,
+            via: Via::Item,
+        };
+        let pr = "https://github.com/o/r/pull/101";
+        assert_eq!(
+            said(&r(StepAction::CiFix, StepAction::CiFix, Some(12), pr, "s")),
+            "policy #12: fix CI on PR #101"
+        );
+        assert_eq!(
+            said(&r(StepAction::CiFix, StepAction::CiFix, None, pr, "s")),
+            "you took: fix CI on PR #101"
+        );
+        assert_eq!(
+            said(&r(StepAction::Leave, StepAction::Rerun, None, pr, "s")),
+            "you left: rerun failed jobs on PR #101"
+        );
+        assert_eq!(
+            said(&r(StepAction::CiFix, StepAction::Rerun, None, pr, "s")),
+            "you chose: fix CI on PR #101 (offered: rerun failed jobs)"
+        );
+        assert_eq!(
+            said(&r(
+                StepAction::Launch,
+                StepAction::Launch,
+                None,
+                "",
+                "item #45"
+            )),
+            "you took: start #45"
+        );
     }
 }
