@@ -64,3 +64,9 @@ from the terminal app move between sessions: `Alt-j` and `Alt-k` step through
 them, `Alt-1` to `Alt-9` jump to one, `Alt-n` goes to whoever needs you, `Alt-p`
 to the one you were last on and `Alt-h` home. They work while you type in a
 terminal too.
+
+Ctrl+K (Cmd+K on a Mac) opens the command palette: type to jump to any session,
+page, doc or backlog item, or to run an action: start a session, add a backlog
+item, accept what an agent proposed, switch the theme. While a terminal has the
+keyboard, Ctrl+K is the program's (it deletes to the end of the line), so press
+Ctrl+Shift+K there; it works everywhere.

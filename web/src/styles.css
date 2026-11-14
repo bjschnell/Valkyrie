@@ -4711,3 +4711,120 @@ html[data-vt="fade"]::view-transition-new(root) {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* The command palette (#183): a box near the top, over a dimmed page. */
+.palette {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(520px, calc(100dvh - 96px));
+  margin: 12vh auto auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  animation: palette-in 0.14s var(--ease-out);
+}
+
+.palette::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.palette[open] .palette-box {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+}
+
+.palette-input {
+  width: 100%;
+  padding: var(--space-35) var(--space-4);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font: var(--text-md) var(--font);
+  outline: none;
+}
+
+.palette-input::placeholder {
+  color: var(--muted);
+}
+
+.palette-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-1);
+  overscroll-behavior: contain;
+}
+
+.palette-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.palette-row[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.palette-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette-label,
+.palette-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-sub {
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.palette-tag {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--soft);
+}
+
+.palette-empty {
+  padding: var(--space-4);
+  color: var(--muted);
+  text-align: center;
+}
+
+.palette-foot {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.palette-foot kbd {
+  margin-right: var(--space-05);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  font: var(--text-2xs) var(--mono);
+}
+
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}

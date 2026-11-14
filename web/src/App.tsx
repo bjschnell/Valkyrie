@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Backlog, ItemEditor, OrderPage } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
@@ -15,6 +15,8 @@ import { ReviewView } from "./components/Review";
 import { SessionView } from "./components/SessionView";
 import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
+import { paletteKey } from "./lib/palette";
+import { Palette } from "./components/Palette";
 import { Settings } from "./components/Settings";
 import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
@@ -193,6 +195,36 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [desktop, paired]);
 
+  // The command palette (#183): Ctrl+K, or Cmd+K on a Mac, from anywhere on a
+  // desktop keyboard. A session's terminal keeps Ctrl+K (kill-line) while it
+  // has the keyboard, so Ctrl+Shift+K opens it from there.
+  const [palette, setPalette] = useState(false);
+  const closePalette = useCallback(() => setPalette(false), []);
+  useEffect(() => {
+    if (!desktop || !paired) return;
+    const onKey = (e: KeyboardEvent) => {
+      const terminal = !!document.querySelector(".typing-field") && !(e.target as Element | null)?.closest?.(".palette");
+      const pressed = {
+        key: e.key,
+        code: e.code,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+        altGraph: e.getModifierState("AltGraph"),
+      };
+      if (e.repeat || !paletteKey(pressed, MAC, terminal)) return;
+      // The browser's own Ctrl+K is its search bar.
+      e.preventDefault();
+      setPalette((p) => !p);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [desktop, paired]);
+  useEffect(() => {
+    if (!desktop || !paired) setPalette(false);
+  }, [desktop, paired]);
+
   // With the room for it, the session list stays beside the open session.
   const wide = useWide();
 
@@ -209,6 +241,7 @@ export function App() {
     <>
       {rail && <Rail at={navKey(at)} />}
       {tabs && <TabBar at={navKey(at)} />}
+      {palette && <Palette onClose={closePalette} />}
       <Toast />
     </>
   );
@@ -228,7 +261,7 @@ export function App() {
                 <div className="split-empty-title">No session open</div>
                 <div>
                   Pick one from the list. <kbd>{ALT}</kbd>+<kbd>J</kbd> and <kbd>{ALT}</kbd>+<kbd>K</kbd> step through
-                  them, <kbd>{ALT}</kbd>+<kbd>N</kbd> goes to whoever needs you.
+                  them, <kbd>{ALT}</kbd>+<kbd>N</kbd> goes to whoever needs you, <kbd>{MAC ? "⌘" : "Ctrl"}</kbd>+<kbd>K</kbd> to anything.
                 </div>
               </div>
             )}

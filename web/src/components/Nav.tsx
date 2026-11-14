@@ -48,6 +48,9 @@ const MORE: NavKey[] = ["search", "digest", "past", "supervisor", "settings"];
 /** Down a desktop's rail, then Settings at its foot. */
 const RAIL: NavKey[] = ["inbox", "backlog", "docs", "memory", "search", "digest", "past", "supervisor"];
 
+/** Every page, for the command palette. */
+export const PAGES = [...RAIL, "settings" as const].map((k) => ({ label: DESTS[k].label, hash: DESTS[k].hash }));
+
 function useBadges(): Partial<Record<NavKey, number>> {
   const needs = useApp((s) => s.queue.length);
   const open = useApp((s) => s.items.filter((i) => i.status === "open").length);
