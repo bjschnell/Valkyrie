@@ -34,7 +34,7 @@ pub(crate) struct Regrow {
 }
 
 /// What a run's resume takes: its agent on its conversation, where it started.
-pub(crate) fn plan(run: &Run, roots: &[PathBuf]) -> Result<Plan, String> {
+pub(crate) fn plan(run: &Run) -> Result<Plan, String> {
     if run.conversation.is_none() {
         return Err("its agent never named its conversation".into());
     }
@@ -71,8 +71,9 @@ pub(crate) fn plan(run: &Run, roots: &[PathBuf]) -> Result<Plan, String> {
         }
         // An older log: Valkyrie's `<repo>-<branch>` naming, checked by the branch.
         (None, _) => {
-            let path = top_gone(&dir).ok_or_else(|| format!("{} is gone", dir.display()))?;
-            let checkout = checkout_beside(&path, roots, &branch).ok_or_else(|| {
+            let path =
+                digest::top_gone(&dir).ok_or_else(|| format!("{} is gone", dir.display()))?;
+            let checkout = checkout_beside(&path, &branch).ok_or_else(|| {
                 format!(
                     "{} is gone, and no repository beside it has {branch}",
                     dir.display()
@@ -99,38 +100,12 @@ fn command(run: &Run) -> Result<Vec<String>, String> {
         .ok_or_else(|| "it ran one command, not a conversation to come back to".into())
 }
 
-/// The highest folder of `dir` that's gone: the worktree a removal took.
-fn top_gone(dir: &Path) -> Option<PathBuf> {
-    dir.ancestors()
-        .take_while(|p| !p.exists())
-        .last()
-        .filter(|p| p.parent().is_some_and(Path::is_dir))
-        .map(Path::to_path_buf)
-}
-
-/// A checkout of the repository a gone worktree `<repo>-<branch>` was beside:
-/// a known root, else a folder beside it, named `<repo>`, in git, that has
-/// `branch`. The longest name wins: `app-web` over `app` for `app-web-feat-x`.
-fn checkout_beside(path: &Path, roots: &[PathBuf], branch: &str) -> Option<PathBuf> {
-    let parent = path.parent()?;
-    let gone = path.file_name()?.to_string_lossy().into_owned();
-    let beside = std::fs::read_dir(parent)
+/// A checkout of the repository a gone worktree `<repo>-<branch>` was beside
+/// that has `branch`, the longest name first (`digest::repos_beside`).
+fn checkout_beside(path: &Path, branch: &str) -> Option<PathBuf> {
+    digest::repos_beside(path)
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path());
-    roots
-        .iter()
-        .filter(|r| r.parent() == Some(parent))
-        .cloned()
-        .chain(beside)
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|n| gone.starts_with(&format!("{}-", n.to_string_lossy())))
-        })
-        .filter(|p| p.is_dir() && valkyrie_context::project::in_git(p))
-        .filter(|p| crate::worktree::knows_branch(p, branch))
-        .max_by_key(|p| p.as_os_str().len())
+        .find(|p| crate::worktree::knows_branch(p, branch))
 }
 
 /// The past sessions among `runs`, newest first: agent sessions with something
@@ -155,12 +130,7 @@ pub(crate) fn past(
                 return None;
             }
             let mut entry = entry;
-            // No hook said where it worked (it ended first): where it started.
-            if entry.cwd.is_none() && run.home.is_some() {
-                entry.cwd = run.home.clone();
-                entry.repo = digest::repo_name(entry.cwd.as_deref(), known.roots);
-            }
-            let (cannot, regrow) = match plan(run, known.roots) {
+            let (cannot, regrow) = match plan(run) {
                 Ok(Plan {
                     regrow: Some(r), ..
                 }) => {
@@ -259,10 +229,9 @@ impl Registry {
         let _busy = Busy::take(key)?;
         let path = self.host.transcript_dir.join(format!("{key}.events.jsonl"));
         anyhow::ensure!(path.is_file(), "no past session {key}");
-        let roots = self.around().roots;
         let (run, plan) = tokio::task::spawn_blocking(move || {
             let run = digest::read_run(&path, 0, now_ms())?;
-            let plan = plan(&run, &roots);
+            let plan = plan(&run);
             anyhow::Ok((run, plan))
         })
         .await??;
@@ -343,7 +312,7 @@ mod tests {
         let dir = scratch("plan");
         let r = run("claude", "claude --model opus fix-it", &dir);
         assert_eq!(
-            plan(&r, &[]).unwrap(),
+            plan(&r).unwrap(),
             Plan {
                 command: v("claude --resume c1 --model opus"),
                 dir: dir.clone(),
@@ -352,12 +321,12 @@ mod tests {
         );
         // Started a shell, ran codex in it.
         let r = run("codex", "fish", &dir);
-        assert_eq!(plan(&r, &[]).unwrap().command, v("codex resume c1"));
+        assert_eq!(plan(&r).unwrap().command, v("codex resume c1"));
         // One-shot and nameless runs can't come back.
-        assert!(plan(&run("claude", "claude -p hi", &dir), &[]).is_err());
+        assert!(plan(&run("claude", "claude -p hi", &dir)).is_err());
         let mut r = run("claude", "claude", &dir);
         r.conversation = None;
-        assert!(plan(&r, &[]).unwrap_err().contains("conversation"));
+        assert!(plan(&r).unwrap_err().contains("conversation"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -379,10 +348,10 @@ mod tests {
         let web = repo("app-web", Some("feat/x"));
         let gone = dir.join("app-web-feat-x").join("sub");
         let mut r = run("claude", "claude", &gone);
-        assert!(plan(&r, &[]).unwrap_err().contains("no known branch"));
+        assert!(plan(&r).unwrap_err().contains("no known branch"));
         r.branch = Some("feat/x".into());
         assert_eq!(
-            plan(&r, &[]).unwrap().regrow,
+            plan(&r).unwrap().regrow,
             Some(Regrow {
                 checkout: web.clone(),
                 path: dir.join("app-web-feat-x"),
@@ -394,21 +363,21 @@ mod tests {
             branch: Some("nope".into()),
             ..r.clone()
         };
-        assert!(plan(&other, &[]).unwrap_err().contains("has nope"));
+        assert!(plan(&other).unwrap_err().contains("has nope"));
         // A newer log names its repository and worktree: those, whatever is beside.
         let recorded = Run {
             repo: Some(web.clone()),
             worktree: Some(dir.join("app-web-feat-x")),
             ..r.clone()
         };
-        assert_eq!(plan(&recorded, &[]).unwrap().regrow.unwrap().checkout, web);
+        assert_eq!(plan(&recorded).unwrap().regrow.unwrap().checkout, web);
         // A gone folder that wasn't a linked worktree is left gone.
         let plain = Run {
             repo: Some(web.clone()),
             worktree: None,
             ..r
         };
-        assert!(plan(&plain, &[]).unwrap_err().contains("wasn't a worktree"));
+        assert!(plan(&plain).unwrap_err().contains("wasn't a worktree"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
