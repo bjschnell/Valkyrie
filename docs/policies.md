@@ -60,6 +60,11 @@ change, it files a bug instead of retrying. This happens at most twice per pull
 request; after that the stop goes through and the queue marks it as needing
 you ([ADR-0013](adr/0013-learned-policies.md)).
 
+CI is usually still running when the agent stops, so it goes red later. The
+[supervisor](supervisor.md) catches that on its next look at the pull request
+and, with `ci: gh` set, types ci-fix's text into the idle agent without asking.
+Those tries count toward the same two.
+
 With `ci: agent`, for CI that posts nothing to GitHub, Valkyrie can't see a red
 build. A Claude agent that stops with an open pull request is asked once to
 check the branch's CI with its own tools, fix and push if it's red, or stop and
