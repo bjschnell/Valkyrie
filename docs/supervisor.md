@@ -57,7 +57,11 @@ ready` policy is proposed, and once accepted it starts them on its own.
 do first, why, and the priorities and after-links that make the board show it.
 Nothing changes until you accept it, all of it or only some items
 (`--accept ID…`). An order is never turned into a policy: priority stays your
-call each time.
+call each time. On the web board a waiting order is one line above the cards;
+Review opens it on a page of its own, where you untick what to leave and
+Accept or Decline. In the TUI's backlog, `O` opens it over the page: `␣` ticks,
+`t` ticks or unticks every change, `g`/`G` and PgUp/PgDn move through a long
+one, `↩` accepts and `d` declines.
 
 ## Turning it off
 

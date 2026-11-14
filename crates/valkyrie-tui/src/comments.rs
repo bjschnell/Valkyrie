@@ -402,7 +402,7 @@ fn when(secs: u64, tz: &TimeZone) -> String {
 }
 
 /// `text` in rows of at most `width` columns, at spaces where it can.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.lines() {
         let mut row = String::new();

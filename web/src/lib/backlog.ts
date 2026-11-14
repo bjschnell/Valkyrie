@@ -258,6 +258,17 @@ export const launchesOn = (o: LaunchOffer) => (o.model ? `${o.agent} · ${o.mode
 export const ordersShown = (orders: OrderProposal[], repo: RepoFilter) =>
   orders.filter((o) => repo === null || o.project === repo);
 
+/** The page a repository's build order opens on: `#/backlog/order/%2Fhome%2Fme%2Fvalk`. */
+export const orderHref = (project: string) => `#/backlog/order/${encodeURIComponent(project)}`;
+
+/** A build order's size for its banner: `23 items, 9 to change`. */
+export function orderSize(order: OrderProposal): string {
+  const n = order.steps.length;
+  const changing = order.steps.filter(changesSomething).length;
+  const items = `${n} item${n === 1 ? "" : "s"}`;
+  return changing ? `${items}, ${changing} to change` : `${items}, nothing to change`;
+}
+
 /** What accepting `step` changes on `item`: `p2→p1, after #37`; empty for nothing. */
 export function stepChanges(step: OrderStep, item: Item | undefined): string {
   const parts: string[] = [];

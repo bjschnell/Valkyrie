@@ -3364,6 +3364,62 @@ button.title-name {
   margin-top: 10px;
 }
 
+/* On the board a build order is one line; its steps are a page of their own. */
+.order-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.order-banner .order-head {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.order-banner .order-why {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-page .order-steps {
+  gap: 10px;
+}
+
+/* With the room of a page, a long title wraps instead of losing its end. */
+.order-page .order-step {
+  flex-wrap: wrap;
+}
+
+.order-page .order-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.order-n {
+  min-width: 2.2ch;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Accept and Decline stay in reach however long the order runs. */
+.order-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 14px -14px 0;
+  padding: 12px 14px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--page);
+}
+
+.order-all {
+  margin-right: auto;
+}
+
 .backlog-filter select,
 .launch select,
 .launcher select {

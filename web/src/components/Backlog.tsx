@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, noteOrigin, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, noteOrigin, orderHref, orderSize, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
@@ -180,7 +180,7 @@ export function Backlog() {
           <LaunchCard key={`${o.project}:${o.id}`} offer={o} />
         ))}
         {shownOrders.map((o) => (
-          <OrderCard key={`${o.project}:${o.id}`} order={o} items={all} />
+          <OrderBanner key={`${o.project}:${o.id}`} order={o} />
         ))}
         {open === 0 && repo !== null && (
           <div className="calm backlog-calm">
@@ -275,32 +275,101 @@ function LaunchCard({ offer }: { offer: LaunchOffer }) {
 }
 
 /**
- * A build order waiting on the user: each item in the order proposed, why, and what
- * accepting it changes. Untick an item to leave it as it is; nothing changes until
- * Accept, and Decline changes nothing.
+ * A build order waiting on the user, as one line above the board: a big backlog's
+ * order is a page of its own (`OrderPage`), not a wall over the cards.
  */
-function OrderCard({ order, items }: { order: OrderProposal; items: Item[] }) {
+function OrderBanner({ order }: { order: OrderProposal }) {
+  return (
+    <section className="order-card order-banner" aria-label={`Build order for ${base(order.project)}`}>
+      <div className="order-head">
+        <div className="order-title">Build order for {base(order.project)}</div>
+        <div className="order-why">
+          {orderSize(order)} · {order.trigger}
+        </div>
+      </div>
+      <button className="primary" onClick={() => (location.hash = orderHref(order.project))}>
+        Review
+      </button>
+    </section>
+  );
+}
+
+/** A repository's build order on a page of its own, or a note that none waits. */
+export function OrderPage({ project }: { project: string }) {
+  const orders = useApp((s) => s.orders);
+  const items = useApp((s) => s.items);
+  const order = orders.find((o) => o.project === project);
+  const back = () => (location.hash = "#/backlog");
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).closest("textarea, input, select") || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "q" || e.key === "Escape") {
+        e.preventDefault();
+        back();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  return (
+    <div className="page">
+      <header className="topbar">
+        <button className="icon-btn" aria-label="Back" onClick={back}>
+          <Back />
+        </button>
+        <div className="title">
+          <div className="title-name">Build order for {base(project)}</div>
+          {order && (
+            <div className="title-sub">
+              {orderSize(order)} · {order.trigger}
+            </div>
+          )}
+        </div>
+      </header>
+      <main className="inbox backlog order-page">
+        {order ? (
+          // A replaced proposal starts over: its ticks were for other steps.
+          <OrderReview key={order.id} order={order} items={items} onDone={back} />
+        ) : (
+          <div className="calm backlog-calm">
+            <div className="calm-title">No build order waits here</div>
+            <div className="calm-sub">It was answered, or replaced by a newer one. Plan order on the backlog asks for one.</div>
+            <button className="ghost" onClick={back}>
+              Back to the backlog
+            </button>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+/**
+ * A build order's steps: each item in the order proposed, why, and what accepting
+ * it changes. Untick an item to leave it as it is; nothing changes until Accept,
+ * and Decline changes nothing (decision #47).
+ */
+function OrderReview({ order, items, onDone }: { order: OrderProposal; items: Item[]; onDone: () => void }) {
   const [skip, setSkip] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
   const changing = order.steps.filter((s) => changesSomething(s));
   const ticked = changing.filter((s) => !skip.includes(s.item)).map((s) => s.item);
   const toggle = (id: number) => setSkip((k) => (k.includes(id) ? k.filter((i) => i !== id) : [...k, id]));
+  const all = ticked.length === changing.length;
   const answer = async (accept: boolean) => {
     setBusy(true);
     try {
-      await answerOrder(order, accept, accept && skip.length ? ticked : undefined);
+      if (await answerOrder(order, accept, accept && skip.length ? ticked : undefined)) onDone();
     } finally {
       setBusy(false);
     }
   };
   return (
-    <section className="order-card" aria-label={`Build order for ${base(order.project)}`}>
-      <div className="order-head">
-        <div className="order-title">Build order for {base(order.project)}</div>
-        <div className="order-why">{order.trigger}</div>
-      </div>
+    <>
       <ol className="order-steps">
-        {order.steps.map((step) => {
+        {order.steps.map((step, n) => {
           const item = items.find((i) => i.id === step.item);
           const changes = stepChanges(step, item);
           const can = changesSomething(step);
@@ -312,6 +381,7 @@ function OrderCard({ order, items }: { order: OrderProposal; items: Item[] }) {
                 ) : (
                   <span className="order-nobox" />
                 )}
+                <span className="order-n">{n + 1}.</span>
                 <span className="order-id">#{step.item}</span>
                 <span className="order-name">{item?.title ?? "(gone)"}</span>
                 {changes && <span className="order-change">{changes}</span>}
@@ -321,15 +391,20 @@ function OrderCard({ order, items }: { order: OrderProposal; items: Item[] }) {
           );
         })}
       </ol>
-      <div className="order-actions">
+      <div className="order-actions order-bar">
+        {changing.length > 1 && (
+          <button className="ghost order-all" disabled={busy} onClick={() => setSkip(all ? changing.map((s) => s.item) : [])}>
+            {all ? "Untick all" : "Tick all"}
+          </button>
+        )}
         <button className="ghost" disabled={busy} onClick={() => void answer(false)}>
           Decline
         </button>
         <button className="primary" disabled={busy || (changing.length > 0 && ticked.length === 0)} onClick={() => void answer(true)}>
-          {changing.length === 0 ? "Clear" : ticked.length === changing.length ? "Accept all" : `Accept ${ticked.length}`}
+          {changing.length === 0 ? "Clear" : all ? "Accept all" : `Accept ${ticked.length}`}
         </button>
       </div>
-    </section>
+    </>
   );
 }
 

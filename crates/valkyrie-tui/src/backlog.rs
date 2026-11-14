@@ -779,10 +779,23 @@ impl Page {
             return vec![Do::Say("that build order is gone".into())];
         };
         let view = self.order.as_mut().unwrap();
+        let last = steps.len().saturating_sub(1);
         match key {
             b"k" | b"\x1b[A" | b"\x1bOA" => view.cursor = view.cursor.saturating_sub(1),
-            b"j" | b"\x1b[B" | b"\x1bOB" => {
-                view.cursor = (view.cursor + 1).min(steps.len().saturating_sub(1))
+            b"j" | b"\x1b[B" | b"\x1bOB" => view.cursor = (view.cursor + 1).min(last),
+            // A big backlog's order is long: a page, or an end, at a time.
+            b"\x1b[5~" => view.cursor = view.cursor.saturating_sub(ORDER_PAGE),
+            b"\x1b[6~" => view.cursor = (view.cursor + ORDER_PAGE).min(last),
+            b"g" | b"\x1b[H" | b"\x1b[1~" => view.cursor = 0,
+            b"G" | b"\x1b[F" | b"\x1b[4~" => view.cursor = last,
+            // Every change ticked unless all already are; then none.
+            b"t" => {
+                let changing = steps.iter().filter(|s| s.change().is_some());
+                view.skip = if view.skip.is_empty() {
+                    changing.map(|s| s.item).collect()
+                } else {
+                    Vec::new()
+                };
             }
             b" " => {
                 if let Some(step) = steps.get(view.cursor).filter(|s| s.change().is_some()) {
@@ -1198,8 +1211,12 @@ impl Page {
     }
 }
 
+/// Steps PgUp and PgDn move in a build order.
+const ORDER_PAGE: usize = 10;
+
 /// A build order over the page: each step with its tick, what accepting it
-/// changes, and why.
+/// changes, and why. As tall as it needs up to the page, and scrolled so the
+/// whole step under the cursor shows, its reason too.
 fn order_window(
     frame: &mut ratatui::Frame,
     over: Rect,
@@ -1209,7 +1226,11 @@ fn order_window(
     t: &Theme,
 ) {
     let width = over.width.saturating_sub(6).min(100);
-    let height = over.height.saturating_sub(4);
+    let inner_width = width.saturating_sub(2) as usize;
+    let (lines, at) = order_lines(view, order, rows, inner_width, t);
+    let height = (lines.len() as u16 + 2)
+        .min(over.height.saturating_sub(4))
+        .max(3);
     let rect =
         Rect::new(over.x + (over.width - width) / 2, over.y + 2, width, height).intersection(over);
     frame.render_widget(Clear, rect);
@@ -1219,6 +1240,8 @@ fn order_window(
         hint(" ↩ ", "accept ticked "),
         hint(" d ", "decline "),
         hint(" esc ", "later "),
+        hint(" t ", "tick all/none "),
+        hint(" g/G ", "ends "),
     ]
     .concat();
     let name = order.project.file_name().map_or_else(
@@ -1230,15 +1253,30 @@ fn order_window(
         .border_style(style::Style::new().fg(t.accent))
         .title(Line::from(vec![
             format!(" Build order for {name} ").fg(t.fg).bold(),
+            format!("{}/{} ", view.cursor + 1, order.steps.len()).fg(t.accent),
             format!("({}) ", order.trigger).fg(t.muted),
         ]))
         .title_bottom(Line::from(fit_hints(hints, width.saturating_sub(4) as usize)).centered())
         .style(style::Style::new().bg(t.panel).fg(t.fg));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    let top = order_scroll(at, inner.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), inner);
+}
+
+/// The build order's lines at `width` columns, wrapped here so each is one row,
+/// and the rows the cursor's step takes.
+fn order_lines(
+    view: &OrderView,
+    order: &OrderProposal,
+    rows: &[(Lane, Item)],
+    width: usize,
+    t: &Theme,
+) -> (Vec<Line<'static>>, std::ops::Range<usize>) {
     let mut lines = Vec::new();
-    let mut cursor_line = 0;
+    let mut at = 0..0;
     for (n, step) in order.steps.iter().enumerate() {
+        let start = lines.len();
         let item = rows.iter().map(|(_, i)| i).find(|i| i.id == step.item);
         let changes = step_changes(step, item);
         let tick = match (step.change().is_some(), view.skip.contains(&step.item)) {
@@ -1246,13 +1284,9 @@ fn order_window(
             (true, true) => "[ ]",
             (true, false) => "[x]",
         };
-        if n == view.cursor {
-            cursor_line = lines.len();
-        }
         let title = item.map_or("(not shown)", |i| i.title.as_str());
         let head = format!(" {tick} {:>2}. #{} ", n + 1, step.item);
-        let room = (inner.width as usize)
-            .saturating_sub(head.chars().count() + changes.chars().count() + 2);
+        let room = width.saturating_sub(head.chars().count() + changes.chars().count() + 2);
         let mut line = Line::from(vec![
             head.fg(if n == view.cursor { t.accent } else { t.fg })
                 .bold(),
@@ -1264,17 +1298,25 @@ fn order_window(
         }
         lines.push(line);
         if !step.reason.is_empty() {
-            lines.push(Line::from(format!("          {}", step.reason).fg(t.muted)));
+            const INDENT: &str = "          ";
+            for row in
+                crate::comments::wrap(&step.reason, width.saturating_sub(INDENT.len()).max(1))
+            {
+                lines.push(Line::from(format!("{INDENT}{row}").fg(t.muted)));
+            }
+        }
+        if n == view.cursor {
+            at = start..lines.len();
         }
     }
-    let room = inner.height.max(1) as usize;
-    let top = cursor_line.saturating_sub(room.saturating_sub(3));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((top as u16, 0)),
-        inner,
-    );
+    (lines, at)
+}
+
+/// The first row to show in `room` rows: no further down than the top, and far
+/// enough that the cursor's step (`at`) shows whole, its head first when it's
+/// taller than the window.
+fn order_scroll(at: std::ops::Range<usize>, room: usize) -> usize {
+    at.end.saturating_sub(room.max(1)).min(at.start)
 }
 
 /// What accepting `step` changes on `item`: `p2→p1, after #37`; empty for none.
@@ -1817,6 +1859,64 @@ mod tests {
         page.orders.clear();
         assert!(matches!(&press(&mut page, b"j")[..], [Do::Say(_)]));
         assert!(page.order.is_none());
+    }
+
+    #[test]
+    fn a_long_order_pages_ends_and_ticks_all_at_once() {
+        let items: Vec<Item> = (1..=30).map(|n| item(n, 1)).collect();
+        let rows = rows(&items, &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        page.orders = vec![proposal(
+            (1..=30)
+                .map(|n| step(n, (n % 2 == 0).then_some(Priority::P1), None))
+                .collect(),
+        )];
+        press(&mut page, b"O");
+        let cursor = |page: &Page| page.order.as_ref().unwrap().cursor;
+        press(&mut page, b"\x1b[6~");
+        assert_eq!(cursor(&page), ORDER_PAGE);
+        press(&mut page, b"G");
+        assert_eq!(cursor(&page), 29);
+        press(&mut page, b"\x1b[6~");
+        assert_eq!(cursor(&page), 29);
+        press(&mut page, b"g");
+        assert_eq!(cursor(&page), 0);
+        // t unticks every change (the place-only steps have no tick), then ticks them back.
+        press(&mut page, b"t");
+        assert_eq!(page.order.as_ref().unwrap().skip.len(), 15);
+        assert!(matches!(&press(&mut page, b"\r")[..], [Do::Say(s)] if s.contains("declines")));
+        press(&mut page, b"O");
+        press(&mut page, b"j t");
+        assert!(page.order.as_ref().unwrap().skip.is_empty());
+    }
+
+    #[test]
+    fn the_order_scrolls_to_show_the_cursors_step_whole() {
+        // Fits: from the top.
+        assert_eq!(order_scroll(3..5, 20), 0);
+        // Below the window: its last row at the bottom.
+        assert_eq!(order_scroll(30..34, 10), 24);
+        // Taller than the window: its head first.
+        assert_eq!(order_scroll(30..45, 10), 30);
+    }
+
+    #[test]
+    fn a_long_reason_wraps_into_rows_the_scroll_can_count() {
+        let rows = rows(&[item(1, 1), item(2, 1)], &[], 7);
+        let mut order = proposal(vec![step(1, None, None), step(2, Some(Priority::P1), None)]);
+        order.steps[0].reason = "word ".repeat(40);
+        let view = OrderView {
+            id: order.id,
+            project: order.project.clone(),
+            cursor: 1,
+            skip: Vec::new(),
+        };
+        let (lines, at) = order_lines(&view, &order, &rows, 40, &crate::theme::VALKYRIE);
+        assert!(lines.iter().all(|l| l.width() <= 40));
+        // The first step's head and its wrapped reason come before the cursor's.
+        assert!(at.start > 2);
+        assert_eq!(at.end, lines.len());
     }
 
     #[test]
