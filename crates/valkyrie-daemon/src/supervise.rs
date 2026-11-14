@@ -943,7 +943,7 @@ impl Registry {
                     pr: None,
                 }),
         );
-        entries.sort_by(|a, b| b.at.cmp(&a.at));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.at));
         entries.truncate(LOG_SHOWN);
         let on = self.supervisor.lock().unwrap().on();
         Ok(Reply::SupervisorLog { entries, on })
