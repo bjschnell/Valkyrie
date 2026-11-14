@@ -1,32 +1,16 @@
-// #104 trial ("Instant pages"): what each page last loaded, kept for the next
-// visit so it paints at once and refreshes behind it, instead of "Loading…".
+// Pages paint what they last loaded at once and refresh behind it, instead of
+// showing "Loading…" on every visit (#104). The keeping itself is lib/kept.ts.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { trialOn } from "./lib/trial";
+import { Kept, type Loader } from "./lib/kept";
 import { useApp } from "./store";
 
-const kept = new Map<string, unknown>();
-const going = new Map<string, Promise<unknown>>();
-
-/** Loads `key` (one request at a time per key) and keeps what came back. A
- * loader returns null when the daemon couldn't be asked, or throws its reason. */
-function load<T>(key: string, get: () => Promise<T | null>): Promise<T | null> {
-  const already = going.get(key);
-  if (already) return already as Promise<T | null>;
-  const p = get()
-    .then((v) => {
-      if (v !== null) kept.set(key, v);
-      return v;
-    })
-    .finally(() => going.delete(key));
-  going.set(key, p);
-  return p;
-}
+const kept = new Kept();
 
 /** Starts loading `key` ahead of a visit (a hover or a press on a link to it). */
-export function prefetch<T>(key: string, get: () => Promise<T | null>): void {
-  if (!trialOn("cache") || useApp.getState().status !== "open") return;
-  void load(key, get).catch(() => undefined);
+export function prefetch<T>(key: string, get: Loader<T>): void {
+  if (useApp.getState().status !== "open") return;
+  void kept.load(key, get).catch(() => undefined);
 }
 
 export interface Cached<T> {
@@ -38,11 +22,11 @@ export interface Cached<T> {
   reload: () => Promise<void>;
 }
 
-/** The data at `key`: what an earlier visit kept at once, then the daemon's. */
-export function useCached<T>(key: string, get: () => Promise<T | null>, fresh?: (v: T) => void): Cached<T> {
+/** The data at `key`: what an earlier visit kept at once, then the daemon's.
+ * `fresh` runs with each answer the daemon gives. */
+export function useCached<T>(key: string, get: Loader<T>, fresh?: (v: T) => void): Cached<T> {
   const status = useApp((s) => s.status);
-  const seed = () => (trialOn("cache") ? ((kept.get(key) as T | undefined) ?? null) : null);
-  const [data, setData] = useState<{ key: string; v: T | null }>(() => ({ key, v: seed() }));
+  const [data, setData] = useState<{ key: string; v: T | null }>(() => ({ key, v: kept.peek<T>(key) }));
   const [failed, setFailed] = useState<string | null>(null);
   const getRef = useRef(get);
   getRef.current = get;
@@ -54,7 +38,7 @@ export function useCached<T>(key: string, get: () => Promise<T | null>, fresh?: 
   const reload = useCallback(async () => {
     const at = keyRef.current;
     try {
-      const v = await load(at, getRef.current);
+      const v = await kept.load(at, getRef.current);
       if (keyRef.current !== at) return;
       if (v === null) {
         setFailed("couldn't ask the daemon");
@@ -73,6 +57,5 @@ export function useCached<T>(key: string, get: () => Promise<T | null>, fresh?: 
   }, [status, key, reload]);
 
   // A new key shows what it kept, never the last key's data.
-  const v = data.key === key ? data.v : seed();
-  return { data: v, failed, reload };
+  return { data: data.key === key ? data.v : kept.peek<T>(key), failed, reload };
 }

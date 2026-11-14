@@ -18,7 +18,6 @@ import { chord, chordTarget } from "./lib/chords";
 import { Settings } from "./components/Settings";
 import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
-import { trialOn, useSpike } from "./lib/trial";
 import { close, connect, open, useApp } from "./store";
 
 /** Alt on most keyboards, Option on a Mac's. */
@@ -75,7 +74,7 @@ function route(): Route {
   return { page: "inbox" };
 }
 
-/** Where a page sits in the app's pages (#104 trial nav). */
+/** Where a page sits among the nav's pages. */
 function navKey(r: Route): NavKey | null {
   switch (r.page) {
     case "inbox":
@@ -119,10 +118,9 @@ export function App() {
       const next = route();
       const from = atRef.current;
       const swap = () => flushSync(() => setAt(next));
-      // #104 trial: a transition between pages. Stepping between sessions
+      // A transition between pages. Stepping between sessions
       // (Alt+J/K) stays instant; so does a device asking for less motion.
       if (
-        !trialOn("motion") ||
         !document.startViewTransition ||
         matchMedia("(prefers-reduced-motion: reduce)").matches ||
         (from.page === "session" && next.page === "session")
@@ -198,10 +196,9 @@ export function App() {
   // With the room for it, the session list stays beside the open session.
   const wide = useWide();
 
-  // #104 trial: a rail on a desktop, a tab bar on a phone's top pages.
-  const nav = useSpike("nav");
-  const rail = nav && desktop && paired;
-  const tabs = nav && !desktop && paired && TOP.has(at.page);
+  // A rail on a desktop, a tab bar on a phone's top pages.
+  const rail = desktop && paired;
+  const tabs = !desktop && paired && TOP.has(at.page);
   useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle("with-rail", rail);

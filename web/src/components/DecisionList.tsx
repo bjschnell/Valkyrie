@@ -11,10 +11,11 @@ import { Loading } from "./bits";
 import { Back } from "./icons";
 import { Markdown } from "./Markdown";
 
-/** Decisions and notes together; null when either can't be asked. */
-export async function fetchMemory(): Promise<{ decisions: Decision[]; notes: Note[] } | null> {
+/** Decisions and notes together, either missing when it can't be asked; null
+ * when neither can. */
+export async function fetchMemory(): Promise<{ decisions: Decision[] | null; notes: Note[] | null } | null> {
   const [decisions, notes] = await Promise.all([allDecisions(), allNotes()]);
-  return decisions && notes ? { decisions, notes } : null;
+  return decisions || notes ? { decisions, notes } : null;
 }
 
 const home = () => {
@@ -43,7 +44,7 @@ export function DecisionList() {
   const { data: memory, failed: why, reload: load } = useCached("memory", fetchMemory);
   const decisions = memory?.decisions ?? null;
   const notes = memory?.notes ?? null;
-  const failed = why !== null;
+  const failed = why !== null || decisions === null || notes === null;
   const [tab, setTab] = useState<Tab>("decisions");
   const [only, setOnly] = useState<string | null>(null);
   const [showEnded, setShowEnded] = useState(false);

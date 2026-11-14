@@ -1,5 +1,5 @@
-// #104 trial ("Navigation"): one place to move between the app's pages. A phone
-// gets a tab bar at the thumb with the rest under More; a desktop gets a rail.
+// One place to move between the app's pages (#104). A phone gets a tab bar at
+// the thumb with the rest under More; a desktop gets a rail.
 
 import { useEffect, useState, type ReactNode } from "react";
 import { prefetch } from "../cache";
@@ -51,6 +51,7 @@ const RAIL: NavKey[] = ["inbox", "backlog", "docs", "memory", "search", "digest"
 function useBadges(): Partial<Record<NavKey, number>> {
   const needs = useApp((s) => s.queue.length);
   const open = useApp((s) => s.items.filter((i) => i.status === "open").length);
+  // Docs agents wrote since you last looked: a count, never a card (ADR-0021 §5).
   const docs = useApp((s) => s.unreadDocs);
   return { inbox: needs, backlog: open, docs };
 }
