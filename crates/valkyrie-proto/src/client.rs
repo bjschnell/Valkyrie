@@ -796,6 +796,28 @@ impl Client {
         }
     }
 
+    /// The pull requests the supervisor watches, when it last read them and reads
+    /// them next, and whether it's on.
+    pub async fn supervisor_watch(&self) -> Result<crate::supervisor::Watch> {
+        match self
+            .request(|req| ClientMsg::SupervisorWatch { req })
+            .await?
+        {
+            Reply::SupervisorWatch {
+                prs,
+                polled_at,
+                next_at,
+                on,
+            } => Ok(crate::supervisor::Watch {
+                prs,
+                polled_at,
+                next_at,
+                on,
+            }),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn supervise(&self, on: Option<bool>) -> Result<String> {
         match self.request(|req| ClientMsg::Supervise { req, on }).await? {
             Reply::Text { text } => Ok(text),

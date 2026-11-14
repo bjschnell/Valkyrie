@@ -11,6 +11,7 @@ import type {
   Digest,
   DigestGroup,
   SupervisorEntry,
+  WatchedPr,
   PastSession,
   SearchResults,
   Doc,
@@ -679,6 +680,15 @@ export async function supervisorLog(): Promise<{ entries: SupervisorEntry[]; on:
   const reply = await conn.request({ t: "supervisor_log" });
   if (reply.t !== "supervisor_log") throw new Error("unexpected reply");
   return { entries: reply.entries, on: reply.on };
+}
+
+/** The pull requests the supervisor watches, as its poll last read them, and
+ * when it reads them next (backlog #181). Throws with the daemon's reason. */
+export async function supervisorWatch(): Promise<{ prs: WatchedPr[]; polled_at?: number; next_at?: number; on: boolean }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "supervisor_watch" });
+  if (reply.t !== "supervisor_watch") throw new Error("unexpected reply");
+  return { prs: reply.prs, polled_at: reply.polled_at, next_at: reply.next_at, on: reply.on };
 }
 
 /** Agent sessions that have ended, newest first (backlog #150). Throws with the

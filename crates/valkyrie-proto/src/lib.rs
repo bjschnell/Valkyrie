@@ -41,10 +41,10 @@ pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
 pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 pub use search::{SearchField, SearchHit, SearchResults};
-pub use supervisor::SupervisorEntry;
+pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 43;
+pub const PROTOCOL: u32 = 44;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -531,6 +531,12 @@ pub enum ClientMsg {
     SupervisorLog {
         req: ReqId,
     },
+    /// The pull requests the supervisor's poll watches, as it last read them, and
+    /// when it reads them next (backlog #181, protocol 44). Read-only. Replies
+    /// `SupervisorWatch`.
+    SupervisorWatch {
+        req: ReqId,
+    },
     /// Whether the supervisor runs (ADR-0019 §6, protocol 26): off, it offers no
     /// steps and takes none on its own, though the PR poll still flags sessions.
     /// `None` only asks; setting it is for the user only. Replies `Text`, `on` or
@@ -988,6 +994,18 @@ pub enum Reply {
     /// What `SupervisorLog` asked for, and whether the supervisor is on.
     SupervisorLog {
         entries: Vec<SupervisorEntry>,
+        on: bool,
+    },
+    /// What `SupervisorWatch` asked for: open PRs, red and conflicting first.
+    SupervisorWatch {
+        prs: Vec<WatchedPr>,
+        /// When the poll last finished, seconds since the epoch; `None` before
+        /// its first pass.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        polled_at: Option<u64>,
+        /// When it reads them next, seconds since the epoch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_at: Option<u64>,
         on: bool,
     },
     /// What a step did, in a line: "typed merge-base into session 4".

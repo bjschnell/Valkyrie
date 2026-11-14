@@ -629,6 +629,14 @@ impl Registry {
                 .await
                 .unwrap_or(Pr::Unknown);
             let id = item.id;
+            self.watching.lock().unwrap().saw(
+                &url,
+                item.project.clone().unwrap_or_default(),
+                Some(id),
+                item.branch.clone(),
+                &pr,
+                now_secs(),
+            );
             // How the steps policies took turned out, before a new flag can follow.
             self.judge_steps(&url, &pr);
             if let Pr::Open {
