@@ -15,7 +15,7 @@ describe("stepChoices", () => {
       stepChoices(flag({ action: "rerun", why: "matches #17", alt: "ci-fix" })),
     ).toEqual([
       { action: "rerun", label: "Rerun failed jobs", primary: true },
-      { action: "ci-fix", label: "Fix CI", primary: false },
+      { action: "ci-fix", label: "Ask its agent to fix CI", primary: false },
       { action: "leave", label: "Leave it", primary: false },
     ]);
     expect(

@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(notes[0].title, "proj1 · PR #98 conflicts with main");
         assert_eq!(
             notes[0].body,
-            "Offers: merge the base in (the branch conflicts with its base)"
+            "Offers: ask its agent to merge the base in (the branch conflicts with its base)"
         );
         assert!(w.has_pending(), "a reminder waits");
         assert!(w.due(AWAY + GRACE_MS + REMIND_MS - 1, 0, false).is_empty());
