@@ -452,8 +452,11 @@ code {
   font-size: var(--text-md);
 }
 
+/* One track no wider than the list: an auto track grows to a card's unwrapped
+   name and pushes the card past a narrow column (#195). */
 .cards {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
 }
 
@@ -692,6 +695,14 @@ code {
   background: var(--blocked);
   color: var(--surface);
   font-weight: var(--weight-bold);
+}
+
+/* Hidden until a swipe uncovers it: a row's hover and current backgrounds are
+   see-through, and a mouse never swipes (#195). It hides only once a closing row
+   has slid back over it. */
+.row-slot:not(:has(> .row.dragging)) > .row-close[aria-hidden="true"] {
+  visibility: hidden;
+  transition: visibility 0s linear 0.2s;
 }
 
 .row:active {
