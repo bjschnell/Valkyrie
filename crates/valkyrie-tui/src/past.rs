@@ -106,7 +106,7 @@ impl Page {
         let mut top = vec![Line::default()];
         match (&self.sessions, &self.failed) {
             (_, Some(e)) => top.push(
-                format!(" Couldn't load past sessions: {}", fit(e, inner))
+                format!(" Couldn't load past sessions: {} · r tries again", fit(e, inner.saturating_sub(16)))
                     .fg(t.needs)
                     .into(),
             ),
