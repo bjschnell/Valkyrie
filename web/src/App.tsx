@@ -15,8 +15,11 @@ import { ReviewView } from "./components/Review";
 import { SessionView } from "./components/SessionView";
 import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
+import { showNeeds } from "./lib/badge";
 import { paletteKey } from "./lib/palette";
+import { shortcutsKey } from "./lib/shortcuts";
 import { Palette } from "./components/Palette";
+import { Shortcuts } from "./components/Shortcuts";
 import { Settings } from "./components/Settings";
 import { OfflineBanner } from "./components/states";
 import { Toast } from "./components/Toast";
@@ -160,6 +163,9 @@ export function App() {
     seen.current = { open: openId, recent: openId === null ? recent : [...recent, openId] };
   }
   const paired = !!token && status !== "unpaired" && status !== "outdated";
+  // Who needs you, on the app icon and the tab title (#187).
+  const needs = useApp((s) => s.queue.length);
+  useEffect(() => showNeeds(paired ? needs : 0), [paired, needs]);
   useEffect(() => {
     if (!desktop || !paired) return;
     const onKey = (e: KeyboardEvent) => {
@@ -226,6 +232,38 @@ export function App() {
     if (!desktop || !paired) setPalette(false);
   }, [desktop, paired]);
 
+  // The '?' sheet (#189): the keys of the page you're on, from anywhere you
+  // aren't typing (a terminal that has the keyboard is typing: the palette's
+  // "Keyboard shortcuts" opens it there).
+  const [sheet, setSheet] = useState(false);
+  const closeSheet = useCallback(() => setSheet(false), []);
+  const openSheet = useCallback(() => {
+    // After the palette has handed the keyboard back, so the sheet gives it back there.
+    setTimeout(() => setSheet(true));
+  }, []);
+  useEffect(() => {
+    if (!desktop || !paired) return;
+    const onKey = (e: KeyboardEvent) => {
+      const pressed = {
+        key: e.key,
+        code: e.code,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+        altGraph: e.getModifierState("AltGraph"),
+      };
+      if (e.repeat || !shortcutsKey(pressed, e.target as Element | null)) return;
+      e.preventDefault();
+      setSheet((s) => !s);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [desktop, paired]);
+  useEffect(() => {
+    if (!desktop || !paired) setSheet(false);
+  }, [desktop, paired]);
+
   // With the room for it, the session list stays beside the open session.
   const wide = useWide();
 
@@ -242,7 +280,8 @@ export function App() {
     <>
       {rail && <Rail at={navKey(at)} />}
       {tabs && <TabBar at={navKey(at)} />}
-      {palette && <Palette onClose={closePalette} />}
+      {palette && <Palette onClose={closePalette} onShortcuts={openSheet} />}
+      {sheet && <Shortcuts page={at.page} onClose={closeSheet} />}
       <OfflineBanner />
       <Toast />
     </>

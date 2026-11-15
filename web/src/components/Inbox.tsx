@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   STATE_LABEL,
   program,
@@ -282,7 +282,12 @@ function QueueCard({
   const s = item.status;
   const choices = prompt?.choices ?? [];
   return (
-    <div className={`card-slot ${picked ? "picked" : ""}`} data-pick>
+    <div
+      className={`card-slot ${picked ? "picked" : ""}`}
+      data-pick
+      data-glide
+      style={{ "--vtn": `card-${item.session}` } as CSSProperties}
+    >
       <article className={`card state-${s.state}`}>
         <button className="card-head" onClick={() => go(item.session)}>
           <StateIcon state={s.state} />
@@ -420,7 +425,12 @@ function SessionRow({
   };
 
   return (
-    <div className="row-slot" data-pick>
+    <div
+      className="row-slot"
+      data-pick
+      data-glide
+      style={{ "--vtn": `row-${s.id}` } as CSSProperties}
+    >
       <button
         className="row-close"
         tabIndex={swiped ? 0 : -1}

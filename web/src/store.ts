@@ -5,6 +5,7 @@ import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
 import { termColors } from "./lib/theme";
+import { glide, moved } from "./lib/glide";
 import type {
   Decision,
   Note,
@@ -217,7 +218,10 @@ export function connect(): void {
 function onPush(msg: ServerMsg): void {
   switch (msg.t) {
     case "queue":
-      set({ queue: msg.items });
+      glide(
+        () => set({ queue: msg.items }),
+        moved(get().queue.map((q) => q.session), msg.items.map((q) => q.session)),
+      );
       setBadge(msg.items.length);
       void refreshPrompts(msg.items);
       void refresh();
@@ -355,7 +359,13 @@ export async function install(): Promise<void> {
 export async function refresh(): Promise<void> {
   try {
     const reply = await conn?.request({ t: "list" });
-    if (reply?.t === "sessions") set({ sessions: reply.sessions });
+    if (reply?.t === "sessions") {
+      const next = reply.sessions;
+      glide(
+        () => set({ sessions: next }),
+        moved(get().sessions.map((x) => x.id), next.map((x) => x.id)),
+      );
+    }
   } catch {
     /* the connection reports itself */
   }
