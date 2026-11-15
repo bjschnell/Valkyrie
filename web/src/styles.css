@@ -4633,6 +4633,28 @@ html[data-vt="fade"]::view-transition-new(root) {
   animation-duration: 0.16s;
 }
 
+/* Cards glide to their new place (#186). The names exist only now, so a page
+   transition never morphs them. Only the cards move: the page itself neither
+   fades nor stacks its two snapshots. */
+html[data-vt="glide"] [data-glide] {
+  view-transition-name: var(--vtn);
+}
+html[data-vt="glide"]::view-transition-old(root) {
+  display: none;
+}
+html[data-vt="glide"]::view-transition-new(root) {
+  animation: none;
+}
+html[data-vt="glide"]::view-transition-group(*) {
+  animation-duration: 0.22s;
+  animation-timing-function: var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-vt="glide"] [data-glide] {
+    view-transition-name: none;
+  }
+}
+
 @keyframes vt-in-right {
   from {
     transform: translateX(28px);
