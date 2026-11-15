@@ -54,6 +54,11 @@ impl History {
         }
     }
 
+    /// Whether the load failed, so `r` can ask again.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.is_some()
+    }
+
     fn selected(&self) -> Option<&DocVersion> {
         self.versions.as_ref()?.get(self.cursor)
     }
@@ -133,7 +138,7 @@ impl History {
             };
             match (&self.versions, &self.failed) {
                 (_, Some(e)) => lines.push(
-                    crate::fit(&format!("Couldn't load it: {e}"), room)
+                    crate::fit(&format!("Couldn't load it: {e} · r tries again"), room)
                         .fg(t.needs)
                         .into(),
                 ),

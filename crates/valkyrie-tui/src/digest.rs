@@ -217,9 +217,12 @@ impl Page {
         top.push(Line::default());
         match (&self.digest, &self.failed) {
             (_, Some(e)) => top.push(
-                format!(" Couldn't load the digest: {}", fit(e, inner))
-                    .fg(t.needs)
-                    .into(),
+                format!(
+                    " Couldn't load the digest: {} · r tries again",
+                    fit(e, inner.saturating_sub(16))
+                )
+                .fg(t.needs)
+                .into(),
             ),
             (None, None) => top.push(" Loading…".fg(t.muted).into()),
             (Some(d), None) => {

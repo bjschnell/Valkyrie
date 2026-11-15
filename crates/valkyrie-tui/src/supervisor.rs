@@ -235,9 +235,12 @@ impl Page {
         ]));
         match (&self.log, &self.failed) {
             (_, Some(e)) => lines.push(
-                format!("   Couldn't load it: {}", fit(e, inner.saturating_sub(20)))
-                    .fg(t.needs)
-                    .into(),
+                format!(
+                    "   Couldn't load it: {} · r tries again",
+                    fit(e, inner.saturating_sub(36))
+                )
+                .fg(t.needs)
+                .into(),
             ),
             (None, None) => lines.push("   Loading…".fg(t.muted).into()),
             (Some((entries, _)), None) if entries.is_empty() => {
@@ -321,9 +324,12 @@ fn watch_lines(
     match watch {
         None => lines.push("   Loading…".fg(t.muted).into()),
         Some(Err(e)) => lines.push(
-            format!("   Couldn't load it: {}", fit(e, inner.saturating_sub(20)))
-                .fg(t.needs)
-                .into(),
+            format!(
+                "   Couldn't load it: {} · r tries again",
+                fit(e, inner.saturating_sub(36))
+            )
+            .fg(t.needs)
+            .into(),
         ),
         Some(Ok(w)) if w.prs.is_empty() && w.on => {
             lines.push("   No open pull request of yours.".fg(t.muted).into())
