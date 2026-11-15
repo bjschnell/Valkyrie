@@ -17,6 +17,7 @@ import { pathBytes } from "../lib/keys";
 import { cellAt, mouseBytes, wantsMouse, type MouseAction } from "../lib/mouse";
 import { cssStyle, reflow, rowRuns, textWidth, type Run } from "../lib/screen";
 import { chord as shellChord } from "../lib/chords";
+import { paletteKey } from "../lib/palette";
 import { copiedRows, copiedText, type CopiedRow, encodeKey, fitSize, focusBytes, pasteBytes, wheelBytes } from "../lib/termkeys";
 import { openModes, resizeOpen, scrollback, sendBytes, sendBytesTo, sendFile, toast, useApp } from "../store";
 
@@ -200,8 +201,11 @@ export function ScreenView({
         metaKey: e.metaKey,
         altGraph: e.getModifierState("AltGraph"),
       };
-      // Moving between sessions is the app's, here as in the TUI.
-      if (shellChord(pressed, MAC)) return;
+      // Moving between sessions is the app's, here as in the TUI, and so is the
+      // palette's Ctrl+Shift+K; plain Ctrl+K stays the program's (kill-line).
+      if (shellChord(pressed, MAC) || paletteKey(pressed, MAC, true)) return;
+      // The palette is open over the terminal: what's typed is its search.
+      if ((e.target as Element | null)?.closest?.(".palette")) return;
       // The session you moved to hasn't shown its screen: what it asked of its
       // keys isn't known yet, so nothing is typed blind.
       if (!ready) {
@@ -244,7 +248,7 @@ export function ScreenView({
 
     const onPaste = (e: ClipboardEvent) => {
       const clip = e.clipboardData;
-      if (!clip) return;
+      if (!clip || (e.target as Element | null)?.closest?.(".palette")) return;
       e.preventDefault();
       // Without the modes a paste would go in unmarked and run line by line.
       if (!ready) return;
@@ -279,6 +283,8 @@ export function ScreenView({
     const onBlur = () => report(false);
     // A click anywhere else (the composer, the header) takes the keyboard back.
     const onPointer = (e: PointerEvent) => {
+      // The palette over it is a detour: closing it gives the keyboard back.
+      if ((e.target as Element | null)?.closest?.(".palette")) return;
       if (!ref.current?.contains(e.target as Node)) onTyping(false);
     };
 
