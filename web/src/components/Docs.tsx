@@ -23,25 +23,16 @@ import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
 import { Markdown, type BlockComments } from "./Markdown";
+import { usePageKeys } from "../lib/pageKeys";
 
 const go = (hash: string) => {
   location.hash = hash;
 };
 
 /** q or Esc goes to `to` (a hash, or a step back within the page), when you aren't typing. */
-function useBack(to: string | (() => void)) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        if (typeof to === "string") go(to);
-        else to();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [to]);
+function useBack(page: "docs" | "doc", to: string | (() => void)) {
+  const back = () => (typeof to === "string" ? go(to) : to());
+  usePageKeys(page, { q: back, Escape: back });
 }
 
 /** Who wrote it and from where, in a line. */
@@ -60,7 +51,7 @@ export function DocsList() {
   const { data, failed, reload } = useCached("docs", allDocs, (got) => docsSeen(got.at));
   const docs = data?.docs ?? null;
   const [gone, setGone] = useState<DeletedDoc[]>([]);
-  useBack("#/");
+  useBack("docs", "#/");
 
   useEffect(() => {
     if (status !== "open") return;
@@ -200,7 +191,7 @@ export function DocView({ docKey }: { docKey: string }) {
   const [mode, setMode] = useState<Mode>("read");
   // In the editor or history, back is the doc itself: the hash stays the same.
   const toRead = useCallback(() => setMode("read"), []);
-  useBack(mode === "read" ? "#/docs" : toRead);
+  useBack("doc", mode === "read" ? "#/docs" : toRead);
 
   useEffect(() => {
     if (status !== "open") return;

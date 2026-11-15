@@ -490,6 +490,10 @@ impl Page {
                         out.push(Do::Undelete(d.token.clone()));
                     }
                 }
+                b"r" => {
+                    trash.failed = None;
+                    out.push(Do::Deleted);
+                }
                 b"\x1b" if whole => self.trash = None,
                 b"q" | [0x03] => self.trash = None,
                 _ => {}
@@ -578,6 +582,23 @@ impl Page {
                 )),
                 None => {}
             }
+            return;
+        }
+        // A panel whose load failed: `r` opens the doc again, which asks again.
+        if key == b"r"
+            && let Some(reader) = &mut self.reader
+            && (reader
+                .history
+                .as_ref()
+                .is_some_and(history::History::failed)
+                || reader.comments.failed())
+        {
+            let key = reader.key.clone();
+            *reader = Reader {
+                key: key.clone(),
+                ..Default::default()
+            };
+            out.push(Do::Open(key));
             return;
         }
         if let Some(reader) = &mut self.reader
@@ -818,9 +839,12 @@ impl Page {
         let mut top = vec![Line::default()];
         match (&self.listing, &self.failed) {
             (_, Some(e)) => top.push(
-                format!(" Couldn't load the docs: {}", fit(e, inner))
-                    .fg(t.needs)
-                    .into(),
+                format!(
+                    " Couldn't load the docs: {} · r tries again",
+                    fit(e, inner.saturating_sub(16))
+                )
+                .fg(t.needs)
+                .into(),
             ),
             (None, None) => top.push(" Loading…".fg(t.muted).into()),
             (Some(l), None) => {
@@ -1152,7 +1176,7 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
     let mut lines: Vec<Line> = vec![Line::default()];
     match (&trash.docs, &trash.failed) {
         (_, Some(e)) => lines.push(
-            fit(&format!("Couldn't load them: {e}"), room)
+            fit(&format!("Couldn't load them: {e} · r tries again"), room)
                 .fg(t.needs)
                 .into(),
         ),
@@ -1190,7 +1214,12 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
         Some(d) => format!(" Recently deleted · {} ", d.len()),
         None => " Recently deleted ".into(),
     };
-    let hints = [hint(" ↩ ", "put back ", t), hint(" esc ", "back ", t)].concat();
+    let hints = [
+        hint(" ↩ ", "put back ", t),
+        hint(" r ", "reload ", t),
+        hint(" esc ", "back ", t),
+    ]
+    .concat();
     let height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .saturating_add(3)
@@ -1699,6 +1728,18 @@ mod tests {
         assert!(page.undo.is_some());
         page.undo_failed("tok");
         assert!(page.undo.is_none());
+    }
+
+    #[test]
+    fn a_failed_trash_load_can_be_asked_again() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![doc("1", "a.md", false)])));
+        assert_eq!(page.keys(b"t"), vec![Do::Deleted]);
+        page.trash(Err("no reply".into()));
+        let shown = screen(&page, 80, 20);
+        assert!(shown.contains("r tries again"), "{shown}");
+        assert_eq!(page.keys(b"r"), vec![Do::Deleted]);
+        assert!(page.trash.as_ref().unwrap().failed.is_none());
     }
 
     #[test]

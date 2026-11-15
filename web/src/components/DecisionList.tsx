@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { Decision, Note } from "../proto";
 import { SHELVES, type Shelf, byProject, ended, inFull, matches, pinnable, shelf } from "../lib/decisions";
 import { live, notesByProject } from "../lib/notes";
@@ -11,6 +11,7 @@ import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
 import { Markdown } from "./Markdown";
+import { usePageKeys } from "../lib/pageKeys";
 
 /** Decisions and notes together, either missing when it can't be asked; null
  * when neither can. */
@@ -62,20 +63,7 @@ export function DecisionList() {
 
 
   // q or Esc goes back and / filters, when you aren't typing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        home();
-      } else if (e.key === "/") {
-        e.preventDefault();
-        filter.current?.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  usePageKeys("decisions", { q: home, Escape: home, "/": () => filter.current?.focus() });
 
   const onShelf = (decisions ?? []).filter((d) => tab !== "notes" && shelf(d) === tab);
   const counts = Object.fromEntries(

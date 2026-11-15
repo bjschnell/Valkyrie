@@ -1,7 +1,9 @@
 // The keys the web app answers to (#189), said once so the '?' sheet can show
-// them and, later, the command palette can offer them. The handlers live in the
-// pages; keep this list in step when one changes (shortcuts.test.ts checks the
-// shared ones against the code that decides them).
+// them and, later, the command palette can offer them. A page's plain keys are
+// PAGE_KEYS, and the pages bind them with usePageKeys (lib/pageKeys.ts),
+// which TypeScript holds to exactly this table: a key bound but not listed, or
+// listed but not bound, doesn't compile. What a plain key can't say (Ctrl chords,
+// a composer's own keys) is in ALSO, by hand.
 
 import type { KeyLike } from "./termkeys";
 
@@ -40,8 +42,6 @@ export function shortcutsKey(e: KeyLike, target: Element | null): boolean {
   return !target?.closest?.("textarea, input, select, [contenteditable]");
 }
 
-const back: Shortcut = { keys: [["q"], ["Esc"]], does: "Go back" };
-
 /** Keys that work wherever you are: the same fingers as the TUI's (docs/keys.md). */
 function everywhere(mac: boolean): Section {
   const alt = mac ? "Option" : "Alt";
@@ -62,84 +62,108 @@ function everywhere(mac: boolean): Section {
 
 const ctrlEnter = (mac: boolean, does: string): Shortcut => ({ keys: [[mac ? "⌘" : "Ctrl", "Enter"]], does });
 
-/** What the keys do on `page`, and then what they do everywhere. */
-export function sections(page: PageKey, mac: boolean): Section[] {
-  const here = onPage(page, mac);
-  return [...(here.shortcuts.length ? [here] : []), everywhere(mac)];
-}
+/**
+ * The plain keys of each page, by the `KeyboardEvent.key` they arrive as, and what
+ * each does. Keys that share a description show as one row ("j or k").
+ */
+export const PAGE_KEYS = {
+  inbox: {
+    j: "Pick the next, previous card or session",
+    k: "Pick the next, previous card or session",
+    Enter: "Open it",
+    o: "Open it",
+    r: "Review its changes",
+    n: "New session",
+    b: "Backlog",
+    d: "Memory (decisions, skills, policies)",
+    a: "What agents did while you were gone",
+    h: "Past sessions",
+    s: "Supervisor",
+    "/": "Search session history",
+    ",": "Settings",
+  },
+  session: {
+    j: "Scroll down, up",
+    k: "Scroll down, up",
+    g: "Top, bottom",
+    G: "Top, bottom",
+    i: "Write to the agent",
+    t: "Switch between chat and terminal",
+    r: "Review its changes",
+    q: "Back to the inbox",
+  },
+  review: {
+    j: "Next, previous file",
+    k: "Next, previous file",
+    o: "Open or close the file",
+    r: "Reload",
+    i: "Write to the agent",
+    q: "Back to the session",
+  },
+  backlog: { n: "Write an item down", a: "Write an item down", q: "Back to the inbox" },
+  order: { q: "Back to the backlog", Escape: "Back to the backlog" },
+  decisions: { q: "Go back", Escape: "Go back", "/": "Filter" },
+  search: { q: "Go back (Esc in the box just leaves it)", Escape: "Go back (Esc in the box just leaves it)", "/": "Focus the search box" },
+  docs: { q: "Back to the inbox", Escape: "Back to the inbox" },
+  doc: { q: "Back to the list", Escape: "Back to the list" },
+  settings: { q: "Go back", Escape: "Go back" },
+  digest: { q: "Go back", Escape: "Go back" },
+  past: { q: "Go back", Escape: "Go back" },
+  supervisor: { q: "Go back", Escape: "Go back" },
+} as const satisfies Partial<Record<PageKey, Record<string, string>>>;
 
-function onPage(page: PageKey, mac: boolean): Section {
-  const make = (title: string, shortcuts: Shortcut[]): Section => ({ title, shortcuts });
-  switch (page) {
-    case "inbox":
-      return make("Inbox", [
-        { keys: [["j"], ["k"]], does: "Pick the next, previous card or session" },
-        { keys: [["Enter"], ["o"]], does: "Open it" },
-        { keys: [["r"]], does: "Review its changes" },
-        { keys: [["n"]], does: "New session" },
-        { keys: [["b"]], does: "Backlog" },
-        { keys: [["d"]], does: "Memory (decisions, skills, policies)" },
-        { keys: [["a"]], does: "What agents did while you were gone" },
-        { keys: [["h"]], does: "Past sessions" },
-        { keys: [["s"]], does: "Supervisor" },
-        { keys: [["/"]], does: "Search session history" },
-        { keys: [[","]], does: "Settings" },
-      ]);
-    case "session":
-      return make("Session", [
-        { keys: [["j"], ["k"]], does: "Scroll down, up" },
-        { keys: [["Ctrl", "D"], ["Ctrl", "U"]], does: "Scroll half a page" },
-        { keys: [["g"], ["Shift", "G"]], does: "Top, bottom" },
-        { keys: [["i"]], does: "Write to the agent" },
-        { keys: [["t"]], does: "Switch between chat and terminal" },
-        { keys: [["r"]], does: "Review its changes" },
-        { keys: [["q"]], does: "Back to the inbox" },
-        { keys: [["Enter"]], does: "Send, from the composer (Shift+Enter for a new line, Esc to leave it)" },
-        { keys: [["Ctrl", "Shift", "Enter"]], does: "Give the keyboard back from the terminal" },
-        { keys: [["Ctrl", "Shift", "C"], ["Ctrl", "Shift", "V"]], does: "Copy, paste in the terminal" },
-      ]);
-    case "review":
-      return make("Review", [
-        { keys: [["j"], ["k"]], does: "Next, previous file" },
-        { keys: [["o"]], does: "Open or close the file" },
-        { keys: [["r"]], does: "Reload" },
-        { keys: [["i"]], does: "Write to the agent" },
-        { keys: [["q"]], does: "Back to the session" },
-      ]);
-    case "backlog":
-      return make("Backlog", [
-        { keys: [["n"], ["a"]], does: "Write an item down" },
-        { keys: [["q"]], does: "Back to the inbox" },
-      ]);
-    case "item":
-      return make("Item", [ctrlEnter(mac, "Save")]);
-    case "new":
-      return make("New session", [ctrlEnter(mac, "Start it")]);
-    case "order":
-      return make("Build order", [{ keys: [["q"], ["Esc"]], does: "Back to the backlog" }]);
-    case "decisions":
-    case "search":
-      return make(page === "search" ? "Search" : "Memory", [
-        { keys: [["/"]], does: page === "search" ? "Focus the search box" : "Filter" },
-        page === "search" ? { ...back, does: "Go back (Esc in the box just leaves it)" } : back,
-      ]);
-    case "docs":
-    case "doc":
-      return make("Docs", [
-        { keys: [["q"], ["Esc"]], does: page === "doc" ? "Back to the list" : "Back to the inbox" },
-        ctrlEnter(mac, "Save, when editing"),
-      ]);
-    case "settings":
-    case "digest":
-    case "past":
-    case "supervisor":
-      return make(PAGE_TITLE[page], [back]);
-  }
-}
+/** The pages whose plain keys are in PAGE_KEYS. */
+export type KeyedPage = keyof typeof PAGE_KEYS;
 
-const PAGE_TITLE = {
+const TITLE: Record<PageKey, string> = {
+  inbox: "Inbox",
+  new: "New session",
   settings: "Settings",
+  backlog: "Backlog",
+  decisions: "Memory",
+  docs: "Docs",
   digest: "Digest",
   past: "Past sessions",
+  search: "Search",
   supervisor: "Supervisor",
-} as const;
+  doc: "Docs",
+  item: "Item",
+  order: "Build order",
+  session: "Session",
+  review: "Review",
+};
+
+/** How a key reads on a keycap. */
+const CAP: Record<string, string[]> = { Escape: ["Esc"], G: ["Shift", "G"] };
+
+/** What the keys do on `page`, and then what they do everywhere. */
+export function sections(page: PageKey, mac: boolean): Section[] {
+  const shortcuts = [...plain(page), ...(ALSO[page]?.(mac) ?? [])];
+  return [...(shortcuts.length ? [{ title: TITLE[page], shortcuts }] : []), everywhere(mac)];
+}
+
+/** A page's PAGE_KEYS as rows: keys with the same words are one row. */
+function plain(page: PageKey): Shortcut[] {
+  const keys: Record<string, string> | undefined = (PAGE_KEYS as Record<string, Record<string, string>>)[page];
+  const rows: Shortcut[] = [];
+  for (const [key, does] of Object.entries(keys ?? {})) {
+    const cap = CAP[key] ?? [key];
+    const row = rows.find((r) => r.does === does);
+    if (row) row.keys.push(cap);
+    else rows.push({ keys: [cap], does });
+  }
+  return rows;
+}
+
+/** What a plain key can't say, by hand. */
+const ALSO: Partial<Record<PageKey, (mac: boolean) => Shortcut[]>> = {
+  session: () => [
+    { keys: [["Ctrl", "D"], ["Ctrl", "U"]], does: "Scroll half a page" },
+    { keys: [["Enter"]], does: "Send, from the composer (Shift+Enter for a new line, Esc to leave it)" },
+    { keys: [["Ctrl", "Shift", "Enter"]], does: "Give the keyboard back from the terminal" },
+    { keys: [["Ctrl", "Shift", "C"], ["Ctrl", "Shift", "V"]], does: "Copy, paste in the terminal" },
+  ],
+  item: (mac) => [ctrlEnter(mac, "Save")],
+  new: (mac) => [ctrlEnter(mac, "Start it")],
+  doc: (mac) => [ctrlEnter(mac, "Save, when editing")],
+};

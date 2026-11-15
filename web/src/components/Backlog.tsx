@@ -7,6 +7,7 @@ import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type 
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
+import { usePageKeys } from "../lib/pageKeys";
 
 type Agent = "claude" | "codex";
 const AGENT_KEY = "valk.backlog.agent";
@@ -112,20 +113,8 @@ export function Backlog() {
   const shownOrders = ordersShown(orders, repo);
   const shownLaunches = launchesShown(launches, repo);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input, select") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "n" || e.key === "a") {
-        e.preventDefault();
-        location.hash = "#/backlog/new";
-      } else if (e.key === "q") {
-        e.preventDefault();
-        location.hash = "#/";
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  const newItem = () => (location.hash = "#/backlog/new");
+  usePageKeys("backlog", { n: newItem, a: newItem, q: () => (location.hash = "#/") });
 
   return (
     <div className="page">
@@ -302,17 +291,7 @@ export function OrderPage({ project }: { project: string }) {
   const order = orders.find((o) => o.project === project);
   const back = () => (location.hash = "#/backlog");
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input, select") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        back();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  usePageKeys("order", { q: back, Escape: back });
 
   return (
     <div className="page">
