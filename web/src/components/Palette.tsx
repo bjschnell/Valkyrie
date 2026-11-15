@@ -26,15 +26,16 @@ const GROUP: Record<Entry["group"], string> = {
 /** An option's element id, by its entry's key so it stays with the entry. */
 const optionId = (key: string) => `palette-${key.replace(/[^\w-]/g, "_")}`;
 
-function run(d: Entry["do"]) {
-  if ("go" in d) {
+function run(d: Entry["do"], onShortcuts: () => void) {
+  if ("sheet" in d) onShortcuts();
+  else if ("go" in d) {
     if (location.hash !== d.go) location.hash = d.go;
   } else if ("look" in d) setLook(d.look as (typeof LOOKS)[number]);
   else if ("decision" in d) void review(d.decision, { a: "accept" });
   else void changeItem(d.item, { do: "status", status: "open" });
 }
 
-export function Palette({ onClose }: { onClose: () => void }) {
+export function Palette({ onClose, onShortcuts }: { onClose: () => void; onShortcuts: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const sessions = useApp((s) => s.sessions);
@@ -94,7 +95,7 @@ export function Palette({ onClose }: { onClose: () => void }) {
   const choose = (e: Entry | undefined) => {
     if (!e) return;
     onClose();
-    run(e.do);
+    run(e.do, onShortcuts);
   };
   const move = (by: number) => {
     if (shown.length) setSel(shown[(pick + by + shown.length) % shown.length].key);

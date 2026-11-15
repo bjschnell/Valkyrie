@@ -66,7 +66,7 @@ const sources = (over: Partial<Sources> = {}): Sources => ({
 describe("entries", () => {
   it("puts actions first, then sessions, pages and themes", () => {
     const groups = entries(sources()).map((e) => e.group);
-    expect(groups).toEqual(["Actions", "Actions", "Sessions", "Sessions", "Pages", "Pages", "Themes", "Themes"]);
+    expect(groups).toEqual(["Actions", "Actions", "Actions", "Sessions", "Sessions", "Pages", "Pages", "Themes", "Themes"]);
   });
   it("offers to accept proposed decisions and backlog items, and no others", () => {
     const d = (id: number, status: string) =>
