@@ -20,6 +20,7 @@ import {
 } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
+import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
 import { Markdown, type BlockComments } from "./Markdown";
 
@@ -56,7 +57,7 @@ function byline(d: Doc): string {
 export function DocsList() {
   const status = useApp((s) => s.status);
   // The marks show what was new before this visit; then it's all read.
-  const { data, failed } = useCached("docs", allDocs, (got) => docsSeen(got.at));
+  const { data, failed, reload } = useCached("docs", allDocs, (got) => docsSeen(got.at));
   const docs = data?.docs ?? null;
   const [gone, setGone] = useState<DeletedDoc[]>([]);
   useBack("#/");
@@ -82,9 +83,13 @@ export function DocsList() {
         </div>
       </header>
       <main className="inbox">
-        {docs === null && (failed ? <div className="empty">Couldn't load the docs.</div> : <Loading />)}
+        {docs === null && (failed ? <ErrorState what="the docs" why={failed} onRetry={reload} /> : <Loading />)}
         {docs !== null && docs.length === 0 && (
-          <div className="empty">No docs yet. Agents write plans, research and reports here.</div>
+          <EmptyState
+            title="No docs yet"
+            hint="Agents write plans, research and reports here. Ask one in a session to write something up."
+            action={{ label: "Open the inbox", run: () => go("#/") }}
+          />
         )}
         {groups.map(([group, ds]) => (
           <section key={group || "-"}>
@@ -189,6 +194,7 @@ export function DocView({ docKey }: { docKey: string }) {
   const [doc, setDoc] = useState<Doc | null>(null);
   const [list, setList] = useState<Doc[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [comments, setComments] = useState<DocComment[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [mode, setMode] = useState<Mode>("read");
@@ -224,7 +230,7 @@ export function DocView({ docKey }: { docKey: string }) {
     return () => {
       live = false;
     };
-  }, [status, docKey]);
+  }, [status, docKey, retry]);
 
   const wiki = useMemo(() => resolver(list), [list]);
   const text = useMemo(() => (doc?.text ? body(doc.text) : ""), [doc]);
@@ -282,7 +288,7 @@ export function DocView({ docKey }: { docKey: string }) {
         </div>
       </header>
       <main className="inbox doc-page">
-        {error && <div className="empty">{error}</div>}
+        {error && (validKey(docKey) ? <ErrorState what="the doc" why={error} onRetry={() => setRetry((n) => n + 1)} /> : <EmptyState title={error} action={{ label: "Back to docs", run: () => go("#/docs") }} />)}
         {!doc && !error && <Loading rows={6} />}
         {doc && (
           <>
@@ -638,11 +644,13 @@ function History({
 }) {
   const [versions, setVersions] = useState<DocVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [again, setAgain] = useState(0);
   const [open, setOpen] = useState<{ version: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let live = true;
+    setError(null);
     docHistory(docKey).then(
       (got) => live && setVersions(got.versions),
       (e: Error) => live && setError(e.message),
@@ -650,7 +658,7 @@ function History({
     return () => {
       live = false;
     };
-  }, [docKey, doc.hash]);
+  }, [docKey, doc.hash, again]);
 
   const peek = (version: string) => {
     if (open?.version === version) return setOpen(null);
@@ -679,10 +687,10 @@ function History({
       <h2 className="section-title">
         History <span className="count">{versions?.length ?? ""}</span>
       </h2>
-      {error && <div className="empty">{error}</div>}
-      {!versions && !error && <div className="empty">Loading…</div>}
+      {error && <ErrorState what="the history" why={error} onRetry={() => setAgain((n) => n + 1)} />}
+      {!versions && !error && <Loading rows={2} />}
       {versions?.length === 0 && (
-        <div className="empty">No past versions yet. Each edit keeps the one it replaces, for 30 days.</div>
+        <EmptyState title="No past versions yet" hint="Each edit keeps the one it replaces, for 30 days." />
       )}
       <div className="list">
         {versions?.map((v) => (

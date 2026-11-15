@@ -4,6 +4,7 @@ import { fieldLabel, marks, terms, windowStart, WINDOWS, type SearchWindow } fro
 import { clockOf, dayLabel } from "../lib/digest";
 import { searchHistory, spawn, toast, useApp } from "../store";
 import { Back } from "./icons";
+import { EmptyState, ErrorState } from "./states";
 
 const home = () => {
   location.hash = "#/";
@@ -26,6 +27,7 @@ export function SearchView() {
   const [results, setResults] = useState<{ win: SearchWindow; r: SearchResults } | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
+  const [tries, setTry] = useState(0);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => input.current?.focus(), []);
@@ -58,7 +60,7 @@ export function SearchView() {
       live = false;
       clearTimeout(timer);
     };
-  }, [status, query, win]);
+  }, [status, query, win, tries]);
 
   // q or Esc goes back, when you aren't typing; Esc in the box leaves it.
   useEffect(() => {
@@ -121,19 +123,23 @@ export function SearchView() {
             </button>
           ))}
         </div>
-        {failed && <div className="empty">Couldn't search: {failed}</div>}
+        {failed && <ErrorState what="the search" why={failed} onRetry={() => setTry((n) => n + 1)} />}
         {!failed && words.length === 0 && (
           <div className="empty">Find the session where you said or did something.</div>
         )}
         {!failed && words.length > 0 && (shown === null || busy) && <div className="empty">Searching…</div>}
-        {!failed && shown !== null && !busy && (
+        {!failed && shown !== null && !busy && shown.total > 0 && (
           <p className="digest-about">
-            {shown.total === 0
-              ? "No session holds every word."
-              : shown.total > shown.hits.length
-                ? `${shown.total} sessions; the newest ${shown.hits.length}.`
-                : `${shown.total} ${shown.total === 1 ? "session" : "sessions"}.`}
+            {shown.total > shown.hits.length
+              ? `${shown.total} sessions; the newest ${shown.hits.length}.`
+              : `${shown.total} ${shown.total === 1 ? "session" : "sessions"}.`}
           </p>
+        )}
+        {!failed && shown !== null && !busy && shown.total === 0 && (
+          <EmptyState
+            title="No session holds every word"
+            action={win !== "all" ? { label: "Search all time", run: () => setWin("all") } : { label: "Clear the search", run: () => setQuery("") }}
+          />
         )}
         {!failed && shown !== null && !busy && shown.hits.length > 0 && (
           <div className="list">

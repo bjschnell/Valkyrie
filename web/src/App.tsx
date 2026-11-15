@@ -21,6 +21,7 @@ import { shortcutsKey } from "./lib/shortcuts";
 import { Palette } from "./components/Palette";
 import { Shortcuts } from "./components/Shortcuts";
 import { Settings } from "./components/Settings";
+import { OfflineBanner } from "./components/states";
 import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
 import { close, connect, open, useApp } from "./store";
@@ -281,6 +282,7 @@ export function App() {
       {tabs && <TabBar at={navKey(at)} />}
       {palette && <Palette onClose={closePalette} onShortcuts={openSheet} />}
       {sheet && <Shortcuts page={at.page} onClose={closeSheet} />}
+      <OfflineBanner />
       <Toast />
     </>
   );
