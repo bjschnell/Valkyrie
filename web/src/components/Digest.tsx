@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { DigestEntry, DigestGroup } from "../proto";
 import { counts, dayLabel, clockOf, groupDigest, outcomeLabel, spanOf, windowStart, type Window } from "../lib/digest";
 import { age } from "../lib/time";
@@ -7,6 +7,7 @@ import { useCached } from "../cache";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
+import { usePageKeys } from "../lib/pageKeys";
 
 const home = () => {
   location.hash = "#/";
@@ -55,17 +56,7 @@ export function DigestView() {
   );
 
   // q or Esc goes back, when you aren't typing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        home();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  usePageKeys("digest", { q: home, Escape: home });
 
   const onCopy = async () => {
     if (!digest) return;

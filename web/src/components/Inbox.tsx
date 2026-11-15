@@ -20,6 +20,7 @@ import { NotifyHint } from "./Notify";
 import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
 import { Mark, Wordmark } from "./Logo";
+import { usePageKeys } from "../lib/pageKeys";
 
 const go = (id: number) => {
   location.hash = `#/s/${id}`;
@@ -49,49 +50,33 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
 
   // n starts a session; j/k pick a card or row, Enter opens it, r reviews its
   // changes, b opens the backlog, d the decisions, `,` opens settings.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Beside an open session, the keys are that session's.
-      if (beside != null) return;
-      if (
-        (e.target as HTMLElement).closest("textarea, input") ||
-        e.ctrlKey ||
-        e.metaKey ||
-        e.altKey
-      )
-        return;
-      const pick = (i: number) => {
-        const next = Math.max(0, Math.min(order.length - 1, i));
-        setSel(next);
-        document
-          .querySelectorAll<HTMLElement>("[data-pick]")
-          [next]?.scrollIntoView({ block: "nearest" });
-      };
-      const actions: Record<string, () => void> = {
-        n: () => (location.hash = "#/new"),
-        b: () => (location.hash = "#/backlog"),
-        d: () => (location.hash = "#/decisions"),
-        a: () => (location.hash = "#/digest"),
-        h: () => (location.hash = "#/history"),
-        s: () => (location.hash = "#/supervisor"),
-        "/": () => (location.hash = "#/search"),
-        ",": () => (location.hash = "#/settings"),
-        j: () => pick(sel + 1),
-        k: () => pick(sel - 1),
-        Enter: () => selected !== null && go(selected),
-        o: () => selected !== null && go(selected),
-        r: () =>
-          selected !== null && (location.hash = `#/s/${selected}/review`),
-      };
-      const action = actions[e.key];
-      if (action) {
-        e.preventDefault();
-        action();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  });
+  const pick = (i: number) => {
+    const next = Math.max(0, Math.min(order.length - 1, i));
+    setSel(next);
+    document.querySelectorAll<HTMLElement>("[data-pick]")[next]?.scrollIntoView({ block: "nearest" });
+  };
+  const open = () => selected !== null && go(selected);
+  const to = (hash: string) => () => (location.hash = hash);
+  // Beside an open session, the keys are that session's.
+  usePageKeys(
+    "inbox",
+    {
+      n: to("#/new"),
+      b: to("#/backlog"),
+      d: to("#/decisions"),
+      a: to("#/digest"),
+      h: to("#/history"),
+      s: to("#/supervisor"),
+      "/": to("#/search"),
+      ",": to("#/settings"),
+      j: () => pick(sel + 1),
+      k: () => pick(sel - 1),
+      Enter: open,
+      o: open,
+      r: () => selected !== null && (location.hash = `#/s/${selected}/review`),
+    },
+    { off: beside != null },
+  );
 
   return (
     <div className="page">

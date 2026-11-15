@@ -4,6 +4,7 @@ import { diffRows, splitPath } from "../lib/diff";
 import { markSeen, sendTo, toast, useApp } from "../store";
 import { Back, Chevron, Send } from "./icons";
 import { MicButton } from "./Mic";
+import { usePageKeys } from "../lib/pageKeys";
 
 const BADGE: Record<Change, string> = {
   modified: "M",
@@ -100,30 +101,18 @@ export function ReviewView({ id }: { id: number }) {
   };
 
   // j/k move between files, o opens one, r reads the diff again, q goes back.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
-      const files = review?.files ?? [];
-      const move = (by: number) => {
-        focus.current = Math.max(0, Math.min(files.length - 1, focus.current + by));
-        cards.current[focus.current]?.scrollIntoView({ block: "start", behavior: "smooth" });
-      };
-      const actions: Record<string, () => void> = {
-        j: () => move(1),
-        k: () => move(-1),
-        o: () => files[focus.current] && toggle(files[focus.current].path),
-        r: () => void load(),
-        i: () => area.current?.focus(),
-        q: () => (location.hash = `#/s/${id}`),
-      };
-      const action = actions[e.key];
-      if (action) {
-        e.preventDefault();
-        action();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+  const files = review?.files ?? [];
+  const move = (by: number) => {
+    focus.current = Math.max(0, Math.min(files.length - 1, focus.current + by));
+    cards.current[focus.current]?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+  usePageKeys("review", {
+    j: () => move(1),
+    k: () => move(-1),
+    o: () => files[focus.current] && toggle(files[focus.current].path),
+    r: () => void load(),
+    i: () => area.current?.focus(),
+    q: () => (location.hash = `#/s/${id}`),
   });
 
   const totals = useMemo(() => {

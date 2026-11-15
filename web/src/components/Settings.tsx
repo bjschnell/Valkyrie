@@ -1,9 +1,9 @@
-import { useEffect } from "react";
 import { LOOKS, LOOK_TEXT, hasRain, setLook, useLook } from "../lib/theme";
 import { AddDeviceSettings } from "./AddDevice";
 import { Back, Check } from "./icons";
 import { NotifySettings } from "./Notify";
 import { Rain } from "./Rain";
+import { usePageKeys } from "../lib/pageKeys";
 
 const home = () => {
   location.hash = "#/";
@@ -14,17 +14,7 @@ export function Settings() {
   const look = useLook();
 
   // q or Esc goes back, when you aren't typing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        home();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  usePageKeys("settings", { q: home, Escape: home });
 
   return (
     <div className="page">
