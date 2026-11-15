@@ -15,6 +15,7 @@ import { ReviewView } from "./components/Review";
 import { SessionView } from "./components/SessionView";
 import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
+import { showNeeds } from "./lib/badge";
 import { paletteKey } from "./lib/palette";
 import { shortcutsKey } from "./lib/shortcuts";
 import { Palette } from "./components/Palette";
@@ -161,6 +162,9 @@ export function App() {
     seen.current = { open: openId, recent: openId === null ? recent : [...recent, openId] };
   }
   const paired = !!token && status !== "unpaired" && status !== "outdated";
+  // Who needs you, on the app icon and the tab title (#187).
+  const needs = useApp((s) => s.queue.length);
+  useEffect(() => showNeeds(paired ? needs : 0), [paired, needs]);
   useEffect(() => {
     if (!desktop || !paired) return;
     const onKey = (e: KeyboardEvent) => {
