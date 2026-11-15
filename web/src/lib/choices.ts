@@ -2,6 +2,10 @@
 // check, Codex's approvals, most TUIs' pickers), so the phone can show buttons.
 // Numbered options are answered with their number, which both agents take;
 // unnumbered ones by moving the program's cursor (`❯`) there and pressing Enter.
+// In Claude's multi-select question both only tick a box; its answers go in from a
+// Submit tab, so that prompt gets a Submit choice that presses Right to reach it.
+
+import type { Key } from "./keys";
 
 export interface Choice {
   label: string;
@@ -11,6 +15,8 @@ export interface Choice {
   n?: number;
   /** Arrow presses from the cursor to it (negative is up), for unnumbered ones. */
   moves?: number;
+  /** Keys that do it, for a step that isn't an option (multi-select's Submit). */
+  keys?: Key[];
 }
 
 const CURSOR = "[❯›>▶→]";
@@ -18,6 +24,8 @@ const NUMBERED = new RegExp(`^(\\s*)(${CURSOR})?\\s*(\\d)[.)]\\s+(.+?)\\s*$`, "u
 const POINTED = new RegExp(`^(\\s*)${CURSOR}\\s+(\\S.*?)\\s*$`, "u");
 const CURSOR_LINE = new RegExp(`^\\s*${CURSOR}(\\s|$)`, "u");
 const RULE = /^\s*[─━═]{8,}\s*$/u;
+/** A multi-select option's box, ticked or not: `[ ] Apple`, `[✔] Banana`. */
+const CHECKBOX = /^\[[ ✔✓xX×]\]\s/u;
 
 /**
  * The prompt in the screen's bottom lines: at least two choices, one under the
@@ -28,7 +36,26 @@ export function findChoices(lines: string[], lookback = 25): Choice[] {
   const tail = lines.slice(Math.max(0, lines.length - lookback));
   const numbered = findNumbered(tail);
   const found = numbered.length >= 2 ? numbered : findPointed(tail);
-  return found.some((c) => c.selected) ? found : [];
+  if (!found.some((c) => c.selected)) return [];
+  // Claude's multi-select: the Submit tab, one Right from its only question (or
+  // the next question, then Submit). Its review there is an ordinary prompt.
+  if (found.some((c) => CHECKBOX.test(c.label))) {
+    return [...found, { label: "Submit", selected: false, keys: ["right"] }];
+  }
+  return found;
+}
+
+/**
+ * The keys that pick a choice: its own, or arrows from the program's cursor to it
+ * and Enter. Null when there's no cursor to move, and its number picks it.
+ */
+export function choiceKeys(choices: Choice[], choice: Choice): Key[] | null {
+  if (choice.keys) return choice.keys;
+  const from = choices.findIndex((c) => c.selected);
+  const to = choices.indexOf(choice);
+  const moves = choice.moves ?? (from >= 0 ? to - from : null);
+  if (moves === null) return null;
+  return [...Array<Key>(Math.abs(moves)).fill(moves < 0 ? "up" : "down"), "enter"];
 }
 
 /**
@@ -58,7 +85,9 @@ function findNumbered(lines: string[]): Choice[] {
     }
     if (!run.length) continue;
     const text = line.trim();
-    if (text && gap === 0 && /^\s{3,}/.test(line)) {
+    // Multi-select's Submit row under its options is a step, not a wrapped label.
+    const submitRow = text === "Submit" && run.some((c) => CHECKBOX.test(c.label));
+    if (text && !submitRow && gap === 0 && /^\s{3,}/.test(line)) {
       // A wrapped label goes on under its option.
       const last = run[run.length - 1];
       last.label = clean(`${last.label} ${text}`);

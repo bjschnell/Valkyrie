@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { findChoices, plainYes, promptContext } from "./choices";
+import { choiceKeys, findChoices, plainYes, promptContext } from "./choices";
 
 // Real screens recorded from Claude Code and Codex (crates/valkyrie-agents).
 const fixture = (name: string) =>
@@ -63,6 +63,42 @@ describe("findChoices", () => {
   it("ignores a numbered list in ordinary output far above", () => {
     const lines = ["Steps:", "1. build", "2. test", ...Array(40).fill("log line"), "$ "];
     expect(findChoices(lines)).toEqual([]);
+  });
+});
+
+describe("Claude's multi-select question", () => {
+  // Recorded from Claude Code 2.1.325, Banana ticked. A number or Enter only ticks
+  // a box; the answers go in from the Submit tab, one Right away.
+  const screen = fixture("claude_multiselect.txt");
+
+  it("offers a Submit after the options, which presses Right", () => {
+    const choices = findChoices(screen);
+    expect(choices.map((c) => c.label)).toEqual([
+      "[ ] Apple Crisp, sweet, and the classic pick.",
+      "[✔] Banana Soft, potassium-heavy, easy to carry.",
+      "[ ] Cherry Small, tart or sweet, and a bit of a pain to pit.",
+      "[ ] Type something",
+      "Chat about this",
+      "Submit",
+    ]);
+    const submit = choices[choices.length - 1];
+    expect(choiceKeys(choices, submit)).toEqual(["right"]);
+  });
+
+  it("ticks an option by moving to it and pressing Enter, as before", () => {
+    const choices = findChoices(screen);
+    expect(choiceKeys(choices, choices[2])).toEqual(["down", "down", "enter"]);
+  });
+
+  it("reads the Submit tab's review as a plain prompt", () => {
+    const choices = findChoices(fixture("claude_multiselect_review.txt"));
+    expect(choices.map((c) => c.label)).toEqual(["Submit answers", "Cancel"]);
+    expect(choiceKeys(choices, choices[0])).toEqual(["enter"]);
+  });
+
+  it("adds no Submit to a single-select question", () => {
+    const choices = findChoices(fixture("claude_question.txt"));
+    expect(choices.map((c) => c.label)).not.toContain("Submit");
   });
 });
 
