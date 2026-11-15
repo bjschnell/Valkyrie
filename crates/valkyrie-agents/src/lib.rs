@@ -29,6 +29,10 @@ pub enum AgentEvent {
     },
     QuestionAsked {
         summary: String,
+        /// Every question of the call, in order, whitespace collapsed: the dialog
+        /// shows them one at a time with no hook between.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<String>,
     },
     InputAsked {
         summary: String,

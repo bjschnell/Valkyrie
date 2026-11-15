@@ -53,6 +53,19 @@ pub fn question(payload: &Value) -> Option<String> {
         .and_then(one_line)
 }
 
+/// Every question of an AskUserQuestion call, in order, whitespace collapsed and
+/// not truncated, so a line of one on screen can be found in it.
+pub fn questions(payload: &Value) -> Vec<String> {
+    payload["tool_input"]["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|q| q["question"].as_str())
+        .map(|q| q.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|q| !q.is_empty())
+        .collect()
+}
+
 /// The most summary-like line of an assistant message: the last prose line that
 /// reads like a conclusion, else the intro of a list-heavy answer, else the last line.
 pub fn pick_summary_line(text: &str) -> Option<String> {
