@@ -9,6 +9,7 @@ import { useCached } from "../cache";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
 import { Back, Chevron } from "./icons";
+import { usePageKeys } from "../lib/pageKeys";
 
 const home = () => {
   location.hash = "#/";
@@ -64,17 +65,8 @@ export function SupervisorView() {
   const { log, failed, reload } = useLog(`${waits.length}:${answered}`);
   const done = () => setAnswered((n) => n + 1);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("textarea, input") || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        home();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  // q or Esc goes back, when you aren't typing.
+  usePageKeys("supervisor", { q: home, Escape: home });
 
   return (
     <div className="page">

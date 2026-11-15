@@ -9,6 +9,7 @@ import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
 import { MicButton } from "./Mic";
 import { ScreenView, useDesktop, useWide } from "./Terminal";
+import { usePageKeys } from "../lib/pageKeys";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -82,31 +83,34 @@ export function SessionView({ id }: { id: number }) {
   };
 
   // Keys on a desktop keyboard, vim-style, when you aren't typing.
+  const by = (dy: number) => scroller.current?.scrollBy({ top: dy, behavior: "smooth" });
+  const scrollTo = (top: number | "end") => () => {
+    const el = scroller.current;
+    el?.scrollTo({ top: top === "end" ? el.scrollHeight : top, behavior: "smooth" });
+  };
+  // In the terminal every key is the program's, these included.
+  usePageKeys(
+    "session",
+    {
+      j: () => by(80),
+      k: () => by(-80),
+      g: scrollTo(0),
+      G: scrollTo("end"),
+      i: () => composer.current?.focus(),
+      t: () => hasChat && choose(mode === "chat" ? "terminal" : "chat"),
+      r: () => (location.hash = `#/s/${id}/review`),
+      q: () => (location.hash = "#/"),
+    },
+    { off: keyboard },
+  );
+  // Ctrl+D and Ctrl+U page through it (listed by hand in lib/shortcuts.ts).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      // In the terminal every key is the program's, these included.
-      if (keyboard || target.closest("textarea, input, [contenteditable]") || e.altKey || e.metaKey) return;
-      const el = scroller.current;
-      const page = (el?.clientHeight ?? 400) / 2;
-      const by = (dy: number) => el?.scrollBy({ top: dy, behavior: "smooth" });
-      const ctrl = e.ctrlKey;
-      const actions: Record<string, () => void> = ctrl
-        ? { d: () => by(page), u: () => by(-page) }
-        : {
-            j: () => by(80),
-            k: () => by(-80),
-            g: () => el?.scrollTo({ top: 0, behavior: "smooth" }),
-            G: () => el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" }),
-            i: () => composer.current?.focus(),
-            t: () => hasChat && choose(mode === "chat" ? "terminal" : "chat"),
-            r: () => (location.hash = `#/s/${id}/review`),
-            q: () => (location.hash = "#/"),
-          };
-      const action = actions[e.key];
-      if (action) {
+      if (keyboard || !e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      if ((e.target as HTMLElement).closest("textarea, input, [contenteditable]")) return;
+      if (e.key === "d" || e.key === "u") {
         e.preventDefault();
-        action();
+        by(((scroller.current?.clientHeight ?? 400) / 2) * (e.key === "d" ? 1 : -1));
       }
     };
     window.addEventListener("keydown", onKey);
