@@ -4,7 +4,7 @@ import { base, launchesOn, orderHref, orderSize } from "../lib/backlog";
 import { stepChoices } from "../lib/step";
 import { stripLine, waitingOnYou, watchLine, type Wait } from "../lib/supervisor";
 import { age } from "../lib/time";
-import { answerLaunch, review, supervisorLog, supervisorWatch, takeStep, useApp } from "../store";
+import { answerLaunch, decide, supervisorLog, supervisorWatch, takeStep, useApp } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
@@ -211,10 +211,10 @@ function WaitCard({ w, onDone }: { w: Wait; onDone: () => void }) {
       ]);
     case "policy":
       return card("policy", `#${w.decision.id} ${w.decision.title}`, `A policy for ${base(w.decision.project)}: once accepted, it runs without asking.`, [
-        <button key="reject" className="ghost" disabled={busy} onClick={() => void act(() => review(w.decision, { a: "reject" }))}>
+        <button key="reject" className="ghost" disabled={busy} onClick={() => decide(w.decision, "reject", onDone)}>
           Reject
         </button>,
-        <button key="accept" className="primary" disabled={busy} onClick={() => void act(() => review(w.decision, { a: "accept" }))}>
+        <button key="accept" className="primary" disabled={busy} onClick={() => decide(w.decision, "accept", onDone)}>
           Accept
         </button>,
       ]);

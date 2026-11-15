@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
+import { editPatch } from "../lib/optimistic";
 import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, noteOrigin, orderHref, orderSize, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
-import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, deleteItem, itemFacts, launchItem, noteItem, planOrder, sendFile, shipMerged, toast, useApp } from "../store";
+import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
 
@@ -443,15 +444,9 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         toast(`Couldn't start: ${(e as Error).message}`);
       }
     });
-  const status = (s: Item["status"]) => act(() => changeItem(item.id, { do: "status", status: s }));
-  // Deleting can't be undone, so it asks twice: the first tap arms it for a moment.
-  const [sure, setSure] = useState(false);
-  useEffect(() => {
-    if (!sure) return;
-    const t = setTimeout(() => setSure(false), 5000);
-    return () => clearTimeout(t);
-  }, [sure]);
-  const remove = () => (sure ? act(() => deleteItem(item.id)) : setSure(true));
+  // Shown at once with Undo in the toast; the daemon hears when the Undo is gone.
+  const status = (s: Item["status"]) => setStatus(item.id, s);
+  const remove = () => removeItem(item.id);
   // Back to the backlog stops the agent on it, so with one running it asks twice too.
   const [back, setBack] = useState(false);
   useEffect(() => {
@@ -592,8 +587,8 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         )}
         <div className="card-actions">
           {(expanded || lane === "proposed") && !live && (
-            <button className={`ghost no ${sure ? "item-sure" : ""}`} disabled={busy} onClick={() => void remove()}>
-              {sure ? "Delete for good" : "Delete"}
+            <button className="ghost no" disabled={busy} onClick={remove}>
+              Delete
             </button>
           )}
           {lane === "proposed" ? (
@@ -711,17 +706,20 @@ export function ItemEditor({ id }: { id: number | null }) {
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const item = id === null ? null : (items.find((i) => i.id === id) ?? null);
+  // Back from a refused save: the editor opens with that edit in it.
+  const [retry] = useState(() => (id === null ? null : takeFailedEdit(id)));
+  const start = item && retry ? { ...item, ...editPatch(retry) } : item;
   // An agent already on it: saving shouldn't start a second one.
   const running = item !== null && liveSession(item, sessions, boot) !== null;
-  const [kind, setKind] = useState<ItemKind>(item?.kind ?? "bug");
-  const [prio, setPrio] = useState<Priority>(item ? priority(item) : "p2");
+  const [kind, setKind] = useState<ItemKind>(start?.kind ?? "bug");
+  const [prio, setPrio] = useState<Priority>(start ? priority(start) : "p2");
   // What it comes after, as typed: "#12, 14".
-  const [after, setAfter] = useState(() => idList(item?.blocked_by));
-  const [title, setTitle] = useState(item?.title ?? "");
-  const [text, setText] = useState(() => item?.body ?? (id === null ? (read(DRAFT_KEY) ?? "") : ""));
+  const [after, setAfter] = useState(() => idList(start?.blocked_by));
+  const [title, setTitle] = useState(start?.title ?? "");
+  const [text, setText] = useState(() => start?.body ?? (id === null ? (read(DRAFT_KEY) ?? "") : ""));
   const [folder, setFolder] = useState<string>(
     // A new item goes where the board is filtered to, else where the last one went.
-    () => item?.project ?? (id === null ? read(REPO_KEY) || (read(FOLDER_KEY) ?? "") : ""),
+    () => start?.project ?? (id === null ? read(REPO_KEY) || (read(FOLDER_KEY) ?? "") : ""),
   );
   const [places, setPlaces] = useState<Places | null>(null);
   const [files, setFiles] = useState<Attachment[]>([]);
@@ -803,7 +801,9 @@ export function ItemEditor({ id }: { id: number | null }) {
           toast(change.clash);
           return;
         }
-        if (change && !(await changeItem(id, change))) return;
+        if (change && andLaunch && !(await changeItem(id, change))) return;
+        // Saved alone, it shows at once with Undo, and the daemon hears when that's gone.
+        if (change && !andLaunch && change.do === "edit") editItem(id, change);
       }
       navigator.vibrate?.(10);
       if (andLaunch && saved !== null) {

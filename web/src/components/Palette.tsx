@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useCached } from "../cache";
 import { entries, rank, type Entry } from "../lib/palette";
 import { LOOK_TEXT, LOOKS, setLook, useLook } from "../lib/theme";
-import { allDocs, changeItem, review, useApp } from "../store";
+import { allDocs, decide, setStatus, useApp } from "../store";
 import { PAGES } from "./Nav";
 
 /** Drawn at once; typing narrows the rest in. */
@@ -31,8 +31,8 @@ function run(d: Entry["do"], onShortcuts: () => void) {
   else if ("go" in d) {
     if (location.hash !== d.go) location.hash = d.go;
   } else if ("look" in d) setLook(d.look as (typeof LOOKS)[number]);
-  else if ("decision" in d) void review(d.decision, { a: "accept" });
-  else void changeItem(d.item, { do: "status", status: "open" });
+  else if ("decision" in d) decide(d.decision, "accept");
+  else setStatus(d.item, "open");
 }
 
 export function Palette({ onClose, onShortcuts }: { onClose: () => void; onShortcuts: () => void }) {

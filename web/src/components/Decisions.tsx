@@ -2,7 +2,7 @@ import { useState } from "react";
 import { DECISION_KINDS, type Decision, type DecisionKind, type ReviewAction } from "../proto";
 import { age } from "../lib/time";
 import { USER_SCOPE, scopeName } from "../lib/scope";
-import { review, useApp } from "../store";
+import { decide, review, useApp } from "../store";
 import { parseScope, scoping } from "../lib/decisions";
 import { Markdown } from "./Markdown";
 
@@ -32,12 +32,6 @@ export function Proposals() {
 function ProposalCard({ d }: { d: Decision }) {
   const now = useApp((s) => s.now);
   const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const act = async (f: () => Promise<boolean>) => {
-    setBusy(true);
-    await f();
-    setBusy(false);
-  };
   const who = { human: "you", valkyrie: "Valkyrie, from your correction" }[d.provenance.by] ?? d.provenance.by;
   const where = [scopeName(d.project), d.provenance.session && d.provenance.session !== scopeName(d.project) ? d.provenance.session : null]
     .filter(Boolean)
@@ -55,7 +49,7 @@ function ProposalCard({ d }: { d: Decision }) {
           <span className="card-age">{age(d.created * 1000, now)}</span>
         </div>
         {editing ? (
-          <DecisionEditor d={d} busy={busy} onDone={() => setEditing(false)} />
+          <DecisionEditor d={d} busy={false} onDone={() => setEditing(false)} />
         ) : (
           <>
             <p className="decision-title">{d.title}</p>
@@ -66,13 +60,13 @@ function ProposalCard({ d }: { d: Decision }) {
               {d.supersedes !== undefined && <> · replaces #{d.supersedes}</>}
             </div>
             <div className="card-actions">
-              <button className="ghost no" disabled={busy} onClick={() => void act(() => review(d, { a: "reject" }))}>
+              <button className="ghost no" onClick={() => decide(d, "reject")}>
                 Reject
               </button>
-              <button className="ghost" disabled={busy} onClick={() => setEditing(true)}>
+              <button className="ghost" onClick={() => setEditing(true)}>
                 Edit
               </button>
-              <button className="primary" disabled={busy} onClick={() => void act(() => review(d, { a: "accept" }))}>
+              <button className="primary" onClick={() => decide(d, "accept")}>
                 Accept
               </button>
             </div>
