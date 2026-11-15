@@ -5,6 +5,7 @@ import { age } from "../lib/time";
 import { awayDigest, toast } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
+import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
 
 const home = () => {
@@ -49,7 +50,7 @@ async function copy(text: string): Promise<boolean> {
 export function DigestView() {
   const [win, setWin] = useState<Window>("away");
   const [by, setBy] = useState<DigestGroup>("repo");
-  const { data: digest, failed } = useCached(`digest:${win}:${by}`, () =>
+  const { data: digest, failed, reload } = useCached(`digest:${win}:${by}`, () =>
     awayDigest(windowStart(win, Date.now()), by),
   );
 
@@ -113,7 +114,7 @@ export function DigestView() {
             </button>
           ))}
         </div>
-        {digest === null && (failed ? <div className="empty">Couldn't load the digest: {failed}</div> : <Loading rows={5} />)}
+        {digest === null && (failed ? <ErrorState what="the digest" why={failed} onRetry={reload} /> : <Loading rows={5} />)}
         {digest !== null && (
           <p className="digest-about">
             {digest.away ? "Since you left, " : "Since "}
@@ -122,7 +123,11 @@ export function DigestView() {
           </p>
         )}
         {digest !== null && digest.entries.length === 0 && (
-          <div className="empty">No agent did anything in that time.</div>
+          <EmptyState
+            title="No agent did anything in that time"
+            hint={win === "3d" ? "Nothing in the last three days." : undefined}
+            action={win === "3d" ? { label: "See past sessions", run: () => (location.hash = "#/history") } : { label: "Look back 3 days", run: () => setWin("3d") }}
+          />
         )}
         {groups.map(([group, es]) => (
           <section key={group}>

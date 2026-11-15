@@ -793,6 +793,64 @@ button.title-name {
   text-align: center;
 }
 
+/* Designed error and empty states, and the offline banner (#184). */
+.state {
+  padding: var(--space-7) var(--space-4);
+  text-align: center;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  margin: var(--space-3) 0;
+}
+
+.state-error {
+  border-color: var(--blocked);
+}
+
+.state-title {
+  font-weight: var(--weight-bold);
+}
+
+.state-sub {
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+.state-actions {
+  margin-top: var(--space-3);
+  display: flex;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.offline-banner {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + var(--space-3));
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: calc(100% - 24px);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-full);
+  background: var(--raised);
+  border: 1px solid var(--interrupted);
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-md);
+  transform: translateX(-50%);
+}
+
+.offline-banner.is-offline {
+  border-color: var(--blocked);
+}
+
+html.with-tabs .offline-banner {
+  bottom: calc(64px + env(safe-area-inset-bottom) + var(--space-3));
+}
+
 /* State glyphs and the working spinner. */
 .state-icon {
   display: inline-grid;

@@ -203,7 +203,8 @@ export class Conn {
     this.timer = window.setTimeout(() => this.connect(), delay);
   }
 
-  private retryNow = (): void => {
+  /** Tries to connect now instead of waiting out the backoff. */
+  retryNow = (): void => {
     if (this.stopped || (this.ws && this.ws.readyState <= WebSocket.OPEN)) return;
     this.clearTimers();
     this.attempt = 0;

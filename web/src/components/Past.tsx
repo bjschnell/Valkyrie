@@ -4,6 +4,7 @@ import { clockOf, dayLabel, outcomeLabel } from "../lib/digest";
 import { pastSessions, resume, toast } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
+import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
 
 const home = () => {
@@ -16,7 +17,7 @@ const home = () => {
  * adding its worktree back if that was taken away, and opens it.
  */
 export function PastView() {
-  const { data: list, failed } = useCached("past", pastSessions);
+  const { data: list, failed, reload } = useCached("past", pastSessions);
   const [busy, setBusy] = useState<string | null>(null);
 
   // q or Esc goes back, when you aren't typing.
@@ -60,9 +61,13 @@ export function PastView() {
       </header>
 
       <main className="inbox">
-        {list === null && (failed ? <div className="empty">Couldn't load past sessions: {failed}</div> : <Loading rows={6} />)}
+        {list === null && (failed ? <ErrorState what="past sessions" why={failed} onRetry={reload} /> : <Loading rows={6} />)}
         {list !== null && list.length === 0 && (
-          <div className="empty">No agent sessions have ended in the last 31 days.</div>
+          <EmptyState
+            title="No agent sessions have ended in the last 31 days"
+            hint="Sessions you finish or close show up here, to pick up again."
+            action={{ label: "Start a session", run: () => (location.hash = "#/new") }}
+          />
         )}
         {list !== null && list.length > 0 && (
           <p className="digest-about">Agent sessions that ended, newest first. Tap one to pick it up where it left off.</p>

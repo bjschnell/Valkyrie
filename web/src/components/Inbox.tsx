@@ -13,6 +13,7 @@ import { stepChoices } from "../lib/step";
 import { hasRain, useLook } from "../lib/theme";
 import { Chevron, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
+import { EmptyState } from "./states";
 import { Proposals } from "./Decisions";
 import { SupervisorStrip } from "./Supervisor";
 import { NotifyHint } from "./Notify";
@@ -163,7 +164,11 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
               />
             ))}
             {sessions.length === 0 && (
-              <div className="empty">No sessions yet.</div>
+              <EmptyState
+                title="No sessions yet"
+                hint="Start an agent in a repository and it shows up here."
+                action={{ label: "New session", run: () => (location.hash = "#/new") }}
+              />
             )}
           </div>
         </section>

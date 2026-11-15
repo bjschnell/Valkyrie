@@ -8,6 +8,7 @@ import { allDecisions, allNotes, correctNote, deleteNote, review, useApp } from 
 import { DecisionEditor } from "./Decisions";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
+import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
 import { Markdown } from "./Markdown";
 
@@ -24,6 +25,15 @@ const home = () => {
 
 type Tab = Shelf | "notes";
 const TABS: Tab[] = [...SHELVES, "notes"];
+
+/** What an empty shelf says to do next. Agents' proposals wait in the inbox. */
+const EMPTY_HINT: Record<Tab, string> = {
+  decisions: "Agents propose decisions as they work; the ones you accept land here.",
+  skills: "Agents propose procedures worth repeating; the ones you accept land here.",
+  policies: "Agents propose policies; the ones you accept land here.",
+  habits: "Valkyrie learns these from how you work, and they land here once you accept them.",
+  notes: "Agents leave notes about a repository as they work.",
+};
 
 const ABOUT: Record<Tab, string> = {
   decisions:
@@ -44,8 +54,7 @@ export function DecisionList() {
   const { data: memory, failed: why, reload: load } = useCached("memory", fetchMemory);
   const decisions = memory?.decisions ?? null;
   const notes = memory?.notes ?? null;
-  const failed = why !== null || decisions === null || notes === null;
-  const [tab, setTab] = useState<Tab>("decisions");
+    const [tab, setTab] = useState<Tab>("decisions");
   const [only, setOnly] = useState<string | null>(null);
   const [showEnded, setShowEnded] = useState(false);
   const [words, setWords] = useState("");
@@ -165,9 +174,21 @@ export function DecisionList() {
             ))}
           </div>
         )}
-        {!loaded && (failed ? <div className="empty">Couldn't load them.</div> : <Loading rows={5} />)}
+        {!loaded && (why !== null ? <ErrorState what={tab === "notes" ? "the notes" : "what Valkyrie remembers"} why={why} onRetry={load} /> : <Loading rows={5} />)}
         {loaded && shown.length === 0 && (
-          <div className="empty">{words.trim() ? "Nothing matches those words." : `No ${showEnded ? "ended " : ""}${tab} yet.`}</div>
+          <EmptyState
+            title={words.trim() ? "Nothing matches those words" : `No ${showEnded ? "ended " : ""}${tab} yet`}
+            hint={words.trim() || showEnded || only !== null ? undefined : EMPTY_HINT[tab]}
+            action={
+              words.trim()
+                ? { label: "Clear the filter", run: () => setWords("") }
+                : showEnded
+                  ? { label: "Show what's in use", run: () => setShowEnded(false) }
+                  : only !== null
+                    ? { label: "Show every project", run: () => setOnly(null) }
+                    : { label: "Check the inbox for proposals", run: () => (location.hash = "#/") }
+            }
+          />
         )}
         {shown.map(([project, items]) => (
           <section key={project}>

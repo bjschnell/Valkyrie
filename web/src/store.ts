@@ -147,6 +147,11 @@ export function toast(text: string, action?: { label: string; run: () => void })
   set({ toast: { text, at: Date.now(), action } });
 }
 
+/** Tries the daemon again now, rather than after the backoff. */
+export function reconnect(): void {
+  conn?.retryNow();
+}
+
 export function saveToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
   set({ token, status: "connecting" });

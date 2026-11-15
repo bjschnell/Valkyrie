@@ -18,6 +18,7 @@ import { chord, chordTarget } from "./lib/chords";
 import { paletteKey } from "./lib/palette";
 import { Palette } from "./components/Palette";
 import { Settings } from "./components/Settings";
+import { OfflineBanner } from "./components/states";
 import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
 import { close, connect, open, useApp } from "./store";
@@ -242,6 +243,7 @@ export function App() {
       {rail && <Rail at={navKey(at)} />}
       {tabs && <TabBar at={navKey(at)} />}
       {palette && <Palette onClose={closePalette} />}
+      <OfflineBanner />
       <Toast />
     </>
   );
