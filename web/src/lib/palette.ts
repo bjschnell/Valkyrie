@@ -19,6 +19,7 @@ export function paletteKey(e: KeyLike, mac: boolean, terminal: boolean): boolean
 /** What choosing an entry does. */
 export type Do =
   | { go: string }
+  | { sheet: true }
   | { look: string }
   | { decision: Decision }
   | { item: number };
@@ -74,6 +75,7 @@ export function entries(s: Sources): Entry[] {
   out.push(
     { key: "new-session", group: "Actions", label: "New session", also: "start launch agent", do: { go: "#/new" } },
     { key: "new-item", group: "Actions", label: "New backlog item", also: "add todo", do: { go: "#/backlog/new" } },
+    { key: "shortcuts", group: "Actions", label: "Keyboard shortcuts", also: "keys help ?", do: { sheet: true } },
   );
   for (const d of s.proposals.filter((d) => d.status === "proposed")) {
     out.push({
