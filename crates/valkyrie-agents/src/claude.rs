@@ -1,7 +1,7 @@
 //! Claude Code. Hooks are registered per session with `--settings` (ADR-0005); the
 //! event mapping follows Leader's live findings.
 
-use crate::summary::{describe_tool, one_line, pick_summary_line, question};
+use crate::summary::{describe_tool, one_line, pick_summary_line, question, questions};
 use crate::{Adapter, AgentEvent, Screen};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -258,10 +258,12 @@ fn normalize(p: &Value) -> Option<AgentEvent> {
         "UserPromptSubmit" => E::PromptSubmitted,
         "PreToolUse" if tool == Some("AskUserQuestion") => E::QuestionAsked {
             summary: question(p).unwrap_or_else(|| "Claude is asking a question".into()),
+            questions: questions(p),
         },
         "PreToolUse" => E::ToolStarted,
         "PermissionRequest" if tool == Some("AskUserQuestion") => E::QuestionAsked {
             summary: question(p).unwrap_or_else(|| "Claude is asking a question".into()),
+            questions: questions(p),
         },
         "PermissionRequest" => E::PermissionAsked {
             summary: describe_tool(p),
@@ -525,14 +527,16 @@ mod tests {
             })
         );
         let ask = json!({"tool_name": "AskUserQuestion",
-                         "tool_input": {"questions": [{"question": "Which DB?"}]}});
+                         "tool_input": {"questions": [{"question": "Which DB?"},
+                                                      {"question": "Which\n  port?"}]}});
         for event in ["PreToolUse", "PermissionRequest"] {
             let mut p = ask.clone();
             p["hook_event_name"] = event.into();
             assert_eq!(
                 n(p),
                 Some(E::QuestionAsked {
-                    summary: "Which DB?".into()
+                    summary: "Which DB?".into(),
+                    questions: vec!["Which DB?".into(), "Which port?".into()],
                 })
             );
         }
