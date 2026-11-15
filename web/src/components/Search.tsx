@@ -5,6 +5,7 @@ import { clockOf, dayLabel } from "../lib/digest";
 import { searchHistory, spawn, toast, useApp } from "../store";
 import { Back } from "./icons";
 import { EmptyState, ErrorState } from "./states";
+import { usePageKeys } from "../lib/pageKeys";
 
 const home = () => {
   location.hash = "#/";
@@ -63,24 +64,7 @@ export function SearchView() {
   }, [status, query, win, tries]);
 
   // q or Esc goes back, when you aren't typing; Esc in the box leaves it.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if ((e.target as HTMLElement).closest("textarea, input")) {
-        if (e.key === "Escape") (e.target as HTMLElement).blur();
-        return;
-      }
-      if (e.key === "q" || e.key === "Escape") {
-        e.preventDefault();
-        home();
-      } else if (e.key === "/") {
-        e.preventDefault();
-        input.current?.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  usePageKeys("search", { q: home, Escape: home, "/": () => input.current?.focus() }, { blurOnEscape: true });
 
   const words = terms(query);
   // Results answer the query they were asked with; a newer one waits for its own.
