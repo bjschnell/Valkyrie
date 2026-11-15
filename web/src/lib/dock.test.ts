@@ -29,10 +29,18 @@ describe("new backlog item dock (#101)", () => {
     expect(launch?.cls).not.toMatch(/\bprimary\b/);
   });
 
-  it("gives Save more room than Save & launch, which takes about half as much", () => {
+  // #197 reversed #101's 2:1 split: the two are equal, and both read as buttons.
+  it("gives Save and Save & launch the same width (#197)", () => {
     const [s, l] = [grow("\\.save"), grow("\\.launch")];
     expect(s).toBeGreaterThan(0);
-    expect(l).toBeGreaterThan(0);
-    expect(l / s).toBeLessThanOrEqual(0.5);
+    expect(l).toBe(s);
+  });
+
+  it("draws Save & launch as a button, with a border and a fill (#197)", () => {
+    const rule = css.match(/\.item-dock \.launch \{([^}]*)\}/)?.[1] ?? "";
+    expect(rule).toMatch(/border:\s*1px solid/);
+    expect(rule).toMatch(/background:\s*var\(--/);
+    // The board card's `.launch` chip is an inline-flex, which pins the label left.
+    expect(rule).toMatch(/justify-content:\s*center/);
   });
 });
