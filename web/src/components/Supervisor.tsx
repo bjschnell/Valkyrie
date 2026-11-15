@@ -7,6 +7,7 @@ import { age } from "../lib/time";
 import { answerLaunch, decide, supervisorLog, supervisorWatch, takeStep, useApp } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
+import { EmptyState, ErrorState } from "./states";
 import { Back, Chevron } from "./icons";
 
 const home = () => {
@@ -21,7 +22,7 @@ function useLog(key: unknown) {
     if (first.current) first.current = false;
     else void reload();
   }, [key, reload]);
-  return { log, failed };
+  return { log, failed, reload };
 }
 
 /** What waits on you, from what the app already holds. */
@@ -60,7 +61,7 @@ export function SupervisorView() {
   const waits = useWaiting();
   const now = useApp((s) => s.now);
   const [answered, setAnswered] = useState(0);
-  const { log, failed } = useLog(`${waits.length}:${answered}`);
+  const { log, failed, reload } = useLog(`${waits.length}:${answered}`);
   const done = () => setAnswered((n) => n + 1);
 
   useEffect(() => {
@@ -109,9 +110,15 @@ export function SupervisorView() {
           <h2 className="section-title">
             What it did <span className="count">{log?.entries.length ?? ""}</span>
           </h2>
-          {failed && <div className="empty">Couldn't load it: {failed}</div>}
+          {failed && !log && <ErrorState what="what it did" why={failed} onRetry={reload} />}
           {!failed && !log && <Loading rows={3} />}
-          {log && log.entries.length === 0 && <div className="empty">Nothing in the last 90 days.</div>}
+          {log && log.entries.length === 0 && (
+            <EmptyState
+              title="Nothing in the last 90 days"
+              hint="Steps it takes after an agent stops show up here."
+              action={{ label: "Open the backlog", run: () => (location.hash = "#/backlog") }}
+            />
+          )}
           {log && log.entries.length > 0 && (
             <ol className="supervisor-log">
               {log.entries.map((e, i) => (
@@ -243,9 +250,15 @@ function Watching({ refresh }: { refresh: number }) {
         Watching <span className="count">{watch?.prs.length ?? ""}</span>
       </h2>
       {watch && <div className="supervisor-watch-line">{watchLine(watch, now)}</div>}
-      {failed && <div className="empty">Couldn't load it: {failed}</div>}
+      {failed && !watch && <ErrorState what="the pull requests it watches" why={failed} onRetry={reload} />}
       {!failed && !watch && <Loading rows={2} />}
-      {watch && watch.on && watch.prs.length === 0 && <div className="empty">No open pull request of yours.</div>}
+      {watch && watch.on && watch.prs.length === 0 && (
+        <EmptyState
+          title="No open pull request of yours"
+          hint="It watches the ones you open."
+          action={{ label: "Open the backlog", run: () => (location.hash = "#/backlog") }}
+        />
+      )}
       {watch && watch.prs.length > 0 && (
         <ol className="supervisor-log supervisor-watch">
           {watch.prs.map((p) => (

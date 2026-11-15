@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   STATE_LABEL,
   program,
@@ -13,6 +13,7 @@ import { stepChoices } from "../lib/step";
 import { hasRain, useLook } from "../lib/theme";
 import { Chevron, Plus } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
+import { EmptyState } from "./states";
 import { Proposals } from "./Decisions";
 import { SupervisorStrip } from "./Supervisor";
 import { NotifyHint } from "./Notify";
@@ -163,7 +164,11 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
               />
             ))}
             {sessions.length === 0 && (
-              <div className="empty">No sessions yet.</div>
+              <EmptyState
+                title="No sessions yet"
+                hint="Start an agent in a repository and it shows up here."
+                action={{ label: "New session", run: () => (location.hash = "#/new") }}
+              />
             )}
           </div>
         </section>
@@ -277,7 +282,12 @@ function QueueCard({
   const s = item.status;
   const choices = prompt?.choices ?? [];
   return (
-    <div className={`card-slot ${picked ? "picked" : ""}`} data-pick>
+    <div
+      className={`card-slot ${picked ? "picked" : ""}`}
+      data-pick
+      data-glide
+      style={{ "--vtn": `card-${item.session}` } as CSSProperties}
+    >
       <article className={`card state-${s.state}`}>
         <button className="card-head" onClick={() => go(item.session)}>
           <StateIcon state={s.state} />
@@ -415,7 +425,12 @@ function SessionRow({
   };
 
   return (
-    <div className="row-slot" data-pick>
+    <div
+      className="row-slot"
+      data-pick
+      data-glide
+      style={{ "--vtn": `row-${s.id}` } as CSSProperties}
+    >
       <button
         className="row-close"
         tabIndex={swiped ? 0 : -1}

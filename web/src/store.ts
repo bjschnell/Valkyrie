@@ -5,6 +5,7 @@ import { create } from "zustand";
 import { Conn, type Status } from "./net/conn";
 import type { Mismatch } from "./lib/protocol";
 import { termColors } from "./lib/theme";
+import { glide, moved } from "./lib/glide";
 import type {
   Decision,
   Note,
@@ -254,6 +255,11 @@ function hold(text: string, change: Change, send: Send, retry?: Action): void {
   held = { key, send, retry, timer: window.setTimeout(flushHeld, HOLD_MS) };
 }
 
+/** Tries the daemon again now, rather than after the backoff. */
+export function reconnect(): void {
+  conn?.retryNow();
+}
+
 export function saveToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
   set({ token, status: "connecting" });
@@ -334,7 +340,8 @@ function onPush(msg: ServerMsg): void {
   switch (msg.t) {
     case "queue":
       raw = { ...raw, queue: msg.items };
-      show();
+      // show() sets the badge from the queue as drawn.
+      glide(show, moved(get().queue.map((q) => q.session), msg.items.map((q) => q.session)));
       void refreshPrompts(msg.items);
       void refresh();
       break;
@@ -474,7 +481,13 @@ export async function install(): Promise<void> {
 export async function refresh(): Promise<void> {
   try {
     const reply = await conn?.request({ t: "list" });
-    if (reply?.t === "sessions") set({ sessions: reply.sessions });
+    if (reply?.t === "sessions") {
+      const next = reply.sessions;
+      glide(
+        () => set({ sessions: next }),
+        moved(get().sessions.map((x) => x.id), next.map((x) => x.id)),
+      );
+    }
   } catch {
     /* the connection reports itself */
   }
