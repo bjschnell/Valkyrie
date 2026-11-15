@@ -146,18 +146,35 @@ export const useApp = create<State>(() => ({
 
 const set = useApp.setState;
 const get = useApp.getState;
+type Action = { label: string; run: () => void };
 let conn: Conn | null = null;
+/** The page-leaving listeners are added, once. */
+let leaving = false;
 let listTimer: number | null = null;
 
-export function toast(text: string, action?: { label: string; run: () => void }): void {
-  // A new toast takes the Undo away, so what it would have undone goes now.
-  flushHeld();
+export function toast(text: string, action?: Action): void {
+  // Any toast waits while an Undo is offered: a reply to an earlier action
+  // mustn't take the Undo off this one and send it. Only another hold does.
+  if (held) {
+    deferred = { text, action };
+    return;
+  }
   set({ toast: { text, at: Date.now(), action } });
+}
+
+/** The last toast raised while an Undo was offered, shown once it's gone. */
+let deferred: { text: string; action?: Action } | null = null;
+
+function showDeferred(): void {
+  const d = deferred;
+  deferred = null;
+  if (d) toast(d.text, d.action);
 }
 
 // Optimistic actions (backlog #185). The daemon's lists are kept as it pushed
 // them; what the store shows is them with the user's pending changes on top.
-let raw: Lists = { proposals: [], items: [], queue: [] };
+// The store's own empty lists, so the first push compares against what's drawn.
+let raw: Lists = { proposals: get().proposals, items: get().items, queue: get().queue };
 /** Changes by key; `sent` once the daemon took it, null while held or in flight. */
 const shownOver = new Map<number, { change: Change; sent: number | null }>();
 let pendingKey = 0;
@@ -170,12 +187,17 @@ function show(): void {
     if (p.sent !== null && (landed(raw, p.change) || now - p.sent >= LAND_MS)) shownOver.delete(key);
   }
   const shown = overlay(raw, [...shownOver.values()].map((p) => p.change));
+  // Only a change to the queue moves the badge: an items push before the first
+  // queue one would clear it.
+  if (shown.queue !== get().queue) setBadge(shown.queue.length);
   set({ proposals: shown.proposals, items: shown.items, queue: shown.queue });
-  setBadge(shown.queue.length);
 }
 
-/** Sends a change shown already; taken back with a toast if the daemon refuses it. */
-async function commit(key: number, send: () => Promise<string | null | void>): Promise<void> {
+type Send = () => Promise<string | null | void>;
+
+/** Sends a change shown already; taken back with a toast if the daemon refuses
+ * it, carrying `retry` when there's a way to try again. */
+async function commit(key: number, send: Send, retry?: Action): Promise<void> {
   try {
     if (!conn) throw new Error("not connected");
     const said = await send();
@@ -187,20 +209,22 @@ async function commit(key: number, send: () => Promise<string | null | void>): P
   } catch (e) {
     shownOver.delete(key);
     show();
-    toast(`Couldn't: ${(e as Error).message}`);
+    toast(`Couldn't: ${(e as Error).message}`, retry);
   }
 }
 
 /** The action waiting out its Undo; one at most, as there's one toast. */
-let held: { key: number; send: () => Promise<string | null | void>; timer: number } | null = null;
+let held: { key: number; send: Send; retry?: Action; timer: number } | null = null;
 
-/** Sends the held action now: its Undo is gone, or the page is going away. */
-function flushHeld(): void {
+/** Sends the held action now: its Undo is gone, or the page is going away.
+ * What waited for it is shown, unless another hold takes the toast (`next`). */
+function flushHeld(next = false): void {
   const h = held;
   if (!h) return;
   held = null;
   window.clearTimeout(h.timer);
-  void commit(h.key, h.send);
+  void commit(h.key, h.send, h.retry);
+  if (!next) showDeferred();
 }
 
 /**
@@ -209,7 +233,9 @@ function flushHeld(): void {
  * the tab is hidden). Undo before then and the daemon never hears of it, which
  * is what lets this cover actions with no inverse: an accept, a delete.
  */
-function hold(text: string, change: Change, send: () => Promise<string | null | void>): void {
+function hold(text: string, change: Change, send: Send, retry?: Action): void {
+  // Another Undo takes this one's place, so what it would have undone goes now.
+  flushHeld(true);
   const key = ++pendingKey;
   shownOver.set(key, { change, sent: null });
   show();
@@ -221,10 +247,11 @@ function hold(text: string, change: Change, send: () => Promise<string | null | 
       held = null;
       shownOver.delete(key);
       show();
+      showDeferred();
     },
   });
   navigator.vibrate?.(10);
-  held = { key, send, timer: window.setTimeout(flushHeld, HOLD_MS) };
+  held = { key, send, retry, timer: window.setTimeout(flushHeld, HOLD_MS) };
 }
 
 export function saveToken(token: string): void {
@@ -280,11 +307,20 @@ export function connect(): void {
   });
   conn.start();
   document.addEventListener("visibilitychange", reportVisible);
-  // Leaving the app is leaving the Undo: what's held goes before the page can.
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flushHeld();
-  });
-  window.addEventListener("pagehide", flushHeld);
+  if (!leaving) {
+    leaving = true;
+    // Leaving the app is leaving the Undo: what's held goes before the page can,
+    // and the toast stops offering it.
+    const leave = () => {
+      if (!held) return;
+      flushHeld();
+      if (get().toast?.action?.label === "Undo") set({ toast: null });
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") leave();
+    });
+    window.addEventListener("pagehide", leave);
+  }
   void checkPush();
   if (listTimer === null) {
     listTimer = window.setInterval(() => {
@@ -691,9 +727,13 @@ async function sendReview(d: Decision, action: ReviewAction): Promise<void> {
   });
 }
 
-/** Accepts or rejects a proposal at once, with Undo; the daemon hears when that's gone. */
-export function decide(d: Decision, a: "accept" | "reject"): void {
-  hold(`${REVIEWED[a]} #${d.id}`, { t: "decided", project: d.project, id: d.id }, () => sendReview(d, { a }));
+/** Accepts or rejects a proposal at once, with Undo; the daemon hears when that's
+ * gone, then `sent` runs. */
+export function decide(d: Decision, a: "accept" | "reject", sent?: () => void): void {
+  hold(`${REVIEWED[a]} #${d.id}`, { t: "decided", project: d.project, id: d.id }, async () => {
+    await sendReview(d, { a });
+    sent?.();
+  });
 }
 
 /** Rewords, retires or otherwise reviews a decision; the daemon pushes the new list. */
@@ -1003,7 +1043,8 @@ async function sendChange(id: number, change: ItemChange): Promise<string | null
 
 /** Sets a backlog item's status at once, with Undo; the daemon hears when that's gone. */
 export function setStatus(id: number, status: Item["status"]): void {
-  const item = raw.items.find((i) => i.id === id);
+  // As shown: a change still held counts, such as a ship before this reopen.
+  const item = get().items.find((i) => i.id === id);
   // Reopening one shipped or dropped before it was accepted proposes it again.
   const shown = status === "open" && item?.unaccepted ? "proposed" : status;
   hold(statusDone(item?.status, status, id), { t: "item", id, patch: { status: shown } }, () =>
@@ -1011,9 +1052,27 @@ export function setStatus(id: number, status: Item["status"]): void {
   );
 }
 
-/** Edits a backlog item at once, with Undo; the daemon hears when that's gone. */
+/** Edits a backlog item at once, with Undo; the daemon hears when that's gone.
+ * Refused, the toast offers the editor again with the edit in it. */
 export function editItem(id: number, change: Extract<ItemChange, { do: "edit" }>): void {
-  hold(`Saved #${id}`, { t: "item", id, patch: editPatch(change) }, () => sendChange(id, change));
+  const retry = {
+    label: "Edit again",
+    run: () => {
+      failedEdits.set(id, change);
+      location.hash = `#/backlog/${id}`;
+    },
+  };
+  hold(`Saved #${id}`, { t: "item", id, patch: editPatch(change) }, () => sendChange(id, change), retry);
+}
+
+/** Edits the daemon refused, by item, for the editor to open with again. */
+const failedEdits = new Map<number, Extract<ItemChange, { do: "edit" }>>();
+
+/** The refused edit of item `id` to start the editor from, once; null without one. */
+export function takeFailedEdit(id: number): Extract<ItemChange, { do: "edit" }> | null {
+  const change = failedEdits.get(id) ?? null;
+  failedEdits.delete(id);
+  return change;
 }
 
 /** Deletes a backlog item at once, with Undo; the daemon hears when that's gone. */

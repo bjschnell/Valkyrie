@@ -204,10 +204,10 @@ function WaitCard({ w, onDone }: { w: Wait; onDone: () => void }) {
       ]);
     case "policy":
       return card("policy", `#${w.decision.id} ${w.decision.title}`, `A policy for ${base(w.decision.project)}: once accepted, it runs without asking.`, [
-        <button key="reject" className="ghost" disabled={busy} onClick={() => decide(w.decision, "reject")}>
+        <button key="reject" className="ghost" disabled={busy} onClick={() => decide(w.decision, "reject", onDone)}>
           Reject
         </button>,
-        <button key="accept" className="primary" disabled={busy} onClick={() => decide(w.decision, "accept")}>
+        <button key="accept" className="primary" disabled={busy} onClick={() => decide(w.decision, "accept", onDone)}>
           Accept
         </button>,
       ]);
