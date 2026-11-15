@@ -41,6 +41,7 @@ import { findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
 import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
+import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
 import {
   keyBytes,
   messageBytes,
@@ -62,6 +63,11 @@ import {
 const TOKEN_KEY = "valk.token";
 /** The list has no push of its own; the TUI polls it about as often. */
 const LIST_EVERY_MS = 2_000;
+/** How long a held action's toast offers Undo before the action is sent. */
+export const HOLD_MS = 8_000;
+/** How long a sent change is drawn over the daemon's lists at most, should its
+ * push say something else (another client changed it again). */
+const LAND_MS = 5_000;
 /** Between keys of one answer, so the program reads them as separate presses. */
 const KEY_GAP_MS = 70;
 /** Between a message and its Enter: long enough that the two can't arrive as one read. */
@@ -144,7 +150,81 @@ let conn: Conn | null = null;
 let listTimer: number | null = null;
 
 export function toast(text: string, action?: { label: string; run: () => void }): void {
+  // A new toast takes the Undo away, so what it would have undone goes now.
+  flushHeld();
   set({ toast: { text, at: Date.now(), action } });
+}
+
+// Optimistic actions (backlog #185). The daemon's lists are kept as it pushed
+// them; what the store shows is them with the user's pending changes on top.
+let raw: Lists = { proposals: [], items: [], queue: [] };
+/** Changes by key; `sent` once the daemon took it, null while held or in flight. */
+const shownOver = new Map<number, { change: Change; sent: number | null }>();
+let pendingKey = 0;
+
+/** Redraws the lists, first forgetting sent changes the daemon shows (or that
+ * have had long enough to show). */
+function show(): void {
+  const now = Date.now();
+  for (const [key, p] of shownOver) {
+    if (p.sent !== null && (landed(raw, p.change) || now - p.sent >= LAND_MS)) shownOver.delete(key);
+  }
+  const shown = overlay(raw, [...shownOver.values()].map((p) => p.change));
+  set({ proposals: shown.proposals, items: shown.items, queue: shown.queue });
+  setBadge(shown.queue.length);
+}
+
+/** Sends a change shown already; taken back with a toast if the daemon refuses it. */
+async function commit(key: number, send: () => Promise<string | null | void>): Promise<void> {
+  try {
+    if (!conn) throw new Error("not connected");
+    const said = await send();
+    const p = shownOver.get(key);
+    if (p) p.sent = Date.now();
+    window.setTimeout(show, LAND_MS);
+    show();
+    if (said) toast(said);
+  } catch (e) {
+    shownOver.delete(key);
+    show();
+    toast(`Couldn't: ${(e as Error).message}`);
+  }
+}
+
+/** The action waiting out its Undo; one at most, as there's one toast. */
+let held: { key: number; send: () => Promise<string | null | void>; timer: number } | null = null;
+
+/** Sends the held action now: its Undo is gone, or the page is going away. */
+function flushHeld(): void {
+  const h = held;
+  if (!h) return;
+  held = null;
+  window.clearTimeout(h.timer);
+  void commit(h.key, h.send);
+}
+
+/**
+ * Shows `change` at once and offers Undo in the toast; `send` goes to the
+ * daemon only when the Undo does (the toast times out or another replaces it,
+ * the tab is hidden). Undo before then and the daemon never hears of it, which
+ * is what lets this cover actions with no inverse: an accept, a delete.
+ */
+function hold(text: string, change: Change, send: () => Promise<string | null | void>): void {
+  const key = ++pendingKey;
+  shownOver.set(key, { change, sent: null });
+  show();
+  toast(text, {
+    label: "Undo",
+    run: () => {
+      if (held?.key !== key) return toast("Too late: it was sent");
+      window.clearTimeout(held.timer);
+      held = null;
+      shownOver.delete(key);
+      show();
+    },
+  });
+  navigator.vibrate?.(10);
+  held = { key, send, timer: window.setTimeout(flushHeld, HOLD_MS) };
 }
 
 export function saveToken(token: string): void {
@@ -200,6 +280,11 @@ export function connect(): void {
   });
   conn.start();
   document.addEventListener("visibilitychange", reportVisible);
+  // Leaving the app is leaving the Undo: what's held goes before the page can.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushHeld();
+  });
+  window.addEventListener("pagehide", flushHeld);
   void checkPush();
   if (listTimer === null) {
     listTimer = window.setInterval(() => {
@@ -212,16 +297,19 @@ export function connect(): void {
 function onPush(msg: ServerMsg): void {
   switch (msg.t) {
     case "queue":
-      set({ queue: msg.items });
-      setBadge(msg.items.length);
+      raw = { ...raw, queue: msg.items };
+      show();
       void refreshPrompts(msg.items);
       void refresh();
       break;
     case "proposals":
-      set({ proposals: msg.items });
+      raw = { ...raw, proposals: msg.items };
+      show();
       break;
     case "items":
-      set({ items: msg.items, orders: msg.orders ?? [], launches: msg.launches ?? [] });
+      raw = { ...raw, items: msg.items };
+      set({ orders: msg.orders ?? [], launches: msg.launches ?? [] });
+      show();
       break;
     case "quota":
       set({ quota: msg.quota });
@@ -542,10 +630,22 @@ export async function answer(
   toast(`${choice.label.slice(0, 40)} ✓`);
 }
 
+/** Takes a finished session off the queue at once; the daemon hears right away. */
 export async function markSeen(item: QueueItem): Promise<void> {
-  await conn
-    ?.request({ t: "mark_seen", session: item.session, seq: item.status.seq })
-    .catch(() => {});
+  const key = ++pendingKey;
+  shownOver.set(key, { change: { t: "seen", session: item.session, seq: item.status.seq }, sent: null });
+  show();
+  try {
+    if (!conn) throw new Error("not connected");
+    await conn.request({ t: "mark_seen", session: item.session, seq: item.status.seq });
+    const p = shownOver.get(key);
+    if (p) p.sent = Date.now();
+    window.setTimeout(show, LAND_MS);
+  } catch {
+    // Not seen after all: it stays in the queue, as it would have without this.
+    shownOver.delete(key);
+  }
+  show();
 }
 
 export async function rename(
@@ -580,20 +680,29 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   decline_scope: "Kept everywhere:",
 };
 
-/** Accepts, rejects or rewords a proposed decision; the daemon pushes the new list. */
+async function sendReview(d: Decision, action: ReviewAction): Promise<void> {
+  if (!conn) throw new Error("not connected");
+  await conn.request({
+    t: "review",
+    project: d.project,
+    id: d.id,
+    action,
+    seen: d.updated,
+  });
+}
+
+/** Accepts or rejects a proposal at once, with Undo; the daemon hears when that's gone. */
+export function decide(d: Decision, a: "accept" | "reject"): void {
+  hold(`${REVIEWED[a]} #${d.id}`, { t: "decided", project: d.project, id: d.id }, () => sendReview(d, { a }));
+}
+
+/** Rewords, retires or otherwise reviews a decision; the daemon pushes the new list. */
 export async function review(
   d: Decision,
   action: ReviewAction,
 ): Promise<boolean> {
   try {
-    if (!conn) throw new Error("not connected");
-    await conn.request({
-      t: "review",
-      project: d.project,
-      id: d.id,
-      action,
-      seen: d.updated,
-    });
+    await sendReview(d, action);
     navigator.vibrate?.(10);
     toast(`${REVIEWED[action.a]} #${d.id} ✓`);
     return true;
@@ -886,17 +995,34 @@ export async function changeItem(
   }
 }
 
-/** Deletes a backlog item for good. */
-export async function deleteItem(id: number): Promise<boolean> {
-  if (!conn) return false;
-  try {
+async function sendChange(id: number, change: ItemChange): Promise<string | null> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "change_item", id, change });
+  return reply.t === "item" ? (reply.note ?? null) : null;
+}
+
+/** Sets a backlog item's status at once, with Undo; the daemon hears when that's gone. */
+export function setStatus(id: number, status: Item["status"]): void {
+  const item = raw.items.find((i) => i.id === id);
+  // Reopening one shipped or dropped before it was accepted proposes it again.
+  const shown = status === "open" && item?.unaccepted ? "proposed" : status;
+  hold(statusDone(item?.status, status, id), { t: "item", id, patch: { status: shown } }, () =>
+    sendChange(id, { do: "status", status }),
+  );
+}
+
+/** Edits a backlog item at once, with Undo; the daemon hears when that's gone. */
+export function editItem(id: number, change: Extract<ItemChange, { do: "edit" }>): void {
+  hold(`Saved #${id}`, { t: "item", id, patch: editPatch(change) }, () => sendChange(id, change));
+}
+
+/** Deletes a backlog item at once, with Undo; the daemon hears when that's gone. */
+export function removeItem(id: number): void {
+  hold(`Deleted #${id}`, { t: "item_gone", id }, async () => {
+    if (!conn) throw new Error("not connected");
     const reply = await conn.request({ t: "delete_item", id });
-    if (reply.t === "item" && reply.note) toast(reply.note);
-    return true;
-  } catch (e) {
-    toast((e as Error).message);
-    return false;
-  }
+    return reply.t === "item" ? (reply.note ?? null) : null;
+  });
 }
 
 /** Leaves a handoff note on a backlog item. */
