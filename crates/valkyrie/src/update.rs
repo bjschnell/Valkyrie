@@ -281,31 +281,73 @@ pub fn activate(_installed: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A running .exe can't be replaced, so install.ps1 gives each version its own
-/// directory, `<dir>\versions\<tag>-<32 hex>\valk.exe`, and `<dir>\valk.cmd` runs the
-/// current one. This does the same.
-#[cfg(windows)]
-fn place(new: &Path, exe: &Path, tag: &str) -> Result<PathBuf> {
-    let versions = exe.parent().and_then(Path::parent);
-    let dir = versions
+/// The install directory a Windows valk.exe belongs to. A running .exe can't be
+/// replaced, so install.ps1 gives each version its own directory,
+/// `<dir>\versions\<tag>-<32 hex>\valk.exe`, and `<dir>\valk.cmd` runs the current
+/// one; that layout is `exe`'s own when it sits in one. A bare `<dir>\valk.exe` is the
+/// one the desktop app places (or one `valk.cmd` already shadows): its directory
+/// is taken when `valk.cmd` is there, or when it is `default_dir`, where the app puts
+/// it. Anything else is somebody's own build, left alone.
+#[cfg(any(windows, test))]
+fn install_dir<'a>(exe: &'a Path, default_dir: Option<&Path>) -> Option<&'a Path> {
+    let parent = exe.parent()?;
+    let versioned = parent
+        .parent()
         .filter(|v| {
             v.file_name()
                 .is_some_and(|n| n.eq_ignore_ascii_case("versions"))
         })
         .and_then(Path::parent)
-        .filter(|dir| dir.join("valk.cmd").is_file())
-        .context("this valk wasn't installed by install.ps1; run that again to update")?;
+        .filter(|dir| dir.join("valk.cmd").is_file());
+    versioned.or_else(|| {
+        (parent.join("valk.cmd").is_file() || default_dir == Some(parent)).then_some(parent)
+    })
+}
+
+/// `<dir>\versions\<name>-<32 hex>`, as long as install.ps1's GUID, so the launcher
+/// keeps its length for a cmd.exe still running it: cmd reads a batch file again, by
+/// offset, after each command.
+#[cfg(any(windows, test))]
+fn version_dir(dir: &Path, name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    // As long as install.ps1's GUID, so the launcher keeps its length for a cmd.exe
-    // still running it: cmd reads a batch file again, by offset, after each command.
-    let target = dir.join(format!(r"versions\{tag}-{nanos:032x}"));
+    dir.join("versions").join(format!("{name}-{nanos:032x}"))
+}
+
+#[cfg(windows)]
+fn place(new: &Path, exe: &Path, tag: &str) -> Result<PathBuf> {
+    let default_dir = std::env::var_os("LOCALAPPDATA")
+        .map(|local| Path::new(&local).join("Programs").join("Valkyrie"))
+        .and_then(|dir| valkyrie_proto::canonical(&dir).ok());
+    let dir = install_dir(exe, default_dir.as_deref())
+        .context("this valk wasn't installed by install.ps1; run that again to update")?;
+    let target = version_dir(dir, tag);
     std::fs::create_dir_all(&target)?;
     let installed = target.join("valk.exe");
     std::fs::rename(new, &installed)?;
     Ok(installed)
+}
+
+/// Moves a bare `<dir>\valk.exe` into its own `versions\` directory. `cmd` tries
+/// `.exe` before `.cmd`, so while one sits beside `valk.cmd` it is the valk that runs
+/// and the launcher is never reached. A running .exe can be renamed, not
+/// deleted, so a daemon still on it keeps running.
+#[cfg(any(windows, test))]
+fn retire_bare(dir: &Path) -> Result<()> {
+    let bare = dir.join("valk.exe");
+    if !bare.is_file() {
+        return Ok(());
+    }
+    let aside = version_dir(dir, "previous");
+    std::fs::create_dir_all(&aside)?;
+    std::fs::rename(&bare, aside.join("valk.exe")).with_context(|| {
+        format!(
+            "couldn't move {} aside, so it still runs instead of valk.cmd",
+            bare.display()
+        )
+    })
 }
 
 /// Points `<dir>\valk.cmd` at `installed`. After the handoff, as install.ps1 does: if
@@ -329,7 +371,7 @@ pub fn activate(installed: &Path) -> Result<()> {
     let tmp = dir.join("valk.cmd.new");
     std::fs::write(&tmp, launcher)?;
     std::fs::rename(&tmp, dir.join("valk.cmd"))?;
-    Ok(())
+    retire_bare(dir)
 }
 
 fn curl(args: &[&str]) -> Result<Vec<u8>> {
@@ -383,5 +425,64 @@ mod tests {
             wanted(Some("edge"), None, Channel::Stable),
             (Some(EDGE), Channel::Edge)
         );
+    }
+
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("valk-update-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_bare_valk_exe_beside_the_launcher_is_part_of_the_install() {
+        let dir = scratch("bare-launcher");
+        std::fs::write(dir.join("valk.cmd"), "").unwrap();
+        let exe = dir.join("valk.exe");
+        assert_eq!(install_dir(&exe, None), Some(dir.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_desktops_copy_in_the_default_directory_is_part_of_the_install() {
+        let dir = scratch("bare-default");
+        let exe = dir.join("valk.exe");
+        assert_eq!(install_dir(&exe, Some(&dir)), Some(dir.as_path()));
+        // Somewhere else, with no launcher, it is somebody's own build.
+        assert_eq!(install_dir(&exe, Some(&dir.join("other"))), None);
+        assert_eq!(install_dir(&exe, None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_versioned_valk_belongs_to_the_directory_with_the_launcher() {
+        let dir = scratch("versioned");
+        std::fs::write(dir.join("valk.cmd"), "").unwrap();
+        let exe = dir.join("versions").join("edge-0").join("valk.exe");
+        assert_eq!(install_dir(&exe, None), Some(dir.as_path()));
+        // No launcher: not an install.ps1 directory.
+        std::fs::remove_file(dir.join("valk.cmd")).unwrap();
+        assert_eq!(install_dir(&exe, None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn retiring_a_bare_valk_exe_moves_it_under_versions() {
+        let dir = scratch("retire");
+        std::fs::write(dir.join("valk.exe"), "0.5.0").unwrap();
+        retire_bare(&dir).unwrap();
+        assert!(!dir.join("valk.exe").exists());
+        let aside: Vec<_> = std::fs::read_dir(dir.join("versions"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(aside[0].join("valk.exe")).unwrap(),
+            "0.5.0"
+        );
+        // Nothing bare: nothing to do.
+        retire_bare(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
