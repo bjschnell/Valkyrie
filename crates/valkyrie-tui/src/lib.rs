@@ -1875,10 +1875,10 @@ impl App {
             Err(e) => return self.say(e),
         };
         let open = self.backlog.is_some();
-        // Asking, a filtered page offers only its own repository's items.
-        let (shipped, kept) = match self.backlog.as_ref().map(|p| &p.repo) {
-            Some(repo) if done.asking => {
-                let shown = |id: u32| self.items.iter().any(|i| i.id == id && repo.holds(i));
+        // Asking, a filtered page offers only the items it shows.
+        let (shipped, kept) = match self.backlog.as_ref() {
+            Some(page) if done.asking => {
+                let shown = |id: u32| self.items.iter().any(|i| i.id == id && page.holds(i));
                 (
                     shipped.into_iter().filter(|s| shown(s.id)).collect(),
                     kept.into_iter().filter(|k| shown(k.id)).collect(),
@@ -2662,13 +2662,13 @@ impl App {
         self.daemon.as_ref().map_or(0, |d| d.boot)
     }
 
-    /// The open page's rows: the items of the repository it shows.
+    /// The open page's rows: the items of the repository and kind it shows.
     fn backlog_rows(&self) -> Vec<(backlog::Lane, Item)> {
-        let repo = self.backlog.as_ref().map(|p| &p.repo);
+        let page = self.backlog.as_ref();
         let items: Vec<Item> = self
             .items
             .iter()
-            .filter(|i| repo.is_none_or(|r| r.holds(i)))
+            .filter(|i| page.is_none_or(|p| p.holds(i)))
             .cloned()
             .collect();
         backlog::rows_of(&items, &self.items, &self.sessions, self.boot())

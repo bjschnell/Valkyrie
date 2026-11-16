@@ -59,6 +59,9 @@ pub enum TodoCmd {
         /// Only the items not for any repository yet.
         #[arg(long)]
         no_folder: bool,
+        /// Only the items of this kind: bug, feature or chore.
+        #[arg(short, long, value_parser = parse_kind)]
+        kind: Option<ItemKind>,
         /// As JSON, every field, for a script or an agent to read.
         #[arg(long)]
         json: bool,
@@ -258,6 +261,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
         all: false,
         dir: None,
         no_folder: false,
+        kind: None,
         json: false,
     }) {
         TodoCmd::Add {
@@ -319,6 +323,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             all,
             dir,
             no_folder,
+            kind,
             json,
         } => {
             let repo = repo_of(dir, no_folder)?;
@@ -327,6 +332,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 .iter()
                 .filter(|i| all || matches!(i.status, ItemStatus::Open | ItemStatus::Proposed))
                 .filter(|i| repo.as_ref().is_none_or(|r| i.project == *r))
+                .filter(|i| kind.is_none_or(|k| i.kind == k))
                 .cloned()
                 .collect();
             // In the order to work them, which is the order a script should too.
@@ -338,9 +344,13 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             let sessions = client.list().await?;
             let boot = client.hello_info().await?.boot;
             if items.is_empty() {
-                match repo {
-                    Some(_) => println!("nothing written down for it"),
-                    None => println!("nothing written down; `valk todo add \"…\"` adds one"),
+                match (&repo, kind) {
+                    (Some(_), Some(k)) => println!("no {} items written down for it", k.as_str()),
+                    (None, Some(k)) => println!("no {} items written down", k.as_str()),
+                    (Some(_), None) => println!("nothing written down for it"),
+                    (None, None) => {
+                        println!("nothing written down; `valk todo add \"…\"` adds one")
+                    }
                 }
             }
             for i in &items {
