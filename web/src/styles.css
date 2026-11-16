@@ -1265,6 +1265,13 @@ html.with-tabs .offline-banner {
   color: color-mix(in srgb, #b06bff 80%, var(--fg));
 }
 
+/* The brand purple, deep enough to read on a light look's paper (#214). */
+:root[data-theme="solarizedlight"] .pair-tagline,
+:root[data-theme="catppuccinlatte"] .pair-tagline,
+:root[data-theme="gruvboxlight"] .pair-tagline {
+  color: #6a33bb;
+}
+
 .pair-lead {
   color: var(--soft);
 }
@@ -2428,14 +2435,17 @@ html.with-tabs .offline-banner {
   gap: var(--space-15);
 }
 
+/* Off is neutral, on is the kind's color: both readable, no dimming (#214). */
 .kind-pick .kind-chip {
   padding: var(--space-15) var(--space-3);
-  opacity: 0.55;
+  color: var(--soft);
+  background: color-mix(in srgb, var(--soft) 10%, transparent);
 }
 
 .kind-pick .kind-chip.on {
-  opacity: 1;
-  outline: 1.5px solid var(--kind);
+  color: var(--kind, var(--accent));
+  background: color-mix(in srgb, var(--kind, var(--accent)) 16%, transparent);
+  outline: 1.5px solid var(--kind, var(--accent));
 }
 
 .decision-card.stale {
@@ -3506,7 +3516,7 @@ html.with-tabs .offline-banner {
 
 .order-skipped .order-name,
 .order-skipped .order-change {
-  opacity: 0.5;
+  color: var(--muted);
   text-decoration: line-through;
 }
 
@@ -4072,8 +4082,9 @@ button.as-text {
   background: var(--surface);
 }
 
-.doc-comment.state-resolved {
-  opacity: 0.6;
+/* Resolved reads quieter by color, not opacity, so it stays legible (#214). */
+.doc-comment.state-resolved .doc-comment-text {
+  color: var(--soft);
 }
 
 .doc-comment-head {
@@ -4207,9 +4218,9 @@ button.as-text {
   overflow-wrap: anywhere;
 }
 
-/* Past sessions (backlog #150): one that can't come back says why, dimmed. */
-.past-cannot {
-  opacity: 0.6;
+/* Past sessions (backlog #150): one that can't come back says why, its name quieter. */
+.past-cannot .row-name {
+  color: var(--muted);
 }
 .past-cannot .digest-detail {
   color: var(--needs);
