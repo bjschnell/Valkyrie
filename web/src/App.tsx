@@ -142,6 +142,23 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  // A new page takes the keyboard to its heading, so a screen reader says where
+  // you are and Tab starts from the top of it (#188). Not on the first load,
+  // and not when the page already put you in a field (search, a new item).
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    if (document.activeElement?.closest("input, textarea, select, [contenteditable]")) return;
+    // Beside the session list, the open pane's heading is the new page's.
+    const heading = document.querySelector<HTMLElement>(".split-pane h1") ?? document.querySelector<HTMLElement>("h1");
+    if (!heading) return;
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+  }, [at]);
+
   useEffect(() => {
     if (token) connect();
   }, [token]);

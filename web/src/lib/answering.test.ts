@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answeringLabel, choicesKey, type Answering } from "./answering";
+import { answeringLabel, batchSummary, choicesKey, type Answering } from "./answering";
 import type { Choice } from "./choices";
 
 const yesNo: Choice[] = [
@@ -41,5 +41,19 @@ describe("answeringLabel", () => {
   it("stays dim in flight even if the status moves before the confirm", () => {
     const a: Answering = { of: choicesKey(yesNo), label: "Yes", done: false, seq: 7 };
     expect(answeringLabel(a, yesNo, 8)).toBe("Yes");
+  });
+});
+
+describe("batchSummary", () => {
+  it("claims all only when all landed", () => {
+    expect(batchSummary(3, 3)).toBe("Answered 3 prompts ✓");
+  });
+
+  it("says how many missed", () => {
+    expect(batchSummary(2, 3)).toBe("Answered 2 of 3; 1 didn't go through");
+  });
+
+  it("says none went through when none did", () => {
+    expect(batchSummary(0, 2)).toBe("Didn't go through; try again");
   });
 });

@@ -33,3 +33,11 @@ export function answeringLabel(
   if (a.done && a.seq !== null && seq != null && seq !== a.seq) return null;
   return a.label;
 }
+
+/** What an Allow all did, counting only the answers that went through. */
+export function batchSummary(landed: number, sent: number): string {
+  if (landed === sent) return `Answered ${sent} prompts ✓`;
+  if (landed === 0) return "Didn't go through; try again";
+  const missed = sent - landed;
+  return `Answered ${landed} of ${sent}; ${missed} didn't go through`;
+}

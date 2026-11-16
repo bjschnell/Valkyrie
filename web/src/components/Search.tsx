@@ -76,7 +76,7 @@ export function SearchView() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Search sessions</div>
+          <h1 className="title-name">Search sessions</h1>
         </div>
       </header>
 

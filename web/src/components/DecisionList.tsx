@@ -100,7 +100,7 @@ export function DecisionList() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Memory</div>
+          <h1 className="title-name">Memory</h1>
         </div>
       </header>
 

@@ -125,7 +125,7 @@ export function Launcher() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">New session</div>
+          <h1 className="title-name">New session</h1>
         </div>
       </header>
 
