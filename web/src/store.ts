@@ -44,7 +44,7 @@ import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
 import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
-import { choicesKey, type Answering } from "./lib/answering";
+import { answeringLabel, choicesKey, type Answering } from "./lib/answering";
 import {
   keyBytes,
   messageBytes,
@@ -697,9 +697,10 @@ export async function sendFile(file: File): Promise<string> {
   return upload(token, await shrinkImage(file));
 }
 
-/** Marks an answer under way, its buttons dim at once; false if one already is. */
+/** Marks an answer under way, its buttons dim at once; false if this prompt
+ * has one already. A new prompt on the screen takes a tap straight away. */
 function startAnswer(session: SessionId, choices: Choice[], choice: Choice): boolean {
-  if (get().answering[session]) return false;
+  if (answeringLabel(get().answering[session], choices) !== null) return false;
   const a: Answering = { of: choicesKey(choices), label: choice.label, done: false };
   set({ answering: { ...get().answering, [session]: a } });
   return true;
