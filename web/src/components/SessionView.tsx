@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { STATE_LABEL, program } from "../proto";
 import { isNegative } from "../lib/choices";
+import { answeringLabel } from "../lib/answering";
 import type { Key } from "../lib/keys";
 import { age } from "../lib/time";
 import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, toast, useApp } from "../store";
@@ -60,6 +61,7 @@ export function SessionView({ id }: { id: number }) {
   const scroller = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const choices = useMemo(() => openChoices(screen), [screen]);
+  const sent = useApp((s) => answeringLabel(s.answering[id], choices, info?.status.seq));
   const state = exited || info?.exited != null ? "exited" : (info?.status.state ?? "idle");
   const hasChat = !!info?.chat;
   const mode: Mode = hasChat ? chosen : "terminal";
@@ -211,11 +213,12 @@ export function SessionView({ id }: { id: number }) {
       {!exited && (
         <footer className="dock">
           {choices.length > 0 && (
-            <div className="choices dock-choices">
+            <div className={`choices dock-choices ${sent !== null ? "answering" : ""}`} aria-busy={sent !== null}>
               {choices.map((c, i) => (
                 <button
                   key={i}
-                  className={`choice ${isNegative(c.label) ? "no" : i === 0 ? "yes" : ""} ${c.selected ? "selected" : ""}`}
+                  className={`choice ${isNegative(c.label) ? "no" : i === 0 ? "yes" : ""} ${c.selected ? "selected" : ""} ${sent === c.label ? "sent" : ""}`}
+                  disabled={sent !== null}
                   onClick={() => void answer(id, choices, c)}
                 >
                   {c.n !== undefined && <span className="choice-n">{c.n}</span>}
