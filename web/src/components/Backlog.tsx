@@ -132,7 +132,7 @@ export function Backlog() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Backlog</div>
+          <h1 className="title-name">Backlog</h1>
         </div>
         {open > 1 && (
           <button
@@ -309,7 +309,7 @@ export function OrderPage({ project }: { project: string }) {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Build order for {base(project)}</div>
+          <h1 className="title-name">Build order for {base(project)}</h1>
           {order && (
             <div className="title-sub">
               {orderSize(order)} · {order.trigger}
@@ -838,7 +838,7 @@ export function ItemEditor({ id }: { id: number | null }) {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">{id === null ? "Write it down" : `Edit #${id}`}</div>
+          <h1 className="title-name">{id === null ? "Write it down" : `Edit #${id}`}</h1>
         </div>
       </header>
 

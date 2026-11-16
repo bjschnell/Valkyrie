@@ -70,7 +70,7 @@ export function DocsList() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Docs</div>
+          <h1 className="title-name">Docs</h1>
         </div>
       </header>
       <main className="inbox">
@@ -274,7 +274,7 @@ export function DocView({ docKey }: { docKey: string }) {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">{doc?.title || "Doc"}</div>
+          <h1 className="title-name">{doc?.title || "Doc"}</h1>
           {doc && <div className="title-sub">{byline(doc)}</div>}
         </div>
       </header>

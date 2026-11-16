@@ -131,9 +131,11 @@ export function SessionView({ id }: { id: number }) {
         </button>
         <div className="title">
           {naming === null ? (
-            <button className={`title-name${info?.auto_name ? " auto-name" : ""}`} title="Rename" onClick={startNaming}>
-              {info?.name ?? `#${id}`}
-            </button>
+            <h1>
+              <button className={`title-name${info?.auto_name ? " auto-name" : ""}`} title="Rename" onClick={startNaming}>
+                {info?.name ?? `#${id}`}
+              </button>
+            </h1>
           ) : (
             <input
               className="title-edit"

@@ -26,7 +26,7 @@ export function Settings() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Settings</div>
+          <h1 className="title-name">Settings</h1>
         </div>
       </header>
 

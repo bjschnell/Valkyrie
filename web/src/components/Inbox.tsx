@@ -82,6 +82,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
     <div className="page">
       {hasRain(look) && <Rain key={look} />}
       <header className="topbar">
+        <h1 className="sr-only">Sessions</h1>
         <div className="brand">
           <Mark size={26} />
           <Wordmark />

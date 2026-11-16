@@ -71,7 +71,7 @@ export function DigestView() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Away digest</div>
+          <h1 className="title-name">Away digest</h1>
         </div>
         <button className="ghost digest-copy" disabled={!digest || digest.entries.length === 0} onClick={onCopy}>
           Copy

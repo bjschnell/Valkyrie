@@ -1,7 +1,7 @@
 // One place to move between the app's pages (#104). A phone gets a tab bar at
 // the thumb with the rest under More; a desktop gets a rail.
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { prefetch } from "../cache";
 import { allDocs, pastSessions, supervisorLog, useApp } from "../store";
 import { fetchMemory } from "./DecisionList";
@@ -110,46 +110,9 @@ export function TabBar({ at }: { at: NavKey | null }) {
   const [more, setMore] = useState(false);
   const inMore = at !== null && MORE.includes(at);
   useEffect(() => setMore(false), [at]);
-  useEffect(() => {
-    if (!more) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMore(false);
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [more]);
   return (
     <>
-      {more && (
-        <div className="sheet-backdrop" onClick={() => setMore(false)}>
-          <div className="sheet" role="dialog" aria-label="More pages" onClick={(e) => e.stopPropagation()}>
-            <div className="sheet-grip" />
-            <div className="list">
-              {MORE.map((k) => {
-                const d = DESTS[k];
-                const Icon = d.icon;
-                return (
-                  <button
-                    key={k}
-                    className="row sheet-row"
-                    aria-current={at === k ? "page" : undefined}
-                    onPointerDown={d.warm}
-                    onClick={() => {
-                      setMore(false);
-                      go(d);
-                    }}
-                  >
-                    <span className="sheet-icon">
-                      <Icon />
-                    </span>
-                    <span className="row-main">
-                      <span className="row-name">{d.label}</span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
+      {more && <MoreSheet at={at} onClose={() => setMore(false)} />}
       <nav className="tabbar" aria-label="Pages">
         {TABS.map((k) => (
           <NavButton key={k} d={DESTS[k]} at={at} badge={badges[k]} className="tab" />
@@ -168,5 +131,61 @@ export function TabBar({ at }: { at: NavKey | null }) {
         </button>
       </nav>
     </>
+  );
+}
+
+/**
+ * The pages that don't fit the tab bar, as a native modal dialog (#188): the
+ * page under it is inert, so the keyboard and a screen reader stay in the sheet,
+ * Escape closes it, and closing gives the keyboard back to More.
+ */
+function MoreSheet({ at, onClose }: { at: NavKey | null; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const back = useRef<HTMLElement | null | undefined>(undefined);
+  if (back.current === undefined) back.current = document.activeElement as HTMLElement | null;
+  useEffect(() => {
+    if (!dialog.current?.open) dialog.current?.showModal();
+    return () => back.current?.focus?.({ preventScroll: true });
+  }, []);
+  // A press that started in the sheet (a scroll, a drag) isn't one on the backdrop.
+  const downOn = useRef<EventTarget | null>(null);
+  return (
+    <dialog
+      ref={dialog}
+      className="sheet"
+      aria-label="More pages"
+      onClose={onClose}
+      onPointerDown={(e) => (downOn.current = e.target)}
+      onClick={(e) => e.target === dialog.current && downOn.current === dialog.current && onClose()}
+    >
+      <div className="sheet-box">
+        <div className="sheet-grip" />
+        <div className="list">
+          {MORE.map((k) => {
+            const d = DESTS[k];
+            const Icon = d.icon;
+            return (
+              <button
+                key={k}
+                className="row sheet-row"
+                aria-current={at === k ? "page" : undefined}
+                onPointerDown={d.warm}
+                onClick={() => {
+                  onClose();
+                  go(d);
+                }}
+              >
+                <span className="sheet-icon">
+                  <Icon />
+                </span>
+                <span className="row-main">
+                  <span className="row-name">{d.label}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </dialog>
   );
 }

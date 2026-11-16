@@ -19,12 +19,14 @@ export function Toast() {
     const t = window.setTimeout(() => setVisible(false), left);
     return () => window.clearTimeout(t);
   }, [toast]);
-  if (!toast) return null;
+  // The live region stays in the page so a screen reader is listening before
+  // anything is said in it; one added with its text is often read out by none (#188).
+  if (!toast) return <div className="toast" role="status" aria-live="polite" />;
   const actions = toast.actions ?? (toast.action ? [toast.action] : []);
   const open = toast.open;
   const live = actions.length > 0 || !!open;
   return (
-    <div className={`toast ${visible ? "show" : ""} ${live ? "with-action" : ""}`} role="status">
+    <div className={`toast ${visible ? "show" : ""} ${live ? "with-action" : ""}`} role="status" aria-live="polite">
       {open ? (
         <button
           className="toast-text"

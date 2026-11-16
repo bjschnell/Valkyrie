@@ -75,7 +75,7 @@ export function SupervisorView() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Supervisor</div>
+          <h1 className="title-name">Supervisor</h1>
           <div className="title-sub">{log && !log.on ? "off: valk supervise on turns it back on" : "watches PRs and the backlog after agents stop"}</div>
         </div>
       </header>
