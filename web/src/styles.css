@@ -7,7 +7,7 @@
   --raised: #343746;
   --line: #44475a;
   --fg: #f8f8f2;
-  --muted: #6272a4;
+  --muted: #95a0c1;
   --soft: #b6bdd8;
   --accent: #bd93f9;
   --accent2: #ff79c6;
@@ -16,7 +16,7 @@
   --done: #50fa7b;
   --working: #8be9fd;
   --interrupted: #ffb86c;
-  --idle: #6272a4;
+  --idle: #8390b7;
   --term-bg: #1e1f29;
   --term-fg: #f8f8f2;
   --on-accent: #1b1530;
@@ -122,6 +122,30 @@ code {
   color: var(--muted);
 }
 
+/* Read out, not shown: a page's heading where the page shows a logo instead. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A page's title is its h1 (#188), sized by the top bar, not the browser. */
+:where(.title) h1 {
+  margin: 0;
+  font: inherit;
+}
+
+/* A new page focuses its heading for screen readers; there's nothing to press there. */
+h1[tabindex="-1"]:focus {
+  outline: none;
+}
+
 /* Page frame ------------------------------------------------------------- */
 
 .page {
@@ -203,6 +227,7 @@ code {
 .icon-btn:active {
   background: var(--raised);
 }
+
 
 .icon-btn svg {
   width: 16px;
@@ -2452,7 +2477,7 @@ html.with-tabs .offline-banner {
   --raised: #1b1e3d;
   --line: #3a2a66;
   --fg: #e6e9ff;
-  --muted: #6a6f9e;
+  --muted: #8085ad;
   --soft: #b4b8d8;
   --accent: #ff2a6d;
   --accent2: #05d9e8;
@@ -2461,7 +2486,7 @@ html.with-tabs .offline-banner {
   --done: #00ff9f;
   --working: #05d9e8;
   --interrupted: #ff9e00;
-  --idle: #5a5f8a;
+  --idle: #777ca6;
   --term-bg: #11132a;
   --term-fg: #e6e9ff;
   --on-accent: #10101a;
@@ -2497,7 +2522,7 @@ html.with-tabs .offline-banner {
   --raised: #141418;
   --line: #2c2833;
   --fg: #f0eef5;
-  --muted: #6f6a7d;
+  --muted: #807b8f;
   --soft: #bcb9c5;
   --accent: #c9a7ff;
   --accent2: #ff8fd0;
@@ -2506,7 +2531,7 @@ html.with-tabs .offline-banner {
   --done: #8dffbf;
   --working: #9ae6ff;
   --interrupted: #ffc39e;
-  --idle: #5a5666;
+  --idle: #7b768b;
   --term-bg: #0a0a0c;
   --term-fg: #f0eef5;
   --on-accent: #10101a;
@@ -2535,7 +2560,7 @@ html.with-tabs .offline-banner {
   --raised: #313244;
   --line: #45475a;
   --fg: #cdd6f4;
-  --muted: #7f849c;
+  --muted: #969aae;
   --soft: #aeb5d1;
   --accent: #cba6f7;
   --accent2: #f5c2e7;
@@ -2544,7 +2569,7 @@ html.with-tabs .offline-banner {
   --done: #a6e3a1;
   --working: #89dceb;
   --interrupted: #fab387;
-  --idle: #6c7086;
+  --idle: #82869a;
   --term-bg: #181825;
   --term-fg: #cdd6f4;
   --on-accent: #10101a;
@@ -2573,16 +2598,16 @@ html.with-tabs .offline-banner {
   --raised: #3b4252;
   --line: #4c566a;
   --fg: #eceff4;
-  --muted: #7b88a1;
+  --muted: #a5aebf;
   --soft: #bfc6d3;
   --accent: #88c0d0;
-  --accent2: #b48ead;
+  --accent2: #b690af;
   --needs: #ebcb8b;
-  --blocked: #bf616a;
+  --blocked: #cf888f;
   --done: #a3be8c;
   --working: #81a1c1;
-  --interrupted: #d08770;
-  --idle: #616e88;
+  --interrupted: #d18a74;
+  --idle: #919cb1;
   --term-bg: #292e39;
   --term-fg: #eceff4;
   --on-accent: #10101a;
@@ -2611,16 +2636,16 @@ html.with-tabs .offline-banner {
   --raised: #32302f;
   --line: #504945;
   --fg: #ebdbb2;
-  --muted: #928374;
+  --muted: #a39689;
   --soft: #c7b899;
   --accent: #fe8019;
   --accent2: #d3869b;
   --needs: #fabd2f;
-  --blocked: #fb4934;
+  --blocked: #fb533f;
   --done: #b8bb26;
   --working: #83a598;
   --interrupted: #8ec07c;
-  --idle: #7c6f64;
+  --idle: #998c80;
   --term-bg: #1d2021;
   --term-fg: #ebdbb2;
   --on-accent: #10101a;
@@ -2649,7 +2674,7 @@ html.with-tabs .offline-banner {
   --raised: #24283b;
   --line: #3b4261;
   --fg: #c0caf5;
-  --muted: #737aa2;
+  --muted: #888eb0;
   --soft: #a1aad4;
   --accent: #7aa2f7;
   --accent2: #bb9af7;
@@ -2658,7 +2683,7 @@ html.with-tabs .offline-banner {
   --done: #9ece6a;
   --working: #7dcfff;
   --interrupted: #ff9e64;
-  --idle: #565f89;
+  --idle: #7982ab;
   --term-bg: #16161e;
   --term-fg: #c0caf5;
   --on-accent: #10101a;
@@ -2687,16 +2712,16 @@ html.with-tabs .offline-banner {
   --raised: #073642;
   --line: #18505e;
   --fg: #93a1a1;
-  --muted: #657b83;
-  --soft: #819295;
-  --accent: #268bd2;
-  --accent2: #6c71c4;
+  --muted: #879ca3;
+  --soft: #92a1a4;
+  --accent: #2f93d9;
+  --accent2: #8387cd;
   --needs: #b58900;
-  --blocked: #dc322f;
+  --blocked: #e56562;
   --done: #859900;
   --working: #2aa198;
-  --interrupted: #cb4b16;
-  --idle: #586e75;
+  --interrupted: #e8652e;
+  --idle: #78929a;
   --term-bg: #00252f;
   --term-fg: #93a1a1;
   --on-accent: #10101a;
@@ -2725,16 +2750,16 @@ html.with-tabs .offline-banner {
   --raised: #2c313a;
   --line: #4b5263;
   --fg: #abb2bf;
-  --muted: #5c6370;
-  --soft: #8b929f;
+  --muted: #9198a5;
+  --soft: #a3a9b3;
   --accent: #61afef;
   --accent2: #c678dd;
   --needs: #e5c07b;
-  --blocked: #e06c75;
+  --blocked: #e17079;
   --done: #98c379;
   --working: #56b6c2;
   --interrupted: #d19a66;
-  --idle: #4b5263;
+  --idle: #8b93a7;
   --term-bg: #21252b;
   --term-fg: #abb2bf;
   --on-accent: #10101a;
@@ -2763,7 +2788,7 @@ html.with-tabs .offline-banner {
   --raised: #26233a;
   --line: #524f67;
   --fg: #e0def4;
-  --muted: #6e6a86;
+  --muted: #8d89a2;
   --soft: #b2b0c8;
   --accent: #c4a7e7;
   --accent2: #ebbcba;
@@ -2772,7 +2797,7 @@ html.with-tabs .offline-banner {
   --done: #9ccfd8;
   --working: #3e8fb0;
   --interrupted: #ea9a97;
-  --idle: #6e6a86;
+  --idle: #86839d;
   --term-bg: #1f1d2e;
   --term-fg: #e0def4;
   --on-accent: #10101a;
@@ -2801,16 +2826,16 @@ html.with-tabs .offline-banner {
   --raised: #3e3d32;
   --line: #5b5a4d;
   --fg: #f8f8f2;
-  --muted: #75715e;
+  --muted: #aba796;
   --soft: #c4c2b7;
   --accent: #66d9ef;
-  --accent2: #f92672;
+  --accent2: #fa4989;
   --needs: #e6db74;
-  --blocked: #f92672;
+  --blocked: #fa4989;
   --done: #a6e22e;
   --working: #ae81ff;
   --interrupted: #fd971f;
-  --idle: #75715e;
+  --idle: #928e78;
   --term-bg: #1e1f1c;
   --term-fg: #f8f8f2;
   --on-accent: #10101a;
@@ -2838,20 +2863,20 @@ html.with-tabs .offline-banner {
   --card: #fdf6e3;
   --raised: #f5eedb;
   --line: #d3cbb7;
-  --fg: #586e75;
-  --muted: #93a1a1;
-  --soft: #708287;
-  --accent: #268bd2;
-  --accent2: #d33682;
-  --needs: #b58900;
-  --blocked: #dc322f;
-  --done: #859900;
-  --working: #2aa198;
-  --interrupted: #cb4b16;
-  --idle: #93a1a1;
+  --fg: #566c73;
+  --muted: #5d6b6b;
+  --soft: #5c6b6f;
+  --accent: #1e6da5;
+  --accent2: #bf2a72;
+  --needs: #836300;
+  --blocked: #ca2522;
+  --done: #606f00;
+  --working: #1e736d;
+  --interrupted: #b64314;
+  --idle: #5d6b6b;
   --term-bg: #fdf6e3;
   --term-fg: #586e75;
-  --on-accent: #10101a;
+  --on-accent: #ffffff;
   color-scheme: light;
   --ansi-0: #073642;
   --ansi-1: #dc322f;
@@ -2878,16 +2903,16 @@ html.with-tabs .offline-banner {
   --raised: #dce0e8;
   --line: #acb0be;
   --fg: #4c4f69;
-  --muted: #7c7f93;
-  --soft: #5f627a;
-  --accent: #8839ef;
-  --accent2: #ea76cb;
-  --needs: #df8e1d;
-  --blocked: #d20f39;
-  --done: #40a02b;
-  --working: #04a5e5;
-  --interrupted: #fe640b;
-  --idle: #9ca0b0;
+  --muted: #565868;
+  --soft: #4e4f63;
+  --accent: #7113ec;
+  --accent2: #a3197e;
+  --needs: #7d4f10;
+  --blocked: #b30d31;
+  --done: #29661b;
+  --working: #026086;
+  --interrupted: #9c3a01;
+  --idle: #545869;
   --term-bg: #eff1f5;
   --term-fg: #4c4f69;
   --on-accent: #ffffff;
@@ -2917,16 +2942,16 @@ html.with-tabs .offline-banner {
   --raised: #f2e5bc;
   --line: #bdae93;
   --fg: #3c3836;
-  --muted: #7c6f64;
+  --muted: #6a5f56;
   --soft: #564e48;
-  --accent: #af3a03;
+  --accent: #ac3903;
   --accent2: #8f3f71;
-  --needs: #b57614;
+  --needs: #86570f;
   --blocked: #9d0006;
-  --done: #79740e;
+  --done: #67620c;
   --working: #076678;
-  --interrupted: #427b58;
-  --idle: #928374;
+  --interrupted: #3a6b4d;
+  --idle: #6b5f54;
   --term-bg: #fbf1c7;
   --term-fg: #3c3836;
   --on-accent: #ffffff;
@@ -2958,7 +2983,7 @@ html.with-tabs .offline-banner {
   --raised: #0a2a14;
   --line: #0f4d22;
   --fg: #b4ffc4;
-  --muted: #2f8f4c;
+  --muted: #349d54;
   --soft: #6fdc8c;
   --accent: #00ff41;
   --accent2: #7dffa0;
@@ -2967,7 +2992,7 @@ html.with-tabs .offline-banner {
   --done: #00ff41;
   --working: #3dffd2;
   --interrupted: #ffb000;
-  --idle: #1f6e36;
+  --idle: #288d45;
   --term-bg: #010603;
   --term-fg: #b4ffc4;
   --on-accent: #001a07;
@@ -3002,7 +3027,7 @@ html.with-tabs .offline-banner {
   --raised: #261d45;
   --line: #3b2e68;
   --fg: #ebe4ff;
-  --muted: #8a7cb8;
+  --muted: #8f82bb;
   --soft: #bfb0ec;
   --accent: #c8b4ff;
   --accent2: #e6ccff;
@@ -3011,7 +3036,7 @@ html.with-tabs .offline-banner {
   --done: #a9f0d1;
   --working: #a3d4ff;
   --interrupted: #ffc59c;
-  --idle: #5f5388;
+  --idle: #8377ac;
   --term-bg: #08060f;
   --term-fg: #ebe4ff;
   --on-accent: #1b1238;
@@ -3046,7 +3071,7 @@ html.with-tabs .offline-banner {
   --raised: #2a1858;
   --line: #3d2a7a;
   --fg: #ece6ff;
-  --muted: #8577b3;
+  --muted: #9184ba;
   --soft: #c2b6ee;
   --accent: #9d6bff;
   --accent2: #ff3ed8;
@@ -3055,7 +3080,7 @@ html.with-tabs .offline-banner {
   --done: #39ff7a;
   --working: #c77dff;
   --interrupted: #ff9e5e;
-  --idle: #5a4f86;
+  --idle: #867bb1;
   --term-bg: #08070f;
   --term-fg: #ece6ff;
   --on-accent: #12082e;
@@ -3096,7 +3121,7 @@ html.with-tabs .offline-banner {
   --raised: #16162a;
   --line: #2a2a3d;
   --fg: #f4f4fa;
-  --muted: #6e6e88;
+  --muted: #7f7f97;
   --soft: #b4b4cc;
   --accent: #00f0ff;
   --accent2: #ff2bd6;
@@ -3105,7 +3130,7 @@ html.with-tabs .offline-banner {
   --done: #39ff14;
   --working: #8a5cff;
   --interrupted: #ff8a00;
-  --idle: #45455a;
+  --idle: #787897;
   --term-bg: #000000;
   --term-fg: #f4f4fa;
   --on-accent: #000000;
@@ -4604,7 +4629,6 @@ html.with-tabs .page {
 .tabbar {
   position: fixed;
   inset: auto 0 0 0;
-  /* Over the More sheet's backdrop, so More closes it again. */
   z-index: 26;
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -4647,22 +4671,27 @@ html.with-tabs .page {
   font-weight: var(--weight-medium);
 }
 
-.sheet-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 25;
-  background: rgb(0 0 0 / 45%);
-  animation: fade-in 0.16s ease-out;
-}
-
+/* The More sheet (#188): a native modal dialog in the top layer, over the tab bar. */
 .sheet {
-  position: absolute;
+  position: fixed;
   inset: auto 0 0 0;
-  padding: var(--space-2) var(--space-3) calc(env(safe-area-inset-bottom) + 76px);
+  width: 100%;
+  max-width: none;
+  max-height: calc(100dvh - 48px);
+  margin: 0;
+  padding: var(--space-2) var(--space-3) calc(env(safe-area-inset-bottom) + var(--space-3));
+  border: 0;
+  border-top: 1px solid var(--line);
   border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   background: var(--page);
-  border-top: 1px solid var(--line);
+  color: var(--fg);
+  overflow-y: auto;
   animation: sheet-up 0.24s var(--ease-out);
+}
+
+.sheet::backdrop {
+  background: rgb(0 0 0 / 45%);
+  animation: fade-in 0.16s ease-out;
 }
 
 .sheet-grip {
@@ -5074,4 +5103,32 @@ html[data-vt="glide"]::view-transition-group(*) {
   border-top: 1px solid var(--line);
   font-size: var(--text-xs);
   color: var(--muted);
+}
+
+/* A finger needs 44px to hit (#188); a mouse keeps the tighter sizes above. */
+@media (pointer: coarse) {
+  .icon-btn,
+  .send,
+  .mic,
+  .attach {
+    width: 44px;
+    height: 44px;
+  }
+
+  .key {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .primary,
+  .ghost {
+    min-height: 44px;
+  }
+
+  /* The session's name renames it: a taller target, the same top bar. */
+  button.title-name {
+    min-width: 44px;
+    padding-block: 11px;
+    margin-block: -11px;
+  }
 }

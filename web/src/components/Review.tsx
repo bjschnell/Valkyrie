@@ -130,7 +130,7 @@ export function ReviewView({ id }: { id: number }) {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Changes · {info?.name ?? `#${id}`}</div>
+          <h1 className="title-name">Changes · {info?.name ?? `#${id}`}</h1>
           <div className="title-sub">
             {review ? (
               <>

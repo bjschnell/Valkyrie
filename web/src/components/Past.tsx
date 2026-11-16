@@ -47,7 +47,7 @@ export function PastView() {
           <Back />
         </button>
         <div className="title">
-          <div className="title-name">Past sessions</div>
+          <h1 className="title-name">Past sessions</h1>
         </div>
       </header>
 
