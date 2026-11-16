@@ -44,7 +44,7 @@ import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
 import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
-import { answeringLabel, choicesKey, type Answering } from "./lib/answering";
+import { answeringLabel, batchSummary, choicesKey, type Answering } from "./lib/answering";
 import {
   keyBytes,
   messageBytes,
@@ -737,11 +737,17 @@ export async function answer(
 }
 
 /** Sends an answer `startAnswer` marked, then confirms or takes it back. */
-async function sendAnswer(session: SessionId, choices: Choice[], choice: Choice): Promise<void> {
+async function sendAnswer(
+  session: SessionId,
+  choices: Choice[],
+  choice: Choice,
+  quiet = false,
+): Promise<boolean> {
   const mine = get().answering[session];
   const failed = () => {
     endAnswer(session, mine);
-    toast("Didn't go through; try again");
+    if (!quiet) toast("Didn't go through; try again");
+    return false;
   };
   const keys = choiceKeys(choices, choice);
   const modes = get().openId === session ? get().screen?.modes : undefined;
@@ -777,7 +783,8 @@ async function sendAnswer(session: SessionId, choices: Choice[], choice: Choice)
   } else {
     set({ prompts });
   }
-  toast(`${choice.label.slice(0, 40)} ✓`);
+  if (!quiet) toast(`${choice.label.slice(0, 40)} ✓`);
+  return true;
 }
 
 /** Takes a finished session off the queue at once; the daemon hears right away. */
@@ -1364,7 +1371,28 @@ export async function answerAll(
   answers: { session: SessionId; choices: Choice[]; choice: Choice }[],
 ): Promise<void> {
   // Every card shows sent at once; the keys still go one prompt at a time.
+  // One answered on its own says so itself. Ones already on their way from
+  // another tap aren't this batch's to count.
   const started = answers.filter((a) => startAnswer(a.session, a.choices, a.choice));
-  for (const a of started) await sendAnswer(a.session, a.choices, a.choice);
-  if (answers.length > 1) toast(`Answered ${answers.length} prompts ✓`);
+  const quiet = started.length > 1;
+  const missed: typeof started = [];
+  for (const a of started) {
+    if (!(await sendAnswer(a.session, a.choices, a.choice, quiet))) missed.push(a);
+  }
+  if (!quiet) return;
+  toast(
+    batchSummary(started.length - missed.length, started.length),
+    missed.length ? { label: "Retry", run: () => void retryAll(missed) } : undefined,
+  );
+}
+
+/** Tries again the ones still showing the prompt they missed: one that moved
+ * on to another prompt isn't sent the old answer's keys. */
+function retryAll(missed: { session: SessionId; choices: Choice[]; choice: Choice }[]): void {
+  const still = missed.filter((a) => {
+    const now = get().prompts[a.session]?.choices;
+    return now !== undefined && choicesKey(now) === choicesKey(a.choices);
+  });
+  if (!still.length) return toast("Those prompts have moved on");
+  void answerAll(still);
 }
