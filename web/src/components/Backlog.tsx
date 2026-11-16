@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
 import { editPatch } from "../lib/optimistic";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchesOn, launchesShown, liveSession, noteOrigin, orderHref, orderSize, ofKind, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, planScope, prLink, priority, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
@@ -460,6 +460,9 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   }, [focused]);
   const [busy, setBusy] = useState(false);
   const [agent, setAgent] = useState<Agent>(() => startAgent(item, read(AGENT_KEY)));
+  // Edited text, or null while the field follows the agent: its last model on the item.
+  const [typed, setTyped] = useState<string | null>(null);
+  const model = typed ?? startModel(item, agent);
   const live = liveSession(item, sessions, boot);
   // Accept, Open, Launch: Launch beside Open while only takes are live (it hands
   // the item over), Accept beside it for an agent's own filed work.
@@ -479,7 +482,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
     act(async () => {
       try {
         write(AGENT_KEY, agent);
-        const id = await launchItem(item.id, agent);
+        const id = await launchItem(item.id, agent, true, typed === null ? undefined : launchModel(typed) ?? "");
         navigator.vibrate?.(10);
         location.hash = `#/s/${id}`;
       } catch (e) {
@@ -702,12 +705,31 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
                     <select
                       aria-label="Agent"
                       value={agent}
-                      onChange={(e) => setAgent(e.target.value as Agent)}
+                      onChange={(e) => {
+                        setAgent(e.target.value as Agent);
+                        setTyped(null);
+                      }}
                       disabled={busy}
                     >
                       <option value="claude">Claude</option>
                       <option value="codex">Codex</option>
                     </select>
+                    <input
+                      aria-label="Model"
+                      list={`models-${item.id}`}
+                      value={model}
+                      onChange={(e) => setTyped(e.target.value)}
+                      placeholder="default"
+                      disabled={busy}
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                    <datalist id={`models-${item.id}`}>
+                      {MODEL_CHOICES[agent].map((m) => (
+                        <option key={m} value={m} />
+                      ))}
+                    </datalist>
                     <button className={kind} disabled={busy} onClick={() => void launch()}>
                       {busy ? "Starting…" : lane === "review" ? "Relaunch" : "Launch"}
                     </button>

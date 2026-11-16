@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -376,6 +376,22 @@ describe("startAgent", () => {
     expect(startAgent(item(), "codex")).toBe("codex");
     expect(startAgent(null, null)).toBe("claude");
     expect(startAgent(item({ launch: { agent: "aider" } }), "nonsense")).toBe("claude");
+  });
+});
+
+describe("the launch model", () => {
+  it("starts on what the item last ran with that agent, else empty", () => {
+    const i = item({ launch: { agent: "claude", model: "opus" } });
+    expect(startModel(i, "claude")).toBe("opus");
+    expect(startModel(i, "codex")).toBe("");
+    expect(startModel(item({ launch: { agent: "claude" } }), "claude")).toBe("");
+    expect(startModel(null, "claude")).toBe("");
+  });
+  it("sends nothing for an empty field, and the agent's own for `default`", () => {
+    expect(launchModel("")).toBeUndefined();
+    expect(launchModel("  ")).toBeUndefined();
+    expect(launchModel("Default")).toBe("");
+    expect(launchModel(" sonnet ")).toBe("sonnet");
   });
 });
 
