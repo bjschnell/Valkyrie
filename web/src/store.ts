@@ -700,10 +700,21 @@ export async function sendFile(file: File): Promise<string> {
 /** Marks an answer under way, its buttons dim at once; false if this prompt
  * has one already. A new prompt on the screen takes a tap straight away. */
 function startAnswer(session: SessionId, choices: Choice[], choice: Choice): boolean {
-  if (answeringLabel(get().answering[session], choices) !== null) return false;
-  const a: Answering = { of: choicesKey(choices), label: choice.label, done: false };
+  const seq = statusSeq(session);
+  if (answeringLabel(get().answering[session], choices, seq) !== null) return false;
+  const a: Answering = { of: choicesKey(choices), label: choice.label, done: false, seq };
   set({ answering: { ...get().answering, [session]: a } });
   return true;
+}
+
+/** The session's status `seq`, which moves on with each prompt. */
+export function statusSeq(session: SessionId): number | null {
+  const s = get();
+  return (
+    s.sessions.find((x) => x.id === session)?.status.seq ??
+    s.queue.find((q) => q.session === session)?.status.seq ??
+    null
+  );
 }
 
 /** Ends `a` if it's still the session's answer: a later one keeps its own. */

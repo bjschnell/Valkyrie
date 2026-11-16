@@ -265,7 +265,7 @@ function QueueCard({
 }) {
   const now = useApp((s) => s.now);
   const prompt = useApp((s) => s.prompts[item.session]);
-  const sent = useApp((s) => answeringLabel(s.answering[item.session], prompt?.choices ?? []));
+  const sent = useApp((s) => answeringLabel(s.answering[item.session], prompt?.choices ?? [], item.status.seq));
   const s = item.status;
   const choices = prompt?.choices ?? [];
   return (

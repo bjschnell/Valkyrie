@@ -61,7 +61,7 @@ export function SessionView({ id }: { id: number }) {
   const scroller = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const choices = useMemo(() => openChoices(screen), [screen]);
-  const sent = useApp((s) => answeringLabel(s.answering[id], choices));
+  const sent = useApp((s) => answeringLabel(s.answering[id], choices, info?.status.seq));
   const state = exited || info?.exited != null ? "exited" : (info?.status.state ?? "idle");
   const hasChat = !!info?.chat;
   const mode: Mode = hasChat ? chosen : "terminal";
