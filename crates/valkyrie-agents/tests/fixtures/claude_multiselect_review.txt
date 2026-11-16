@@ -1,0 +1,16 @@
+❯ Use the AskUserQuestion tool exactly once with ONE question, multiSelect:
+  true, header 'Fruit', question 'Which fruits?', options Apple, Banana, Cherry
+  (each with a short description). Do nothing else.
+
+────────────────────────────────────────────────────────────────────────────────
+←  ☒ Fruit  ✔ Submit  →
+
+Review your answers
+
+ ● Which fruits?
+   → Banana, Apple
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel

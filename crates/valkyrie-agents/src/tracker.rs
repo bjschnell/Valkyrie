@@ -38,6 +38,9 @@ pub struct Tracker {
     /// The last turn's end (its summary, and whether it had been seen), which
     /// background agents the turn started can put off: `Stop` fires while they run.
     turn_end: Option<(Option<String>, bool)>,
+    /// The open question call's questions: its dialog shows one at a time, and no
+    /// hook says which, so the screen does (backlog #171).
+    questions: Vec<String>,
     /// Whether the agent can miss transitions that only the screen shows.
     hook_gaps: bool,
     ended: bool,
@@ -56,6 +59,7 @@ impl Tracker {
             dialog_seen: false,
             reviewing: None,
             turn_end: None,
+            questions: Vec::new(),
             hook_gaps,
             ended: false,
         }
@@ -132,13 +136,17 @@ impl Tracker {
                 now,
                 watching,
             ),
-            E::QuestionAsked { summary } => self.set(
-                S::NeedsInput,
-                Some(AskKind::Question),
-                Some(summary.clone()),
-                now,
-                watching,
-            ),
+            E::QuestionAsked { summary, questions } => {
+                let changed = self.set(
+                    S::NeedsInput,
+                    Some(AskKind::Question),
+                    Some(summary.clone()),
+                    now,
+                    watching,
+                );
+                self.questions = questions.clone();
+                changed
+            }
             E::InputAsked { summary } => self.set(
                 S::NeedsInput,
                 Some(AskKind::Input),
@@ -227,7 +235,8 @@ impl Tracker {
             return false;
         }
         if self.status.hooked {
-            return self.background(&verdict, now, watching)
+            return self.follow_question(&verdict)
+                | self.background(&verdict, now, watching)
                 | self.review(verdict, now, watching)
                 | self.check_interrupted(now, watching);
         }
@@ -261,6 +270,45 @@ impl Tracker {
     /// box under the spinner), so idle detection and heuristics wait for quiet.
     pub fn glance(&mut self, verdict: Option<Screen>, now: u64, watching: bool) -> bool {
         !self.ended && self.status.hooked && self.review(verdict, now, watching)
+    }
+
+    /// A question call's dialog moved on to its next question: the summary becomes
+    /// that one. The screen gives a row of it (the last, when it wraps), so the
+    /// question holding that row is the one showing. Still the same wait: `seen` and
+    /// `since_ms` stay, and a new `seq` has clients read the new choices.
+    fn follow_question(&mut self, verdict: &Option<Screen>) -> bool {
+        let s = &self.status;
+        if s.state != AgentState::NeedsInput || s.ask != Some(AskKind::Question) {
+            return false;
+        }
+        let Some(Screen::Prompt { summary: row }) = verdict else {
+            return false;
+        };
+        let row = row
+            .trim_end_matches('…')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if row.is_empty() {
+            return false;
+        }
+        let showing = |q: &&String| q.contains(&row);
+        let current = s.summary.as_deref().unwrap_or("");
+        // Already on it (a short row can sit in several; keep the one shown).
+        if self
+            .questions
+            .iter()
+            .filter(showing)
+            .any(|q| crate::summary::truncate(q) == current)
+        {
+            return false;
+        }
+        let Some(next) = self.questions.iter().find(showing) else {
+            return false;
+        };
+        self.status.summary = Some(crate::summary::truncate(next));
+        self.status.seq += 1;
+        true
     }
 
     /// A turn that ended while background agents still run isn't done until they
@@ -434,6 +482,9 @@ impl Tracker {
         self.dialog_seen = false;
         if state != AgentState::Working {
             self.reviewing = None;
+        }
+        if ask != Some(AskKind::Question) {
+            self.questions.clear();
         }
         true
     }
@@ -899,5 +950,66 @@ mod tests {
         assert!(!t.status().seen, "annotation is not a new transition");
         hook(&mut t, E::PromptSubmitted, 2);
         assert!(!t.annotate(seq, "late"));
+    }
+
+    /// Backlog #171: one AskUserQuestion call with several questions shows them one
+    /// at a time and fires no hook between them. The summary follows the screen.
+    #[test]
+    fn a_question_call_with_several_questions_follows_the_screen() {
+        let q1 = "Claude transcripts record branch, cwd and time per line but no commit. What should a transcript hit show for 'commit'?";
+        let q2 = "A transcript hit is 'a tool error or user message plus the next successful call of that tool'. A user message has no tool. What goes with a user-message hit?";
+        let q3 = "Which for notes/sessions search?";
+        let mut t = tracker();
+        hook(&mut t, E::PromptSubmitted, 1);
+        t.hook(
+            &[E::QuestionAsked {
+                summary: q1.into(),
+                questions: vec![q1.into(), q2.into(), q3.into()],
+            }],
+            2_000,
+            2,
+            false,
+        );
+        assert_eq!(t.status().summary.as_deref(), Some(q1));
+        let prompt = |s: &str| Some(Screen::Prompt { summary: s.into() });
+        // The dialog's first question: nothing to change.
+        assert!(!t.screen(prompt(q1), 3, false));
+        // Answered; the dialog shows the next one, wrapped, so the screen's line is
+        // only its last row.
+        let seq = t.status().seq;
+        assert!(t.screen(prompt("tool. What goes with a user-message hit?"), 4, false));
+        let s = t.status();
+        assert_eq!(s.summary.as_deref(), Some(q2));
+        assert_eq!((s.state, s.ask), (S::NeedsInput, Some(AskKind::Question)));
+        assert!(s.seq > seq, "a new seq, so clients read the new choices");
+        assert_eq!(s.since_ms, 2, "still the same wait");
+        assert!(t.screen(prompt(q3), 5, false));
+        assert_eq!(t.status().summary.as_deref(), Some(q3));
+        // A screen line that matches no question leaves it alone.
+        assert!(!t.screen(prompt("Type something."), 6, false));
+        assert_eq!(t.status().summary.as_deref(), Some(q3));
+    }
+
+    #[test]
+    fn a_question_follows_the_screen_without_unseeing_it() {
+        let mut t = tracker();
+        t.hook(
+            &[E::QuestionAsked {
+                summary: "First?".into(),
+                questions: vec!["First?".into(), "Second?".into()],
+            }],
+            1_000,
+            1,
+            false,
+        );
+        t.mark_seen(t.status().seq);
+        assert!(t.screen(
+            Some(Screen::Prompt {
+                summary: "Second?".into()
+            }),
+            2,
+            false
+        ));
+        assert!(t.status().seen, "answering the first isn't news to push");
     }
 }

@@ -38,7 +38,7 @@ import type {
   StepAction,
 } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
-import { findChoices, promptContext, type Choice } from "./lib/choices";
+import { choiceKeys, findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
 import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
@@ -696,21 +696,13 @@ export async function answer(
   choices: Choice[],
   choice: Choice,
 ): Promise<void> {
-  const from = choices.findIndex((c) => c.selected);
-  const to = choices.indexOf(choice);
-  const moves = choice.moves ?? (from >= 0 ? to - from : null);
+  const keys = choiceKeys(choices, choice);
   const modes = get().openId === session ? get().screen?.modes : undefined;
-  const keys: Key[] =
-    moves === null
-      ? []
-      : [...Array(Math.abs(moves)).fill(moves < 0 ? "up" : "down"), "enter"];
   navigator.vibrate?.(10);
-  if (moves === null) {
+  if (keys === null) {
     // No cursor to move: the number picks it.
-    if (
-      !input(session, [...new TextEncoder().encode(String(choice.n ?? to + 1))])
-    )
-      return;
+    const n = choice.n ?? choices.indexOf(choice) + 1;
+    if (!input(session, [...new TextEncoder().encode(String(n))])) return;
   } else {
     for (const [i, key] of keys.entries()) {
       if (i) await new Promise((r) => setTimeout(r, KEY_GAP_MS));
