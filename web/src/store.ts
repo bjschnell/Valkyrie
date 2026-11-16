@@ -44,6 +44,7 @@ import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
 import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
+import { answeringLabel, choicesKey, type Answering } from "./lib/answering";
 import {
   keyBytes,
   messageBytes,
@@ -72,6 +73,9 @@ export const HOLD_MS = 8_000;
 const LAND_MS = 5_000;
 /** Between keys of one answer, so the program reads them as separate presses. */
 const KEY_GAP_MS = 70;
+/** How long a confirmed answer keeps the screen's old buttons dim, in case the
+ * program never redraws them. */
+const ANSWERED_DIM_MS = 4000;
 /** Between a message and its Enter: long enough that the two can't arrive as one read. */
 const ENTER_GAP_MS = 150;
 
@@ -111,6 +115,8 @@ interface State {
   chat: Chat | null;
   /** Choices on the screens of queued sessions, by session, for the inbox. */
   prompts: Record<SessionId, Prompt>;
+  /** Answers sent and not yet confirmed, or confirmed while the screen catches up. */
+  answering: Record<SessionId, Answering>;
   /** `action`: a button on it, such as Undo; the toast stays longer. A backlog
    * proposal's (#194) has `actions` (Accept, Decline), `open` for a tap on its
    * text, and its own `ms`. */
@@ -150,6 +156,7 @@ export const useApp = create<State>(() => ({
   exited: null,
   chat: null,
   prompts: {},
+  answering: {},
   toast: null,
   focusItem: null,
   now: Date.now(),
@@ -690,23 +697,63 @@ export async function sendFile(file: File): Promise<string> {
   return upload(token, await shrinkImage(file));
 }
 
-/** Picks a choice: moves the program's cursor to it, then Enter. */
+/** Marks an answer under way, its buttons dim at once; false if this prompt
+ * has one already. A new prompt on the screen takes a tap straight away. */
+function startAnswer(session: SessionId, choices: Choice[], choice: Choice): boolean {
+  const seq = statusSeq(session);
+  if (answeringLabel(get().answering[session], choices, seq) !== null) return false;
+  const a: Answering = { of: choicesKey(choices), label: choice.label, done: false, seq };
+  set({ answering: { ...get().answering, [session]: a } });
+  return true;
+}
+
+/** The session's status `seq`, which moves on with each prompt. */
+export function statusSeq(session: SessionId): number | null {
+  const s = get();
+  return (
+    s.sessions.find((x) => x.id === session)?.status.seq ??
+    s.queue.find((q) => q.session === session)?.status.seq ??
+    null
+  );
+}
+
+/** Ends `a` if it's still the session's answer: a later one keeps its own. */
+function endAnswer(session: SessionId, a: Answering | undefined): void {
+  if (!a || get().answering[session] !== a) return;
+  const answering = { ...get().answering };
+  delete answering[session];
+  set({ answering });
+}
+
+/** Picks a choice: moves the program's cursor to it, then Enter. The buttons
+ * show it sent at once and stay that way unless it doesn't go through. */
 export async function answer(
   session: SessionId,
   choices: Choice[],
   choice: Choice,
 ): Promise<void> {
+  if (!startAnswer(session, choices, choice)) return;
+  await sendAnswer(session, choices, choice);
+}
+
+/** Sends an answer `startAnswer` marked, then confirms or takes it back. */
+async function sendAnswer(session: SessionId, choices: Choice[], choice: Choice): Promise<void> {
+  const mine = get().answering[session];
+  const failed = () => {
+    endAnswer(session, mine);
+    toast("Didn't go through; try again");
+  };
   const keys = choiceKeys(choices, choice);
   const modes = get().openId === session ? get().screen?.modes : undefined;
   navigator.vibrate?.(10);
   if (keys === null) {
     // No cursor to move: the number picks it.
     const n = choice.n ?? choices.indexOf(choice) + 1;
-    if (!input(session, [...new TextEncoder().encode(String(n))])) return;
+    if (!input(session, [...new TextEncoder().encode(String(n))])) return failed();
   } else {
     for (const [i, key] of keys.entries()) {
       if (i) await new Promise((r) => setTimeout(r, KEY_GAP_MS));
-      if (!input(session, keyBytes(key, modes))) return;
+      if (!input(session, keyBytes(key, modes))) return failed();
     }
   }
   // Keystrokes are fire-and-forget, and a phone just back from sleep can hold a
@@ -716,13 +763,20 @@ export async function answer(
     if (!conn) throw new Error("not connected");
     await conn.request({ t: "hello" });
   } catch {
-    toast("Didn't go through; try again");
-    return;
+    return failed();
   }
-  // Answered: drop the buttons until the screen says otherwise.
+  // Answered: drop the inbox's buttons until the screen says otherwise. The
+  // open session's dock reads the live screen, so its old buttons stay dim
+  // until the program redraws them, or a few seconds pass.
   const prompts = { ...get().prompts };
   delete prompts[session];
-  set({ prompts });
+  if (mine && get().answering[session] === mine) {
+    const done = { ...mine, done: true };
+    set({ prompts, answering: { ...get().answering, [session]: done } });
+    window.setTimeout(() => endAnswer(session, done), ANSWERED_DIM_MS);
+  } else {
+    set({ prompts });
+  }
   toast(`${choice.label.slice(0, 40)} ✓`);
 }
 
@@ -1309,6 +1363,8 @@ export function sendTo(session: SessionId, text: string): boolean {
 export async function answerAll(
   answers: { session: SessionId; choices: Choice[]; choice: Choice }[],
 ): Promise<void> {
-  for (const a of answers) await answer(a.session, a.choices, a.choice);
+  // Every card shows sent at once; the keys still go one prompt at a time.
+  const started = answers.filter((a) => startAnswer(a.session, a.choices, a.choice));
+  for (const a of started) await sendAnswer(a.session, a.choices, a.choice);
   if (answers.length > 1) toast(`Answered ${answers.length} prompts ✓`);
 }
