@@ -1,6 +1,7 @@
 // Where each backlog item stands (DESIGN §8.12), worked out from its sessions
 // rather than dragged between columns, so it can't fall out of step.
 
+import { ITEM_KINDS } from "../proto";
 import type { Item, ItemChange, ItemFacts, ItemKind, ItemNote, KeptItem, LaunchOffer, OrderApplied, OrderProposal, OrderStep, Priority, SessionInfo, ShippedItem } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
@@ -141,6 +142,22 @@ export function repoChoices(items: Item[]): { repo: string; label: string }[] {
   const out = named.map((n) => (clash(n.label) ? { ...n, label: n.repo } : n));
   out.sort((a, b) => a.label.localeCompare(b.label) || a.repo.localeCompare(b.repo));
   if (items.some((i) => !i.project)) out.push({ repo: "", label: "No folder" });
+  return out;
+}
+
+/** Which kind of item the board shows: every kind (`null`) or one. */
+export type KindFilter = ItemKind | null;
+
+export const ofKind = (item: Item, kind: KindFilter) => kind === null || item.kind === kind;
+
+/** A kind filter as kept between visits; anything else is every kind. */
+export const kindFilter = (saved: string | null): KindFilter => ITEM_KINDS.find((k) => k === saved) ?? null;
+
+/** How many of `items` are still to do (open or proposed), of each kind, to show
+ * beside its chip. */
+export function kindCounts(items: Item[]): Record<ItemKind, number> {
+  const out = Object.fromEntries(ITEM_KINDS.map((k) => [k, 0])) as Record<ItemKind, number>;
+  for (const i of items) if (i.status === "open" || i.status === "proposed") out[i.kind]++;
   return out;
 }
 
