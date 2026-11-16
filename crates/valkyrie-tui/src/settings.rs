@@ -88,6 +88,8 @@ pub struct Settings {
     pub noise: Noise,
     /// Toasts also go out as desktop notifications (not over SSH).
     pub desktop: bool,
+    /// An agent's new backlog proposal pops up as a toast (#194).
+    pub proposals: bool,
     /// Agents in Valkyrie sessions get the project's decisions (ADR-0007).
     pub context: bool,
     /// The home screen says when a newer release is out (release builds; GitHub is
@@ -98,33 +100,29 @@ pub struct Settings {
 
 impl PartialEq for Settings {
     fn eq(&self, other: &Self) -> bool {
-        (
-            self.theme.name,
-            self.themed_sessions,
-            self.tabs,
-            self.tab_side,
-            self.minimal_tabs,
-            self.hints,
-            self.sound,
-            self.noise,
-            self.desktop,
-            self.context,
-            self.updates,
-            self.keys,
-        ) == (
-            other.theme.name,
-            other.themed_sessions,
-            other.tabs,
-            other.tab_side,
-            other.minimal_tabs,
-            other.hints,
-            other.sound,
-            other.noise,
-            other.desktop,
-            other.context,
-            other.updates,
-            other.keys,
-        )
+        // Two tuples: one of 13 has no `==`.
+        let look = |s: &Self| {
+            (
+                s.theme.name,
+                s.themed_sessions,
+                s.tabs,
+                s.tab_side,
+                s.minimal_tabs,
+                s.hints,
+            )
+        };
+        let rest = |s: &Self| {
+            (
+                s.sound,
+                s.noise,
+                s.desktop,
+                s.proposals,
+                s.context,
+                s.updates,
+                s.keys,
+            )
+        };
+        look(self) == look(other) && rest(self) == rest(other)
     }
 }
 
@@ -145,6 +143,7 @@ impl Default for Settings {
             hints: true,
             sound: true,
             desktop: true,
+            proposals: true,
             noise: Noise::Chime,
             context: true,
             updates: true,
@@ -164,6 +163,7 @@ pub enum Field {
     Hints,
     Sound,
     Desktop,
+    Proposals,
     Context,
     Updates,
 }
@@ -178,6 +178,7 @@ impl Field {
         Field::Hints,
         Field::Sound,
         Field::Desktop,
+        Field::Proposals,
         Field::Context,
         Field::Updates,
     ];
@@ -192,6 +193,7 @@ impl Field {
             Field::Hints => "Key hints",
             Field::Sound => "Sound",
             Field::Desktop => "Desktop",
+            Field::Proposals => "Proposals",
             Field::Context => "Context",
             Field::Updates => "Updates",
         }
@@ -212,6 +214,7 @@ impl Settings {
             ("hints", "VALK_HINTS"),
             ("sound", "VALK_SOUND"),
             ("desktop", "VALK_DESKTOP"),
+            ("proposals", "VALK_PROPOSALS"),
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
         ] {
@@ -246,6 +249,7 @@ impl Settings {
             Field::Hints => kept.hints = self.hints,
             Field::Sound => (kept.sound, kept.noise) = (self.sound, self.noise),
             Field::Desktop => kept.desktop = self.desktop,
+            Field::Proposals => kept.proposals = self.proposals,
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
         });
@@ -285,6 +289,7 @@ impl Settings {
              hints = {}        # the bar under a session shows its keys\n\
              sound = \"{}\"     # none | {}\n\
              desktop = {}      # toasts also go out as desktop notifications (not over SSH)\n\
+             proposals = {}    # an agent's new backlog proposal pops up as a toast\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
              # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
@@ -301,6 +306,7 @@ impl Settings {
             self.value(Field::Sound),
             names(Noise::ALL.iter().map(|n| n.name())),
             self.desktop,
+            self.proposals,
             self.context,
             self.updates,
             self.keys.to_toml(),
@@ -361,6 +367,11 @@ impl Settings {
             "desktop" => match value {
                 "true" | "on" => self.desktop = true,
                 "false" | "off" => self.desktop = false,
+                _ => {}
+            },
+            "proposals" => match value {
+                "true" | "on" => self.proposals = true,
+                "false" | "off" => self.proposals = false,
                 _ => {}
             },
             "hints" => match value {
@@ -429,6 +440,7 @@ impl Settings {
             }
             Field::Hints => on_off(self.hints),
             Field::Desktop => on_off(self.desktop),
+            Field::Proposals => on_off(self.proposals),
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
         }
@@ -446,6 +458,7 @@ impl Settings {
             Field::TabDetail => self.minimal_tabs = !self.minimal_tabs,
             Field::Hints => self.hints = !self.hints,
             Field::Desktop => self.desktop = !self.desktop,
+            Field::Proposals => self.proposals = !self.proposals,
             // None, then each noise.
             Field::Sound => {
                 let choices: Vec<Option<Noise>> = std::iter::once(None)
@@ -510,7 +523,7 @@ fn step<'a, T>(all: &'a [T], current: &str, by: isize, name_of: impl Fn(&T) -> &
 }
 
 /// The keys `to_toml` writes, or drops when they're back on their defaults.
-const OURS: [&str; 10] = [
+const OURS: [&str; 11] = [
     "theme",
     "session_colors",
     "tabs",
@@ -519,6 +532,7 @@ const OURS: [&str; 10] = [
     "hints",
     "sound",
     "desktop",
+    "proposals",
     "context",
     "updates",
 ];
@@ -553,6 +567,7 @@ mod tests {
         s.cycle(Field::SessionColors, 1);
         s.cycle(Field::Context, 1);
         s.cycle(Field::Updates, 1);
+        s.cycle(Field::Proposals, 1);
         s.keys
             .bind(crate::keys::Action::Home, Some(crate::keys::Key::Alt(b'#')));
         let mut back = Settings::default();
@@ -664,6 +679,17 @@ mod tests {
     }
 
     #[test]
+    fn proposals_pop_up_until_turned_off() {
+        let mut s = Settings::default();
+        assert!(s.proposals);
+        s.apply("proposals = off\n");
+        assert!(!s.proposals);
+        let mut back = Settings::default();
+        back.apply(&s.to_toml());
+        assert!(!back.proposals);
+    }
+
+    #[test]
     fn every_value_cycles_back_to_itself() {
         let start = Settings::default();
         for &field in Field::ALL {
@@ -677,6 +703,7 @@ mod tests {
                 | Field::TabDetail
                 | Field::Hints
                 | Field::Desktop
+                | Field::Proposals
                 | Field::Context
                 | Field::Updates => 2,
             };

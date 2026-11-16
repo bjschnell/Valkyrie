@@ -67,6 +67,15 @@ export function Backlog() {
     setReady(null);
     write(REPO_KEY, r);
   };
+  // A proposal's toast opens its card (#194): one another repository's filter
+  // hides shows every repository instead, without keeping that choice.
+  const focus = useApp((s) => s.focusItem);
+  const focused = focus === null ? undefined : all.find((i) => i.id === focus);
+  useEffect(() => {
+    if (focus === null) return;
+    if (!focused) useApp.setState({ focusItem: null });
+    else if (!inRepo(focused, repo)) setPicked(null);
+  }, [focus, focused, repo]);
   const items = all.filter((i) => inRepo(i, repo));
   const columns = byColumn(items, sessions, boot, all);
   const open = items.length - columns.done.length;
@@ -395,6 +404,15 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [expanded, setExpanded] = useState(false);
+  // Opened from a proposal's toast: this card, open and in view, once.
+  const focused = useApp((s) => s.focusItem === item.id);
+  const cardRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (!focused) return;
+    setExpanded(true);
+    cardRef.current?.scrollIntoView({ block: "center" });
+    useApp.setState({ focusItem: null });
+  }, [focused]);
   const [busy, setBusy] = useState(false);
   const [agent, setAgent] = useState<Agent>(() => startAgent(item, read(AGENT_KEY)));
   const live = liveSession(item, sessions, boot);
@@ -459,7 +477,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
 
   return (
     <div className="card-slot">
-      <article className={`card item-card ${EDGE[lane]} ${lane === "done" ? "item-done" : ""}`}>
+      <article ref={cardRef} className={`card item-card ${EDGE[lane]} ${lane === "done" ? "item-done" : ""}`}>
         <button className="card-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
           <span className={`kind-chip kind-${item.kind}`}>{item.kind}</span>
           {lane !== "done" && <span className={`kind-chip prio-${priority(item)}`}>{priority(item)}</span>}

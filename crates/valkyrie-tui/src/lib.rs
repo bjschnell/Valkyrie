@@ -268,6 +268,8 @@ struct App {
     pinger: Pinger,
     /// The last ping, shown in the bar for `TOAST_FOR`.
     toast: Option<(Ping, Instant)>,
+    /// Spots agents' new backlog proposals, for a toast (#194).
+    new_proposals: ping::Proposals,
     /// The start of a mouse report the last read cut off.
     partial: Vec<u8>,
     /// Tab mode: the next key acts on the attached tab (split, rename, …) rather
@@ -439,6 +441,7 @@ impl App {
             preview: None,
             pinger: Pinger::default(),
             toast: None,
+            new_proposals: ping::Proposals::default(),
             partial: Vec::new(),
             tab_mode: false,
             previous: None,
@@ -1204,8 +1207,16 @@ impl App {
                 }
                 b"b" => {
                     self.tab_mode = false;
-                    self.open_backlog().await;
+                    match self.toast_proposal() {
+                        Some(id) => self.open_backlog_at(id).await,
+                        None => self.open_backlog().await,
+                    }
                     return;
+                }
+                // The backlog proposal on the toast, answered without leaving.
+                b"a" | b"x" => {
+                    self.tab_mode = false;
+                    self.answer_proposal(key == b"a").await;
                 }
                 b"d" => {
                     self.tab_mode = false;
@@ -1512,6 +1523,17 @@ impl App {
             .iter()
             .find(|&&(from, to, _)| (from..to).contains(&x))
         else {
+            // The toast follows the bar's own spans: a proposal's opens the backlog.
+            let from = bar.line.width() as u16;
+            let to = from
+                + self.toast().map_or(0, |p| {
+                    self.toast_line(p).iter().map(|s| s.width() as u16).sum()
+                });
+            if (from..to).contains(&x)
+                && let Some(id) = self.toast_proposal()
+            {
+                self.open_backlog_at(id).await;
+            }
             return;
         };
         match click {
@@ -2551,7 +2573,15 @@ impl App {
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
-            HomeKey::Backlog => self.open_backlog().await,
+            HomeKey::Backlog => match self.toast_proposal() {
+                Some(id) => self.open_backlog_at(id).await,
+                None => self.open_backlog().await,
+            },
+            HomeKey::Toast => {
+                if let Some(id) = self.toast_proposal() {
+                    self.open_backlog_at(id).await;
+                }
+            }
             HomeKey::Digest => self.open_digest().await,
             HomeKey::Supervisor => self.open_supervisor().await,
             HomeKey::Past => self.open_past().await,
@@ -3183,6 +3213,48 @@ impl App {
         self.backlog_facts().await;
     }
 
+    /// The backlog, its cursor on item `id` (a proposal's toast).
+    async fn open_backlog_at(&mut self, id: u32) {
+        self.toast = None;
+        let mut page = backlog::Page::default();
+        page.orders = self.orders.clone();
+        page.launches = self.launches.clone();
+        self.backlog = Some(page);
+        let at = self.backlog_rows().iter().position(|(_, i)| i.id == id);
+        if let (Some(page), Some(at)) = (&mut self.backlog, at) {
+            page.cursor = at;
+        }
+        self.backlog_facts().await;
+    }
+
+    /// The backlog proposal the toast up now is about.
+    fn toast_proposal(&self) -> Option<u32> {
+        self.toast().and_then(|t| t.proposal)
+    }
+
+    /// Accepts (open) or declines (drops) the proposal on the toast.
+    async fn answer_proposal(&mut self, accept: bool) {
+        let Some(id) = self.toast_proposal() else {
+            return self.say("no backlog proposal to answer".into());
+        };
+        self.toast = None;
+        let status = if accept {
+            valkyrie_proto::ItemStatus::Open
+        } else {
+            valkyrie_proto::ItemStatus::Dropped
+        };
+        let said = match self
+            .client
+            .change_item(id, ItemChange::Status { status })
+            .await
+        {
+            Ok((item, _)) if accept => format!("accepted #{} {}", item.id, item.title),
+            Ok((item, _)) => format!("declined #{} {}", item.id, item.title),
+            Err(e) => format!("can't answer #{id}: {e:#}"),
+        };
+        self.say(said);
+    }
+
     /// Reads the selected item's facts from git, unless they're for it already.
     async fn backlog_facts(&mut self) {
         let rows = self.backlog_rows();
@@ -3510,6 +3582,12 @@ impl App {
             launches,
         } = msg
         {
+            let new = self.new_proposals.on_items(&items);
+            if self.settings.proposals
+                && let Some(ping) = Ping::proposals(&new)
+            {
+                self.show_ping(ping);
+            }
             self.items = items;
             if let Some(page) = &mut self.backlog {
                 page.orders = orders.clone();
@@ -3657,11 +3735,9 @@ impl App {
                     if let Some(cursor) = self.reviewing {
                         self.draw_reviews(frame, main, cursor);
                     }
-                    let t = self.settings.theme;
                     let mut line = self.bar(view).line;
                     if let Some(toast) = self.toast() {
-                        line.spans
-                            .extend(toast_spans(toast, self.toast_summary(toast), t));
+                        line.spans.extend(self.toast_line(toast));
                     }
                     frame.render_widget(
                         Paragraph::new(line)
@@ -3708,6 +3784,8 @@ const HOVER_DELAY: Duration = Duration::from_secs(1);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
+/// A backlog proposal's toast stays longer: long enough to answer it.
+const PROPOSAL_TOAST_FOR: Duration = Duration::from_secs(15);
 
 impl App {
     /// Tells the daemon this terminal's cell size in pixels, for image programs (as
@@ -3757,8 +3835,38 @@ impl App {
     fn toast(&self) -> Option<&Ping> {
         self.toast
             .as_ref()
-            .filter(|(_, at)| at.elapsed() < TOAST_FOR)
+            .filter(|(ping, at)| {
+                let lasts = match ping.proposal {
+                    Some(_) => PROPOSAL_TOAST_FOR,
+                    None => TOAST_FOR,
+                };
+                at.elapsed() < lasts
+            })
             .map(|(ping, _)| ping)
+    }
+
+    /// The keys that answer a proposal's toast: tab mode's own, once you're in it.
+    /// The home screen's `a` is the decisions', so there `b` opens it to answer.
+    fn toast_hint(&self, ping: &Ping) -> Option<String> {
+        ping.proposal?;
+        if self.view.is_none() {
+            return Some("b open".into());
+        }
+        if self.tab_mode {
+            return Some("a accept · x decline · b open".into());
+        }
+        let tabs = self.settings.keys.get(Action::Tabs)?.label();
+        Some(format!("{tabs} a accept · x decline"))
+    }
+
+    /// The toast's spans, as the bar shows them.
+    fn toast_line(&self, ping: &Ping) -> Vec<Span<'static>> {
+        let t = self.settings.theme;
+        let mut spans = toast_spans(ping, self.toast_summary(ping), t);
+        if let Some(hint) = self.toast_hint(ping) {
+            spans.insert(spans.len() - 1, format!(" {hint} ").fg(t.muted));
+        }
+        spans
     }
 
     /// What the pinged session needs or finished, as it is now: a summary can
@@ -3782,9 +3890,11 @@ const TOAST_SUMMARY_MAX: usize = 60;
 
 /// ` ● api needs input ` in the ping's color, then what it asks or finished.
 fn toast_spans(ping: &Ping, summary: Option<&str>, t: &Theme) -> Vec<ratatui::text::Span<'static>> {
-    let (icon, color) = match ping.kind {
-        Kind::Request => ("●", t.needs),
-        Kind::Done => ("✓", t.done),
+    let (icon, color) = match (ping.proposal, ping.kind) {
+        // The Proposed lane's color.
+        (Some(_), _) => ("◆", t.accent2),
+        (None, Kind::Request) => ("●", t.needs),
+        (None, Kind::Done) => ("✓", t.done),
     };
     let mut spans = vec![format!(" {icon} {} ", ping.text).fg(t.bg).bg(color).bold()];
     if let Some(summary) = summary.map(one_line).filter(|s| !s.is_empty()) {
@@ -4061,9 +4171,14 @@ impl App {
         };
         let mut shift = 0;
         if let Some(toast) = self.toast() {
-            let spans = toast_spans(toast, self.toast_summary(toast), t);
+            let spans = self.toast_line(toast);
             shift = spans.iter().map(|s| s.width() as u16).sum();
             footer.spans.splice(0..0, spans);
+            if toast.proposal.is_some() {
+                self.home_rows
+                    .borrow_mut()
+                    .push((Rect::new(bar.x, bar.y, shift, 1), Hit::Key(HomeKey::Toast)));
+            }
         }
         self.home_rows
             .borrow_mut()
@@ -6352,6 +6467,8 @@ enum HomeKey {
     AddDevice,
     /// Open the backlog page.
     Backlog,
+    /// The backlog proposal's toast: opens the backlog on it.
+    Toast,
     /// Open the away digest.
     Digest,
     /// Open the supervisor page.
@@ -6762,6 +6879,65 @@ mod tests {
         // Not whatever this machine's settings.toml says.
         app.settings = Settings::default();
         (app, listener)
+    }
+
+    /// An agent's new backlog proposal pops up as a toast that names how to answer
+    /// it; `b` in tab mode opens the backlog on it. The setting turns it off.
+    #[tokio::test]
+    async fn a_new_backlog_proposal_pops_up() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-pop-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.settings.sound = false;
+        app.settings.desktop = false;
+        let item = |id: u32, status: &str, by: &str| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": format!("item {id}"), "status": status, "by": by,
+                "project": "/r/app", "created": 0, "updated": 0,
+            }))
+            .unwrap()
+        };
+        let mut items = vec![item(1, "open", "human"), item(2, "proposed", "claude")];
+        let push = |items: &[Item]| ServerMsg::Items {
+            items: items.to_vec(),
+            orders: vec![],
+            launches: vec![],
+        };
+        app.on_push(push(&items)).unwrap();
+        assert!(
+            app.toast().is_none(),
+            "what was there on connecting isn't news"
+        );
+
+        items.push(item(3, "proposed", "claude"));
+        app.on_push(push(&items)).unwrap();
+        let toast = app.toast().expect("the new proposal shows as a toast");
+        assert_eq!(toast.proposal, Some(3));
+        let line: String = app
+            .toast_line(toast)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(line.contains("◆ claude proposed #3 item 3"), "{line}");
+        // The home screen's `a` is the decisions': there `b` opens it.
+        assert!(line.contains("b open"), "{line}");
+
+        app.view = Some(Attached::new(1, "proj1".into(), None));
+        let toast = app.toast().unwrap();
+        let hint = app.toast_hint(toast).unwrap();
+        assert!(hint.ends_with("a accept · x decline"), "{hint}");
+        app.on_keys(vec![TABS_KEY, b'b']).await;
+        let rows = app.backlog_rows();
+        let cursor = app.backlog.as_ref().expect("the backlog opened").cursor;
+        assert_eq!(rows[cursor].1.id, 3, "on the proposal");
+        assert!(app.toast().is_none(), "opening it answers the toast");
+
+        // Off: no toast.
+        app.backlog = None;
+        app.settings.proposals = false;
+        items.push(item(4, "proposed", "codex"));
+        app.on_push(push(&items)).unwrap();
+        assert!(app.toast().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// One selection runs over the proposals, then the queue, then the sessions,
@@ -8831,6 +9007,7 @@ mod tests {
             session: Some(1),
             text: "proj1 finished".into(),
             sound: false,
+            proposal: None,
         };
         let toast: String = toast_spans(&ping, app.toast_summary(&ping), app.settings.theme)
             .iter()
