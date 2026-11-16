@@ -629,6 +629,26 @@ code {
   outline-offset: 1px;
 }
 
+/* Answered (#203): the keys are on their way. The tapped one stays lit; the
+   rest dim, and none take another tap until it goes through or doesn't. */
+.choices.answering .choice {
+  opacity: 0.45;
+  transition: opacity 0.12s ease;
+}
+
+.choices.answering .choice.sent {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.choices.answering .choice.sent::after {
+  content: "sent";
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
 .choice-n {
   display: grid;
   place-items: center;

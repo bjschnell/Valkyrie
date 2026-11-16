@@ -7,6 +7,7 @@ import {
   type SessionInfo,
 } from "../proto";
 import { isNegative, plainYes, weakSummary, type Choice } from "../lib/choices";
+import { answeringLabel } from "../lib/answering";
 import { age } from "../lib/time";
 import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
@@ -264,6 +265,7 @@ function QueueCard({
 }) {
   const now = useApp((s) => s.now);
   const prompt = useApp((s) => s.prompts[item.session]);
+  const sent = useApp((s) => answeringLabel(s.answering[item.session], prompt?.choices ?? []));
   const s = item.status;
   const choices = prompt?.choices ?? [];
   return (
@@ -291,11 +293,12 @@ function QueueCard({
         )}
         {item.flag && <StepOffer item={item} />}
         {choices.length > 0 && (
-          <div className="choices">
+          <div className={`choices ${sent !== null ? "answering" : ""}`} aria-busy={sent !== null}>
             {choices.map((c, i) => (
               <button
                 key={i}
-                className={`choice ${isNegative(c.label) ? "no" : i === 0 ? "yes" : ""}`}
+                className={`choice ${isNegative(c.label) ? "no" : i === 0 ? "yes" : ""} ${sent === c.label ? "sent" : ""}`}
+                disabled={sent !== null}
                 onClick={() => void answer(item.session, choices, c)}
               >
                 {c.n !== undefined && <span className="choice-n">{c.n}</span>}
