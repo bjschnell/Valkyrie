@@ -3610,6 +3610,7 @@ html.with-tabs .offline-banner {
 
 .backlog-filter select,
 .launch select,
+.launch input,
 .launcher select {
   padding: var(--space-15) var(--space-25);
   border-radius: var(--radius-md);
@@ -3617,6 +3618,11 @@ html.with-tabs .offline-banner {
   background: var(--card);
   color: var(--fg);
   font: var(--text-md) var(--font);
+}
+
+.launch input {
+  width: 8.5em;
+  min-width: 0;
 }
 
 .launcher select {

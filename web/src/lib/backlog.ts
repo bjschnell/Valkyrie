@@ -316,3 +316,24 @@ export function startAgent(item: Item | null | undefined, fallback: string | nul
   if (last === "claude" || last === "codex") return last;
   return fallback === "codex" ? "codex" : "claude";
 }
+
+/** Claude Code's own aliases, which follow its newest models; Codex's names change
+ * too often to list (the TUI's launch form has the same split). */
+export const MODEL_CHOICES: Record<"claude" | "codex", string[]> = {
+  claude: ["opus", "sonnet", "haiku"],
+  codex: [],
+};
+
+/** The model the Launch field starts on: what `item` last ran with `agent`, else
+ * empty (the daemon then keeps whatever the item's last launch of it ran). */
+export function startModel(item: Item | null | undefined, agent: string): string {
+  return item?.launch?.agent === agent ? (item.launch.model ?? "") : "";
+}
+
+/** The `model` for `launch_item`: nothing typed is `undefined` (as last time), and
+ * `default` is `""`, the agent's own, as `valk todo launch --model default` has it. */
+export function launchModel(typed: string): string | undefined {
+  const m = typed.trim();
+  if (!m) return undefined;
+  return m.toLowerCase() === "default" ? "" : m;
+}

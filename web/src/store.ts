@@ -1338,11 +1338,13 @@ export async function itemFacts(id: number): Promise<ItemFacts | null> {
   return reply.t === "item_facts" ? reply.facts : null;
 }
 
-/** Starts an agent on a backlog item, in a worktree of its own; the session's id. */
+/** Starts an agent on a backlog item, in a worktree of its own; the session's id.
+ * `model` absent keeps the item's last one for that agent, `""` is the agent's own. */
 export async function launchItem(
   id: number,
   agent: "claude" | "codex",
   worktree = true,
+  model?: string,
 ): Promise<SessionId> {
   if (!conn) throw new Error("not connected");
   const reply = await conn.request({
@@ -1352,6 +1354,7 @@ export async function launchItem(
     worktree,
     size: SPAWN_SIZE,
     env: [],
+    ...(model === undefined ? {} : { model }),
   });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
