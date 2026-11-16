@@ -23,7 +23,7 @@ fn how_to_propose(valk: &str) -> String {
          repeating (steps, pitfalls, how to verify) is a skill: `{valk} decide --kind skill \
          \"<when to use it>\" -` with the steps on stdin.\n\nFix what you have to in order \
          to deliver your task, as part of this change. Anything else you find broken, keep \
-         out of this change and file it: `{valk} todo add -k <bug|feature|chore> \"<title>\" \
+         out of this change and file it: `{valk} todo add -k <bug|feature|chore|spike> \"<title>\" \
          --body \"<what, how to reproduce it, how much it matters>\"`, after checking `{valk} \
          todo list --json`; if one already covers it, `{valk} todo note -i N` what you \
          found there instead. That's the right call, not a fix skipped. When your task is \
