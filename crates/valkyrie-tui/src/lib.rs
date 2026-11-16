@@ -3221,8 +3221,9 @@ impl App {
         page.launches = self.launches.clone();
         self.backlog = Some(page);
         let at = self.backlog_rows().iter().position(|(_, i)| i.id == id);
-        if let (Some(page), Some(at)) = (&mut self.backlog, at) {
-            page.cursor = at;
+        match (&mut self.backlog, at) {
+            (Some(page), Some(at)) => page.cursor = at,
+            _ => self.say(format!("#{id} isn't on the board")),
         }
         self.backlog_facts().await;
     }
@@ -3238,6 +3239,14 @@ impl App {
             return self.say("no backlog proposal to answer".into());
         };
         self.toast = None;
+        // Answered elsewhere meanwhile (the web, the backlog page): leave it be.
+        let proposed = self
+            .items
+            .iter()
+            .any(|i| i.id == id && i.status == valkyrie_proto::ItemStatus::Proposed);
+        if !proposed {
+            return self.say(format!("#{id} was already answered"));
+        }
         let status = if accept {
             valkyrie_proto::ItemStatus::Open
         } else {
@@ -3825,8 +3834,10 @@ impl App {
         if self.settings.desktop {
             ping::desktop("Valkyrie", &ping.text);
         }
-        // A fresh request stays up over a later finish.
-        if self.toast().is_some_and(|t| t.kind == Kind::Request) && ping.kind == Kind::Done {
+        // A fresh request, or a proposal waiting on an answer, stays up over a
+        // later finish; a proposal takes the bar from a request, as it pops once.
+        let rank = |p: &Ping| u8::from(p.kind == Kind::Request || p.proposal.is_some());
+        if self.toast().is_some_and(|t| rank(t) > rank(&ping)) {
             return;
         }
         self.toast = Some((ping, Instant::now()));
@@ -3848,15 +3859,15 @@ impl App {
     /// The keys that answer a proposal's toast: tab mode's own, once you're in it.
     /// The home screen's `a` is the decisions', so there `b` opens it to answer.
     fn toast_hint(&self, ping: &Ping) -> Option<String> {
-        ping.proposal?;
+        let id = ping.proposal?;
         if self.view.is_none() {
             return Some("b open".into());
         }
         if self.tab_mode {
-            return Some("a accept · x decline · b open".into());
+            return Some(format!("a accept #{id} · x decline · b open"));
         }
         let tabs = self.settings.keys.get(Action::Tabs)?.label();
-        Some(format!("{tabs} a accept · x decline"))
+        Some(format!("{tabs} a accept #{id} · x decline"))
     }
 
     /// The toast's spans, as the bar shows them.
@@ -6924,7 +6935,7 @@ mod tests {
         app.view = Some(Attached::new(1, "proj1".into(), None));
         let toast = app.toast().unwrap();
         let hint = app.toast_hint(toast).unwrap();
-        assert!(hint.ends_with("a accept · x decline"), "{hint}");
+        assert!(hint.ends_with("a accept #3 · x decline"), "{hint}");
         app.on_keys(vec![TABS_KEY, b'b']).await;
         let rows = app.backlog_rows();
         let cursor = app.backlog.as_ref().expect("the backlog opened").cursor;

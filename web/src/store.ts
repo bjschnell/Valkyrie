@@ -207,10 +207,16 @@ function popProposals(items: Item[]): void {
     ms: PROPOSAL_MS,
     open: () => openBacklogAt(t.id),
     actions: [
-      { label: "Decline", run: () => setStatus(t.id, "dropped") },
-      { label: "Accept", run: () => setStatus(t.id, "open") },
+      { label: "Decline", run: () => answerProposal(t.id, "dropped") },
+      { label: "Accept", run: () => answerProposal(t.id, "open") },
     ],
   });
+}
+
+/** Answers a proposal's toast, unless it was answered elsewhere meanwhile. */
+function answerProposal(id: number, status: Item["status"]): void {
+  if (get().items.find((i) => i.id === id)?.status !== "proposed") return toast(`#${id} was already answered`);
+  setStatus(id, status);
 }
 
 /** The backlog, its card `id` open and in view. */

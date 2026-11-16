@@ -62,8 +62,17 @@ impl Ping {
     /// how many came at once. It names the newest, which tab mode's `a`/`x` answer.
     pub fn proposals(new: &[&Item]) -> Option<Ping> {
         let newest = new.iter().max_by_key(|i| i.id)?;
+        // One line, and short: the keys that answer it follow in the bar.
+        let mut title = newest
+            .title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if title.chars().count() > TITLE_MAX {
+            title = title.chars().take(TITLE_MAX - 1).collect::<String>() + "…";
+        }
         let text = match new.len() {
-            1 => format!("{} proposed #{} {}", newest.by, newest.id, newest.title),
+            1 => format!("{} proposed #{} {title}", newest.by, newest.id),
             n => format!("{n} agent proposals, newest #{}", newest.id),
         };
         Some(Ping {
@@ -75,6 +84,9 @@ impl Ping {
         })
     }
 }
+
+/// The longest proposal title a toast carries.
+const TITLE_MAX: usize = 50;
 
 #[derive(Debug, PartialEq)]
 pub struct Ping {
@@ -891,6 +903,11 @@ mod tests {
         assert_eq!(ping.text, "2 agent proposals, newest #9");
         assert_eq!(ping.proposal, Some(9));
         assert!(Ping::proposals(&[]).is_none());
+
+        let mut long = backlog_item(6, "proposed", "claude");
+        long.title = format!("two\nlines {}", "x".repeat(80));
+        let text = Ping::proposals(&[&long]).unwrap().text;
+        assert!(!text.contains('\n') && text.ends_with('…'), "{text}");
     }
 
     #[test]
