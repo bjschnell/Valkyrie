@@ -151,11 +151,19 @@ impl Valk {
             .and_then(|exe| Some(exe.parent()?.join(&name)));
         // Cargo's last: `install.sh` from a checkout puts it there, where a
         // dock's PATH doesn't reach.
-        let exe = [beside, crate::install::home(), crate::install::cargo_bin()]
-            .into_iter()
-            .flatten()
-            .find(|path| path.is_file())
-            .unwrap_or_else(|| PathBuf::from(&name));
+        // On Windows `install.ps1` puts the valk in a `versions\` directory and a
+        // `valk.cmd` beside it that runs it, which a process can't launch by name.
+        let launched = crate::install::home().and_then(|home| crate::install::launched(&home));
+        let exe = [
+            beside,
+            launched,
+            crate::install::home(),
+            crate::install::cargo_bin(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(&name));
         Self { exe }
     }
 }
