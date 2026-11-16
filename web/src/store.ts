@@ -1375,9 +1375,10 @@ export async function answerAll(
   // another tap aren't this batch's to count.
   const started = answers.filter((a) => startAnswer(a.session, a.choices, a.choice));
   const quiet = started.length > 1;
-  const missed: typeof started = [];
+  const missed: Missed[] = [];
   for (const a of started) {
-    if (!(await sendAnswer(a.session, a.choices, a.choice, quiet))) missed.push(a);
+    const seq = statusSeq(a.session);
+    if (!(await sendAnswer(a.session, a.choices, a.choice, quiet))) missed.push({ ...a, seq });
   }
   if (!quiet) return;
   toast(
@@ -1386,12 +1387,20 @@ export async function answerAll(
   );
 }
 
-/** Tries again the ones still showing the prompt they missed: one that moved
- * on to another prompt isn't sent the old answer's keys. */
-function retryAll(missed: { session: SessionId; choices: Choice[]; choice: Choice }[]): void {
+/** An Allow all answer that didn't go through, with the status `seq` it was sent at. */
+type Missed = { session: SessionId; choices: Choice[]; choice: Choice; seq: number | null };
+
+/** Tries again the ones still showing the prompt they missed. One that moved
+ * on isn't sent the old answer's keys: another prompt, even with the same
+ * choices, or the keys landed after all and only the confirm was lost. */
+function retryAll(missed: Missed[]): void {
   const still = missed.filter((a) => {
     const now = get().prompts[a.session]?.choices;
-    return now !== undefined && choicesKey(now) === choicesKey(a.choices);
+    return (
+      now !== undefined &&
+      choicesKey(now) === choicesKey(a.choices) &&
+      statusSeq(a.session) === a.seq
+    );
   });
   if (!still.length) return toast("Those prompts have moved on");
   void answerAll(still);
