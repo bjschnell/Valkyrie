@@ -42,6 +42,7 @@ import { choiceKeys, findChoices, promptContext, type Choice } from "./lib/choic
 import { upload } from "./lib/api";
 import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
+import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
 import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
 import {
   keyBytes,
@@ -110,8 +111,19 @@ interface State {
   chat: Chat | null;
   /** Choices on the screens of queued sessions, by session, for the inbox. */
   prompts: Record<SessionId, Prompt>;
-  /** `action`: a button on it, such as Undo; the toast stays longer. */
-  toast: { text: string; at: number; action?: { label: string; run: () => void } } | null;
+  /** `action`: a button on it, such as Undo; the toast stays longer. A backlog
+   * proposal's (#194) has `actions` (Accept, Decline), `open` for a tap on its
+   * text, and its own `ms`. */
+  toast: {
+    text: string;
+    at: number;
+    action?: { label: string; run: () => void };
+    actions?: { label: string; run: () => void }[];
+    open?: () => void;
+    ms?: number;
+  } | null;
+  /** The backlog card to open and scroll to, once, when the backlog shows. */
+  focusItem: number | null;
   now: number;
   push: PushState;
   /** Turning notifications on: the browser's push service can take a while. */
@@ -139,6 +151,7 @@ export const useApp = create<State>(() => ({
   chat: null,
   prompts: {},
   toast: null,
+  focusItem: null,
   now: Date.now(),
   push: "unknown",
   pushBusy: false,
@@ -153,23 +166,64 @@ let conn: Conn | null = null;
 let leaving = false;
 let listTimer: number | null = null;
 
+type Raised = Omit<NonNullable<State["toast"]>, "at">;
+
 export function toast(text: string, action?: Action): void {
+  raise({ text, action });
+}
+
+function raise(t: Raised): void {
   // Any toast waits while an Undo is offered: a reply to an earlier action
   // mustn't take the Undo off this one and send it. Only another hold does.
   if (held) {
-    deferred = { text, action };
+    deferred = t;
     return;
   }
-  set({ toast: { text, at: Date.now(), action } });
+  set({ toast: { ...t, at: Date.now() } });
 }
 
 /** The last toast raised while an Undo was offered, shown once it's gone. */
-let deferred: { text: string; action?: Action } | null = null;
+let deferred: Raised | null = null;
 
 function showDeferred(): void {
   const d = deferred;
   deferred = null;
-  if (d) toast(d.text, d.action);
+  if (d) raise(d);
+}
+
+/** How long a proposal's toast stays: long enough to read it and answer. */
+const PROPOSAL_MS = 12_000;
+/** The backlog's ids at the last items push; `null` until the first, which primes. */
+let knownItems: Set<number> | null = null;
+
+/** Agents' new backlog proposals, as a toast to accept or decline (#194). */
+function popProposals(items: Item[]): void {
+  const { known, fresh } = newProposals(knownItems, items);
+  knownItems = known;
+  const t = proposalPopups() ? proposalToast(fresh) : null;
+  if (!t) return;
+  raise({
+    text: t.text,
+    ms: PROPOSAL_MS,
+    open: () => openBacklogAt(t.id),
+    actions: [
+      { label: "Decline", run: () => answerProposal(t.id, "dropped") },
+      { label: "Accept", run: () => answerProposal(t.id, "open") },
+    ],
+  });
+}
+
+/** Answers a proposal's toast, unless it was answered elsewhere meanwhile. */
+function answerProposal(id: number, status: Item["status"]): void {
+  if (get().items.find((i) => i.id === id)?.status !== "proposed") return toast(`#${id} was already answered`);
+  setStatus(id, status);
+}
+
+/** The backlog, its card `id` open and in view. */
+export function openBacklogAt(id: number): void {
+  // The toast goes too: the page change remounts it, which would show it again.
+  set({ focusItem: id, toast: null });
+  location.hash = "#/backlog";
 }
 
 // Optimistic actions (backlog #185). The daemon's lists are kept as it pushed
@@ -350,6 +404,7 @@ function onPush(msg: ServerMsg): void {
       show();
       break;
     case "items":
+      popProposals(msg.items);
       raw = { ...raw, items: msg.items };
       set({ orders: msg.orders ?? [], launches: msg.launches ?? [] });
       show();

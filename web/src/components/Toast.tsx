@@ -12,28 +12,45 @@ export function Toast() {
     if (!toast) return;
     // Timed from when it was raised, not from this mount: a page change remounts
     // the toast, and a held action's Undo mustn't come back after it was sent.
-    const left = (toast.action ? ACTION_MS : SHOW_MS) - (Date.now() - toast.at);
+    const lasts = toast.ms ?? (toast.action ? ACTION_MS : SHOW_MS);
+    const left = lasts - (Date.now() - toast.at);
     if (left <= 0) return setVisible(false);
     setVisible(true);
     const t = window.setTimeout(() => setVisible(false), left);
     return () => window.clearTimeout(t);
   }, [toast]);
   if (!toast) return null;
-  const action = toast.action;
+  const actions = toast.actions ?? (toast.action ? [toast.action] : []);
+  const open = toast.open;
+  const live = actions.length > 0 || !!open;
   return (
-    <div className={`toast ${visible ? "show" : ""} ${action ? "with-action" : ""}`} role="status">
-      {toast.text}
-      {action && visible && (
+    <div className={`toast ${visible ? "show" : ""} ${live ? "with-action" : ""}`} role="status">
+      {open ? (
         <button
-          className="toast-action"
+          className="toast-text"
           onClick={() => {
             setVisible(false);
-            action.run();
+            open();
           }}
         >
-          {action.label}
+          {toast.text}
         </button>
+      ) : (
+        toast.text
       )}
+      {visible &&
+        actions.map((a) => (
+          <button
+            key={a.label}
+            className="toast-action"
+            onClick={() => {
+              setVisible(false);
+              a.run();
+            }}
+          >
+            {a.label}
+          </button>
+        ))}
     </div>
   );
 }

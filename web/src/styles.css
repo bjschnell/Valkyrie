@@ -1325,6 +1325,25 @@ html.with-tabs .offline-banner {
   gap: var(--space-3);
 }
 
+/* A proposal's text opens its card (#194). */
+.toast-text {
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-text:hover {
+  text-decoration: underline;
+}
+
 .toast-action {
   border: 0;
   background: none;

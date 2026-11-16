@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use valkyrie_proto::{AgentState, NoticeSound, QueueItem, SessionId};
+use valkyrie_proto::{AgentState, Item, ItemStatus, NoticeSound, QueueItem, SessionId};
 
 /// Back-to-back transitions make one sound; the toast still names the last one.
 const SOUND_GAP: Duration = Duration::from_secs(1);
@@ -54,9 +54,39 @@ impl Ping {
             session: None,
             text: text.to_owned(),
             sound: sound.is_some(),
+            proposal: None,
         }
     }
+
+    /// A toast for agents' new backlog proposals (#194): the newest one by name, or
+    /// how many came at once. It names the newest, which tab mode's `a`/`x` answer.
+    pub fn proposals(new: &[&Item]) -> Option<Ping> {
+        let newest = new.iter().max_by_key(|i| i.id)?;
+        // One line, and short: the keys that answer it follow in the bar.
+        let mut title = newest
+            .title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if title.chars().count() > TITLE_MAX {
+            title = title.chars().take(TITLE_MAX - 1).collect::<String>() + "…";
+        }
+        let text = match new.len() {
+            1 => format!("{} proposed #{} {title}", newest.by, newest.id),
+            n => format!("{n} agent proposals, newest #{}", newest.id),
+        };
+        Some(Ping {
+            kind: Kind::Done,
+            session: None,
+            text,
+            sound: true,
+            proposal: Some(newest.id),
+        })
+    }
 }
+
+/// The longest proposal title a toast carries.
+const TITLE_MAX: usize = 50;
 
 #[derive(Debug, PartialEq)]
 pub struct Ping {
@@ -67,6 +97,8 @@ pub struct Ping {
     pub text: String,
     /// Whether to make a sound (false inside the gap after the last one).
     pub sound: bool,
+    /// The backlog proposal it is about: tab mode answers it, a click opens it.
+    pub proposal: Option<u32>,
 }
 
 #[derive(Default)]
@@ -187,7 +219,37 @@ impl Pinger {
             session: Some(best.item.session),
             text: format!("{} {what}", best.item.name),
             sound,
+            proposal: None,
         })
+    }
+}
+
+/// Spots backlog items an agent has just proposed (#194). What was proposed
+/// before this client connected isn't news, nor is an item that comes back to
+/// proposed (reopened unaccepted), nor one an agent filed and took for its own
+/// work: that one follows its session.
+#[derive(Default)]
+pub struct Proposals {
+    known: std::collections::HashSet<u32>,
+    primed: bool,
+}
+
+impl Proposals {
+    /// Takes the backlog; returns the proposals new since the last look.
+    pub fn on_items<'a>(&mut self, items: &'a [Item]) -> Vec<&'a Item> {
+        let primed = std::mem::replace(&mut self.primed, true);
+        let new = items
+            .iter()
+            .filter(|i| {
+                primed
+                    && !self.known.contains(&i.id)
+                    && i.status == ItemStatus::Proposed
+                    && i.by != "human"
+                    && !i.agent_filed()
+            })
+            .collect();
+        self.known = items.iter().map(|i| i.id).collect();
+        new
     }
 }
 
@@ -788,6 +850,64 @@ mod tests {
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b));
         }
+    }
+
+    fn backlog_item(id: u32, status: &str, by: &str) -> Item {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": format!("item {id}"), "status": status, "by": by,
+            "created": 0, "updated": 0,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_a_proposal_new_since_connecting_pops_up() {
+        let mut watch = Proposals::default();
+        let before = vec![backlog_item(1, "proposed", "claude")];
+        assert!(
+            watch.on_items(&before).is_empty(),
+            "already waiting: not news"
+        );
+
+        let mut now = before.clone();
+        now.push(backlog_item(2, "proposed", "codex"));
+        now.push(backlog_item(3, "open", "human"));
+        let new: Vec<u32> = watch.on_items(&now).iter().map(|i| i.id).collect();
+        assert_eq!(new, [2]);
+        assert!(watch.on_items(&now).is_empty(), "news once");
+
+        // Reopened unaccepted, it's proposed again, but not new.
+        now[2].status = ItemStatus::Proposed;
+        assert!(watch.on_items(&now).is_empty());
+
+        // Filed and taken for the agent's own work: it follows its session.
+        let mut own = backlog_item(4, "proposed", "claude");
+        own.filed_by = Some((7, 3));
+        own.taken = vec![3];
+        now.push(own);
+        assert!(watch.on_items(&now).is_empty());
+    }
+
+    #[test]
+    fn a_proposal_toast_names_the_newest() {
+        let one = backlog_item(5, "proposed", "claude");
+        let ping = Ping::proposals(&[&one]).unwrap();
+        assert_eq!(ping.text, "claude proposed #5 item 5");
+        assert_eq!(
+            (ping.proposal, ping.session, ping.sound),
+            (Some(5), None, true)
+        );
+
+        let two = backlog_item(9, "proposed", "codex");
+        let ping = Ping::proposals(&[&two, &one]).unwrap();
+        assert_eq!(ping.text, "2 agent proposals, newest #9");
+        assert_eq!(ping.proposal, Some(9));
+        assert!(Ping::proposals(&[]).is_none());
+
+        let mut long = backlog_item(6, "proposed", "claude");
+        long.title = format!("two\nlines {}", "x".repeat(80));
+        let text = Ping::proposals(&[&long]).unwrap().text;
+        assert!(!text.contains('\n') && text.ends_with('…'), "{text}");
     }
 
     #[test]
