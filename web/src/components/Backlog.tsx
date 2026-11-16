@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
 import { editPatch } from "../lib/optimistic";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, launchesOn, launchesShown, liveSession, noteOrigin, orderHref, orderSize, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchesOn, launchesShown, liveSession, noteOrigin, orderHref, orderSize, ofKind, ordersShown, planScope, prLink, priority, repoChoices, startAgent, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
@@ -15,6 +15,9 @@ const FOLDER_KEY = "valk.backlog.folder";
 const DRAFT_KEY = "valk.backlog.draft";
 /** The repository the board shows, `""` for no folder; absent for every one. */
 const REPO_KEY = "valk.backlog.repo";
+/** The one kind of item the board shows; absent for every kind. A new item
+ * starts as that kind too. */
+const KIND_KEY = "valk.backlog.kind";
 /** The picker's value for every repository: no project path is relative. */
 const ALL = "*";
 
@@ -67,18 +70,31 @@ export function Backlog() {
     setReady(null);
     write(REPO_KEY, r);
   };
-  // A proposal's toast opens its card (#194): one another repository's filter
-  // hides shows every repository instead, without keeping that choice.
+  const [kind, setKind] = useState<KindFilter>(() => kindFilter(read(KIND_KEY)));
+  const pickKind = (k: KindFilter) => {
+    setKind(k);
+    setReady(null);
+    write(KIND_KEY, k);
+  };
+  // A proposal's toast opens its card (#194): one a filter hides shows every
+  // repository, or every kind, instead, without keeping that choice.
   const focus = useApp((s) => s.focusItem);
   const focused = focus === null ? undefined : all.find((i) => i.id === focus);
   useEffect(() => {
     if (focus === null) return;
     if (!focused) useApp.setState({ focusItem: null });
-    else if (!inRepo(focused, repo)) setPicked(null);
-  }, [focus, focused, repo]);
-  const items = all.filter((i) => inRepo(i, repo));
+    else {
+      if (!inRepo(focused, repo)) setPicked(null);
+      if (!ofKind(focused, kind)) setKind(null);
+    }
+  }, [focus, focused, repo, kind]);
+  const inThisRepo = all.filter((i) => inRepo(i, repo));
+  const counts = kindCounts(inThisRepo);
+  const items = inThisRepo.filter((i) => ofKind(i, kind));
   const columns = byColumn(items, sessions, boot, all);
   const open = items.length - columns.done.length;
+  // A build order covers a repository's every open item, whatever kind is shown.
+  const repoOpen = inThisRepo.filter((i) => i.status === "open" || i.status === "proposed").length;
   // Only items with a branch can be found merged.
   const mergeable = items.some((i) => (i.status === "open" || agentFiled(i)) && i.branch && i.project);
   const [shipping, setShipping] = useState(false);
@@ -108,7 +124,7 @@ export function Backlog() {
   };
 
   // A build order (ADR-0019 §2): asked of a model, so it can take a minute.
-  const scope = planScope(repo, items);
+  const scope = planScope(repo, inThisRepo);
   const [planning, setPlanning] = useState(false);
   const plan = async () => {
     if (!scope) return;
@@ -134,7 +150,7 @@ export function Backlog() {
         <div className="title">
           <h1 className="title-name">Backlog</h1>
         </div>
-        {open > 1 && (
+        {repoOpen > 1 && (
           <button
             className="ghost"
             disabled={planning || !scope}
@@ -159,20 +175,39 @@ export function Backlog() {
         </button>
       </header>
       <main className="inbox backlog">
-        {(choices.length > 1 || repo !== null) && (
+        {(choices.length > 1 || repo !== null || inThisRepo.length > 0) && (
           <div className="backlog-filter">
-            <select
-              aria-label="Repository"
-              value={repo ?? ALL}
-              onChange={(e) => pick(e.target.value === ALL ? null : e.target.value)}
-            >
-              <option value={ALL}>Every repository</option>
-              {choices.map((c) => (
-                <option key={c.repo} value={c.repo} title={c.repo || undefined}>
-                  {c.label}
-                </option>
+            {(choices.length > 1 || repo !== null) && (
+              <select
+                aria-label="Repository"
+                value={repo ?? ALL}
+                onChange={(e) => pick(e.target.value === ALL ? null : e.target.value)}
+              >
+                <option value={ALL}>Every repository</option>
+                {choices.map((c) => (
+                  <option key={c.repo} value={c.repo} title={c.repo || undefined}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            <div className="kind-pick" role="radiogroup" aria-label="Kind">
+              <button role="radio" aria-checked={kind === null} className={`kind-chip ${kind === null ? "on" : ""}`} onClick={() => pickKind(null)}>
+                all
+              </button>
+              {ITEM_KINDS.map((k) => (
+                <button
+                  key={k}
+                  role="radio"
+                  aria-checked={kind === k}
+                  className={`kind-chip kind-${k} ${kind === k ? "on" : ""}`}
+                  // Tapping the one shown again shows every kind.
+                  onClick={() => pickKind(kind === k ? null : k)}
+                >
+                  {k} <span className="count">{counts[k]}</span>
+                </button>
               ))}
-            </select>
+            </div>
           </div>
         )}
         {shownLaunches.map((o) => (
@@ -181,7 +216,17 @@ export function Backlog() {
         {shownOrders.map((o) => (
           <OrderBanner key={`${o.project}:${o.id}`} order={o} />
         ))}
-        {open === 0 && repo !== null && (
+        {open === 0 && kind !== null && (
+          <div className="calm backlog-calm">
+            <div className="calm-title">
+              No open {kind} items{repo !== null ? " here" : ""}
+            </div>
+            <button className="ghost" onClick={() => pickKind(null)}>
+              Show every kind
+            </button>
+          </div>
+        )}
+        {open === 0 && kind === null && repo !== null && (
           <div className="calm backlog-calm">
             <div className="calm-title">Nothing open here</div>
             <button className="ghost" onClick={() => pick(null)}>
@@ -189,7 +234,7 @@ export function Backlog() {
             </button>
           </div>
         )}
-        {open === 0 && repo === null && (
+        {open === 0 && kind === null && repo === null && (
           <div className="calm backlog-calm">
             <div className="calm-title">Nothing written down</div>
             <div className="calm-sub">
@@ -708,7 +753,8 @@ export function ItemEditor({ id }: { id: number | null }) {
   const start = item && retry ? { ...item, ...editPatch(retry) } : item;
   // An agent already on it: saving shouldn't start a second one.
   const running = item !== null && liveSession(item, sessions, boot) !== null;
-  const [kind, setKind] = useState<ItemKind>(start?.kind ?? "bug");
+  // A new one starts as the kind the board shows.
+  const [kind, setKind] = useState<ItemKind>(start?.kind ?? kindFilter(read(KIND_KEY)) ?? "bug");
   const [prio, setPrio] = useState<Priority>(start ? priority(start) : "p2");
   // What it comes after, as typed: "#12, 14".
   const [after, setAfter] = useState(() => idList(start?.blocked_by));

@@ -225,6 +225,18 @@ impl Repo {
     }
 }
 
+/// The kind filter after `kind` (`t`): every kind, then bug, feature, chore, and
+/// round again.
+pub(crate) fn next_kind(kind: Option<ItemKind>) -> Option<ItemKind> {
+    match kind {
+        None => Some(ItemKind::ALL[0]),
+        Some(k) => ItemKind::ALL
+            .iter()
+            .position(|&a| a == k)
+            .and_then(|at| ItemKind::ALL.get(at + 1).copied()),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Typing {
     /// A new item: Tab cycles its kind.
@@ -395,6 +407,8 @@ pub(crate) struct Page {
     pub(crate) capture: bool,
     /// The repository whose items it shows; new ones are written down for it.
     pub(crate) repo: Repo,
+    /// The one kind of item it shows, or every kind.
+    pub(crate) kind: Option<ItemKind>,
     /// Inside a bracketed paste while typing; `true` right after a line break, so
     /// a run of them, and the indent after, becomes one space.
     paste: Option<bool>,
@@ -496,6 +510,11 @@ pub(crate) enum Do {
 }
 
 impl Page {
+    /// Whether the page shows `item`: of its repository and its kind.
+    pub(crate) fn holds(&self, item: &Item) -> bool {
+        self.repo.holds(item) && self.kind.is_none_or(|k| item.kind == k)
+    }
+
     /// Handles `keys` against `rows` (from `rows`), returning what to do, in order.
     pub(crate) fn keys(
         &mut self,
@@ -694,8 +713,19 @@ impl Page {
                 }
                 b"g" => self.cursor = 0,
                 b"G" => self.cursor = rows.len().saturating_sub(1),
-                b"n" => self.typing = Some(Typing::add()),
+                // Of the kind shown, so it doesn't drop out of sight once added.
+                b"n" => {
+                    self.typing = Some(Typing::Add {
+                        kind: self.kind.unwrap_or(ItemKind::Bug),
+                        text: LineEdit::default(),
+                    })
+                }
                 b"r" => out.push(Do::NextRepo),
+                b"t" => {
+                    self.kind = next_kind(self.kind);
+                    self.cursor = 0;
+                    self.armed = None;
+                }
                 b"P" => out.push(match self.scope(rows) {
                     Some(project) => Do::Plan(project),
                     None => Do::Say("pick a repository first: r".into()),
@@ -1026,6 +1056,7 @@ impl Page {
                 hint(" +/- ", "priority "),
                 hint(" x ", "delete "),
                 hint(" r ", "repo "),
+                hint(" t ", "type "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
             ]
@@ -1036,6 +1067,7 @@ impl Page {
                 hint(" x ", "delete "),
                 hint(" S ", "ship merged "),
                 hint(" r ", "repo "),
+                hint(" t ", "type "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
             ]
@@ -1067,6 +1099,7 @@ impl Page {
                     hint(" d ", "drop "),
                     hint(" B ", "to backlog "),
                     hint(" r ", "repo "),
+                    hint(" t ", "type "),
                     hint(" n ", "new "),
                     hint(" P ", "order "),
                     hint(" esc ", "close "),
@@ -1075,6 +1108,7 @@ impl Page {
             }
             (None, None) => [
                 hint(" r ", "repo "),
+                hint(" t ", "type "),
                 hint(" n ", "new "),
                 hint(" esc ", "close "),
             ]
@@ -1091,6 +1125,9 @@ impl Page {
                     self.repo
                         .label()
                         .map(|r| vec![format!("{r} ").fg(t.accent).bold()])
+                        .unwrap_or_default(),
+                    self.kind
+                        .map(|k| vec![format!("{} ", k.as_str()).fg(t.accent).bold()])
                         .unwrap_or_default(),
                     vec![format!("{open} open ").fg(t.muted)],
                     if self.waiting_order(rows) {
@@ -1149,9 +1186,12 @@ impl Page {
         }
         if rows.is_empty() {
             lines.push(Line::default());
-            lines.push(Line::from(
-                "  nothing written down: n adds a bug or an idea".fg(t.muted),
-            ));
+            lines.push(Line::from(match self.kind {
+                Some(k) => {
+                    format!("  no {} items here: t shows every kind", k.as_str()).fg(t.muted)
+                }
+                None => "  nothing written down: n adds a bug or an idea".fg(t.muted),
+            }));
         }
         if let Some(typing) = self
             .typing
@@ -2687,6 +2727,66 @@ mod tests {
         // And `r` asks for it, with or without items shown.
         let mut page = Page::default();
         assert_eq!(page.keys(b"r", &[], &[], 7), [Do::NextRepo]);
+    }
+
+    #[test]
+    fn t_cycles_every_kind_then_each_and_the_page_shows_only_that_kind() {
+        let of = |id, kind| Item {
+            kind,
+            project: Some(PathBuf::from(if id == 3 { "/w/b" } else { "/w/a" })),
+            ..item(id, 1)
+        };
+        let items = [
+            of(1, ItemKind::Bug),
+            of(2, ItemKind::Feature),
+            of(3, ItemKind::Bug),
+            of(4, ItemKind::Chore),
+        ];
+        let mut page = Page {
+            cursor: 2,
+            ..Page::default()
+        };
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            assert!(
+                page.keys(b"t", &[], &[], 7).is_empty(),
+                "t is the page's own"
+            );
+            seen.push(page.kind);
+        }
+        assert_eq!(
+            seen,
+            [
+                Some(ItemKind::Bug),
+                Some(ItemKind::Feature),
+                Some(ItemKind::Chore),
+                None
+            ]
+        );
+        assert_eq!(page.cursor, 0, "a new filter starts at the top");
+        let shown = |page: &Page| {
+            items
+                .iter()
+                .filter(|i| page.holds(i))
+                .map(|i| i.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&page), [1, 2, 3, 4]);
+        page.kind = Some(ItemKind::Bug);
+        assert_eq!(shown(&page), [1, 3]);
+        // With a repository too, both hold.
+        page.repo = Repo::In("/w/a".into());
+        assert_eq!(shown(&page), [1]);
+        // A new item starts as the kind shown.
+        page.kind = Some(ItemKind::Chore);
+        page.keys(b"n", &[], &[], 7);
+        assert!(matches!(
+            page.typing,
+            Some(Typing::Add {
+                kind: ItemKind::Chore,
+                ..
+            })
+        ));
     }
 
     #[test]

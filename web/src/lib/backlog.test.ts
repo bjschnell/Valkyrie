@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -376,5 +376,30 @@ describe("startAgent", () => {
     expect(startAgent(item(), "codex")).toBe("codex");
     expect(startAgent(null, null)).toBe("claude");
     expect(startAgent(item({ launch: { agent: "aider" } }), "nonsense")).toBe("claude");
+  });
+});
+
+describe("the kind filter", () => {
+  const items = [
+    item({ id: 1, kind: "bug" }),
+    item({ id: 2, kind: "feature" }),
+    item({ id: 3, kind: "bug", status: "proposed" }),
+    item({ id: 4, kind: "chore", status: "shipped" }),
+  ];
+
+  it("shows every kind, or only the one picked", () => {
+    expect(items.filter((i) => ofKind(i, null)).map((i) => i.id)).toEqual([1, 2, 3, 4]);
+    expect(items.filter((i) => ofKind(i, "bug")).map((i) => i.id)).toEqual([1, 3]);
+    expect(items.filter((i) => ofKind(i, "chore")).map((i) => i.id)).toEqual([4]);
+  });
+
+  it("keeps only a known kind between visits", () => {
+    expect(kindFilter("feature")).toBe("feature");
+    expect(kindFilter(null)).toBeNull();
+    expect(kindFilter("epic")).toBeNull();
+  });
+
+  it("counts what's still to do of each kind", () => {
+    expect(kindCounts(items)).toEqual({ bug: 2, feature: 1, chore: 0 });
   });
 });
