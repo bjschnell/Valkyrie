@@ -1723,7 +1723,10 @@ mod tests {
         for word in ["summary", "digest"] {
             let cli = super::Cli::try_parse_from(["valk", word, "--by", "day"])
                 .unwrap_or_else(|e| panic!("{word}: {e}"));
-            assert!(matches!(cli.cmd, Some(super::Cmd::Summary { .. })), "{word}");
+            assert!(
+                matches!(cli.cmd, Some(super::Cmd::Summary { .. })),
+                "{word}"
+            );
         }
     }
 }
