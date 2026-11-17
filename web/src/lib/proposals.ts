@@ -41,7 +41,7 @@ export function proposalToast(fresh: Item[]): { text: string; id: number } | nul
   const newest = fresh.reduce((a, b) => (b.id > a.id ? b : a));
   const text =
     fresh.length === 1
-      ? `${newest.by} proposed #${newest.id} ${newest.title}`
-      : `${fresh.length} agent proposals, newest #${newest.id} ${newest.title}`;
+      ? `${newest.by} proposed #${newest.number} ${newest.title}`
+      : `${fresh.length} agent proposals, newest #${newest.number} ${newest.title}`;
   return { text, id: newest.id };
 }

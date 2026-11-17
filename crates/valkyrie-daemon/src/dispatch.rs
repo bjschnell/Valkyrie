@@ -213,11 +213,23 @@ fn pick(
 }
 
 /// Why an item's offered, in a line.
-fn why(item: &Item, waived: &[u32], why: Option<&str>, running: usize, max: usize) -> String {
+fn why(
+    item: &Item,
+    items: &[Item],
+    waived: &[u32],
+    why: Option<&str>,
+    running: usize,
+    max: usize,
+) -> String {
     let room = format!("{running} of {max} agent sessions running");
     let list = |ids: &[u32]| {
         ids.iter()
-            .map(|b| format!("#{b}"))
+            .map(|b| {
+                format!(
+                    "#{}",
+                    items.iter().find(|i| i.id == *b).map_or(*b, |i| i.number)
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -353,10 +365,11 @@ impl Registry {
                     id: book.next_id(),
                     project: project.clone(),
                     item: id,
+                    number: item.number,
                     title: item.title.clone(),
                     agent,
                     model,
-                    why: why(item, &waived, model_why.as_deref(), n, max),
+                    why: why(item, &items, &waived, model_why.as_deref(), n, max),
                     waived,
                     made: now_secs(),
                 };
@@ -500,7 +513,13 @@ impl Registry {
             .launch_item(offer.item, &offer.agent, None, true, SIZE, Vec::new(), peer)
             .await?;
         let Reply::Session { info } = reply else {
-            bail!("starting #{} gave no session", offer.item);
+            let number = self
+                .backlog
+                .lock()
+                .unwrap()
+                .get(offer.item)
+                .map_or(offer.item, |i| i.number);
+            bail!("starting #{number} gave no session");
         };
         {
             let mut book = self.dispatch.lock().unwrap();
@@ -592,12 +611,9 @@ impl Registry {
                 info: Box::new(info),
             });
         }
-        let updated = self
-            .backlog
-            .lock()
-            .unwrap()
-            .get(offer.item)
-            .map_or(0, |i| i.updated);
+        let found = self.backlog.lock().unwrap().get(offer.item).ok();
+        let updated = found.as_ref().map_or(0, |i| i.updated);
+        let number = found.map_or(offer.item, |i| i.number);
         {
             let mut book = self.dispatch.lock().unwrap();
             book.pending.retain(|o| o.id != id);
@@ -610,7 +626,7 @@ impl Registry {
         self.dispatch_kick.notify_one();
         tracing::info!(item = offer.item, "launch offer left");
         Ok(Reply::Text {
-            text: format!("left #{}; it's offered again once it changes", offer.item),
+            text: format!("left #{}; it's offered again once it changes", number),
         })
     }
 }

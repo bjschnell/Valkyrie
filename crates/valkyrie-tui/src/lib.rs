@@ -2689,7 +2689,7 @@ impl App {
             .adopt_session(id, None, valkyrie_proto::ItemKind::Feature)
             .await
         {
-            Ok(item) => format!("adopted as #{} {}", item.id, item.title),
+            Ok(item) => format!("adopted as #{} {}", item.number, item.title),
             Err(e) => format!("adopt failed: {e:#}"),
         };
     }
@@ -3266,7 +3266,7 @@ impl App {
         let at = self.backlog_rows().iter().position(|(_, i)| i.id == id);
         match (&mut self.backlog, at) {
             (Some(page), Some(at)) => page.cursor = at,
-            _ => self.say(format!("#{id} isn't on the board")),
+            _ => self.say(format!("#{} isn't on the board", self.item_no(id))),
         }
         self.backlog_facts().await;
     }
@@ -3288,7 +3288,7 @@ impl App {
             .iter()
             .any(|i| i.id == id && i.status == valkyrie_proto::ItemStatus::Proposed);
         if !proposed {
-            return self.say(format!("#{id} was already answered"));
+            return self.say(format!("#{} was already answered", self.item_no(id)));
         }
         let status = if accept {
             valkyrie_proto::ItemStatus::Open
@@ -3300,9 +3300,9 @@ impl App {
             .change_item(id, ItemChange::Status { status })
             .await
         {
-            Ok((item, _)) if accept => format!("accepted #{} {}", item.id, item.title),
-            Ok((item, _)) => format!("declined #{} {}", item.id, item.title),
-            Err(e) => format!("can't answer #{id}: {e:#}"),
+            Ok((item, _)) if accept => format!("accepted #{} {}", item.number, item.title),
+            Ok((item, _)) => format!("declined #{} {}", item.number, item.title),
+            Err(e) => format!("can't answer #{}: {e:#}", self.item_no(id)),
         };
         self.say(said);
     }
@@ -3415,20 +3415,20 @@ impl App {
                     .client
                     .change_item(id, ItemChange::Status { status })
                     .await?;
-                let said = format!("#{} {}", item.id, item.status.as_str());
+                let said = format!("#{} {}", item.number, item.status.as_str());
                 self.say(note.map_or(said.clone(), |n| format!("{said}: {n}")));
             }
             Do::Return(id) => {
                 let (item, _) = self.client.change_item(id, ItemChange::Return).await?;
-                self.say(format!("#{} back in the backlog", item.id));
+                self.say(format!("#{} back in the backlog", item.number));
             }
             Do::Delete(id) => {
                 let (item, _) = self.client.delete_item(id).await?;
-                self.say(format!("deleted #{} {}", item.id, item.title));
+                self.say(format!("deleted #{} {}", item.number, item.title));
             }
             Do::Note { id, text } => {
                 self.client.note_item(id, text).await?;
-                self.say(format!("noted on #{id}"));
+                self.say(format!("noted on #{}", self.item_no(id)));
             }
             Do::Edit {
                 id,
@@ -3453,7 +3453,7 @@ impl App {
                     .await?;
                 self.say(format!(
                     "saved #{} {} ({})",
-                    item.id,
+                    item.number,
                     item.title,
                     item.priority.as_str()
                 ));
@@ -3541,7 +3541,10 @@ impl App {
                     self.refresh().await;
                     self.switch_to(info.id).await;
                 }
-                None => self.say(format!("left #{item}: it's offered again once it changes")),
+                None => self.say(format!(
+                    "left #{}: it's offered again once it changes",
+                    self.item_no(item)
+                )),
             },
             Do::AnswerOrder {
                 project,
@@ -3556,13 +3559,13 @@ impl App {
                     (true, ids) => format!(
                         "changed {}",
                         ids.iter()
-                            .map(|i| format!("#{i}"))
+                            .map(|i| format!("#{}", self.item_no(*i)))
                             .collect::<Vec<_>>()
                             .join(" ")
                     ),
                 };
                 for (id, why) in &applied.skipped {
-                    said += &format!("; #{id} left: {why}");
+                    said += &format!("; #{} left: {why}", self.item_no(*id));
                 }
                 self.say(said);
             }
@@ -3598,7 +3601,7 @@ impl App {
                         ..NewItem::default()
                     })
                     .await?;
-                self.say(format!("added #{} {}", item.id, item.title));
+                self.say(format!("added #{} {}", item.number, item.title));
             }
         }
         Ok(())
@@ -3909,10 +3912,18 @@ impl App {
             .map(|(ping, _)| ping)
     }
 
+    /// What people call item `id`: its number in its repository.
+    fn item_no(&self, id: u32) -> u32 {
+        self.items
+            .iter()
+            .find(|i| i.id == id)
+            .map_or(id, |i| i.number)
+    }
+
     /// The keys that answer a proposal's toast: tab mode's own, once you're in it.
     /// The home screen's `a` is the decisions', so there `b` opens it to answer.
     fn toast_hint(&self, ping: &Ping) -> Option<String> {
-        let id = ping.proposal?;
+        let id = self.item_no(ping.proposal?);
         if self.view.is_none() {
             return Some("b open".into());
         }
@@ -6958,7 +6969,7 @@ mod tests {
         app.settings.desktop = false;
         let item = |id: u32, status: &str, by: &str| -> Item {
             serde_json::from_value(serde_json::json!({
-                "id": id, "title": format!("item {id}"), "status": status, "by": by,
+                "id": id, "number": id, "title": format!("item {id}"), "status": status, "by": by,
                 "project": "/r/app", "created": 0, "updated": 0,
             }))
             .unwrap()
@@ -8174,6 +8185,7 @@ mod tests {
         );
         let merged = |id: u32| valkyrie_proto::ShippedItem {
             id,
+            number: id,
             title: String::new(),
             branch: format!("fix/{id}"),
             branch_taken: false,
