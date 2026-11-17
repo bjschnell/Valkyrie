@@ -59,7 +59,7 @@ pub enum TodoCmd {
         /// Only the items not for any repository yet.
         #[arg(long)]
         no_folder: bool,
-        /// Only the items of this kind: bug, feature, chore or spike.
+        /// Only the items of this kind: bug, feature, chore, spike or debt.
         #[arg(short, long, value_parser = parse_kind)]
         kind: Option<ItemKind>,
         /// As JSON, every field, for a script or an agent to read.
@@ -252,7 +252,7 @@ fn rank(item: &Item, items: &[Item]) -> String {
 }
 
 pub fn parse_kind(s: &str) -> Result<ItemKind, String> {
-    ItemKind::parse(s).ok_or_else(|| "bug, feature, chore or spike".into())
+    ItemKind::parse(s).ok_or_else(|| "bug, feature, chore, spike or debt".into())
 }
 
 /// Runs `cmd`; `Launch --attach` hands back the session to attach to.

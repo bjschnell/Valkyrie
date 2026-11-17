@@ -1,4 +1,4 @@
-//! The backlog (DESIGN §8.12): bugs, features, chores and spikes written down for later,
+//! The backlog (DESIGN §8.12): bugs, features, chores, spikes and tech debt written down for later,
 //! each of which can start an agent session on itself.
 
 use crate::SessionId;
@@ -16,10 +16,18 @@ pub enum ItemKind {
     /// Exploration: the agent investigates and writes up what it found, no
     /// production code.
     Spike,
+    /// Tech debt: behaviour-preserving cleanup, no features or fixes mixed in.
+    Debt,
 }
 
 impl ItemKind {
-    pub const ALL: [ItemKind; 4] = [Self::Bug, Self::Feature, Self::Chore, Self::Spike];
+    pub const ALL: [ItemKind; 5] = [
+        Self::Bug,
+        Self::Feature,
+        Self::Chore,
+        Self::Spike,
+        Self::Debt,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -27,6 +35,7 @@ impl ItemKind {
             Self::Feature => "feature",
             Self::Chore => "chore",
             Self::Spike => "spike",
+            Self::Debt => "debt",
         }
     }
 
