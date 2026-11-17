@@ -47,6 +47,31 @@ impl Pairing {
     }
 }
 
+impl Pairing {
+    /// A link that pairs a window with `host`'s web app, forwarded to `url`
+    /// here: as `link`, this machine's daemon vouches first, since the other
+    /// one sees only `sshd`. That machine makes the link, at a terminal of its
+    /// own there (`remote::pairing_link`).
+    pub async fn remote_link(
+        &self,
+        socket: &Path,
+        host: &valkyrie_proto::remote::Host,
+        url: &str,
+    ) -> Result<Option<String>> {
+        let mut asked = self.asked.lock().await;
+        if *asked {
+            return Ok(None);
+        }
+        let client = daemon(socket).await?;
+        *asked = true;
+        client.vouch(WHAT).await?;
+        let auth = valkyrie_proto::remote::Auth::Never;
+        Ok(Some(
+            valkyrie_proto::remote::pairing_link(host, auth, url).await?,
+        ))
+    }
+}
+
 /// A pairing link for the window, once the app's earlier devices are gone.
 ///
 /// The page asks to pair only when its storage has no token, so a "Desktop app"

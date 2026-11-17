@@ -95,6 +95,65 @@ fn desktop_argv(argv: &[String]) -> bool {
         == Some("valk-desktop")
 }
 
+/// Whether `pid` runs `valk bridge`, the far end of `valk --remote` (DESIGN §8.1),
+/// started over SSH: `None` when it isn't one. Else who the other machine said
+/// runs it: `Some(None)` the user, `Some(Some(agent))` an agent there.
+///
+/// Only below `sshd`: a `valk bridge` an agent leaves running here, detached, is
+/// as unknown as any other detached process. One that came in over SSH holds the
+/// user's SSH credentials, as `ssh -t host valk` does, which counts as the user.
+pub fn remote_bridge(pid: i32) -> Option<Option<String>> {
+    let who = cmdline_n(pid, 8).and_then(|argv| remote_bridge_argv(&argv))?;
+    ancestry(pid)
+        .into_iter()
+        .skip(1)
+        .any(|up| cmdline_n(up, 1).is_some_and(|argv| sshd_argv(&argv)))
+        .then_some(who)
+}
+
+/// `sshd` as it runs a login: `sshd: me@notty`, `sshd-session: me@notty`, or by
+/// its path where the OS keeps the original argv.
+fn sshd_argv(argv: &[String]) -> bool {
+    argv.first()
+        .and_then(|program| valkyrie_agents::program_name(program))
+        .is_some_and(|name| name.starts_with("sshd"))
+}
+
+/// `valk [--socket S] bridge [--agent NAME]`, and who it says runs it.
+fn remote_bridge_argv(argv: &[String]) -> Option<Option<String>> {
+    let (program, args) = argv.split_first()?;
+    if !matches!(valkyrie_agents::program_name(program), Some("valk" | "v")) {
+        return None;
+    }
+    let mut args = args.iter();
+    loop {
+        match args.next()?.as_str() {
+            "--socket" => {
+                args.next()?;
+            }
+            a if a.starts_with("--socket=") => {}
+            "bridge" => break,
+            _ => return None,
+        }
+    }
+    match (args.next().map(String::as_str), args.next(), args.next()) {
+        (None, ..) => Some(None),
+        (Some("--agent"), Some(name), None) => Some(Some(agent_label(name))),
+        _ => None,
+    }
+}
+
+/// An agent's name as another machine sent it, made safe to show.
+fn agent_label(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(32)
+        .collect();
+    let name = if name.is_empty() { "an agent" } else { &name };
+    format!("{name} on another machine")
+}
+
 fn bridge_argv(argv: &[String]) -> bool {
     let Some((program, args)) = argv.split_first() else {
         return false;
@@ -730,6 +789,41 @@ mod tests {
         assert!(!yes(&["valk", "new", "--", "web"]));
         assert!(!yes(&["sh", "web"]));
         assert!(!yes(&["valk"]));
+    }
+
+    #[test]
+    fn knows_the_remote_bridge_and_who_it_says_runs_it() {
+        let who = |a: &[&str]| remote_bridge_argv(&argv(a));
+        assert_eq!(who(&["/home/u/.local/bin/valk", "bridge"]), Some(None));
+        assert_eq!(who(&["v", "--socket", "/s.sock", "bridge"]), Some(None));
+        assert_eq!(
+            who(&["valk", "bridge", "--agent", "claude"]),
+            Some(Some("claude on another machine".into()))
+        );
+        // Nothing it says can dress up the label.
+        assert_eq!(
+            who(&["valk", "bridge", "--agent", "\x1b[2Jme; rm"]),
+            Some(Some("2Jmerm on another machine".into()))
+        );
+        assert_eq!(
+            who(&["valk", "bridge", "--agent", ""]),
+            Some(Some("an agent on another machine".into()))
+        );
+        // Anything else is no bridge, so it counts as detached.
+        assert_eq!(who(&["valk", "bridge", "--agent"]), None);
+        assert_eq!(who(&["valk", "bridge", "--human"]), None);
+        assert_eq!(who(&["valk", "new", "--", "bridge"]), None);
+        assert_eq!(who(&["sh", "bridge"]), None);
+        assert_eq!(who(&["valk"]), None);
+    }
+
+    #[test]
+    fn knows_sshd_running_a_login() {
+        assert!(sshd_argv(&argv(&["sshd: me@notty"])));
+        assert!(sshd_argv(&argv(&["sshd-session: me@notty"])));
+        assert!(sshd_argv(&argv(&["/usr/sbin/sshd", "-D"])));
+        assert!(!sshd_argv(&argv(&["ssh", "box"])));
+        assert!(!sshd_argv(&argv(&["bash"])));
     }
 
     fn argv(args: &[&str]) -> Vec<String> {

@@ -100,6 +100,29 @@ pub fn on_add_device(f: fn() -> Result<String, String>) {
     let _ = ADD_DEVICE.set(f);
 }
 
+static REMOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Says the daemon is another machine's (`valk --remote HOST`): its paths are
+/// that machine's, this one's login environment means nothing there, and its
+/// binary isn't one to run here.
+pub fn set_remote(host: String) {
+    let _ = REMOTE.set(host);
+}
+
+fn remote() -> Option<&'static str> {
+    REMOTE.get().map(String::as_str)
+}
+
+/// The login environment a session started from here gets: none on another
+/// machine, where this one's agent socket and display mean nothing.
+fn spawn_env() -> Vec<(String, Option<String>)> {
+    if remote().is_some() {
+        Vec::new()
+    } else {
+        valkyrie_proto::login_env()
+    }
+}
+
 /// The terminal, through a backend that stays silent while nothing changes.
 type Term = Terminal<quiet::Quiet<CrosstermBackend<std::io::Stdout>>>;
 
@@ -137,8 +160,10 @@ pub async fn run(
             e.path.display()
         );
     }
+    // Another machine's daemon names a binary there, never one to run here.
     #[cfg(unix)]
     if let Err(e) = &result
+        && remote().is_none()
         && let Some(restart) = e.downcast_ref::<Restart>()
         && let Some(exe) = restart.daemon.follow(exe.ok())
     {
@@ -585,9 +610,12 @@ impl App {
                 continue;
             };
             let info = match client.hello_as(ClientBuild::this("tui")).await {
+                // Another machine's upgrade leaves this valk as it was: carry on
+                // while it still speaks the protocol.
                 Ok(info)
                     if info.protocol == valkyrie_proto::PROTOCOL
-                        && !self.daemon.as_ref().is_some_and(|d| info.upgraded_from(d)) =>
+                        && (remote().is_some()
+                            || !self.daemon.as_ref().is_some_and(|d| info.upgraded_from(d))) =>
                 {
                     info
                 }
@@ -1408,7 +1436,7 @@ impl App {
             cwd,
             name: None,
             size,
-            env: valkyrie_proto::login_env(),
+            env: spawn_env(),
             worktree: None,
             hidden: false,
         };
@@ -3067,6 +3095,12 @@ impl App {
         if self.editing.is_some() {
             return self.say("a doc is already open in your editor".into());
         }
+        // The file to edit would be on this machine, the editor on the other.
+        if let Some(host) = remote() {
+            return self.say(format!(
+                "editing a doc needs {host}'s own valk: `ssh -t {host} valk`"
+            ));
+        }
         let path = match edit_file(&body) {
             Ok(path) => path,
             Err(e) => return self.say(format!("couldn't make a file to edit: {e}")),
@@ -3079,7 +3113,7 @@ impl App {
             cwd: None,
             name: Some(format!("edit {}", fit(&title, 30))),
             size,
-            env: valkyrie_proto::login_env(),
+            env: spawn_env(),
             worktree: None,
             hidden: false,
         };
@@ -3534,11 +3568,16 @@ impl App {
                 // For the repository the page shows, else the one the TUI is in, or
                 // the attached tab is.
                 let repo = self.backlog.as_ref().map(|p| p.repo.clone());
-                let here = self.attached_cwd().or_else(|| std::env::current_dir().ok());
                 let cwd = match repo.unwrap_or_default() {
                     backlog::Repo::In(root) => Some(root),
                     backlog::Repo::NoFolder => None,
-                    backlog::Repo::All => here.filter(|d| in_repository(d)),
+                    // Another machine's paths can't be looked at here: the daemon
+                    // finds the attached tab's repository itself.
+                    backlog::Repo::All if remote().is_some() => self.attached_cwd(),
+                    backlog::Repo::All => self
+                        .attached_cwd()
+                        .or_else(|| std::env::current_dir().ok())
+                        .filter(|d| in_repository(d)),
                 };
                 let item = self
                     .client
@@ -3560,6 +3599,11 @@ impl App {
         let Some(&make) = ADD_DEVICE.get() else {
             return;
         };
+        // The code would pair a device with this machine's web app.
+        if let Some(host) = remote() {
+            self.status = format!("add a device on {host}: `ssh -t {host} valk web pair`");
+            return;
+        }
         // A paired device can do whatever the user can; an agent mustn't add one.
         if let Err(e) = self.client.vouch("adding a device").await {
             self.status = format!("can't add a device: {e:#}");
@@ -5755,6 +5799,9 @@ fn header_line(
             " agent control ".fg(t.muted),
         ]
     };
+    if let Some(host) = remote() {
+        spans.push(format!(" on {host} ").fg(t.bg).bg(t.accent2).bold());
+    }
     for (state, n) in counts(queue, sessions) {
         let color = t.state(state);
         spans.push(" ".into());
