@@ -25,11 +25,13 @@ mod quota;
 mod restore;
 mod session;
 mod supervise;
+mod usage;
 mod watching;
 pub mod work;
 mod worktree;
 
 pub use restore::path as restore_path;
+pub use usage::agent_above;
 
 use anyhow::{Context, Result};
 use pty::StopPipe;
@@ -1063,6 +1065,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // Who is asking, for requests an agent may not make (ADR-0007 §4).
     let peer = context::Peer::of(&stream);
     let conn = registry.next_conn.fetch_add(1, Ordering::Relaxed);
+    // Whose actions this connection carries, for the usage log: `tui`, `web`, or
+    // `None` for the CLI's (which records its own). Worked out at its first.
+    let mut surface: Option<Option<String>> = None;
     // Whether this connection is an agent's (`Some(Some(agent))`), worked out the
     // first time it starts or types into a session: those sessions then count as
     // the agent's doing, so it can't launder a decision through them.
@@ -1094,6 +1099,20 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             Ok(None) => break Ok(()),
             Err(e) => break Err(e),
         };
+        if usage::feature(&msg).is_some() {
+            let surface = surface.get_or_insert_with(|| {
+                let kind = registry
+                    .clients
+                    .lock()
+                    .unwrap()
+                    .get(&conn)
+                    .map(|c| c.kind.clone());
+                usage::surface(kind, peer.as_ref().map(context::Peer::pid))
+            });
+            if let Some(surface) = surface {
+                usage::record(surface, &msg);
+            }
+        }
         let (req, result) = match msg {
             ClientMsg::Hello { req, client } => {
                 // Only the kinds `valk upgrade` names; anything else is ignored.
