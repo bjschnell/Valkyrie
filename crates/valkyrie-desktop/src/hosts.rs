@@ -7,6 +7,7 @@
 //! to pair: the window hears it, and the page can't say anything else.
 
 use anyhow::{Context, Result, bail};
+use std::net::SocketAddr;
 use std::process::Stdio;
 use valkyrie_proto::remote::{self, Auth, Host, Known};
 
@@ -71,6 +72,8 @@ pub fn page_script(current: Option<&Host>, known: &[Known]) -> String {
 pub struct Tunnel {
     pub host: Host,
     pub port: u16,
+    /// Where the host's `valk web` listens, there.
+    pub there: SocketAddr,
     /// Ends with the tunnel: killed when dropped.
     ssh: tokio::process::Child,
 }
@@ -81,8 +84,9 @@ impl Tunnel {
     /// the SSH agent, or a connection `ssh` already shares must do.
     pub async fn open(host: &Host) -> Result<Tunnel> {
         let known = remote::add_host(&remote::hosts_file(), host)?;
-        remote::start_web(host, Auth::Never).await?;
-        let mut ssh = tokio::process::Command::from(remote::tunnel(host, Auth::Never, known.port))
+        let there = remote::start_web(host, Auth::Never).await?;
+        let tunnel = remote::tunnel(host, Auth::Never, known.port, there);
+        let mut ssh = tokio::process::Command::from(tunnel)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -121,6 +125,7 @@ impl Tunnel {
         Ok(Tunnel {
             host: host.clone(),
             port: known.port,
+            there,
             ssh,
         })
     }

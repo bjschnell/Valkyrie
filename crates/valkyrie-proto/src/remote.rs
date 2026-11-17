@@ -13,9 +13,12 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-/// Where the other machine's `valk web` listens (`valk setup web --local`).
+/// Where the other machine's `valk web` listens when it doesn't say
+/// (`valk web address`, which a `valk` from before it doesn't know): what
+/// `valk setup web --local` sets up.
 pub const REMOTE_WEB_PORT: u16 = 8790;
 /// The first local port a host's web app is forwarded to; this machine's own
 /// `valk web` has `REMOTE_WEB_PORT`.
@@ -100,15 +103,17 @@ pub fn bridge(host: &Host, auth: Auth) -> std::process::Command {
 /// `ssh` forwarding local `port` to the other machine's `valk web`, on a
 /// connection of its own: one shared with others could go with them, and a
 /// forward through a shared one outlives the `ssh` that asked for it. It ends
-/// at once if the port is taken here.
-pub fn tunnel(host: &Host, auth: Auth, port: u16) -> std::process::Command {
+/// at once if the port is taken here. `there`: where that `valk web` listens
+/// (`start_web`).
+pub fn tunnel(host: &Host, auth: Auth, port: u16, there: SocketAddr) -> std::process::Command {
     let mut cmd = std::process::Command::new("ssh");
     if auth == Auth::Never {
         cmd.args(["-o", "BatchMode=yes"]);
     }
     cmd.args(["-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes"]);
     cmd.args(["-o", "ServerAliveInterval=30", "-N", "-L"]);
-    cmd.arg(format!("127.0.0.1:{port}:127.0.0.1:{REMOTE_WEB_PORT}"));
+    // `[::1]:8790` for an IPv6 one, as `ssh` reads it.
+    cmd.arg(format!("127.0.0.1:{port}:{}", reachable(there)));
     cmd.arg(host.as_str());
     cmd
 }
@@ -169,13 +174,18 @@ fn remote_command(args: &[&str]) -> String {
     for arg in args {
         assert!(
             !arg.is_empty()
-                && arg
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')),
+                && arg.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '[' | ']')
+                }),
             "a remote argument needs no quoting: {arg:?}"
         );
         line.push(' ');
-        line.push_str(arg);
+        // An IPv6 address's brackets would be a pattern to the shell there.
+        if arg.contains(['[', ']']) {
+            line.push_str(&format!("'{arg}'"));
+        } else {
+            line.push_str(arg);
+        }
     }
     line
 }
@@ -294,9 +304,10 @@ pub fn pairing_code(line: &str) -> Option<&str> {
 const WEB_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Makes sure the other machine's `valk web` runs, as the desktop app does for
-/// its own: for that machine only, and one already set up is left as it is.
+/// its own: for that machine only, and one already set up is left as it is,
+/// on whatever address it was set up with. That address, as it says there.
 /// What it says goes to stderr: stdout may be a program's.
-pub async fn start_web(host: &Host, auth: Auth) -> Result<()> {
+pub async fn start_web(host: &Host, auth: Auth) -> Result<SocketAddr> {
     let setup = tokio::process::Command::from(ssh(host, auth, &["setup", "web", "--local"]))
         .stdin(std::process::Stdio::null())
         .stdout(std::io::stderr())
@@ -309,7 +320,47 @@ pub async fn start_web(host: &Host, auth: Auth) -> Result<()> {
     if !setup.success() {
         bail!("couldn't start valk web on {host} (`valk setup web --local` there failed)");
     }
-    Ok(())
+    web_address(host, auth).await
+}
+
+/// Where the other machine's `valk web` says it listens. A `valk` there from
+/// before `valk web address` fails it, and has the address it set up.
+async fn web_address(host: &Host, auth: Auth) -> Result<SocketAddr> {
+    let asked = tokio::process::Command::from(ssh(host, auth, &["web", "address"]))
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(CALL_WAIT, asked)
+        .await
+        .map_err(|_| anyhow::anyhow!("{host} didn't answer within {} s", CALL_WAIT.as_secs()))?
+        .context("couldn't run ssh")?;
+    let said = out
+        .status
+        .success()
+        .then(|| listen_address(&String::from_utf8_lossy(&out.stdout)))
+        .flatten();
+    Ok(said.unwrap_or(SocketAddr::from((Ipv4Addr::LOCALHOST, REMOTE_WEB_PORT))))
+}
+
+/// The address in what `valk web address` printed: its last line, past
+/// anything a login script there said first.
+fn listen_address(said: &str) -> Option<SocketAddr> {
+    said.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Where to reach `there` from its own machine: one that listens everywhere
+/// (`0.0.0.0`, `::`) is on its loopback too.
+fn reachable(there: SocketAddr) -> SocketAddr {
+    match there.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => (Ipv4Addr::LOCALHOST, there.port()).into(),
+        IpAddr::V6(ip) if ip.is_unspecified() => (Ipv6Addr::LOCALHOST, there.port()).into(),
+        _ => there,
+    }
 }
 
 /// Waits until a web app answers on local `port`: an HTTP status line, not just
@@ -349,15 +400,19 @@ async fn http_answers(port: u16) -> bool {
 }
 
 /// A link that pairs a browser at `url` (the tunnel's end here) with the other
-/// machine's web app, made there by `valk web open --print`. With a terminal
-/// there (`-tt`): it pairs only for a person, as from your own. Ask this
-/// machine's daemon first; the other one can't see past `sshd`.
-pub async fn pairing_link(host: &Host, auth: Auth, url: &str) -> Result<String> {
+/// machine's web app on `there` (`start_web`), made there by `valk web open
+/// --print`. With a terminal there (`-tt`): it pairs only for a person, as
+/// from your own. Ask this machine's daemon first; the other one can't see
+/// past `sshd`.
+pub async fn pairing_link(host: &Host, auth: Auth, url: &str, there: SocketAddr) -> Result<String> {
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(ssh_options(auth));
     cmd.arg("-tt");
     cmd.arg(host.as_str());
-    cmd.arg(remote_command(&["web", "open", "--print"]));
+    let listen = reachable(there).to_string();
+    cmd.arg(remote_command(&[
+        "web", "--listen", &listen, "open", "--print",
+    ]));
     let out = tokio::process::Command::from(cmd)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -419,6 +474,9 @@ mod tests {
             remote_command(&["bridge", "--agent", "claude"]),
             r#"sh -c 'v=$(command -v valk 2>/dev/null || echo "$HOME/.local/bin/valk"); exec "$v" "$@"' valk bridge --agent claude"#
         );
+        assert!(
+            remote_command(&["web", "--listen", "[::1]:8790"]).ends_with(" --listen '[::1]:8790'")
+        );
     }
 
     #[test]
@@ -430,7 +488,8 @@ mod tests {
     #[test]
     fn the_tunnel_forwards_one_local_port_on_its_own_connection() {
         let host = Host::parse("box").unwrap();
-        let args: Vec<_> = tunnel(&host, Auth::Never, 8791)
+        let there = "127.0.0.1:8790".parse().unwrap();
+        let args: Vec<_> = tunnel(&host, Auth::Never, 8791, there)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
@@ -451,6 +510,39 @@ mod tests {
                 "box"
             ]
         );
+    }
+
+    #[test]
+    fn the_tunnel_goes_where_the_other_web_app_listens() {
+        let host = Host::parse("box").unwrap();
+        let target = |there: &str| {
+            let cmd = tunnel(&host, Auth::Ask, 8791, there.parse().unwrap());
+            let args: Vec<_> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args[args.len() - 2].clone()
+        };
+        assert_eq!(target("127.0.0.1:8799"), "127.0.0.1:8791:127.0.0.1:8799");
+        assert_eq!(target("100.64.0.7:8790"), "127.0.0.1:8791:100.64.0.7:8790");
+        // Listening everywhere, it listens on loopback too.
+        assert_eq!(target("0.0.0.0:8790"), "127.0.0.1:8791:127.0.0.1:8790");
+        assert_eq!(target("[::]:9000"), "127.0.0.1:8791:[::1]:9000");
+        assert_eq!(target("[::1]:9000"), "127.0.0.1:8791:[::1]:9000");
+    }
+
+    #[test]
+    fn the_address_is_the_last_line_said() {
+        assert_eq!(
+            listen_address("Welcome to box\n127.0.0.1:8799\n\n"),
+            Some("127.0.0.1:8799".parse().unwrap())
+        );
+        assert_eq!(
+            listen_address("[::1]:8790"),
+            Some("[::1]:8790".parse().unwrap())
+        );
+        assert_eq!(listen_address("127.0.0.1:8799\nbye"), None);
+        assert_eq!(listen_address(""), None);
     }
 
     #[test]

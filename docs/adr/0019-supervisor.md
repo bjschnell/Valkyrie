@@ -1,6 +1,6 @@
 # ADR-0019: The supervisor watches work after its session stops, proposes the next step, and learns which steps to take on its own
 
-Status: accepted (2026-11-11); phases 1–7 shipped (#69, #75, #76, #77, #78, #80, #107, #121); phase 8 (#215) in review
+Status: accepted (2026-11-11); all eight phases shipped (#69, #75, #76, #77, #78, #80, #107, #121, #215)
 Date: 2026-11-04
 Amends: DESIGN §7 (what the supervisor is), [ADR-0013](0013-learned-policies.md) §7 (what it leaves to the supervisor)
 

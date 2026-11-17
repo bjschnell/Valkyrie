@@ -3359,6 +3359,7 @@ html.with-tabs .offline-banner {
 .kind-feature { --kind: var(--accent); }
 .kind-chore { --kind: var(--soft); }
 .kind-spike { --kind: var(--needs); }
+.kind-debt { --kind: var(--accent2); }
 /* Priority wears the kind chip's shape: p0 and p1 stand out, the rest stay quiet. */
 .prio-p0 { --kind: var(--needs); }
 .prio-p1 { --kind: var(--accent); }

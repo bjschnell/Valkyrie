@@ -588,7 +588,7 @@ fn clean(title: &str, body: &str) -> Result<(String, String)> {
     Ok((title, body))
 }
 
-/// The branch a launch makes: `fix/12-tab-crash`, `feat/12-…`, `chore/12-…` or `spike/12-…`,
+/// The branch a launch makes: `fix/12-tab-crash`, `feat/12-…`, `chore/12-…`, `spike/12-…` or `refactor/12-…`,
 /// as the repo's own branches are named. Only ASCII letters, digits and `-`, so it
 /// is always a valid ref.
 pub fn branch(item: &Item) -> String {
@@ -597,6 +597,7 @@ pub fn branch(item: &Item) -> String {
         ItemKind::Feature => "feat",
         ItemKind::Chore => "chore",
         ItemKind::Spike => "spike",
+        ItemKind::Debt => "refactor",
     };
     let mut slug = String::new();
     for word in item
@@ -636,6 +637,9 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
             "Build this feature from my backlog. It was written down quickly, so read the relevant code first and give me a short plan. If anything about what I want is unclear, ask me before writing code."
         }
         ItemKind::Chore => "Do this task from my backlog.",
+        ItemKind::Debt => {
+            "Pay down this tech debt from my backlog. Behaviour must stay exactly the same: this is cleanup, not a feature or a fix. Read the code first and check that tests cover what you're about to touch; if they don't, add characterization tests that pass on the current code before you change anything. Then work in small steps, keeping the tests green after each. Don't mix in features or bug fixes: if you find a bug, file it with `valk todo add -k bug` instead of fixing it here. If the cleanup turns out bigger than the item says, stop and tell me what you found before going further."
+        }
         ItemKind::Spike => {
             "Explore this spike from my backlog. Read the relevant code and any docs first, and keep it time-boxed: answer the question, don't build the thing. Don't ship production code; a throwaway prototype is fine if it settles the question, but leave it out of the change. Write what you found up with `valk doc write \"<title>\" -k research -` (what you tried, what you learned, a recommendation with the alternatives you rejected), and say where the doc is. If the answer needs a decision from me or you're unsure what I'm after, ask before digging further. Don't file follow-up backlog items on your own guess: once I've accepted a direction, propose the work it implies as backlog items with `valk todo add`, one per piece, and tell me which you filed."
         }
@@ -682,7 +686,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
 /// What an agent on item `id` is asked to keep track of: the end of its brief.
 fn footer(id: u32) -> String {
     format!(
-        "(This is item #{} in my Valkyrie backlog. Fix what you have to in order to deliver it, as part of this change. Anything else you find broken, keep out of this change and file it with `valk todo add -k <bug|feature|chore|spike> \"<title>\" --body \"<what, how to reproduce it, how much it matters>\"`. When this is done, tell me in a line what you filed. Offer to fix a find here only when it's worth acting on now (it blocks my next step, or it's a real bug I'd want dealt with before moving on); otherwise leave it on the backlog and don't ask. If I say go ahead, take it with `valk todo take N --branch <branch>` and fix it on its own branch and pull request. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
+        "(This is item #{} in my Valkyrie backlog. Fix what you have to in order to deliver it, as part of this change. Anything else you find broken, keep out of this change and file it with `valk todo add -k <bug|feature|chore|spike|debt> \"<title>\" --body \"<what, how to reproduce it, how much it matters>\"`. When this is done, tell me in a line what you filed. Offer to fix a find here only when it's worth acting on now (it blocks my next step, or it's a real bug I'd want dealt with before moving on); otherwise leave it on the backlog and don't ask. If I say go ahead, take it with `valk todo take N --branch <branch>` and fix it on its own branch and pull request. If you open a pull request, record it with `valk todo take --pr <url>`. When you finish or stop, leave a short handoff with `valk todo note \"<what changed, what's left, anything I should check>\"`.)\n",
         id
     )
 }
@@ -1353,6 +1357,10 @@ mod tests {
             "feat/3-backlog-kanban-ish-view"
         );
         assert_eq!(branch(&mk(4, "日本語", ItemKind::Chore)), "chore/4");
+        assert_eq!(
+            branch(&mk(7, "Split the big match", ItemKind::Debt)),
+            "refactor/7-split-the-big-match"
+        );
         assert_eq!(
             branch(&mk(6, "Can we drop sqlite?", ItemKind::Spike)),
             "spike/6-can-we-drop-sqlite"
