@@ -175,7 +175,7 @@ impl Registry {
                 bridge = true;
                 None
             }
-            None if let Some(who) = remote => who,
+            None if remote.is_some() => remote.clone().flatten(),
             None if foreground::is_desktop_app(peer.pid) => {
                 desktop = true;
                 Some("the desktop app".into())
