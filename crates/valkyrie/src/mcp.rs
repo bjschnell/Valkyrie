@@ -58,6 +58,13 @@ async fn handle(client: &Client, cwd: &std::path::Path, msg: &Value) -> Result<V
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = &params["arguments"];
+            // Only a tool there is: the name is the agent's to write.
+            if tools()
+                .as_array()
+                .is_some_and(|t| t.iter().any(|t| t["name"] == name))
+            {
+                crate::stats::record("mcp", name);
+            }
             match call(client, cwd, name, args).await {
                 Ok(text) => Ok(json!({"content": [{"type": "text", "text": text}]})),
                 // A tool that failed is a result the agent reads, not a protocol error.

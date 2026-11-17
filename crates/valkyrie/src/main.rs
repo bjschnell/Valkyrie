@@ -9,6 +9,7 @@ mod notes;
 mod pane;
 mod pings;
 mod service;
+mod stats;
 mod statusline;
 mod todo;
 mod tools;
@@ -341,6 +342,22 @@ enum Cmd {
         #[arg(long)]
         repeats: bool,
     },
+    /// Whether Valkyrie is helping, week by week: how often agents stopped on
+    /// you, what context reached them and whether learned failures came back, the
+    /// supervisor's steps, the backlog's pace, and (with Analytics on) which
+    /// features got used. Read from this machine's records; no daemon needed.
+    Stats {
+        /// How many weeks back to look.
+        #[arg(long, default_value_t = 8)]
+        weeks: usize,
+        /// The project to report on (any of its worktrees); the current one by
+        /// default.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Print JSON instead.
+        #[arg(long)]
+        json: bool,
+    },
     /// Whether the supervisor offers and takes steps on flagged sessions
     /// (ADR-0019): on (the default) or off. Off, the PR poll still flags them.
     /// Without one, shows which.
@@ -526,6 +543,7 @@ fn main() -> Result<()> {
             .unwrap_or_else(valkyrie_proto::default_socket_path);
         statusline::run(&socket, then.as_deref());
     }
+    stats::record_cli();
     let socket = valkyrie_proto::daemon_socket(cli.socket);
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
 }
@@ -1056,6 +1074,19 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 if repeats {
                     print!("{}", pings::repeats_report(&pool, since)?);
                 }
+            }
+            Ok(())
+        }
+        Some(Cmd::Stats { weeks, repo, json }) => {
+            let weeks = weeks.clamp(1, 13);
+            let now = stats::now_secs();
+            let root = stats::root(repo.as_deref())?;
+            let input = stats::gather(&root, now, weeks)?;
+            let s = stats::compute(&input, now, weeks, &root.to_string_lossy());
+            if json {
+                println!("{}", stats::json(&s));
+            } else {
+                print!("{}", stats::report(&s));
             }
             Ok(())
         }
