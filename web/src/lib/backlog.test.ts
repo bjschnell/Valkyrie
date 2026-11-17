@@ -416,6 +416,6 @@ describe("the kind filter", () => {
   });
 
   it("counts what's still to do of each kind", () => {
-    expect(kindCounts(items)).toEqual({ bug: 2, feature: 1, chore: 0 });
+    expect(kindCounts(items)).toEqual({ bug: 2, feature: 1, chore: 0, spike: 0 });
   });
 });
