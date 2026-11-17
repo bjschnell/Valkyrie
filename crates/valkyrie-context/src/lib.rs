@@ -32,6 +32,7 @@ pub mod served;
 pub mod skill;
 pub mod stale;
 pub mod steps;
+pub mod usage;
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -123,6 +124,18 @@ impl SkillUse {
                 .unwrap_or_default(),
         }
     }
+}
+
+/// One line of a project's failure log: a failed call (`call`), or a decision
+/// proposed from a signature (`decision`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureLine {
+    pub at: u64,
+    pub sig: u64,
+    /// The agent's session id, when the hook knew it.
+    pub session: Option<String>,
+    pub call: Option<String>,
+    pub decision: Option<u32>,
 }
 
 /// What a project's sessions' failures have been (ADR-0011 §2).
@@ -593,6 +606,38 @@ impl Store {
             })
             .collect();
         self.append_failures(root, &lines, now)
+    }
+
+    /// Every line of `root`'s failure log over the last [`FAILURE_DAYS`] days,
+    /// oldest first: each failed call once (a restart or resume can record one
+    /// again) and each decision proposed from a signature.
+    pub fn failure_log(&self, root: &Path, now: u64) -> Vec<FailureLine> {
+        let mut calls = HashSet::new();
+        let mut out: Vec<FailureLine> = std::fs::read_to_string(self.failures_file(root))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| {
+                let at = v["at"].as_u64()?;
+                let sig = u64::from_str_radix(v["sig"].as_str()?, 16).ok()?;
+                if now.saturating_sub(at) > FAILURE_DAYS * 86_400 {
+                    return None;
+                }
+                let call = v["call"].as_str().map(str::to_owned);
+                if call.as_ref().is_some_and(|c| !calls.insert(c.clone())) {
+                    return None;
+                }
+                Some(FailureLine {
+                    at,
+                    sig,
+                    session: v["session"].as_str().map(str::to_owned),
+                    call,
+                    decision: v["decision"].as_u64().and_then(|d| u32::try_from(d).ok()),
+                })
+            })
+            .collect();
+        out.sort_by_key(|l| l.at);
+        out
     }
 
     /// Records that decision `id` was proposed from failures with signature `sig`.
@@ -1396,6 +1441,30 @@ mod tests {
         assert_eq!(
             f.store.failures(&f.repo, (FAILURE_DAYS + 3) * day),
             Failures::default()
+        );
+    }
+
+    #[test]
+    fn the_failure_log_lists_each_call_once_and_the_proposals() {
+        let f = Fixture::new("failure-log");
+        let day = 86_400;
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c1"), (0xdef, "c2")], Some("s1"), day)
+            .unwrap();
+        f.store
+            .record_failures(&f.repo, &[(0xabc, "c1")], Some("s1"), day + 1)
+            .unwrap();
+        f.store.record_proposal(&f.repo, 0xabc, 4, 2 * day).unwrap();
+        let log = f.store.failure_log(&f.repo, 2 * day);
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0].session.as_deref(), Some("s1"));
+        assert_eq!(log[2].decision, Some(4));
+        assert_eq!(log[2].sig, 0xabc);
+        assert!(log[2].call.is_none());
+        assert!(
+            f.store
+                .failure_log(&f.repo, (FAILURE_DAYS + 3) * day)
+                .is_empty()
         );
     }
 

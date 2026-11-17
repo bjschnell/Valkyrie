@@ -95,6 +95,9 @@ pub struct Settings {
     /// The home screen says when a newer release is out (release builds; GitHub is
     /// asked at most once a day).
     pub updates: bool,
+    /// Which features get used is counted in `usage.jsonl` for `valk stats`
+    /// (backlog #176). Off by default; nothing leaves the machine.
+    pub analytics: bool,
     pub keys: Keymap,
 }
 
@@ -119,6 +122,7 @@ impl PartialEq for Settings {
                 s.proposals,
                 s.context,
                 s.updates,
+                s.analytics,
                 s.keys,
             )
         };
@@ -147,6 +151,7 @@ impl Default for Settings {
             noise: Noise::Chime,
             context: true,
             updates: true,
+            analytics: false,
             keys: Keymap::default(),
         }
     }
@@ -166,6 +171,7 @@ pub enum Field {
     Proposals,
     Context,
     Updates,
+    Analytics,
 }
 
 impl Field {
@@ -181,6 +187,7 @@ impl Field {
         Field::Proposals,
         Field::Context,
         Field::Updates,
+        Field::Analytics,
     ];
 
     pub fn label(self) -> &'static str {
@@ -196,6 +203,7 @@ impl Field {
             Field::Proposals => "Proposals",
             Field::Context => "Context",
             Field::Updates => "Updates",
+            Field::Analytics => "Analytics",
         }
     }
 }
@@ -217,6 +225,7 @@ impl Settings {
             ("proposals", "VALK_PROPOSALS"),
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
+            ("analytics", "VALK_ANALYTICS"),
         ] {
             if let Ok(value) = std::env::var(var) {
                 settings.set(key, &value);
@@ -252,6 +261,7 @@ impl Settings {
             Field::Proposals => kept.proposals = self.proposals,
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
+            Field::Analytics => kept.analytics = self.analytics,
         });
     }
 
@@ -292,6 +302,7 @@ impl Settings {
              proposals = {}    # an agent's new backlog proposal pops up as a toast\n\
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
+             analytics = {}    # count which features get used, for `valk stats` (stays on this machine)\n\
              # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
              {}",
             self.theme.name,
@@ -309,6 +320,7 @@ impl Settings {
             self.proposals,
             self.context,
             self.updates,
+            self.analytics,
             self.keys.to_toml(),
         )
     }
@@ -389,6 +401,11 @@ impl Settings {
                 "false" | "off" => self.updates = false,
                 _ => {}
             },
+            "analytics" => match value {
+                "true" | "on" => self.analytics = true,
+                "false" | "off" => self.analytics = false,
+                _ => {}
+            },
             _ => {
                 if let Some(action) = key.strip_prefix("keys.") {
                     self.keys.set(action, value);
@@ -443,6 +460,7 @@ impl Settings {
             Field::Proposals => on_off(self.proposals),
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
+            Field::Analytics => on_off(self.analytics),
         }
     }
 
@@ -472,6 +490,7 @@ impl Settings {
             }
             Field::Context => self.context = !self.context,
             Field::Updates => self.updates = !self.updates,
+            Field::Analytics => self.analytics = !self.analytics,
         }
     }
 }
@@ -523,7 +542,7 @@ fn step<'a, T>(all: &'a [T], current: &str, by: isize, name_of: impl Fn(&T) -> &
 }
 
 /// The keys `to_toml` writes, or drops when they're back on their defaults.
-const OURS: [&str; 11] = [
+const OURS: [&str; 12] = [
     "theme",
     "session_colors",
     "tabs",
@@ -535,6 +554,7 @@ const OURS: [&str; 11] = [
     "proposals",
     "context",
     "updates",
+    "analytics",
 ];
 
 /// The `key = value` lines of `text` the TUI doesn't own (`max_running`, a
@@ -568,6 +588,7 @@ mod tests {
         s.cycle(Field::Context, 1);
         s.cycle(Field::Updates, 1);
         s.cycle(Field::Proposals, 1);
+        s.cycle(Field::Analytics, 1);
         s.keys
             .bind(crate::keys::Action::Home, Some(crate::keys::Key::Alt(b'#')));
         let mut back = Settings::default();
@@ -584,6 +605,19 @@ mod tests {
         assert!(!back.themed_sessions);
         assert!(!back.context);
         assert!(!back.updates);
+        assert!(back.analytics);
+    }
+
+    #[test]
+    fn analytics_is_off_unless_turned_on_and_the_hooks_read_it_alike() {
+        let mut s = Settings::default();
+        assert!(!s.analytics);
+        assert!(!valkyrie_context::usage::enabled_in(&s.to_toml()));
+        s.apply("analytics = maybe\n");
+        assert!(!s.analytics);
+        s.apply("analytics = on\n");
+        assert!(s.analytics);
+        assert!(valkyrie_context::usage::enabled_in(&s.to_toml()));
     }
 
     #[test]
@@ -705,7 +739,8 @@ mod tests {
                 | Field::Desktop
                 | Field::Proposals
                 | Field::Context
-                | Field::Updates => 2,
+                | Field::Updates
+                | Field::Analytics => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);

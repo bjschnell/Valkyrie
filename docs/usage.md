@@ -9,6 +9,7 @@ valk ls                    # list sessions, with their state
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk notify "deploy done" --sound done   # a toast, ping and desktop notification
 valk pings                 # where agents stopped and waited on you, last 30 days
+valk stats                 # is Valkyrie helping? the agents week by week, this repo
 valk notes                 # findings agents left about this repo (unreviewed, never injected)
 valk notes search WORDS    # those notes and past sessions here: what failed, what fixed it
 valk digest                # what every agent did while you were gone, as markdown
@@ -17,6 +18,8 @@ valk sessions resume 1 -a  # pick the newest back up where it left off, and atta
 valk search WORDS          # the session where you (or an agent) said or did something
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v
+valk --remote box          # the TUI here, on box's sessions, over SSH
+valk remote web box        # box's web app in this machine's browser, paired
 ```
 
 ## One worktree per agent
@@ -35,6 +38,31 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
   branch is in `origin`'s default branch, with the branch, unless a session runs
   there, a backlog item owns it, it has no commits of its own, or it has changes.
   It lists the ignored files (`.env`, `target/`) that go with each.
+
+## Another machine over SSH
+
+`valk --remote HOST` opens the TUI here on HOST's sessions. HOST is anything
+`ssh` takes: `box`, `me@box`, an alias from `~/.ssh/config`. Each connection
+runs `ssh HOST valk bridge`, which starts HOST's daemon if need be. Pings, the
+clipboard, desktop notifications and links happen on the machine you sit at.
+`ls`, `new`, `kill`, `rename`, `send` and `dump` work the same way
+(`valk --remote box ls`). Anything that reads a repository or this machine's
+settings doesn't: run it there with `ssh box valk …`.
+
+- Both machines need the same release. If they differ, `valk --remote` says so;
+  `valk upgrade` on each keeps every session.
+- `ssh` may ask for a password before the TUI starts. After that the TUI reuses
+  that connection, and if it drops, reconnecting needs a key or your SSH agent.
+- `valk` is found on HOST's `PATH`, else in `~/.local/bin`.
+- Editing a doc and adding a phone (`p`) need HOST's own TUI: `ssh -t box valk`.
+
+The web app works the same way. `valk remote web HOST` starts HOST's `valk web`
+(as `valk setup web --local` there), forwards a local port to it, and opens it
+in your browser, paired. Each host keeps its own port (`valk remote ls`), so a
+browser stays paired with each. In the desktop app, the server icon at the foot
+of the rail switches hosts or connects to a new one, each in a window of its
+own. The desktop app can't ask for a password, so it needs your SSH key or
+agent.
 
 ## Agents drive their panes
 
@@ -74,6 +102,42 @@ The TUI has it too: `w` on the home screen. `w` steps through since you left,
 12 hours, today and 3 days, `t` switches between repository and day, `↩` opens a
 session that's still running and `y` copies the markdown. The web app has the
 same view behind the clock on the home screen, with a Copy button.
+
+## Is it helping?
+
+`valk stats` reads what Valkyrie already records on this machine and shows the
+current repository week by week, over the last 8 weeks (`--weeks N`, up to 13):
+
+- **Sessions:** how often agents stopped and waited on you (questions,
+  permissions, blocks, turn ends that asked you something), per session, and the
+  stops a policy kept going instead.
+- **Context:** the conversations that got the project's decisions, how many each
+  read whole, what searches found, failed tool calls, and how many of those
+  failed the same way as one a note or decision had already been written about.
+- **Supervisor:** steps offered, taken as offered, taken by a policy, and the
+  policy blocks you overrode.
+- **Backlog:** items you and the agents filed, shipped, and the median days from
+  filed to shipped, with a split by the agent and model each item last launched.
+
+On top, a trend sets the later half of the window against the earlier half and
+says better, worse or flat. The trend shows correlation, not cause: a better
+number can come from anything else that changed that month too.
+
+```sh
+valk stats                       # this repository, the last 8 weeks
+valk stats --repo ~/repos/app --weeks 4
+valk stats --json
+```
+
+**Which features get used** is counted only with **Analytics** on (the settings
+panel, `,`, or `analytics = on` in `settings.toml`; `VALK_ANALYTICS=on|off`
+overrides it). It's off by default. With it on, each `valk` subcommand, MCP tool
+call, and action taken in the TUI or web app (start, launch, review, search and so
+on, not typing or scrolling) adds a line to `~/.local/state/valkyrie/usage.jsonl`:
+when, where, the feature's name, and whether you or an agent used it. Arguments
+are never recorded, nothing leaves the machine, and lines older than 90 days are
+dropped. `valk stats` then lists what got used, by you and by agents, and the
+commands nobody ran.
 
 ## Picking up a session you closed
 

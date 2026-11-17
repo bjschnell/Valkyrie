@@ -19,6 +19,10 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
+    pub(crate) fn pid(&self) -> i32 {
+        self.pid
+    }
+
     pub(crate) fn of(stream: &valkyrie_proto::ipc::Stream) -> Option<Peer> {
         let pid = valkyrie_proto::ipc::peer_pid(stream)?;
         Some(Peer {
@@ -158,6 +162,10 @@ impl Registry {
         }
         let mut bridge = false;
         let mut desktop = false;
+        // The far end of another machine's `valk --remote`, come in over SSH.
+        let remote = (session.is_none() && seen_agent.is_none() && tty.is_none())
+            .then(|| foreground::remote_bridge(peer.pid))
+            .flatten();
         let agent = match &session {
             Some(s) => seen_agent.or_else(|| s.agent_behind()),
             None if seen_agent.is_some() => seen_agent,
@@ -167,6 +175,7 @@ impl Registry {
                 bridge = true;
                 None
             }
+            None if remote.is_some() => remote.clone().flatten(),
             None if foreground::is_desktop_app(peer.pid) => {
                 desktop = true;
                 Some("the desktop app".into())

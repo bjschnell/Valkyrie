@@ -8,7 +8,9 @@ mod mcp;
 mod notes;
 mod pane;
 mod pings;
+mod remote;
 mod service;
+mod stats;
 mod statusline;
 mod todo;
 mod tools;
@@ -36,6 +38,11 @@ struct Cli {
     /// Daemon socket path.
     #[arg(long, global = true, env = "VALK_SOCKET")]
     socket: Option<PathBuf>,
+    /// Another machine's Valkyrie, over SSH: the TUI, and `ls`, `new`, `kill`,
+    /// `rename`, `send` and `dump`, run against its daemon. HOST is anything `ssh`
+    /// takes (`box`, `me@box`, an alias from ~/.ssh/config).
+    #[arg(long, global = true, value_name = "HOST")]
+    remote: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -268,6 +275,19 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<WebCmd>,
     },
+    /// Other machines you reach over SSH: `valk --remote HOST` for the TUI,
+    /// `valk remote web HOST` for the web app.
+    #[command(subcommand)]
+    Remote(RemoteCmd),
+    /// The daemon's socket on stdin and stdout, for `valk --remote` on another
+    /// machine to reach over SSH. Starts the daemon if need be.
+    #[command(hide = true)]
+    Bridge {
+        /// The other machine's daemon says an agent runs it there: this one
+        /// treats it as one. Read by the daemon from the command line.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Print the screen a recorded transcript (`.raw`) leaves behind.
     Render {
         file: PathBuf,
@@ -341,6 +361,22 @@ enum Cmd {
         #[arg(long)]
         repeats: bool,
     },
+    /// Whether Valkyrie is helping, week by week: how often agents stopped on
+    /// you, what context reached them and whether learned failures came back, the
+    /// supervisor's steps, the backlog's pace, and (with Analytics on) which
+    /// features got used. Read from this machine's records; no daemon needed.
+    Stats {
+        /// How many weeks back to look.
+        #[arg(long, default_value_t = 8)]
+        weeks: usize,
+        /// The project to report on (any of its worktrees); the current one by
+        /// default.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Print JSON instead.
+        #[arg(long)]
+        json: bool,
+    },
     /// Whether the supervisor offers and takes steps on flagged sessions
     /// (ADR-0019): on (the default) or off. Off, the PR poll still flags them.
     /// Without one, shows which.
@@ -363,11 +399,30 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum RemoteCmd {
+    /// List your hosts, with the local address each one's web app gets.
+    Ls,
+    /// Remember a host, for the desktop app's host list and a port of its own.
+    Add { host: String },
+    /// Forget a host.
+    Rm { host: String },
+    /// Open a host's web app in this machine's browser, paired: its `valk web`
+    /// (started there if need be) on a local port of its own, through SSH, until
+    /// Ctrl-C.
+    Web { host: String },
+}
+
+#[derive(Subcommand)]
 enum WebCmd {
     /// Show a new pairing QR code, and a short code to type, for the running server.
     Pair,
     /// Open the web app in this machine's browser, paired.
-    Open,
+    Open {
+        /// Print the pairing link instead of opening it (`valk remote web` on
+        /// another machine reads it).
+        #[arg(long)]
+        print: bool,
+    },
     /// List paired devices.
     Devices,
     /// Unpair a device by name, or `all`.
@@ -526,8 +581,62 @@ fn main() -> Result<()> {
             .unwrap_or_else(valkyrie_proto::default_socket_path);
         statusline::run(&socket, then.as_deref());
     }
+    stats::record_cli();
+    if let Some(host) = cli.remote {
+        let host = valkyrie_proto::remote::Host::parse(&host)?;
+        return tokio::runtime::Runtime::new()?.block_on(run_remote(cli.cmd, host));
+    }
     let socket = valkyrie_proto::daemon_socket(cli.socket);
     tokio::runtime::Runtime::new()?.block_on(run(cli.cmd, socket))
+}
+
+/// The other machine `--remote` reaches, once its proxy listens.
+#[cfg(unix)]
+static REMOTE: std::sync::OnceLock<remote::Handle> = std::sync::OnceLock::new();
+
+/// `valk --remote HOST …`: the command, against HOST's daemon through a proxy
+/// socket (`remote::Proxy`). Only the TUI and the session commands: the rest
+/// read or write this machine's disk (a repo, settings, the docs folder).
+#[cfg(unix)]
+async fn run_remote(cmd: Option<Cmd>, host: valkyrie_proto::remote::Host) -> Result<()> {
+    match &cmd {
+        None
+        | Some(
+            Cmd::Attach { .. }
+            | Cmd::Ls
+            | Cmd::New { .. }
+            | Cmd::Kill { .. }
+            | Cmd::Rename { .. }
+            | Cmd::Send { .. }
+            | Cmd::Dump { .. },
+        ) => {}
+        Some(_) => bail!(
+            "--remote runs the TUI, ls, new, kill, rename, send and dump; for anything \
+             else, `ssh {host} valk …`"
+        ),
+    }
+    let agent = remote::local_agent().await;
+    let proxy = remote::Proxy::start(host.clone(), agent)?;
+    let _ = REMOTE.set(proxy.handle());
+    valkyrie_tui::set_remote(host.to_string());
+    let socket = proxy.socket.clone();
+    // The proxy lives as long as the command: its socket goes with it.
+    let result = run(cmd, socket).await;
+    drop(proxy);
+    result
+}
+
+#[cfg(windows)]
+async fn run_remote(_: Option<Cmd>, host: valkyrie_proto::remote::Host) -> Result<()> {
+    bail!("--remote isn't on Windows yet; `ssh -t {host} valk` does the same in a terminal")
+}
+
+/// Whether this process reaches another machine (`--remote`).
+fn is_remote() -> bool {
+    #[cfg(unix)]
+    return REMOTE.get().is_some();
+    #[cfg(windows)]
+    false
 }
 
 async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
@@ -636,10 +745,21 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     cols: 120,
                     rows: 40,
                 });
-            let cwd = Some(match cwd {
-                Some(dir) => valkyrie_proto::canonical(&dir)?,
-                None => std::env::current_dir()?,
-            });
+            // On another machine a directory is its path there, and none is its
+            // daemon's default.
+            let cwd = match cwd {
+                // Relative to what? Not this shell's directory, nor the daemon's.
+                Some(dir) if is_remote() && dir.is_relative() => {
+                    bail!(
+                        "--cwd on another machine is a full path there, not {}",
+                        dir.display()
+                    )
+                }
+                Some(dir) if is_remote() => Some(dir),
+                Some(dir) => Some(valkyrie_proto::canonical(&dir)?),
+                None if is_remote() => None,
+                None => Some(std::env::current_dir()?),
+            };
             // Before the spawn: an image program asks for the cell size at startup.
             if let Some((width, height)) = valkyrie_tui::cell_pixels() {
                 let _ = client.cell_pixels(None, width, height);
@@ -650,7 +770,12 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     cwd,
                     name,
                     size,
-                    env: valkyrie_proto::login_env(),
+                    // This login's agent socket and display mean nothing there.
+                    env: if is_remote() {
+                        Vec::new()
+                    } else {
+                        valkyrie_proto::login_env()
+                    },
                     worktree,
                     hidden: false,
                 })
@@ -749,13 +874,13 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 let url = valkyrie_web::public_url(url, listen);
                 valkyrie_web::print_pairing(&valkyrie_web::store()?, &url, true)
             }
-            Some(WebCmd::Open) => {
+            Some(WebCmd::Open { print }) => {
                 connect(&socket)
                     .await?
                     .0
                     .vouch("pairing this browser")
                     .await?;
-                open_web(&valkyrie_web::store()?, listen)
+                open_web(&valkyrie_web::store()?, listen, print)
             }
             Some(WebCmd::Devices) => {
                 for d in valkyrie_web::store()?.devices() {
@@ -784,6 +909,25 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 }
             }
         },
+        Some(Cmd::Bridge { .. }) => remote::bridge(&socket).await,
+        Some(Cmd::Remote(cmd)) => {
+            use valkyrie_proto::remote::Host;
+            match cmd {
+                RemoteCmd::Ls => remote::list(),
+                RemoteCmd::Add { host } => remote::add(&Host::parse(&host)?),
+                RemoteCmd::Rm { host } => remote::remove(&Host::parse(&host)?),
+                RemoteCmd::Web { host } => {
+                    let host = Host::parse(&host)?;
+                    // The other machine sees only `sshd`; this one knows who asks.
+                    connect(&socket)
+                        .await?
+                        .0
+                        .vouch("pairing a browser with another machine")
+                        .await?;
+                    remote::web(&host).await
+                }
+            }
+        }
         Some(Cmd::Kill { session }) => connect(&socket).await?.0.kill(session).await,
         Some(Cmd::Rename { session, name }) => {
             connect(&socket).await?.0.rename(session, name).await
@@ -1059,6 +1203,19 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Stats { weeks, repo, json }) => {
+            let weeks = weeks.clamp(1, 13);
+            let now = stats::now_secs();
+            let root = stats::root(repo.as_deref())?;
+            let input = stats::gather(&root, now, weeks)?;
+            let s = stats::compute(&input, now, weeks, &root.to_string_lossy());
+            if json {
+                println!("{}", stats::json(&s));
+            } else {
+                print!("{}", stats::report(&s));
+            }
+            Ok(())
+        }
         Some(Cmd::Digest { since, by, json }) => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
@@ -1152,7 +1309,11 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
 /// The TUI reads raw keys from stdin and draws to stdout, so both must be a terminal.
 /// `valk web open`: pairs this machine's browser with a fresh code and opens the
 /// app in it, on the local address (its own origin, so its own device).
-fn open_web(store: &valkyrie_web::auth::Store, listen: std::net::SocketAddr) -> Result<()> {
+fn open_web(
+    store: &valkyrie_web::auth::Store,
+    listen: std::net::SocketAddr,
+    print: bool,
+) -> Result<()> {
     let url = valkyrie_web::local_url(listen);
     let reachable = std::net::TcpStream::connect_timeout(
         &url.trim_start_matches("http://").parse()?,
@@ -1164,6 +1325,10 @@ fn open_web(store: &valkyrie_web::auth::Store, listen: std::net::SocketAddr) -> 
         "nothing answers at {url}; start it with `valk web` (or `valk setup web`)"
     );
     let link = valkyrie_web::pairing_link(store, &url)?;
+    if print {
+        println!("{link}");
+        return Ok(());
+    }
     let over_ssh =
         std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some();
     if !over_ssh && valkyrie_tui::open_link(&link).is_ok() {
@@ -1369,6 +1534,10 @@ fn alive(pid: u32) -> bool {
 }
 
 async fn connect(socket: &Path) -> Result<(Client, Pushes)> {
+    #[cfg(unix)]
+    if let Some(remote) = REMOTE.get() {
+        return remote.connect(socket).await;
+    }
     let conn = start_or_connect(socket).await?;
     match conn.0.hello().await {
         Ok(p) if p == valkyrie_proto::PROTOCOL => Ok(conn),
