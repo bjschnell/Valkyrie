@@ -48,8 +48,8 @@ impl Pairing {
 }
 
 impl Pairing {
-    /// A link that pairs a window with `host`'s web app, forwarded to `url`
-    /// here: as `link`, this machine's daemon vouches first, since the other
+    /// A link that pairs a window with `host`'s web app on `there`, forwarded
+    /// to `url` here: as `link`, this machine's daemon vouches first, since the other
     /// one sees only `sshd`. That machine makes the link, at a terminal of its
     /// own there (`remote::pairing_link`).
     pub async fn remote_link(
@@ -57,6 +57,7 @@ impl Pairing {
         socket: &Path,
         host: &valkyrie_proto::remote::Host,
         url: &str,
+        there: std::net::SocketAddr,
     ) -> Result<Option<String>> {
         let mut asked = self.asked.lock().await;
         if *asked {
@@ -67,7 +68,7 @@ impl Pairing {
         client.vouch(WHAT).await?;
         let auth = valkyrie_proto::remote::Auth::Never;
         Ok(Some(
-            valkyrie_proto::remote::pairing_link(host, auth, url).await?,
+            valkyrie_proto::remote::pairing_link(host, auth, url, there).await?,
         ))
     }
 }

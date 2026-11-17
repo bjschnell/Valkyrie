@@ -324,24 +324,25 @@ pub fn remove(host: &Host) -> Result<()> {
 pub async fn web(host: &Host) -> Result<()> {
     let known = remote::add_host(&remote::hosts_file(), host)?;
     let url = remote::local_url(known.port);
-    remote::start_web(host, Auth::Ask).await?;
-    let mut tunnel = tokio::process::Command::from(remote::tunnel(host, Auth::Ask, known.port))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .context("couldn't run ssh")?;
+    let there = remote::start_web(host, Auth::Ask).await?;
+    let mut tunnel =
+        tokio::process::Command::from(remote::tunnel(host, Auth::Ask, known.port, there))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("couldn't run ssh")?;
     tokio::select! {
         answered = remote::web_answers(known.port) => {
             answered.with_context(|| format!("{host}'s web app didn't answer on {url}"))?
         }
         status = tunnel.wait() => bail!(
-            "the tunnel to {host} closed ({}); is port {} free here?",
+            "the tunnel to {host}'s {there} closed ({}); is port {} free here?",
             status?,
             known.port
         ),
     }
-    let link = remote::pairing_link(host, Auth::Ask, &url).await?;
+    let link = remote::pairing_link(host, Auth::Ask, &url, there).await?;
     if valkyrie_tui::open_link(&link).is_ok() {
         println!("opened {host}'s web app in your browser");
         println!("  (if it didn't open: {link})");

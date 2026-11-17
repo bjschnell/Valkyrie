@@ -431,6 +431,9 @@ enum WebCmd {
     /// read a file only you can. The desktop app checks this before it trusts
     /// the port. Exits 0 when it is.
     Check,
+    /// Print where your latest `valk web` said it listens (`valk remote web` on
+    /// another machine reads it). Exits 1 when none has.
+    Address,
 }
 
 #[derive(Subcommand)]
@@ -894,6 +897,13 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 println!("unpaired {n} device(s)");
                 Ok(())
             }
+            Some(WebCmd::Address) => match valkyrie_web::listening() {
+                Some(addr) => {
+                    println!("{addr}");
+                    Ok(())
+                }
+                None => bail!("no valk web has said where it listens"),
+            },
             Some(WebCmd::Check) => {
                 use valkyrie_web::proof::Local;
                 match valkyrie_web::proof::check(listen).await? {

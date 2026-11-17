@@ -496,17 +496,15 @@ async fn paired(app: &AppHandle, label: &str) {
             .link(&shell.socket, &start::url(shell.addr))
             .await
     } else {
-        let remote = shell
-            .remotes
-            .lock()
-            .unwrap()
-            .get(label)
-            .map(|r| (r.tunnel.host.clone(), r.tunnel.port, Arc::clone(&r.pairing)));
-        let Some((host, port, pairing)) = remote else {
+        let remote = shell.remotes.lock().unwrap().get(label).map(|r| {
+            let t = &r.tunnel;
+            (t.host.clone(), t.port, t.there, Arc::clone(&r.pairing))
+        });
+        let Some((host, port, there, pairing)) = remote else {
             return;
         };
         pairing
-            .remote_link(&shell.socket, &host, &remote::local_url(port))
+            .remote_link(&shell.socket, &host, &remote::local_url(port), there)
             .await
     };
     match link {
