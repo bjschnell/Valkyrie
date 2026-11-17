@@ -140,6 +140,8 @@ impl Registry {
                 Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => url.clone(),
             };
             self.supervisor.lock().unwrap().no_pr.remove(&key);
+            // A merge this poll read may have left it conflicting (backlog #215).
+            let pr = self.foresee(&url, pr);
             // Watched only while it's the user's own and open, as flags are.
             let mine = matches!(&pr, Pr::Open { author, .. } if author == me);
             if mine || !matches!(pr, Pr::Open { .. }) {

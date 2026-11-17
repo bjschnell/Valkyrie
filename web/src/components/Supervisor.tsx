@@ -222,8 +222,9 @@ const STATE_LABEL: Record<WatchedPr["state"], string> = {
 };
 
 /**
- * What the supervisor watches (backlog #181): each open PR its poll read, red and
- * conflicting first, with why, and when the poll reads them next. Read again
+ * What the supervisor watches (backlog #181): each open PR its poll read, in the
+ * order to merge each repository's (backlog #215), with why and whom it collides
+ * with, and when the poll reads them next. Read again
  * every minute while the page is open, since the poll runs every five.
  */
 function Watching({ refresh }: { refresh: number }) {
@@ -255,11 +256,15 @@ function Watching({ refresh }: { refresh: number }) {
         <ol className="supervisor-log supervisor-watch">
           {watch.prs.map((p) => (
             <li key={p.url}>
-              <span className={`supervisor-state state-${p.state}`}>{STATE_LABEL[p.state]}</span>
+              <span className={`supervisor-state state-${p.state}`}>
+                {p.order !== undefined && <span className="supervisor-order">{p.order}.</span>}
+                {STATE_LABEL[p.state]}
+              </span>
               <span className="supervisor-said">
                 <a href={p.url} target="_blank" rel="noreferrer">
                   {p.detail}
                 </a>
+                {p.merge_note && <span className="supervisor-merge-note">{p.merge_note}</span>}
               </span>
               <span className="supervisor-repo">
                 {p.item !== undefined ? `#${p.item}` : p.branch} · {base(p.project)}

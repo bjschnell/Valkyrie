@@ -34,6 +34,31 @@ to review, never is). `valk decisions health` compares how often you leave
 those flags, and override the steps on them, with flags on backlog items, so
 you can tell whether it reaches too far.
 
+## Which PR to merge first
+
+With several agents working at once, several PRs go up together. After each
+poll the daemon checks which of a repository's open PRs would conflict with
+each other, by test-merging their branches locally (`git merge-tree`, which
+touches neither branch nor any checkout), and the supervisor page lists them
+in the order to merge them:
+
+- ready ones first (green, then pending, red), and one already conflicting
+  with main last, since it needs main merged in before anything;
+- a PR that collides with others goes after them, so only it has to merge
+  main in, not all of them;
+- then the oldest first.
+
+Each one says whom it collides with: "merge after #236: conflicts on
+src/foo.rs; then it needs the base merged in". It only suggests: merging stays
+yours.
+
+When you merge one, every PR it was found to collide with is flagged as
+conflicting right away, without waiting for GitHub to work it out again or for
+the next poll, and offered `merge-base` as above. With the
+`merge-base` / `conflicting` policy accepted, its agent is told to merge main
+in within seconds of your merge. Once GitHub settles the PR's mergeability its
+own answer wins, and the agent pushing a new head ends the prediction.
+
 ## When a PR merges
 
 The agent whose PR merged doesn't wait for you to tell it. If it's idle, it gets
@@ -79,7 +104,8 @@ latest thing it did, and opens the page (`s` from the keyboard).
   leaves or rejects in the TUI; ↩ on a build order opens it). They still show
   where they always did, on the session and the board, too.
 - **Watching:** each open pull request of yours the poll read on its last
-  pass, red and conflicting first, with why, and when it reads them next. One
+  pass, each repository's in the order to merge them (numbered when there are
+  two or more), with why, whom each collides with, and when it reads them next. One
   that merges, closes, or stops being read (its item shipped, its session
   ended) drops off.
 - **What it did:** the last 90 days, newest first: each step you answered, each

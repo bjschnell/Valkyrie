@@ -118,6 +118,10 @@ export interface WatchedPr {
   detail: string;
   /** Seconds since the epoch. */
   read_at: number;
+  /** Its place in the order to merge its repository's open PRs, from 1; absent when it's the only one (backlog #215). */
+  order?: number;
+  /** How it meets the repository's other open PRs: "merge after #236: conflicts on src/foo.rs". */
+  merge_note?: string;
 }
 
 /** How the away digest is grouped (backlog #105). */

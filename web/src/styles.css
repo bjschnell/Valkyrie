@@ -4483,6 +4483,20 @@ button.as-text {
   color: var(--done);
 }
 
+/* The order to merge a repository's PRs in, and whom each collides with (#215). */
+.supervisor-order {
+  margin-right: 0.6ch;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.supervisor-merge-note {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
 /* Navigation, instant pages and motion (#104) ------------------------------- */
 
 /* Instant pages: rows shaped like the list, shimmering until it lands. */

@@ -39,6 +39,15 @@ pub struct WatchedPr {
     pub detail: String,
     /// When it was read, seconds since the epoch.
     pub read_at: u64,
+    /// Where it comes in the order to merge its repository's open PRs, from 1;
+    /// `None` when it's the only one there (backlog #215; optional, so no
+    /// protocol bump).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    /// One line on how it meets the repository's other open PRs: "merge after
+    /// #236: both change src/foo.rs"; `None` when it collides with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_note: Option<String>,
 }
 
 /// An open pull request, as the poll read it.

@@ -1,6 +1,6 @@
 # ADR-0019: The supervisor watches work after its session stops, proposes the next step, and learns which steps to take on its own
 
-Status: accepted (2026-11-11); all seven phases shipped (#69, #75, #76, #77, #78, #80, #107, #121)
+Status: accepted (2026-11-11); phases 1–7 shipped (#69, #75, #76, #77, #78, #80, #107, #121); phase 8 (#215) in review
 Date: 2026-11-04
 Amends: DESIGN §7 (what the supervisor is), [ADR-0013](0013-learned-policies.md) §7 (what it leaves to the supervisor)
 
@@ -20,6 +20,7 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
    - **Unordered work** (phase 2): three or more items land in one repository within a day, or a note on an item names a build order (several `#N` in sequence). The user can also ask at any time with `valk todo plan [-C DIR]` (and a board button).
    - **Edit overlap** (phase 6): two live agent sessions in one repository have changed the same file, which would conflict once their pull requests meet. Each gets a one-line note, "overlaps session X on src/foo.rs", shown beside its state. Unlike the flags above it isn't *blocked* and doesn't wait for the session to go idle: the agents are still working, so it's a note on the row (`SessionInfo.overlap`), and it clears when the overlap does. It offers no step. The check is `git diff <merge-base with the default branch>` per session, plus untracked files, on the poll. Committed and uncommitted work both count, merging the default branch in doesn't, and two sessions in one checkout are never compared. A file watch would need a watcher per worktree and ignores for build output, and would still have to diff to learn what differs from the base.
    - **Item ready** (phase 4): an open item nobody's on whose blockers have all shipped or been dropped.
+   - **Merge order** (phase 8, backlog #215): two or more open PRs in one repository. Which pairs would conflict with each other is read with `git merge-tree` on their head commits, after each poll, and the page lists the PRs in the order to merge them, each with a line on whom it collides with. It flags nothing and offers no step: merging is the user's. When one of a colliding pair merges, the other is read as *conflicting* right away (§9).
 
    Both PR watchers ride the existing 5-minute poll, which already makes one `gh pr view` call per item. They share its rules: an item's sessions of this daemon boot (sessions with no item, or from before a restart, are found by their branch, §7), only `idle` or `done`, and a flag that was seen isn't raised again until the session goes idle again or the reason changes. A session still showing the poll's own flag takes the new reason (red CI, then main moves), and it shows as news again. A session blocked by anything else keeps what it shows.
 2. **The supervisor proposes one step per flag, from a fixed list.** For each flag, the supervisor picks one action. Each is a template with parameters, and no free text reaches an agent (as in ADR-0013 §3):
@@ -52,6 +53,8 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
    - **Every other agent session in the repository** is told on its next prompt that `<base>` moved, with the PR, and to merge it in before pushing if it touches the same code. It isn't woken. The conflict watcher (§1) still handles a branch that actually conflicts.
    - Each session hears about a PR once: an item ships once, and a merged PR read by the branch watch is news only if this daemon saw it open first and the `gh` user opened it. A PR that merged before anyone was watching, or a colleague's PR checked out for review, wakes nobody. Each notice is a `merged` line (`pr`, `typed`) in the session's event log.
 
+9. **A merge flags the PRs it collides with at once** (backlog #215, decided 2026-11-16). Several agents working at once leave several PRs up, and which to merge first, and which collide, showed only after a merge, once GitHub had worked each PR's mergeability out again and a later poll read it. The merge order (§1) knows which PRs collide before anything merges. It's worked out by rules, not a model (ready first; fewer collisions first; then the oldest), since `git merge-tree` already answers the hard part. When the poll reads a PR merged, each one it collides with is read as conflicting with the base until GitHub settles that PR's mergeability, its head moves, or an hour passes, and the poll reads them all again at once. The flag and the `merge-base` step are §1 and §2's, unchanged, so an accepted `merge-base` policy types the step within seconds of the merge. GitHub's settled read always wins over the prediction.
+
 ## Phases
 1. **The conflict watcher** (backlog #69): `gh pr view` also reads `mergeable,baseRefName`, and the poll flags *conflicting* next to *red*.
 2. **Build order and proposals** (backlog #75, #76): the *unordered work* watcher, `valk todo plan` and `order`, which is the case the user hits most. A flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
@@ -62,6 +65,8 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
 6. **Agents editing the same files** (phase 6, backlog #107): the overlap watcher, `SessionInfo.overlap` (protocol 31) and its note in the TUI and web session lists.
 
 7. **Merged PRs tell their agents** (backlog #121): the wrap-up typed into the PR's idle sessions and the next-prompt news for the repository's other agents (§8).
+
+8. **Merge order** (backlog #215): the pairwise `git merge-tree` read, the order on the supervisor page, and the fast flag after a merge (§9).
 
 ## Consequences
 - **No standing supervisor session.** No agent sits in a loop reading the queue. It's watchers and a picker in the daemon, plus a few model calls on flags. That's cheaper, can be audited, and can't drift, at the price of DESIGN §7's open-ended "dispatch tasks" being only what the action list names. A case that needs more joins the list as a new template, as policies do.

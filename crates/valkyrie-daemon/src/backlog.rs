@@ -628,6 +628,8 @@ impl Registry {
             let pr = tokio::task::spawn_blocking(move || ask(&dir, &asked))
                 .await
                 .unwrap_or(Pr::Unknown);
+            // A merge this poll read may have left it conflicting (backlog #215).
+            let pr = self.foresee(&url, pr);
             let id = item.id;
             self.watching.lock().unwrap().saw(
                 &url,
