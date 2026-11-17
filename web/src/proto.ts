@@ -469,8 +469,8 @@ export interface SpawnSpec {
 }
 
 /** A backlog item (DESIGN §8.12): written down for later, it can start an agent on itself. */
-export type ItemKind = "bug" | "feature" | "chore";
-export const ITEM_KINDS: ItemKind[] = ["bug", "feature", "chore"];
+export type ItemKind = "bug" | "feature" | "chore" | "spike";
+export const ITEM_KINDS: ItemKind[] = ["bug", "feature", "chore", "spike"];
 export type ItemStatus = "open" | "shipped" | "dropped" | "proposed";
 /** How soon: p0 first. An item from an older daemon has none, which is p2. */
 export type Priority = "p0" | "p1" | "p2" | "p3";

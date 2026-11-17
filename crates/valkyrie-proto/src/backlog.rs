@@ -1,4 +1,4 @@
-//! The backlog (DESIGN §8.12): bugs, features and chores written down for later,
+//! The backlog (DESIGN §8.12): bugs, features, chores and spikes written down for later,
 //! each of which can start an agent session on itself.
 
 use crate::SessionId;
@@ -13,16 +13,20 @@ pub enum ItemKind {
     #[default]
     Feature,
     Chore,
+    /// Exploration: the agent investigates and writes up what it found, no
+    /// production code.
+    Spike,
 }
 
 impl ItemKind {
-    pub const ALL: [ItemKind; 3] = [Self::Bug, Self::Feature, Self::Chore];
+    pub const ALL: [ItemKind; 4] = [Self::Bug, Self::Feature, Self::Chore, Self::Spike];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Bug => "bug",
             Self::Feature => "feature",
             Self::Chore => "chore",
+            Self::Spike => "spike",
         }
     }
 

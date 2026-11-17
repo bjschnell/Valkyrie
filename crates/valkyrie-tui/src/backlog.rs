@@ -225,7 +225,7 @@ impl Repo {
     }
 }
 
-/// The kind filter after `kind` (`t`): every kind, then bug, feature, chore, and
+/// The kind filter after `kind` (`t`): every kind, then bug, feature, chore, spike, and
 /// round again.
 pub(crate) fn next_kind(kind: Option<ItemKind>) -> Option<ItemKind> {
     match kind {
@@ -1561,6 +1561,7 @@ fn kind_color(kind: ItemKind, t: &Theme) -> style::Color {
         ItemKind::Bug => t.blocked,
         ItemKind::Feature => t.accent,
         ItemKind::Chore => t.muted,
+        ItemKind::Spike => t.needs,
     }
 }
 
@@ -2747,7 +2748,7 @@ mod tests {
             ..Page::default()
         };
         let mut seen = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..5 {
             assert!(
                 page.keys(b"t", &[], &[], 7).is_empty(),
                 "t is the page's own"
@@ -2760,6 +2761,7 @@ mod tests {
                 Some(ItemKind::Bug),
                 Some(ItemKind::Feature),
                 Some(ItemKind::Chore),
+                Some(ItemKind::Spike),
                 None
             ]
         );
