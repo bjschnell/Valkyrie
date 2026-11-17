@@ -309,7 +309,8 @@ enum Cmd {
     },
     /// What every agent did while you were gone, one line a session: shipped,
     /// stuck, abandoned, waiting on PR/CI. Prints markdown to paste as a standup.
-    Digest {
+    #[command(alias = "digest")]
+    Summary {
         /// Where to start instead of when you were last gone: 90m, 12h, 3d, today,
         /// yesterday, 2026-11-10 or "2026-11-10 09:00" (local time).
         #[arg(long)]
@@ -1226,7 +1227,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Digest { since, by, json }) => {
+        Some(Cmd::Summary { since, by, json }) => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u64;
@@ -1713,5 +1714,16 @@ mod tests {
             b"a\x1b[B\r\x1d\\"
         );
         assert!(super::unescape(r"\q").is_err());
+    }
+
+    /// Backlog #199: the away page is called Summary; `digest` stays as an alias.
+    #[test]
+    fn summary_is_the_command_and_digest_still_works() {
+        use clap::Parser;
+        for word in ["summary", "digest"] {
+            let cli = super::Cli::try_parse_from(["valk", word, "--by", "day"])
+                .unwrap_or_else(|e| panic!("{word}: {e}"));
+            assert!(matches!(cli.cmd, Some(super::Cmd::Summary { .. })), "{word}");
+        }
     }
 }
