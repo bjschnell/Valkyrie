@@ -112,7 +112,13 @@ impl ItemStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     /// Numbered from 1 across every project, so `valk todo launch 12` needs no folder.
+    /// The key everything stores and sends; what people read and type is `number`.
     pub id: u32,
+    /// The number within its repository, from 1: the `#N` a person sees. Items with
+    /// no repository share one count. 0 only on an item written before there were
+    /// numbers; the backlog fills those in when it loads them.
+    #[serde(default)]
+    pub number: u32,
     pub title: String,
     #[serde(default)]
     pub body: String,
