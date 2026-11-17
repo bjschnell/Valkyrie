@@ -1782,6 +1782,7 @@ mod tests {
             priority: Default::default(),
             blocked_by: Vec::new(),
             id,
+            number: id,
             title: format!("item {id}"),
             body: String::new(),
             kind: ItemKind::Bug,
