@@ -1,14 +1,17 @@
 //! The desktop app (ADR-0020): a native window around the web app that `valk web`
 //! serves on this machine, a tray icon with the number of sessions that need you,
-//! and native notifications for them. Everything inside the window is the web
-//! app; what the window stands on is this crate's library.
+//! and native notifications for them. Other machines' web apps open in windows
+//! of their own, each through an SSH tunnel (backlog #179). Everything inside a
+//! window is the web app; what the windows stand on is this crate's library.
 
 // No console window beside the app on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
@@ -18,11 +21,13 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKin
 use tauri_plugin_notification::NotificationExt as _;
 use tauri_plugin_opener::OpenerExt as _;
 use tauri_plugin_updater::UpdaterExt as _;
+use valkyrie_desktop::hosts::{self, Signal, Tunnel};
 use valkyrie_desktop::install;
 use valkyrie_desktop::pair::Pairing;
 use valkyrie_desktop::start::{self, Valk};
 use valkyrie_desktop::watch::{self, Event};
 use valkyrie_proto::SessionId;
+use valkyrie_proto::remote::{self, Host};
 
 const WINDOW: &str = "main";
 const TRAY: &str = "valkyrie";
@@ -31,10 +36,13 @@ const NAME: &str = "Valkyrie";
 /// Set before the page's own scripts run: the page then leaves notifications to
 /// the app, and tells it when it isn't paired (`PAIR_SIGNAL`).
 const PAGE_FLAG: &str = "window.__VALK_DESKTOP__ = true;";
-/// Where the page goes to say it isn't paired. Never loaded: the window's
-/// navigation is where the app hears of it. A page can say only this, so it has
-/// no way to call into the app.
+/// Where the page goes to say it isn't paired, or to switch hosts
+/// (`hosts::signal`). Never loaded: the window's navigation is where the app
+/// hears of it. A page can say only these, so it has no way to call into the
+/// app.
 const PAIR_SIGNAL: &str = "valk-desktop";
+/// Another machine's window is `host-PORT`, after the local port its tunnel has.
+const HOST_WINDOW: &str = "host-";
 
 /// What the launch knows once `valk web` answered.
 struct Shell {
@@ -43,6 +51,17 @@ struct Shell {
     pairing: Pairing,
     /// The pairing dialog is up: a page that asks again gets no second one.
     asking: AtomicBool,
+    /// Other machines' windows, by label, and the tunnels they stand on.
+    remotes: Mutex<HashMap<String, Remote>>,
+    /// Hosts being connected to: a second ask waits for the first.
+    connecting: Mutex<HashSet<String>>,
+}
+
+/// Another machine's window.
+struct Remote {
+    tunnel: Tunnel,
+    /// Its own one try a launch, as the local window's.
+    pairing: Arc<Pairing>,
 }
 
 fn main() {
@@ -112,6 +131,12 @@ fn main() {
         .expect("the desktop app failed to start")
         // Closing the window leaves the tray, its count and its notifications.
         .run(|app, event| {
+            // The tunnels go with the app: `ssh -N` would outlive it.
+            if let tauri::RunEvent::Exit = event
+                && let Some(shell) = app.try_state::<Shell>()
+            {
+                shell.remotes.lock().unwrap().clear();
+            }
             // A click on the Dock icon, with the window closed.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
@@ -146,10 +171,12 @@ fn started(app: AppHandle, addr: SocketAddr) {
         socket: socket.clone(),
         pairing: Pairing::new(),
         asking: AtomicBool::new(false),
+        remotes: Mutex::default(),
+        connecting: Mutex::default(),
     });
     let opener = app.clone();
     let opened = app.run_on_main_thread(move || {
-        if let Err(e) = window(&opener, addr) {
+        if let Err(e) = window(&opener, WINDOW, addr, None) {
             fail(&opener, &format!("Couldn't open the window: {e}"));
         }
     });
@@ -169,18 +196,37 @@ fn started(app: AppHandle, addr: SocketAddr) {
     });
 }
 
-fn window(app: &AppHandle, addr: SocketAddr) -> tauri::Result<()> {
+/// A window on the web app at `addr`: this computer's (`WINDOW`), or `host`'s
+/// through its tunnel.
+fn window(
+    app: &AppHandle,
+    label: &str,
+    addr: SocketAddr,
+    host: Option<&Host>,
+) -> tauri::Result<()> {
     let url: Url = start::url(addr).parse().expect("a local http address");
     let (navigator, opener) = (app.clone(), app.clone());
-    let window = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
-        .title(NAME)
+    let at = label.to_owned();
+    let title = match host {
+        Some(host) => format!("{NAME} · {host}"),
+        None => NAME.to_owned(),
+    };
+    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        .title(title)
         .inner_size(1280.0, 860.0)
         .min_inner_size(420.0, 480.0)
         .initialization_script(PAGE_FLAG)
+        .initialization_script(hosts::page_script(host, &known_hosts()))
         .on_navigation(move |to| {
             if to.scheme() == PAIR_SIGNAL {
-                tracing::info!("the page isn't paired; asking at the window");
-                ask_to_pair(&navigator);
+                match hosts::signal(to.as_str()) {
+                    Some(Signal::Pair) => {
+                        tracing::info!(window = at, "the page isn't paired; asking at the window");
+                        ask_to_pair(&navigator, &at);
+                    }
+                    Some(Signal::Host(host)) => switch(&navigator, host),
+                    None => tracing::warn!("the page asked for something unknown"),
+                }
                 return false;
             }
             if ours(to, addr) {
@@ -198,13 +244,157 @@ fn window(app: &AppHandle, addr: SocketAddr) -> tauri::Result<()> {
         })
         .build()?;
     let hidden = window.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
+    let remote = host.is_some();
+    let closer = app.clone();
+    let label = label.to_owned();
+    window.on_window_event(move |event| match event {
+        // This computer's window hides, for the tray to bring back.
+        WindowEvent::CloseRequested { api, .. } if !remote => {
             api.prevent_close();
             let _ = hidden.hide();
         }
+        // Another machine's closes, and its tunnel with it.
+        WindowEvent::Destroyed if remote => {
+            if let Some(shell) = closer.try_state::<Shell>() {
+                shell.remotes.lock().unwrap().remove(&label);
+            }
+        }
+        _ => {}
     });
     Ok(())
+}
+
+/// The hosts file as it is now; unreadable is empty, and said.
+fn known_hosts() -> Vec<remote::Known> {
+    remote::hosts(&remote::hosts_file()).unwrap_or_else(|e| {
+        tracing::warn!("hosts: {e:#}");
+        Vec::new()
+    })
+}
+
+/// The page asked for a host: this computer's window, or `host`'s, connecting
+/// first if need be. A host that isn't one of yours yet is a person's to add.
+fn switch(app: &AppHandle, host: Option<Host>) {
+    let Some(host) = host else {
+        return show(app);
+    };
+    if known_hosts().iter().any(|k| k.host == host) {
+        return connect(app, host);
+    }
+    let app = app.clone();
+    app.clone()
+        .dialog()
+        .message(format!(
+            "Connect to {host} over SSH?\n\n\
+             Valkyrie starts its web app there if it isn't running, and opens it in \
+             a window of its own. It's added to your hosts (`valk remote ls`). Your \
+             SSH key or agent must get in without a password."
+        ))
+        .title(NAME)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Connect".into(),
+            "Cancel".into(),
+        ))
+        .show(move |yes| {
+            if yes {
+                connect(&app, host);
+            }
+        });
+}
+
+/// Brings up `host`'s window, opening its tunnel and the window first if need
+/// be. A tunnel that died (the laptop slept, the network went) is opened again.
+fn connect(app: &AppHandle, host: Host) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    let known = match remote::add_host(&remote::hosts_file(), &host) {
+        Ok(known) => known,
+        Err(e) => return say(app, &format!("Couldn't add {host}: {e:#}")),
+    };
+    let label = format!("{HOST_WINDOW}{}", known.port);
+    {
+        let mut remotes = shell.remotes.lock().unwrap();
+        let alive = remotes.get_mut(&label).map(|r| r.tunnel.alive());
+        match alive {
+            Some(true) => {
+                drop(remotes);
+                return show_window(app, &label);
+            }
+            Some(false) => {
+                remotes.remove(&label);
+                drop(remotes);
+                if let Some(old) = app.get_webview_window(&label) {
+                    let _ = old.destroy();
+                }
+            }
+            None => {}
+        }
+    }
+    if !shell.connecting.lock().unwrap().insert(label.clone()) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tracing::info!(%host, "connecting");
+        let opened = Tunnel::open(&host).await;
+        let Some(shell) = app.try_state::<Shell>() else {
+            return;
+        };
+        shell.connecting.lock().unwrap().remove(&label);
+        let tunnel = match opened {
+            Ok(tunnel) => tunnel,
+            Err(e) => {
+                tracing::warn!(%host, "connecting: {e:#}");
+                return fail_soft(&app, &format!("Couldn't connect to {host}: {e:#}"));
+            }
+        };
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, tunnel.port));
+        shell.remotes.lock().unwrap().insert(
+            label.clone(),
+            Remote {
+                tunnel,
+                pairing: Arc::new(Pairing::new()),
+            },
+        );
+        let opener = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(e) = window(&opener, &label, addr, Some(&host)) {
+                return fail_soft(&opener, &format!("Couldn't open {host}'s window: {e}"));
+            }
+            tell_hosts(&opener);
+        });
+    });
+}
+
+/// Every window's host switcher learns the hosts as they are now.
+fn tell_hosts(app: &AppHandle) {
+    let known = known_hosts();
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    let remotes = shell.remotes.lock().unwrap();
+    for (label, window) in app.webview_windows() {
+        let host = remotes.get(&label).map(|r| &r.tunnel.host);
+        let _ = window.eval(hosts::page_script(host, &known));
+    }
+}
+
+fn show_window(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Something went wrong that leaves the app as it was: say so, and carry on.
+fn fail_soft(app: &AppHandle, why: &str) {
+    app.dialog()
+        .message(why)
+        .title(NAME)
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
 }
 
 /// Hands a web link to the browser. Only a web link: any other scheme would go
@@ -244,24 +434,41 @@ fn show(app: &AppHandle) {
     }
 }
 
-/// The page says it isn't paired. Pairing is a person's to allow, and pressing
-/// Pair here is how: only then is the daemon asked, and it answers a launch once
-/// (`Pairing`).
-fn ask_to_pair(app: &AppHandle) {
+/// The page in window `label` says it isn't paired. Pairing is a person's to
+/// allow, and pressing Pair here is how: only then is this machine's daemon
+/// asked, and it answers a launch once per window (`Pairing`).
+fn ask_to_pair(app: &AppHandle, label: &str) {
     let Some(shell) = app.try_state::<Shell>() else {
         return;
     };
+    let host = shell
+        .remotes
+        .lock()
+        .unwrap()
+        .get(label)
+        .map(|r| r.tunnel.host.clone());
+    if label != WINDOW && host.is_none() {
+        return;
+    }
     if shell.asking.swap(true, Ordering::SeqCst) {
         return;
     }
+    let message = match &host {
+        None => "Pair this app with Valkyrie on this computer?\n\n\
+                 It can then do what you do in a terminal: start agents, answer them \
+                 and type into their sessions."
+            .to_owned(),
+        Some(host) => format!(
+            "Pair this app with Valkyrie on {host}?\n\n\
+             It can then do there what you do in a terminal over SSH: start agents, \
+             answer them and type into their sessions."
+        ),
+    };
     let app = app.clone();
+    let label = label.to_owned();
     app.clone()
         .dialog()
-        .message(
-            "Pair this app with Valkyrie on this computer?\n\n\
-             It can then do what you do in a terminal: start agents, answer them \
-             and type into their sessions.",
-        )
+        .message(message)
         .title(NAME)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Pair".into(),
@@ -270,7 +477,7 @@ fn ask_to_pair(app: &AppHandle) {
         .show(move |pair| {
             tauri::async_runtime::spawn(async move {
                 if pair {
-                    paired(&app).await;
+                    paired(&app, &label).await;
                 }
                 if let Some(shell) = app.try_state::<Shell>() {
                     shell.asking.store(false, Ordering::SeqCst);
@@ -279,18 +486,36 @@ fn ask_to_pair(app: &AppHandle) {
         });
 }
 
-async fn paired(app: &AppHandle) {
+async fn paired(app: &AppHandle, label: &str) {
     let Some(shell) = app.try_state::<Shell>() else {
         return;
     };
-    let link = shell
-        .pairing
-        .link(&shell.socket, &start::url(shell.addr))
-        .await;
+    let link = if label == WINDOW {
+        shell
+            .pairing
+            .link(&shell.socket, &start::url(shell.addr))
+            .await
+    } else {
+        let remote = shell
+            .remotes
+            .lock()
+            .unwrap()
+            .get(label)
+            .map(|r| (r.tunnel.host.clone(), r.tunnel.port, Arc::clone(&r.pairing)));
+        let Some((host, port, pairing)) = remote else {
+            return;
+        };
+        pairing
+            .remote_link(&shell.socket, &host, &remote::local_url(port))
+            .await
+    };
     match link {
         Ok(Some(link)) => {
-            tracing::info!("the daemon vouched; loading the pairing link");
-            let Some(window) = app.get_webview_window(WINDOW) else {
+            tracing::info!(
+                window = label,
+                "the daemon vouched; loading the pairing link"
+            );
+            let Some(window) = app.get_webview_window(label) else {
                 return;
             };
             // The page reads the code as it loads, so it loads again with it.

@@ -18,6 +18,8 @@ valk sessions resume 1 -a  # pick the newest back up where it left off, and atta
 valk search WORDS          # the session where you (or an agent) said or did something
 valk setup codex           # once, if you use Codex: adds Valkyrie's hooks
 valk setup alias           # optional: type v instead of valk, if nothing else is called v
+valk --remote box          # the TUI here, on box's sessions, over SSH
+valk remote web box        # box's web app in this machine's browser, paired
 ```
 
 ## One worktree per agent
@@ -36,6 +38,31 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
   branch is in `origin`'s default branch, with the branch, unless a session runs
   there, a backlog item owns it, it has no commits of its own, or it has changes.
   It lists the ignored files (`.env`, `target/`) that go with each.
+
+## Another machine over SSH
+
+`valk --remote HOST` opens the TUI here on HOST's sessions. HOST is anything
+`ssh` takes: `box`, `me@box`, an alias from `~/.ssh/config`. Each connection
+runs `ssh HOST valk bridge`, which starts HOST's daemon if need be. Pings, the
+clipboard, desktop notifications and links happen on the machine you sit at.
+`ls`, `new`, `kill`, `rename`, `send` and `dump` work the same way
+(`valk --remote box ls`). Anything that reads a repository or this machine's
+settings doesn't: run it there with `ssh box valk …`.
+
+- Both machines need the same release. If they differ, `valk --remote` says so;
+  `valk upgrade` on each keeps every session.
+- `ssh` may ask for a password before the TUI starts. After that the TUI reuses
+  that connection, and if it drops, reconnecting needs a key or your SSH agent.
+- `valk` is found on HOST's `PATH`, else in `~/.local/bin`.
+- Editing a doc and adding a phone (`p`) need HOST's own TUI: `ssh -t box valk`.
+
+The web app works the same way. `valk remote web HOST` starts HOST's `valk web`
+(as `valk setup web --local` there), forwards a local port to it, and opens it
+in your browser, paired. Each host keeps its own port (`valk remote ls`), so a
+browser stays paired with each. In the desktop app, the server icon at the foot
+of the rail switches hosts or connects to a new one, each in a window of its
+own. The desktop app can't ask for a password, so it needs your SSH key or
+agent.
 
 ## Agents drive their panes
 

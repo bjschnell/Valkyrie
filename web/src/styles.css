@@ -4639,6 +4639,24 @@ html.with-rail body {
   flex: 1;
 }
 
+/* The host this window shows (#179): a name, cut to the rail's width. */
+.rail-host .nav-label {
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hosts-add {
+  margin-top: var(--space-3);
+}
+
+.hosts-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
 /* Phone: a tab bar at the thumb on the top pages, More for the rest. */
 html.with-tabs .page {
   padding-bottom: calc(64px + env(safe-area-inset-bottom));

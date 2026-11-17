@@ -21,6 +21,8 @@ const WEEK: u64 = 7 * 86_400;
 /// Subcommands that are servers or plumbing rather than something you use.
 const NOT_FEATURES: &[&str] = &[
     "daemon",
+    // Runs once per `valk --remote` connection, on the far side: plumbing.
+    "bridge",
     "hook",
     "context-hook",
     "statusline",

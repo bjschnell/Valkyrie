@@ -16,6 +16,7 @@ pub mod layout;
 pub mod notes;
 pub mod pastes;
 pub mod quota;
+pub mod remote;
 pub mod screen;
 pub mod search;
 pub mod supervisor;

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { prefetch } from "../cache";
 import { allDocs, pastSessions, supervisorLog, useApp } from "../store";
 import { fetchMemory } from "./DecisionList";
+import { HostButton } from "./Hosts";
 import { Clock, Dots, Eye, Gear, List, Page, Pin, Plus, Rewind, Search, Tray } from "./icons";
 
 export type NavKey = "inbox" | "backlog" | "docs" | "memory" | "search" | "digest" | "past" | "supervisor" | "settings";
@@ -99,6 +100,7 @@ export function Rail({ at }: { at: NavKey | null }) {
         <NavButton key={k} d={DESTS[k]} at={at} badge={badges[k]} className="rail-item" />
       ))}
       <div className="rail-gap" />
+      <HostButton />
       <NavButton d={DESTS.settings} at={at} className="rail-item" />
     </nav>
   );
