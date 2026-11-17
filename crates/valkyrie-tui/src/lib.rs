@@ -2750,7 +2750,7 @@ impl App {
                     return;
                 }
                 digest::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
-                    Ok(()) => self.say("copied the digest as markdown".into()),
+                    Ok(()) => self.say("copied the summary as markdown".into()),
                     Err(e) => self.say(format!("couldn't copy: {e}")),
                 },
                 digest::Do::Say(text) => self.say(text),
@@ -5916,7 +5916,7 @@ fn footer_line(
         ("n", "new"),
         ("b", "backlog"),
         ("s", "supervisor"),
-        ("w", "digest"),
+        ("w", "summary"),
         ("h", "history"),
         ("D", "docs"),
         (",", "settings"),

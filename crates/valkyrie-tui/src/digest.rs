@@ -1,6 +1,6 @@
 //! The away digest (backlog #105, DESIGN §8.19): `w` on the home screen. What
 //! every agent did while you were gone, a few lines a session under its
-//! repository or day, as `valk digest` and the web app show it. Read-only: `↩`
+//! repository or day, as `valk summary` and the web app show it. Read-only: `↩`
 //! opens a session still running, `y` copies the digest as markdown.
 
 use crate::backlog::fit_hints;
@@ -218,7 +218,7 @@ impl Page {
         match (&self.digest, &self.failed) {
             (_, Some(e)) => top.push(
                 format!(
-                    " Couldn't load the digest: {} · r tries again",
+                    " Couldn't load the summary: {} · r tries again",
                     fit(e, inner.saturating_sub(16))
                 )
                 .fg(t.needs)
@@ -324,7 +324,7 @@ impl Page {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(style::Style::new().fg(t.accent))
-            .title(" Away digest ".fg(t.fg).bold())
+            .title(" Away summary ".fg(t.fg).bold())
             .title_bottom(Line::from(hints).centered())
             .style(style::Style::new().bg(t.panel).fg(t.fg));
         frame.render_widget(Paragraph::new(lines).block(block), rect);
@@ -379,7 +379,7 @@ mod tests {
             away: true,
             by: DigestGroup::Repo,
             entries,
-            markdown: "# Away digest\n".into(),
+            markdown: "# Away summary\n".into(),
         }
     }
 
@@ -402,7 +402,7 @@ mod tests {
             page.keys(b"\r"),
             vec![Do::Say("that session has ended".into())]
         );
-        assert_eq!(page.keys(b"y"), vec![Do::Copy("# Away digest\n".into())]);
+        assert_eq!(page.keys(b"y"), vec![Do::Copy("# Away summary\n".into())]);
         assert_eq!(page.keys(b"w"), vec![Do::Load]);
         assert_eq!(page.win, Window::Hours12);
         assert_eq!(page.keys(b"t"), vec![Do::Load]);
@@ -445,7 +445,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         for want in [
-            "Away digest",
+            "Away summary",
             "valkyrie",
             "stuck",
             "work a",
