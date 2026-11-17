@@ -365,6 +365,7 @@ impl Registry {
                     id: book.next_id(),
                     project: project.clone(),
                     item: id,
+                    number: item.number,
                     title: item.title.clone(),
                     agent,
                     model,

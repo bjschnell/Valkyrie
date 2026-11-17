@@ -446,6 +446,9 @@ pub struct LaunchOffer {
     /// The repository's root.
     pub project: PathBuf,
     pub item: u32,
+    /// The item's number in its repository, as people know it.
+    #[serde(default)]
+    pub number: u32,
     /// The item's title, for a push or a banner.
     pub title: String,
     /// The agent and model it starts on: the item's last launch, else claude on
@@ -477,6 +480,9 @@ pub struct OrderApplied {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShippedItem {
     pub id: u32,
+    /// Its number in its repository.
+    #[serde(default)]
+    pub number: u32,
     pub title: String,
     /// The branch judged, and whether a take set it rather than a launch.
     #[serde(default)]
@@ -498,6 +504,9 @@ pub struct ShippedItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptItem {
     pub id: u32,
+    /// Its number in its repository; 0 for an item that's gone.
+    #[serde(default)]
+    pub number: u32,
     pub title: String,
     /// `not merged`, `branch fix/x not found`, `no commits of its own`, …
     pub why: String,

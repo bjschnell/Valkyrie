@@ -3,7 +3,7 @@ import { newProposals, proposalToast } from "./proposals";
 import type { Item } from "../proto";
 
 const item = (id: number, status: string, by: string, extra: Partial<Item> = {}): Item =>
-  ({ id, title: `item ${id}`, status, by, created: 0, updated: 0, ...extra }) as unknown as Item;
+  ({ id, number: id, title: `item ${id}`, status, by, created: 0, updated: 0, ...extra }) as unknown as Item;
 
 describe("newProposals", () => {
   it("is news only for a proposal that arrives after connecting, once", () => {

@@ -91,7 +91,7 @@ export function entries(s: Sources): Entry[] {
     out.push({
       key: `accept-item-${i.id}`,
       group: "Actions",
-      label: `Accept #${i.id}: ${i.title}`,
+      label: `Accept #${i.number}: ${i.title}`,
       sub: `${i.kind} · by ${i.by}`,
       also: "proposal backlog item",
       do: { item: i.id },
@@ -124,7 +124,7 @@ export function entries(s: Sources): Entry[] {
     out.push({
       key: `item-${i.id}`,
       group: "Backlog",
-      label: `#${i.id} ${i.title}`,
+      label: `#${i.number} ${i.title}`,
       sub: [i.kind, i.status === "proposed" ? "proposed" : null, i.project && base(i.project)].filter(Boolean).join(" · "),
       do: { go: `#/backlog/${i.id}` },
     });

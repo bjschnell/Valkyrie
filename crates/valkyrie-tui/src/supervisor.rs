@@ -412,7 +412,7 @@ fn describe(w: &Wait) -> (&'static str, String, String) {
         ),
         Wait::Launch(o) => (
             "ready",
-            format!("#{} {} ({})", o.item, o.title, o.why),
+            format!("#{} {} ({})", o.number, o.title, o.why),
             "a start · d leave".into(),
         ),
         Wait::Order { project, steps, .. } => (
