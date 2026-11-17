@@ -730,6 +730,13 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             // On another machine a directory is its path there, and none is its
             // daemon's default.
             let cwd = match cwd {
+                // Relative to what? Not this shell's directory, nor the daemon's.
+                Some(dir) if is_remote() && dir.is_relative() => {
+                    bail!(
+                        "--cwd on another machine is a full path there, not {}",
+                        dir.display()
+                    )
+                }
                 Some(dir) if is_remote() => Some(dir),
                 Some(dir) => Some(valkyrie_proto::canonical(&dir)?),
                 None if is_remote() => None,

@@ -20,8 +20,9 @@ pub const REMOTE_WEB_PORT: u16 = 8790;
 /// The first local port a host's web app is forwarded to; this machine's own
 /// `valk web` has `REMOTE_WEB_PORT`.
 const FIRST_PORT: u16 = 8791;
-/// Ports handed out at most, from `FIRST_PORT`.
-const MAX_HOSTS: u16 = 200;
+/// How long a call that sets something up over there gets: `ssh` gives up on
+/// a dead network itself, but a `valk` that hangs there wouldn't.
+const CALL_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// An SSH destination as the user would type it: `box`, `me@box`, an alias from
 /// `~/.ssh/config`. Never anything `ssh` could read as an option, or the shell on
@@ -111,6 +112,16 @@ fn ssh_options(auth: Auth) -> Vec<String> {
     if auth == Auth::Never {
         opts.extend(["-o".into(), "BatchMode=yes".into()]);
     }
+    // A dead network shows within a minute, not when TCP gives up a quarter of
+    // an hour later; the TUI then reconnects.
+    opts.extend([
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ServerAliveInterval=15".into(),
+        "-o".into(),
+        "ServerAliveCountMax=3".into(),
+    ]);
     // Windows' OpenSSH has no connection sharing.
     #[cfg(unix)]
     if let Some(path) = control_path() {
@@ -133,8 +144,13 @@ fn control_path() -> Option<PathBuf> {
     let dir = crate::state_dir().join("run");
     crate::ensure_private_dir(&dir).ok()?;
     let path = dir.join("ssh-%C");
-    // `%C` is 40 hex digits, so the path grows by 38.
-    (path.as_os_str().len() + 38 <= crate::MAX_SOCKET_PATH).then_some(path)
+    // `%C` is 40 hex digits, so the path grows by 38. `ssh` splits an option's
+    // value at a space and expands `%` in it: a state dir with either goes
+    // without sharing rather than with a broken path.
+    let plain = path
+        .to_str()
+        .is_some_and(|p| !p.contains(char::is_whitespace) && p.matches('%').count() == 1);
+    (plain && path.as_os_str().len() + 38 <= crate::MAX_SOCKET_PATH).then_some(path)
 }
 
 /// What `ssh` hands the other machine's login shell, which may be fish, bash or
@@ -171,50 +187,69 @@ pub fn hosts_file() -> PathBuf {
     crate::state_dir().join("remote").join("hosts.json")
 }
 
-/// The hosts in `file`, in the order they were added. A missing file has none.
-pub fn hosts(file: &Path) -> Result<Vec<Known>> {
+/// The hosts file as kept: the hosts, and the next port to hand out.
+#[derive(Default, Serialize, Deserialize)]
+struct HostsFile {
+    /// Never handed out again once used: the page on a port keeps that host's
+    /// device token, which must never reach another host.
+    #[serde(default)]
+    next_port: Option<u16>,
+    hosts: Vec<Known>,
+}
+
+fn read(file: &Path) -> Result<HostsFile> {
     match std::fs::read(file) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).with_context(|| format!("read {}", file.display()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HostsFile::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", file.display())),
     }
 }
 
-/// Adds `host` to `file` with the first free port, or returns it as it is.
+/// The hosts in `file`, in the order they were added. A missing file has none.
+pub fn hosts(file: &Path) -> Result<Vec<Known>> {
+    read(file).map(|f| f.hosts)
+}
+
+/// Adds `host` to `file` with a port no host had before, or returns it as it is.
 pub fn add_host(file: &Path, host: &Host) -> Result<Known> {
-    let mut known = hosts(file)?;
-    if let Some(k) = known.iter().find(|k| &k.host == host) {
+    let mut f = read(file)?;
+    if let Some(k) = f.hosts.iter().find(|k| &k.host == host) {
         return Ok(k.clone());
     }
-    let Some(port) =
-        (FIRST_PORT..FIRST_PORT + MAX_HOSTS).find(|p| known.iter().all(|k| k.port != *p))
-    else {
-        bail!("{MAX_HOSTS} hosts already; remove one with `valk remote rm`");
-    };
+    let after_known = f.hosts.iter().map(|k| k.port.saturating_add(1)).max();
+    let port = [Some(FIRST_PORT), f.next_port, after_known]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(FIRST_PORT);
+    if port == u16::MAX {
+        bail!("no local ports left for another host");
+    }
     let k = Known {
         host: host.clone(),
         port,
     };
-    known.push(k.clone());
-    save(file, &known)?;
+    f.hosts.push(k.clone());
+    f.next_port = Some(port + 1);
+    save(file, &f)?;
     Ok(k)
 }
 
-/// Takes `host` out of `file`; whether it was there.
+/// Takes `host` out of `file`; whether it was there. Its port isn't reused.
 pub fn remove_host(file: &Path, host: &Host) -> Result<bool> {
-    let mut known = hosts(file)?;
-    let before = known.len();
-    known.retain(|k| &k.host != host);
-    if known.len() == before {
+    let mut f = read(file)?;
+    let before = f.hosts.len();
+    f.hosts.retain(|k| &k.host != host);
+    if f.hosts.len() == before {
         return Ok(false);
     }
-    save(file, &known)?;
+    save(file, &f)?;
     Ok(true)
 }
 
-fn save(file: &Path, known: &[Known]) -> Result<()> {
+fn save(file: &Path, hosts: &HostsFile) -> Result<()> {
     let dir = file.parent().context("hosts file has no directory")?;
     crate::ensure_private_dir(dir)?;
     let tmp = file.with_extension(format!("json.{}", std::process::id()));
@@ -225,7 +260,7 @@ fn save(file: &Path, known: &[Known]) -> Result<()> {
             .write(true)
             .truncate(true)
             .open(&tmp)?;
-        f.write_all(&serde_json::to_vec_pretty(known)?)?;
+        f.write_all(&serde_json::to_vec_pretty(hosts)?)?;
     }
     std::fs::rename(&tmp, file).with_context(|| format!("write {}", file.display()))
 }
@@ -259,8 +294,11 @@ pub async fn start_web(host: &Host, auth: Auth) -> Result<()> {
     let setup = tokio::process::Command::from(ssh(host, auth, &["setup", "web", "--local"]))
         .stdin(std::process::Stdio::null())
         .stdout(std::io::stderr())
-        .status()
+        .kill_on_drop(true)
+        .status();
+    let setup = tokio::time::timeout(CALL_WAIT, setup)
         .await
+        .map_err(|_| anyhow::anyhow!("{host} didn't answer within {} s", CALL_WAIT.as_secs()))?
         .context("couldn't run ssh")?;
     if !setup.success() {
         bail!("couldn't start valk web on {host} (`valk setup web --local` there failed)");
@@ -316,8 +354,11 @@ pub async fn pairing_link(host: &Host, auth: Auth, url: &str) -> Result<String> 
     cmd.arg(remote_command(&["web", "open", "--print"]));
     let out = tokio::process::Command::from(cmd)
         .stdin(std::process::Stdio::null())
-        .output()
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(CALL_WAIT, out)
         .await
+        .map_err(|_| anyhow::anyhow!("{host} didn't answer within {} s", CALL_WAIT.as_secs()))?
         .context("couldn't run ssh")?;
     let said = String::from_utf8_lossy(&out.stdout);
     match said.lines().find_map(pairing_code) {
@@ -427,15 +468,21 @@ mod tests {
         assert_eq!(add_host(&file, &a).unwrap().port, 8791);
         assert!(remove_host(&file, &a).unwrap());
         assert!(!remove_host(&file, &a).unwrap());
-        // A freed port goes to the next host.
+        // A freed port never goes to another host: its page keeps a's token.
         let c = Host::parse("c").unwrap();
-        assert_eq!(add_host(&file, &c).unwrap().port, 8791);
+        assert_eq!(add_host(&file, &c).unwrap().port, 8793);
         let names: Vec<_> = hosts(&file)
             .unwrap()
             .into_iter()
             .map(|k| k.host.0)
             .collect();
         assert_eq!(names, ["b", "c"]);
+        // Nor after the last one goes.
+        assert!(remove_host(&file, &c).unwrap());
+        assert!(remove_host(&file, &b).unwrap());
+        assert_eq!(add_host(&file, &a).unwrap().port, 8794);
+        assert!(remove_host(&file, &a).unwrap());
+        assert!(hosts(&file).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

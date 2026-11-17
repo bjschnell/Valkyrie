@@ -63,7 +63,7 @@ fn agent_of(argv: &[String]) -> Option<&'static str> {
     }
 }
 
-use sys::{children, cmdline_n, group_of, parent};
+use sys::{children, cmdline_n, group_of, parent, uid};
 pub use sys::{cwd, started, tty};
 
 /// The first two arguments: enough to tell the program and a runtime's script.
@@ -102,12 +102,20 @@ fn desktop_argv(argv: &[String]) -> bool {
 /// Only below `sshd`: a `valk bridge` an agent leaves running here, detached, is
 /// as unknown as any other detached process. One that came in over SSH holds the
 /// user's SSH credentials, as `ssh -t host valk` does, which counts as the user.
+/// The `sshd` must run as another user (the privileged monitor, root): a
+/// process can rewrite its own command line to read `sshd: me@notty`, but not
+/// run as root. The name it gives is a label, not a check: whoever holds the
+/// user's SSH key is the user on this machine.
 pub fn remote_bridge(pid: i32) -> Option<Option<String>> {
     let who = cmdline_n(pid, 8).and_then(|argv| remote_bridge_argv(&argv))?;
+    let me = uid(pid)?;
     ancestry(pid)
         .into_iter()
         .skip(1)
-        .any(|up| cmdline_n(up, 1).is_some_and(|argv| sshd_argv(&argv)))
+        .any(|up| {
+            uid(up).is_some_and(|u| u != me)
+                && cmdline_n(up, 1).is_some_and(|argv| sshd_argv(&argv))
+        })
         .then_some(who)
 }
 
@@ -248,6 +256,14 @@ mod sys {
         stat_field(pid, 4)
     }
 
+    /// The user a process runs as: the owner of its `/proc` entry.
+    pub fn uid(pid: i32) -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(format!("/proc/{pid}"))
+            .ok()
+            .map(|m| m.uid())
+    }
+
     /// The controlling terminal (field 7, `tty_nr`), as `dev_key`; `None` without one.
     pub fn tty(pid: i32) -> Option<u64> {
         let nr: u64 = stat_field(pid, 7)?;
@@ -381,6 +397,10 @@ mod sys {
 
     pub fn parent(pid: i32) -> Option<i32> {
         bsdinfo(pid).map(|i| i.pbi_ppid as i32)
+    }
+
+    pub fn uid(pid: i32) -> Option<u32> {
+        bsdinfo(pid).map(|i| i.pbi_uid)
     }
 
     pub fn tty(pid: i32) -> Option<u64> {
@@ -644,6 +664,11 @@ mod sys {
         None
     }
 
+    /// No `sshd` to trust on Windows (`foreground::remote_bridge`).
+    pub fn uid(_: i32) -> Option<u32> {
+        None
+    }
+
     /// The process that started `pid`, if it is still that one: Windows keeps a
     /// dead parent's pid, which a newer process may have since.
     pub fn parent(pid: i32) -> Option<i32> {
@@ -733,6 +758,9 @@ mod sys {
     pub fn parent(_: i32) -> Option<i32> {
         None
     }
+    pub fn uid(_: i32) -> Option<u32> {
+        None
+    }
     pub fn tty(_: i32) -> Option<u64> {
         None
     }
@@ -805,8 +833,9 @@ mod tests {
             who(&["valk", "bridge", "--agent", "\x1b[2Jme; rm"]),
             Some(Some("2Jmerm on another machine".into()))
         );
+        // Only symbols: still an agent, under a name of its own.
         assert_eq!(
-            who(&["valk", "bridge", "--agent", ""]),
+            who(&["valk", "bridge", "--agent", "!!"]),
             Some(Some("an agent on another machine".into()))
         );
         // Anything else is no bridge, so it counts as detached.
@@ -815,6 +844,19 @@ mod tests {
         assert_eq!(who(&["valk", "new", "--", "bridge"]), None);
         assert_eq!(who(&["sh", "bridge"]), None);
         assert_eq!(who(&["valk"]), None);
+    }
+
+    /// The bridge's trust rests on telling a root `sshd` from one of the user's
+    /// own processes.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn knows_who_a_process_runs_as() {
+        let me = std::process::id() as i32;
+        // SAFETY: getuid cannot fail.
+        assert_eq!(uid(me), Some(unsafe { libc::getuid() }));
+        assert_eq!(uid(1), Some(0), "init runs as root");
+        // This test isn't `valk bridge`, whatever is above it.
+        assert_eq!(remote_bridge(me), None);
     }
 
     #[test]

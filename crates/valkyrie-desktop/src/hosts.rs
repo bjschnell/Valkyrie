@@ -105,6 +105,19 @@ impl Tunnel {
                 )
             }
         }
+        // From now on `ssh` complains each time a forwarded connection finds
+        // nothing there (the host's `valk web` restarting): left in the pipe,
+        // that fills it, and `ssh` stops forwarding while it still looks alive.
+        if let Some(err) = ssh.stderr.take() {
+            let host = host.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(%host, "ssh: {line}");
+                }
+            });
+        }
         Ok(Tunnel {
             host: host.clone(),
             port: known.port,

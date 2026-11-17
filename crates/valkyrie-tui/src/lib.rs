@@ -196,7 +196,16 @@ struct Restart {
 
 impl std::fmt::Display for Restart {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if self.daemon.protocol == valkyrie_proto::PROTOCOL {
+        if let Some(host) = remote() {
+            // Never "run the new valk": this machine's is the one behind.
+            write!(
+                f,
+                "valk on {host} now speaks protocol {}, this one {}; bring both to the \
+                 same release (`valk upgrade` on each keeps every session)",
+                self.daemon.protocol,
+                valkyrie_proto::PROTOCOL
+            )
+        } else if self.daemon.protocol == valkyrie_proto::PROTOCOL {
             write!(f, "the daemon was upgraded; run the new valk")
         } else {
             write!(

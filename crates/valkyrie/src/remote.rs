@@ -229,6 +229,8 @@ async fn carry(stream: tokio::net::UnixStream, cmd: std::process::Command, share
             return;
         }
     };
+    // What `why` reports is this connection's, not an older one's.
+    shared.error.lock().unwrap().clear();
     let (Some(mut to), Some(mut from), Some(err)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
