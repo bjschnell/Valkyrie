@@ -91,6 +91,12 @@ pub fn ssh(host: &Host, auth: Auth, args: &[&str]) -> std::process::Command {
     cmd
 }
 
+/// `ssh` piping the other machine's daemon over its stdin and stdout
+/// (`valk bridge`), for a client there (`Client::over`).
+pub fn bridge(host: &Host, auth: Auth) -> std::process::Command {
+    ssh(host, auth, &["bridge"])
+}
+
 /// `ssh` forwarding local `port` to the other machine's `valk web`, on a
 /// connection of its own: one shared with others could go with them, and a
 /// forward through a shared one outlives the `ssh` that asked for it. It ends
