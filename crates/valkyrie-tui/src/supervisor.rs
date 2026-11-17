@@ -290,8 +290,9 @@ impl Page {
     }
 }
 
-/// The "Watching" section: each open PR the poll read, its state and why, and
-/// when the poll reads them next.
+/// The "Watching" section: each open PR the poll read, in the order to merge
+/// them, its state and why, whom it collides with, and when the poll reads them
+/// next.
 fn watch_lines(
     watch: Option<&Result<Watch, String>>,
     inner: usize,
@@ -346,14 +347,23 @@ fn watch_lines(
                     (None, Some(b)) => b.clone(),
                     (None, None) => String::new(),
                 };
+                // Its place in the order to merge its repository's PRs (backlog #215).
+                let place = pr.order.map_or("   ".to_owned(), |n| format!("{n:>2}."));
                 let state = format!(" {:<11} ", pr.state.label());
-                let room = inner.saturating_sub(state.len() + whose.len() + 8);
+                let room = inner.saturating_sub(state.len() + whose.len() + 11);
                 lines.push(Line::from(vec![
                     "   ".into(),
+                    place.fg(t.muted),
                     state.fg(color).bold(),
                     fit(&pr.detail, room).fg(t.fg),
                     format!("  {whose}").fg(t.muted),
                 ]));
+                if let Some(note) = &pr.merge_note {
+                    lines.push(Line::from(vec![
+                        " ".repeat(19).into(),
+                        fit(note, inner.saturating_sub(21)).fg(t.muted),
+                    ]));
+                }
             }
         }
     }
@@ -549,6 +559,22 @@ mod tests {
             "detail": "CI red on PR #101: lint", "read_at": 880
         }))
         .unwrap();
+        let ordered: valkyrie_proto::WatchedPr = serde_json::from_value(serde_json::json!({
+            "url": "v", "project": "/r/app", "item": 13, "state": "green",
+            "detail": "checks passed, merges cleanly", "read_at": 880, "order": 1,
+            "merge_note": "merge before #101: conflicts on src/a.rs"
+        }))
+        .unwrap();
+        let both = Ok(Watch {
+            prs: vec![ordered, pr.clone()],
+            polled_at: Some(880),
+            next_at: Some(1_180),
+            on: true,
+        });
+        let lines = text(Some(&both));
+        assert!(lines[1].contains(" 1. green"), "{lines:?}");
+        assert!(lines[2].contains("merge before #101: conflicts on src/a.rs"));
+        assert!(lines[3].contains("red") && !lines[3].contains("1."));
         let w = Ok(Watch {
             prs: vec![pr],
             polled_at: Some(880),

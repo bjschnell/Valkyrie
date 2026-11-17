@@ -15,6 +15,7 @@ mod foreground;
 mod guard;
 mod habit;
 mod history;
+mod merge_order;
 mod merged;
 mod order;
 mod overlap;
@@ -999,7 +1000,8 @@ const PRS_EVERY: Duration = Duration::from_secs(300);
 /// Notes agents that changed the same files (`overlap`), then ships items whose
 /// PRs merged. Only items with a PR are asked about, so with none open this costs
 /// nothing. Then the supervisor's watch on the branches of sessions no item covers
-/// (`branches`), once `gh` says who the user is.
+/// (`branches`), once `gh` says who the user is, and the order to merge the open
+/// ones in (`merge_order`).
 async fn watch_prs(registry: Arc<Registry>) {
     let lookup: work::PrLookup = Arc::new(|dir, url| work::gh_pr(dir, url, work::GH_TIMEOUT));
     // In a debug build, `$VALK_PRS_EVERY_MS` for trying the watchers out.
@@ -1015,20 +1017,38 @@ async fn watch_prs(registry: Arc<Registry>) {
         interval.tick().await;
         // Local git only, so it comes before the calls to `gh` that can be slow.
         registry.watch_overlaps().await;
-        registry.watching.lock().unwrap().begin();
-        registry.ship_merged_prs(lookup.clone()).await;
-        if me.is_none() {
-            me = tokio::task::spawn_blocking(branches::me)
-                .await
-                .ok()
-                .flatten();
+        // A merge that leaves another PR conflicting reads them all again at once,
+        // so its agent hears now rather than a pass later (backlog #215).
+        for _ in 0..2 {
+            read_prs(&registry, &lookup, &mut me, every).await;
+            if !registry.watching.lock().unwrap().take_rerun() {
+                break;
+            }
         }
-        if let Some(me) = &me {
-            registry.watch_branches(lookup.clone(), me).await;
-        }
-        let now = session::now_ms() / 1000;
-        registry.watching.lock().unwrap().end(now, every);
     }
+}
+
+/// One pass of `watch_prs` over the pull requests, then the merge order.
+async fn read_prs(
+    registry: &Arc<Registry>,
+    lookup: &work::PrLookup,
+    me: &mut Option<String>,
+    every: Duration,
+) {
+    registry.watching.lock().unwrap().begin();
+    registry.ship_merged_prs(lookup.clone()).await;
+    if me.is_none() {
+        *me = tokio::task::spawn_blocking(branches::me)
+            .await
+            .ok()
+            .flatten();
+    }
+    if let Some(me) = me.as_deref() {
+        registry.watch_branches(lookup.clone(), me).await;
+    }
+    let now = session::now_ms() / 1000;
+    registry.watching.lock().unwrap().end(now, every);
+    registry.plan_merges().await;
 }
 
 async fn tick(registry: Arc<Registry>) {
