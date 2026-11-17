@@ -277,6 +277,10 @@ pub struct ItemNote {
     /// For an aside, the item that agent was on, when it was on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<u32>,
+    /// `from`'s number in its repository, as people know it; 0 on a note from
+    /// before numbers, which then shows the id.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub from_number: u32,
 }
 
 impl ItemNote {
@@ -291,12 +295,23 @@ impl ItemNote {
     /// the CLI and TUI label it.
     pub fn origin(&self) -> Option<String> {
         match (self.aside, self.from, self.taken) {
-            (true, Some(from), _) => Some(format!("while on #{from}")),
+            (true, Some(from), _) => Some(format!(
+                "while on #{}",
+                if self.from_number == 0 {
+                    from
+                } else {
+                    self.from_number
+                }
+            )),
             (true, None, _) => Some("from outside the item".into()),
             (false, _, true) => Some("from a take".into()),
             _ => None,
         }
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn is_false(b: &bool) -> bool {

@@ -215,6 +215,7 @@ impl Backlog {
             // the brief.
             NoteOrigin::Aside(from) => (true, true, from),
         };
+        let from_number = from.and_then(|f| self.get(f).ok()).map_or(0, |f| f.number);
         item.notes.push(ItemNote {
             at: now,
             by: by.to_owned(),
@@ -222,6 +223,7 @@ impl Backlog {
             taken,
             aside,
             from,
+            from_number,
         });
         let over = item.notes.len().saturating_sub(MAX_NOTES);
         item.notes.drain(..over);
@@ -326,7 +328,11 @@ impl Backlog {
                     }
                     let root = project::root(cwd);
                     if item.checkout.is_some() && item.project.as_ref() != Some(&root) {
-                        bail!("#{id} already has a checkout in {}", display(&item.project));
+                        bail!(
+                            "#{} already has a checkout in {}",
+                            item.number,
+                            display(&item.project)
+                        );
                     }
                     if item.project.as_ref() != Some(&root) {
                         item.number = self.next_number(Some(&root));
@@ -337,15 +343,19 @@ impl Backlog {
             ItemChange::Return => {
                 if !matches!(item.status, ItemStatus::Open) && !item.agent_filed() {
                     bail!(
-                        "#{id} is {}: only an item being worked on goes back",
+                        "#{} is {}: only an item being worked on goes back",
+                        item.number,
                         item.status.as_str()
                     );
                 }
                 if item.sessions.is_empty() {
-                    bail!("#{id} isn't started");
+                    bail!("#{} isn't started", item.number);
                 }
                 if item.pr.is_some() {
-                    bail!("#{id} has a pull request: ship or drop it instead");
+                    bail!(
+                        "#{} has a pull request: ship or drop it instead",
+                        item.number
+                    );
                 }
                 // Its branch and checkout stay, for the next launch to reuse.
                 item.sessions.clear();
@@ -540,6 +550,12 @@ fn number_legacy(items: &mut [Item]) {
     }
 }
 
+/// What people call item `id`: its number, or `id` for one not in `items` (the
+/// one being added, which has none yet).
+fn number(items: &[Item], id: u32) -> u32 {
+    items.iter().find(|i| i.id == id).map_or(id, |i| i.number)
+}
+
 /// Most items one can wait on.
 pub(crate) const MAX_BLOCKERS: usize = 20;
 
@@ -561,7 +577,7 @@ fn blockers(id: u32, ids: &[u32], had: &[u32], items: &[Item]) -> Result<Vec<u32
             bail!("no item #{b}");
         }
         if b == id {
-            bail!("#{id} can't wait on itself");
+            bail!("#{} can't wait on itself", number(items, id));
         }
         // Follow what b waits on: reaching `id` would make a loop.
         let mut seen = vec![b];
@@ -572,7 +588,12 @@ fn blockers(id: u32, ids: &[u32], had: &[u32], items: &[Item]) -> Result<Vec<u32
             };
             for &up in &i.blocked_by {
                 if up == id {
-                    bail!("#{b} already waits on #{id}, so #{id} can't wait on it");
+                    bail!(
+                        "#{} already waits on #{}, so #{} can't wait on it",
+                        number(items, b),
+                        number(items, id),
+                        number(items, id)
+                    );
                 }
                 if !seen.contains(&up) {
                     seen.push(up);
@@ -720,7 +741,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
         for i in items.iter().filter(|i| waits.contains(&i.id)) {
             text.push_str(&format!(
                 "- #{} {} ({})\n",
-                i.id,
+                i.number,
                 i.title,
                 i.status.as_str()
             ));
@@ -735,7 +756,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
         }
     }
     text.push('\n');
-    text.push_str(&footer(item.id));
+    text.push_str(&footer(item.number));
     text
 }
 
@@ -755,10 +776,13 @@ pub fn merged_own(url: &str, item: Option<&Item>) -> String {
         Some(item) => (
             format!(
                 ", and backlog #{} “{}” shipped with it",
-                item.id,
+                item.number,
                 one_line(&item.title)
             ),
-            format!(" with `valk todo note -i {} \"<what's left>\"`", item.id),
+            format!(
+                " with `valk todo note -i {} \"<what's left>\"`",
+                item.number
+            ),
         ),
         None => (String::new(), String::new()),
     };
@@ -774,7 +798,7 @@ pub fn merged_own(url: &str, item: Option<&Item>) -> String {
 /// base isn't news at push time.
 pub fn merged_other(url: &str, base: &str, item: Option<&Item>) -> String {
     let card = item
-        .map(|item| format!(" (#{} “{}”)", item.id, one_line(&item.title)))
+        .map(|item| format!(" (#{} “{}”)", item.number, one_line(&item.title)))
         .unwrap_or_default();
     let base = if base.is_empty() {
         "the default branch"
@@ -792,9 +816,9 @@ pub fn merged_other(url: &str, base: &str, item: Option<&Item>) -> String {
 pub fn adopted(item: &Item) -> String {
     format!(
         "The user just added this session to their Valkyrie backlog as item #{} “{}”: its card follows this session now. `valk todo show` prints it.\n{}",
-        item.id,
+        item.number,
         one_line(&item.title),
-        footer(item.id)
+        footer(item.number)
     )
 }
 
@@ -803,9 +827,9 @@ pub fn adopted(item: &Item) -> String {
 pub fn accepted(item: &Item) -> String {
     format!(
         "The user accepted #{} “{}” you filed; take it with `valk todo take {} --branch <branch>` once your current task is delivered, and fix it on its own branch and pull request.",
-        item.id,
+        item.number,
         one_line(&item.title),
-        item.id
+        item.number
     )
 }
 

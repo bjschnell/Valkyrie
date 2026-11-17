@@ -251,8 +251,9 @@ impl Registry {
         how: Claim,
     ) -> Result<Vec<SessionId>> {
         let id = item.id;
+        let number = item.number;
         if self.launching.lock().unwrap().contains(&id) {
-            bail!("#{id} is being launched right now; try again in a moment");
+            bail!("#{number} is being launched right now; try again in a moment");
         }
         let holders = self.holders(item, mine);
         let Some(&newest) = holders.first() else {
@@ -276,7 +277,7 @@ impl Registry {
         };
         let blocker = blocker_of(how, launched, newest);
         let Ok(session) = self.get(blocker) else {
-            bail!("#{id} is already being worked on in session {blocker}; {or}");
+            bail!("#{number} is already being worked on in session {blocker}; {or}");
         };
         let info = session.info();
         let agent = session.agent_behind().unwrap_or_else(|| {
@@ -290,7 +291,7 @@ impl Registry {
             name = format!("{}…", name.chars().take(23).collect::<String>());
         }
         bail!(
-            "#{id} is already being worked on in session {} ({}, \"{name}\"); {or}",
+            "#{number} is already being worked on in session {} ({}, \"{name}\"); {or}",
             info.id,
             backlog::one_line(&agent)
         );
@@ -324,8 +325,8 @@ impl Registry {
             // Its own work, written down with `add --take`: the session that filed
             // it may take it again (to record the pull request) before it's accepted.
             ItemStatus::Proposed if item.filed_by == Some((self.boot, info.id)) => {}
-            ItemStatus::Proposed => bail!("#{id} is proposed; accept it first"),
-            other => bail!("#{id} is {}; reopen it first", other.as_str()),
+            ItemStatus::Proposed => bail!("#{} is proposed; accept it first", item.number),
+            other => bail!("#{} is {}; reopen it first", item.number, other.as_str()),
         }
         // Ship merged judges an item by its branch, so which branch it is can't be
         // an agent's to steer: a launch's is fixed, and one a take recorded only
@@ -333,10 +334,16 @@ impl Registry {
         if let Some(branch) = branch.filter(|b| item.branch.as_deref() != Some(*b)) {
             let current = item.branch.as_deref().unwrap_or_default();
             if item.checkout.is_some() || (item.branch.is_some() && !item.branch_taken) {
-                bail!("#{id} is on {current}, its launch's branch, which stays");
+                bail!(
+                    "#{} is on {current}, its launch's branch, which stays",
+                    item.number
+                );
             }
             if item.branch.is_some() && caller.agent.is_some() {
-                bail!("#{id} is already on {current}; only the user changes that");
+                bail!(
+                    "#{} is already on {current}; only the user changes that",
+                    item.number
+                );
             }
             worktree::valid(&info.cwd, branch)?;
         }
@@ -393,7 +400,7 @@ impl Registry {
             bail!("session {id} isn't running claude or codex; only an agent's lane can follow it");
         }
         if let Some(on) = self.item_of(id) {
-            bail!("session {id} is already on #{}", on.id);
+            bail!("session {id} is already on #{}", on.number);
         }
         let title = title
             .or_else(|| session.own_name())
@@ -415,7 +422,7 @@ impl Registry {
             let backlog = self.backlog.lock().unwrap();
             // Checked again under the lock that records it, as a take is.
             if let Some(on) = self.item_of_in(&backlog.load(), id) {
-                bail!("session {id} is already on #{}", on.id);
+                bail!("session {id} is already on #{}", on.number);
             }
             let now = now_secs();
             let added = backlog.add(&new, "human", now)?;
@@ -759,13 +766,16 @@ impl Registry {
                 .filter(|s| !item.taken.contains(s))
                 .any(|&s| self.get(s).is_ok_and(|s| !s.exited()));
         if running {
-            bail!("an agent is still running on #{id}; stop it first");
+            bail!(
+                "an agent is still running on #{}; stop it first",
+                item.number
+            );
         }
         let mut note = None;
         if item.checkout.is_some() {
             let (removed, said) = self.take_checkout(&item).await?;
             if !removed {
-                bail!("{said}; ship or drop #{id} instead");
+                bail!("{said}; ship or drop #{} instead", item.number);
             }
             note = Some(said);
         }
@@ -891,11 +901,14 @@ impl Registry {
         check_model(&model)?;
         match item.status {
             ItemStatus::Open => {}
-            ItemStatus::Proposed => bail!("#{id} is proposed; accept it first"),
-            other => bail!("#{id} is {}; reopen it first", other.as_str()),
+            ItemStatus::Proposed => bail!("#{} is proposed; accept it first", item.number),
+            other => bail!("#{} is {}; reopen it first", item.number, other.as_str()),
         }
         let Some(project) = item.project.clone() else {
-            bail!("#{id} has no folder yet; pick the repository it's for");
+            bail!(
+                "#{} has no folder yet; pick the repository it's for",
+                item.number
+            );
         };
         // One session on an item at a time; held from here until the new one is
         // recorded on it, so a take or launch meanwhile is refused too.
@@ -927,7 +940,10 @@ impl Registry {
             _ if worktree => (project.clone(), Some(branch.clone())),
             _ => (project.clone(), None),
         };
-        let mut name: String = format!("#{id} {}", item.title).chars().take(40).collect();
+        let mut name: String = format!("#{} {}", item.number, item.title)
+            .chars()
+            .take(40)
+            .collect();
         name = name.trim_end().to_owned();
         let mut env = env;
         // The item it's on, for `valk todo show` in the session.
