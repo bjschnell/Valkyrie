@@ -63,7 +63,7 @@ fn agent_of(argv: &[String]) -> Option<&'static str> {
     }
 }
 
-use sys::{children, cmdline_n, group_of, parent, uid};
+use sys::{children, cmdline_n, group_of, name, parent, uid};
 pub use sys::{cwd, started, tty};
 
 /// The first two arguments: enough to tell the program and a runtime's script.
@@ -112,19 +112,14 @@ pub fn remote_bridge(pid: i32) -> Option<Option<String>> {
     ancestry(pid)
         .into_iter()
         .skip(1)
-        .any(|up| {
-            uid(up).is_some_and(|u| u != me)
-                && cmdline_n(up, 1).is_some_and(|argv| sshd_argv(&argv))
-        })
+        .any(|up| uid(up).is_some_and(|u| u != me) && name(up).is_some_and(|n| sshd_name(&n)))
         .then_some(who)
 }
 
 /// `sshd` as it runs a login: `sshd: me@notty`, `sshd-session: me@notty`, or by
-/// its path where the OS keeps the original argv.
-fn sshd_argv(argv: &[String]) -> bool {
-    argv.first()
-        .and_then(|program| valkyrie_agents::program_name(program))
-        .is_some_and(|name| name.starts_with("sshd"))
+/// its path or the kernel's short name.
+fn sshd_name(program: &str) -> bool {
+    valkyrie_agents::program_name(program).is_some_and(|name| name.starts_with("sshd"))
 }
 
 /// `valk [--socket S] bridge [--agent NAME]`, and who it says runs it.
@@ -264,6 +259,11 @@ mod sys {
             .map(|m| m.uid())
     }
 
+    /// The program, as its command line names it (`sshd: me@notty`).
+    pub fn name(pid: i32) -> Option<String> {
+        cmdline_n(pid, 1)?.into_iter().next()
+    }
+
     /// The controlling terminal (field 7, `tty_nr`), as `dev_key`; `None` without one.
     pub fn tty(pid: i32) -> Option<u64> {
         let nr: u64 = stat_field(pid, 7)?;
@@ -399,8 +399,41 @@ mod sys {
         bsdinfo(pid).map(|i| i.pbi_ppid as i32)
     }
 
+    /// The short form, which macOS gives about any user's process: a root
+    /// `sshd` is what the bridge's trust rests on, and `bsdinfo` and the
+    /// command line are this user's processes only.
+    fn shortinfo(pid: i32) -> Option<libc::proc_bsdshortinfo> {
+        // SAFETY: zeroed is a valid proc_bsdshortinfo; proc_pidinfo fills at
+        // most the size given.
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdshortinfo).cast(),
+                size,
+            )
+        };
+        (n == size).then_some(info)
+    }
+
     pub fn uid(pid: i32) -> Option<u32> {
-        bsdinfo(pid).map(|i| i.pbi_uid)
+        shortinfo(pid).map(|i| i.pbsi_uid)
+    }
+
+    /// The kernel's name for the program (`sshd`, `sshd-session`), up to 16
+    /// bytes.
+    pub fn name(pid: i32) -> Option<String> {
+        let info = shortinfo(pid)?;
+        let bytes: Vec<u8> = info
+            .pbsi_comm
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        String::from_utf8(bytes).ok()
     }
 
     pub fn tty(pid: i32) -> Option<u64> {
@@ -669,6 +702,10 @@ mod sys {
         None
     }
 
+    pub fn name(_: i32) -> Option<String> {
+        None
+    }
+
     /// The process that started `pid`, if it is still that one: Windows keeps a
     /// dead parent's pid, which a newer process may have since.
     pub fn parent(pid: i32) -> Option<i32> {
@@ -759,6 +796,9 @@ mod sys {
         None
     }
     pub fn uid(_: i32) -> Option<u32> {
+        None
+    }
+    pub fn name(_: i32) -> Option<String> {
         None
     }
     pub fn tty(_: i32) -> Option<u64> {
@@ -855,17 +895,19 @@ mod tests {
         // SAFETY: getuid cannot fail.
         assert_eq!(uid(me), Some(unsafe { libc::getuid() }));
         assert_eq!(uid(1), Some(0), "init runs as root");
+        assert!(name(1).is_some(), "and its name can be read");
         // This test isn't `valk bridge`, whatever is above it.
         assert_eq!(remote_bridge(me), None);
     }
 
     #[test]
     fn knows_sshd_running_a_login() {
-        assert!(sshd_argv(&argv(&["sshd: me@notty"])));
-        assert!(sshd_argv(&argv(&["sshd-session: me@notty"])));
-        assert!(sshd_argv(&argv(&["/usr/sbin/sshd", "-D"])));
-        assert!(!sshd_argv(&argv(&["ssh", "box"])));
-        assert!(!sshd_argv(&argv(&["bash"])));
+        assert!(sshd_name("sshd: me@notty"));
+        assert!(sshd_name("sshd-session: me@notty"));
+        assert!(sshd_name("/usr/sbin/sshd"));
+        assert!(sshd_name("sshd-session"));
+        assert!(!sshd_name("ssh"));
+        assert!(!sshd_name("bash"));
     }
 
     fn argv(args: &[&str]) -> Vec<String> {
