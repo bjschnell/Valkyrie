@@ -19,6 +19,10 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
+    pub(crate) fn pid(&self) -> i32 {
+        self.pid
+    }
+
     pub(crate) fn of(stream: &valkyrie_proto::ipc::Stream) -> Option<Peer> {
         let pid = valkyrie_proto::ipc::peer_pid(stream)?;
         Some(Peer {

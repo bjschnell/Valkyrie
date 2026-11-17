@@ -9,6 +9,7 @@ valk ls                    # list sessions, with their state
 valk handoff 3 --to codex -a   # start codex on session 3's work, with a resume of it
 valk notify "deploy done" --sound done   # a toast, ping and desktop notification
 valk pings                 # where agents stopped and waited on you, last 30 days
+valk stats                 # is Valkyrie helping? the agents week by week, this repo
 valk notes                 # findings agents left about this repo (unreviewed, never injected)
 valk notes search WORDS    # those notes and past sessions here: what failed, what fixed it
 valk digest                # what every agent did while you were gone, as markdown
@@ -101,6 +102,42 @@ The TUI has it too: `w` on the home screen. `w` steps through since you left,
 12 hours, today and 3 days, `t` switches between repository and day, `↩` opens a
 session that's still running and `y` copies the markdown. The web app has the
 same view behind the clock on the home screen, with a Copy button.
+
+## Is it helping?
+
+`valk stats` reads what Valkyrie already records on this machine and shows the
+current repository week by week, over the last 8 weeks (`--weeks N`, up to 13):
+
+- **Sessions:** how often agents stopped and waited on you (questions,
+  permissions, blocks, turn ends that asked you something), per session, and the
+  stops a policy kept going instead.
+- **Context:** the conversations that got the project's decisions, how many each
+  read whole, what searches found, failed tool calls, and how many of those
+  failed the same way as one a note or decision had already been written about.
+- **Supervisor:** steps offered, taken as offered, taken by a policy, and the
+  policy blocks you overrode.
+- **Backlog:** items you and the agents filed, shipped, and the median days from
+  filed to shipped, with a split by the agent and model each item last launched.
+
+On top, a trend sets the later half of the window against the earlier half and
+says better, worse or flat. The trend shows correlation, not cause: a better
+number can come from anything else that changed that month too.
+
+```sh
+valk stats                       # this repository, the last 8 weeks
+valk stats --repo ~/repos/app --weeks 4
+valk stats --json
+```
+
+**Which features get used** is counted only with **Analytics** on (the settings
+panel, `,`, or `analytics = on` in `settings.toml`; `VALK_ANALYTICS=on|off`
+overrides it). It's off by default. With it on, each `valk` subcommand, MCP tool
+call, and action taken in the TUI or web app (start, launch, review, search and so
+on, not typing or scrolling) adds a line to `~/.local/state/valkyrie/usage.jsonl`:
+when, where, the feature's name, and whether you or an agent used it. Arguments
+are never recorded, nothing leaves the machine, and lines older than 90 days are
+dropped. `valk stats` then lists what got used, by you and by agents, and the
+commands nobody ran.
 
 ## Picking up a session you closed
 

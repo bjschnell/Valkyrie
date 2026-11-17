@@ -49,6 +49,24 @@ pub fn cargo_bin() -> Option<PathBuf> {
     Some(cargo.join("bin").join(name()))
 }
 
+/// `install.ps1`'s launcher beside `home`: it runs the current `valk.exe` from a
+/// `versions\` directory, and there is no `valk.exe` beside it. A bare one placed
+/// there would shadow it, because `cmd` tries `.exe` before `.cmd`.
+fn launcher(home: &Path) -> PathBuf {
+    home.with_file_name("valk.cmd")
+}
+
+/// The `valk.exe` that `install.ps1`'s launcher beside `home` runs, if it is one.
+pub fn launched(home: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(launcher(home)).ok()?;
+    let rest = text.split("%~dp0").nth(1)?;
+    let relative = rest
+        .split('"')
+        .next()?
+        .replace('\\', std::path::MAIN_SEPARATOR_STR);
+    Some(home.parent()?.join(relative)).filter(|exe| exe.is_file())
+}
+
 /// A `valk` installed somewhere other than the installers' place: on the PATH,
 /// or cargo's. A second one beside it would be a second build for the daemon
 /// and the terminal to disagree over.
@@ -62,7 +80,11 @@ pub fn elsewhere() -> Option<PathBuf> {
 pub fn place(bundled: &Path, home: &Path, elsewhere: Option<&Path>) -> Result<bool> {
     // Anything by that name counts, a link whose target is gone too: a
     // developer's link into a build tree is theirs to mend, not to write over.
-    if home.symlink_metadata().is_ok() || elsewhere.is_some() || !bundled.is_file() {
+    if home.symlink_metadata().is_ok()
+        || launcher(home).is_file()
+        || elsewhere.is_some()
+        || !bundled.is_file()
+    {
         return Ok(false);
     }
     let dir = home.parent().context("the install directory")?;
@@ -166,6 +188,39 @@ mod tests {
         let home = dir.join("bin").join(name());
         assert!(!place(&dir.join("resources").join(name()), &home, None).unwrap());
         assert!(!home.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_machine_with_installps1s_launcher_gets_no_valk_exe_over_it() {
+        let dir = scratch("launcher");
+        let bundled = dir.join("bundled");
+        std::fs::write(&bundled, "0.5.0").unwrap();
+        let home = dir.join("bin").join(name());
+        std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+        std::fs::write(launcher(&home), "").unwrap();
+        assert!(!place(&bundled, &home, None).unwrap());
+        assert!(!home.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_launcher_says_which_valk_it_runs() {
+        let dir = scratch("launched");
+        let home = dir.join("bin").join(name());
+        let exe = dir
+            .join("bin")
+            .join("versions")
+            .join("edge-0")
+            .join("valk.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "edge").unwrap();
+        std::fs::write(
+            launcher(&home),
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%~dp0versions\\edge-0\\valk.exe\" %*\r\nexit /b %errorlevel%\r\n",
+        )
+        .unwrap();
+        assert_eq!(launched(&home), Some(exe));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

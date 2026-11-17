@@ -105,7 +105,7 @@ pub struct Ping {
     /// Where a turn end left its work (ADR-0013 §1): `clean`, `uncommitted`,
     /// `unpushed`, `no-pr` or `pr-red`; `None` before the daemon recorded it.
     pub work: Option<String>,
-    cwd: Option<PathBuf>,
+    pub(crate) cwd: Option<PathBuf>,
 }
 
 /// A Claude stop a `ship` policy kept going (ADR-0013 §5): the hook answered it,
