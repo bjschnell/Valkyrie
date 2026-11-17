@@ -463,6 +463,7 @@ mod tests {
     }
 
     /// `at`, read from `url`.
+    #[cfg(unix)]
     fn reads(url: &str, head: &str, settled: bool) -> Pr {
         match at(head, settled) {
             Pr::Open {
