@@ -519,13 +519,19 @@ impl Registry {
             let against = match merged {
                 Ok(against) => against,
                 Err(why) => {
-                    kept.push(KeptItem { id, title, why });
+                    kept.push(KeptItem {
+                        id,
+                        number: item.number,
+                        title,
+                        why,
+                    });
                     continue;
                 }
             };
             if dry_run {
                 shipped.push(ShippedItem {
                     id,
+                    number: item.number,
                     title,
                     branch: judged_branch.clone(),
                     branch_taken,
@@ -537,12 +543,18 @@ impl Registry {
             }
             let Some(done) = self.ship_judged(&item).await else {
                 let why = "changed since it was checked".to_owned();
-                kept.push(KeptItem { id, title, why });
+                kept.push(KeptItem {
+                    id,
+                    number: item.number,
+                    title,
+                    why,
+                });
                 continue;
             };
             match done {
                 Ok((_, note)) => shipped.push(ShippedItem {
                     id,
+                    number: item.number,
                     title,
                     branch: judged_branch.clone(),
                     branch_taken,
@@ -552,6 +564,7 @@ impl Registry {
                 }),
                 Err(e) => kept.push(KeptItem {
                     id,
+                    number: item.number,
                     title,
                     why: format!("{e:#}"),
                 }),
@@ -563,6 +576,7 @@ impl Registry {
                 let why = "no longer open with a branch".to_owned();
                 kept.push(KeptItem {
                     id,
+                    number: 0,
                     title: String::new(),
                     why,
                 });

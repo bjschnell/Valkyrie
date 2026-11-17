@@ -187,7 +187,7 @@ function WaitCard({ w, onDone }: { w: Wait; onDone: () => void }) {
       );
     }
     case "launch":
-      return card("ready", `#${w.offer.item} ${w.offer.title}`, `${w.offer.why} · on ${launchesOn(w.offer)} · ${base(w.offer.project)}`, [
+      return card("ready", `#${w.offer.number} ${w.offer.title}`, `${w.offer.why} · on ${launchesOn(w.offer)} · ${base(w.offer.project)}`, [
         <button key="leave" className="ghost" disabled={busy} onClick={() => void act(() => answerLaunch(w.offer, false))}>
           Leave
         </button>,
