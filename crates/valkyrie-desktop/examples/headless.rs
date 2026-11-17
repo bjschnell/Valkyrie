@@ -2,15 +2,19 @@
 //! notification centre would be told. For trying the core against a daemon.
 //!
 //!     cargo run -p valkyrie-desktop --example headless -- [--socket PATH] [--setup] [--pair]
+//!     cargo run -p valkyrie-desktop --example headless -- --remote HOST
 //!
 //! Without `--setup` nothing is installed: a machine with no `valk web` running
 //! is reported, not changed. `--pair` asks for the launch's pairing link, twice.
+//! `--remote` only follows HOST's daemon over `ssh HOST valk bridge`, as a host
+//! window does.
 
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use valkyrie_desktop::pair::Pairing;
 use valkyrie_desktop::start::{self, Host, Valk};
+use valkyrie_desktop::watch::{Board, Source};
 use valkyrie_web::proof::Local;
 
 /// The real machine, except that it sets nothing up.
@@ -40,6 +44,15 @@ async fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .unwrap_or_else(valkyrie_proto::default_socket_path);
+    let remote = args
+        .iter()
+        .position(|a| a == "--remote")
+        .and_then(|i| args.get(i + 1))
+        .map(|h| valkyrie_proto::remote::Host::parse(h))
+        .transpose()?;
+    if let Some(host) = remote {
+        return follow(Source::Remote(host)).await;
+    }
 
     let valk = Valk::find();
     println!("valk: {}", valk.exe.display());
@@ -73,10 +86,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    follow(Source::Local(socket)).await
+}
+
+/// Prints what the watcher says, and the tray's label after it.
+async fn follow(source: Source) -> Result<()> {
     let (events, mut seen) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move { valkyrie_desktop::watch::run(&socket, || false, events).await });
-    while let Some(event) = seen.recv().await {
-        println!("{event:?}");
+    tokio::spawn(async move { valkyrie_desktop::watch::run(source, || false, events).await });
+    let mut board = Board::default();
+    while let Some((from, event)) = seen.recv().await {
+        println!("{from:?} {event:?}");
+        if let Some(label) = board.on(from.as_ref(), &event, "Valkyrie") {
+            println!("  tray: {label:?}");
+        }
     }
     Ok(())
 }

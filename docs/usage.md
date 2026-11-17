@@ -61,8 +61,9 @@ The web app works the same way. `valk remote web HOST` starts HOST's `valk web`
 in your browser, paired. Each host keeps its own port (`valk remote ls`), so a
 browser stays paired with each. In the desktop app, the server icon at the foot
 of the rail switches hosts or connects to a new one, each in a window of its
-own. The desktop app can't ask for a password, so it needs your SSH key or
-agent.
+own. While a host's window is open, its agents count on the tray and notify
+you like this computer's, with the host in the title. The desktop app can't ask
+for a password, so it needs your SSH key or agent.
 
 ## Agents drive their panes
 

@@ -111,7 +111,18 @@ impl Client {
         }
         let stream = crate::ipc::connect(path).await?;
         let same_user = crate::ipc::peer_is_me(&stream);
-        let (mut rd, mut wr) = tokio::io::split(stream);
+        let (rd, wr) = tokio::io::split(stream);
+        Ok(Client::over(rd, wr, same_user))
+    }
+
+    /// A client over any byte stream to a daemon: the other machine's, through
+    /// `ssh HOST valk bridge` (`remote::bridge`). `same_user`: whether the other
+    /// end is known to run as this user, as a socket's peer can be.
+    pub fn over<R, W>(mut rd: R, mut wr: W, same_user: bool) -> (Client, Pushes)
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (out, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
         let (push_tx, push_rx) = mpsc::unbounded_channel();
         let lag = Arc::new(Lag::default());
@@ -162,7 +173,7 @@ impl Client {
             pending.clear();
         });
 
-        Ok((
+        (
             Client {
                 out,
                 pending,
@@ -171,7 +182,7 @@ impl Client {
                 same_user,
             },
             Pushes { rx: push_rx, lag },
-        ))
+        )
     }
 
     async fn request(&self, build: impl FnOnce(ReqId) -> ClientMsg) -> Result<Reply> {

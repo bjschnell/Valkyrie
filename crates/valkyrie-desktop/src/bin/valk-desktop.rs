@@ -1,7 +1,8 @@
 //! The desktop app (ADR-0020): a native window around the web app that `valk web`
 //! serves on this machine, a tray icon with the number of sessions that need you,
 //! and native notifications for them. Other machines' web apps open in windows
-//! of their own, each through an SSH tunnel (backlog #179). Everything inside a
+//! of their own, each through an SSH tunnel (backlog #179), and are followed for
+//! the tray and notifications while open (#226). Everything inside a
 //! window is the web app; what the windows stand on is this crate's library.
 
 // No console window beside the app on Windows.
@@ -25,7 +26,7 @@ use valkyrie_desktop::hosts::{self, Signal, Tunnel};
 use valkyrie_desktop::install;
 use valkyrie_desktop::pair::Pairing;
 use valkyrie_desktop::start::{self, Valk};
-use valkyrie_desktop::watch::{self, Event};
+use valkyrie_desktop::watch::{self, Board, Event, Report, Source};
 use valkyrie_proto::SessionId;
 use valkyrie_proto::remote::{self, Host};
 
@@ -55,6 +56,8 @@ struct Shell {
     remotes: Mutex<HashMap<String, Remote>>,
     /// Hosts being connected to: a second ask waits for the first.
     connecting: Mutex<HashSet<String>>,
+    /// Where every daemon's watcher reports, for the tray and notifications.
+    events: tokio::sync::mpsc::UnboundedSender<Report>,
 }
 
 /// Another machine's window.
@@ -62,6 +65,42 @@ struct Remote {
     tunnel: Tunnel,
     /// Its own one try a launch, as the local window's.
     pairing: Arc<Pairing>,
+    /// Its daemon, followed for the tray while the window is open.
+    _watcher: Watcher,
+}
+
+/// Follows another machine's daemon until dropped, then takes its count off
+/// the tray.
+struct Watcher {
+    host: Host,
+    task: tauri::async_runtime::JoinHandle<()>,
+    events: tokio::sync::mpsc::UnboundedSender<Report>,
+}
+
+impl Watcher {
+    /// `label`: its window, whose being in front is its being looked at.
+    fn start(app: &AppHandle, host: &Host, label: &str) -> Option<Watcher> {
+        let events = app.try_state::<Shell>()?.events.clone();
+        let (watcher, label) = (app.clone(), label.to_owned());
+        let source = Source::Remote(host.clone());
+        let sender = events.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            watch::run(source, || in_front(&watcher, &label), sender).await;
+        });
+        Some(Watcher {
+            host: host.clone(),
+            task,
+            events,
+        })
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        // Its `ssh` goes with it.
+        self.task.abort();
+        let _ = self.events.send((Some(self.host.clone()), Event::Gone));
+    }
 }
 
 fn main() {
@@ -104,7 +143,7 @@ fn main() {
             let clicked = app.handle().clone();
             app.notification().on_action(move |performed| {
                 if performed.action_id() == "tap" {
-                    open(&clicked, session_of(performed));
+                    open(&clicked, host_of(performed), session_of(performed));
                 }
             })?;
             let app = app.handle().clone();
@@ -166,6 +205,7 @@ fn bundled_valk(app: &AppHandle) {
 /// it, and start following the daemon.
 fn started(app: AppHandle, addr: SocketAddr) {
     let socket = valkyrie_proto::daemon_socket(std::env::var_os("VALK_SOCKET").map(PathBuf::from));
+    let (events, mut seen) = tokio::sync::mpsc::unbounded_channel();
     app.manage(Shell {
         addr,
         socket: socket.clone(),
@@ -173,6 +213,7 @@ fn started(app: AppHandle, addr: SocketAddr) {
         asking: AtomicBool::new(false),
         remotes: Mutex::default(),
         connecting: Mutex::default(),
+        events: events.clone(),
     });
     let opener = app.clone();
     let opened = app.run_on_main_thread(move || {
@@ -183,15 +224,15 @@ fn started(app: AppHandle, addr: SocketAddr) {
     if let Err(e) = opened {
         return fail(&app, &format!("Couldn't open the window: {e}"));
     }
-    let (events, mut seen) = tokio::sync::mpsc::unbounded_channel();
     let watcher = app.clone();
     tauri::async_runtime::spawn(async move {
-        let front = || in_front(&watcher);
-        watch::run(&socket, front, events).await;
+        let front = || in_front(&watcher, WINDOW);
+        watch::run(Source::Local(socket), front, events).await;
     });
     tauri::async_runtime::spawn(async move {
-        while let Some(event) = seen.recv().await {
-            told(&app, event);
+        let mut board = Board::default();
+        while let Some((from, event)) = seen.recv().await {
+            told(&app, &mut board, from, event);
         }
     });
 }
@@ -350,11 +391,15 @@ fn connect(app: &AppHandle, host: Host) {
             }
         };
         let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, tunnel.port));
+        let Some(watcher) = Watcher::start(&app, &host, &label) else {
+            return;
+        };
         shell.remotes.lock().unwrap().insert(
             label.clone(),
             Remote {
                 tunnel,
                 pairing: Arc::new(Pairing::new()),
+                _watcher: watcher,
             },
         );
         let opener = app.clone();
@@ -420,9 +465,10 @@ fn ours(url: &Url, addr: SocketAddr) -> bool {
         && url.port_or_known_default() == Some(addr.port())
 }
 
-/// The window is on screen and has the keyboard: what it shows has been seen.
-fn in_front(app: &AppHandle) -> bool {
-    app.get_webview_window(WINDOW)
+/// Window `label` is on screen and has the keyboard: what it shows has been
+/// seen.
+fn in_front(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label)
         .is_some_and(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false))
 }
 
@@ -691,6 +737,8 @@ fn say(app: &AppHandle, what: &str) {
 
 /// Where a notification keeps the session it is about, for its click.
 const SESSION: &str = "session";
+/// Where it keeps the machine that session is on, when it isn't this one.
+const HOST: &str = "host";
 
 /// The session a clicked notification is about, if it is about one.
 fn session_of(performed: &tauri_plugin_notification::ActionPerformed) -> Option<SessionId> {
@@ -698,52 +746,76 @@ fn session_of(performed: &tauri_plugin_notification::ActionPerformed) -> Option<
     SessionId::try_from(session.as_u64()?).ok()
 }
 
-/// Brings the window up, on `session` when there is one. The page routes by its
-/// hash (`#/s/12`), so it opens the session as a link to it would. Before the
-/// page has loaded there is nothing to route, and the window just comes up.
-fn open(app: &AppHandle, session: Option<SessionId>) {
+/// The machine a clicked notification's session is on: `None` for this one,
+/// or for a name that isn't a host.
+fn host_of(performed: &tauri_plugin_notification::ActionPerformed) -> Option<Host> {
+    let host = performed.notification()?.extra().get(HOST)?;
+    Host::parse(host.as_str()?).ok()
+}
+
+/// Brings `host`'s window up (this computer's for `None`), on `session` when
+/// there is one. The page routes by its hash (`#/s/12`), so it opens the
+/// session as a link to it would. Before the page has loaded there is nothing
+/// to route, and the window just comes up. A host whose window has closed since
+/// is connected to again.
+fn open(app: &AppHandle, host: Option<Host>, session: Option<SessionId>) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
-        show(&app);
-        if let (Some(session), Some(window)) = (session, app.get_webview_window(WINDOW)) {
+        let label = match &host {
+            None => {
+                show(&app);
+                WINDOW.to_owned()
+            }
+            Some(host) => {
+                let Some(label) = window_of(&app, host) else {
+                    return connect(&app, host.clone());
+                };
+                show_window(&app, &label);
+                label
+            }
+        };
+        if let (Some(session), Some(window)) = (session, app.get_webview_window(&label)) {
             let _ = window.eval(format!("location.hash = '#/s/{session}';"));
         }
     });
 }
 
-/// What the daemon's watcher said, on the tray and as a notification.
-fn told(app: &AppHandle, event: Event) {
-    let tray = app.tray_by_id(TRAY);
-    let label = |tooltip: String, title: Option<String>| {
-        if let Some(tray) = &tray {
-            let _ = tray.set_tooltip(Some(tooltip));
-            let _ = tray.set_title(title);
+/// The label of `host`'s open window, if it has one.
+fn window_of(app: &AppHandle, host: &Host) -> Option<String> {
+    let shell = app.try_state::<Shell>()?;
+    let remotes = shell.remotes.lock().unwrap();
+    remotes
+        .iter()
+        .find(|(_, r)| &r.tunnel.host == host)
+        .map(|(label, _)| label.clone())
+}
+
+/// What a daemon's watcher said (`from`: which machine's), on the tray and as a
+/// notification.
+fn told(app: &AppHandle, board: &mut Board, from: Option<Host>, event: Event) {
+    tracing::debug!(host = ?from, ?event, "from a daemon");
+    if let Event::Notify(note) = event {
+        let mut builder = app
+            .notification()
+            .builder()
+            .title(watch::titled(from.as_ref(), &note.title))
+            .body(note.body);
+        if let Some(session) = note.session {
+            builder = builder.extra(SESSION, session);
         }
-    };
-    tracing::debug!(?event, "from the daemon");
-    match event {
-        Event::Online(true) => {}
-        Event::Online(false) => label(format!("{NAME}: no daemon"), None),
-        Event::Outdated => label(
-            format!("{NAME} was upgraded: quit and open this app again"),
-            Some("!".into()),
-        ),
-        Event::Count(0) => label(format!("{NAME}: nothing needs you"), None),
-        Event::Count(n) => label(format!("{NAME}: {n} need you"), Some(n.to_string())),
-        Event::Notify(note) => {
-            let mut builder = app
-                .notification()
-                .builder()
-                .title(note.title)
-                .body(note.body);
-            if let Some(session) = note.session {
-                builder = builder.extra(SESSION, session);
-            }
-            let shown = builder.show();
-            if let Err(e) = shown {
-                tracing::warn!("notification: {e}");
-            }
+        if let Some(host) = &from {
+            builder = builder.extra(HOST, host.as_str());
         }
+        if let Err(e) = builder.show() {
+            tracing::warn!("notification: {e}");
+        }
+        return;
+    }
+    if let Some(label) = board.on(from.as_ref(), &event, NAME)
+        && let Some(tray) = app.tray_by_id(TRAY)
+    {
+        let _ = tray.set_tooltip(Some(label.tooltip));
+        let _ = tray.set_title(label.title);
     }
 }
 
@@ -794,6 +866,23 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn a_clicked_notification_names_its_machine() {
+        assert_eq!(
+            host_of(&clicked(
+                serde_json::json!({ "session": 3, "host": "me@box" })
+            )),
+            Some(Host::parse("me@box").unwrap())
+        );
+        assert_eq!(host_of(&clicked(serde_json::json!({ "session": 3 }))), None);
+        // Nothing `ssh` could read as an option, whatever the notification holds.
+        assert_eq!(
+            host_of(&clicked(serde_json::json!({ "host": "-oProxyCommand=sh" }))),
+            None
+        );
+        assert_eq!(host_of(&clicked(serde_json::json!({ "host": 3 }))), None);
     }
 
     #[test]
