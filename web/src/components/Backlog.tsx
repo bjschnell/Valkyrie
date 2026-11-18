@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
 import { editPatch } from "../lib/optimistic";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, planScope, prLink, priority, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, itemNo, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, planScope, prLink, priority, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
@@ -106,7 +106,7 @@ export function Backlog() {
     const t = setTimeout(() => setReady(null), 8000);
     return () => clearTimeout(t);
   }, [ready]);
-  const listed = ready?.map((id) => `#${id}`).join(" ");
+  const listed = ready?.map((id) => `#${itemNo(all, id)}`).join(" ");
   const shipLabel = shipping ? (ready ? "Shipping…" : "Checking…") : ready ? `Ship ${listed}` : "Ship merged";
   const ship = async () => {
     setShipping(true);
@@ -297,10 +297,10 @@ function LaunchCard({ offer }: { offer: LaunchOffer }) {
     }
   };
   return (
-    <section className="order-card" aria-label={`Ready to start: #${offer.item}`}>
+    <section className="order-card" aria-label={`Ready to start: #${offer.number}`}>
       <div className="order-head">
         <div className="order-title">
-          Ready to start in {base(offer.project)}: <span className="order-id">#{offer.item}</span> {offer.title}
+          Ready to start in {base(offer.project)}: <span className="order-id">#{offer.number}</span> {offer.title}
         </div>
         <div className="order-why">
           {offer.why} · on {launchesOn(offer)}
@@ -405,7 +405,7 @@ function OrderReview({ order, items, onDone }: { order: OrderProposal; items: It
       <ol className="order-steps">
         {order.steps.map((step, n) => {
           const item = items.find((i) => i.id === step.item);
-          const changes = stepChanges(step, item);
+          const changes = stepChanges(step, item, items);
           const can = changesSomething(step);
           return (
             <li key={step.item} className={can && skip.includes(step.item) ? "order-skipped" : ""}>
@@ -416,7 +416,7 @@ function OrderReview({ order, items, onDone }: { order: OrderProposal; items: It
                   <span className="order-nobox" />
                 )}
                 <span className="order-n">{n + 1}.</span>
-                <span className="order-id">#{step.item}</span>
+                <span className="order-id">#{item?.number ?? step.item}</span>
                 <span className="order-name">{item?.title ?? "(gone)"}</span>
                 {changes && <span className="order-change">{changes}</span>}
               </label>
@@ -529,7 +529,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         <button className="card-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
           <span className={`kind-chip kind-${item.kind}`}>{item.kind}</span>
           {lane !== "done" && <span className={`kind-chip prio-${priority(item)}`}>{priority(item)}</span>}
-          <span className="card-prog">#{item.id}</span>
+          <span className="card-prog">#{item.number}</span>
           <span className="card-prog item-folder">{folder ?? "no folder"}</span>
           <span className="card-age">{lane === "done" ? item.status : age(item.updated * 1000, now)}</span>
         </button>
@@ -538,7 +538,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         </p>
         {waits.length > 0 && (
           <div className="item-live item-after">
-            after {waits.map((id) => `#${id}`).join(", ")}, not finished yet
+            after {waits.map((id) => `#${itemNo(items, id)}`).join(", ")}, not finished yet
           </div>
         )}
         {lane === "proposed" && (
@@ -755,13 +755,16 @@ let attachmentKey = 0;
  * Writing an item down (`id` absent) or changing one. A new item is one box, the
  * first line its title, so a thought dictated on a phone goes in as it comes.
  */
-const idList = (ids: number[] | undefined) => (ids ?? []).map((i) => `#${i}`).join(", ");
+const idList = (ids: number[] | undefined, items: Item[]) => (ids ?? []).map((i) => `#${itemNo(items, i)}`).join(", ");
 
-/** "#12, 14" as [12, 14]; null if something in it isn't an item number. */
-function parseIds(text: string): number[] | null {
+/** "#12, 14" as the ids of items 12 and 14 of the repository `folder` (empty for none);
+ * null if something in it isn't an item there. */
+function parseIds(text: string, items: Item[], folder: string): number[] | null {
   const parts = text.split(/[\s,]+/).filter(Boolean);
-  const ids = parts.map((p) => (/^#?\d+$/.test(p) ? Number(p.replace("#", "")) : NaN));
-  return ids.some((n) => !Number.isInteger(n) || n <= 0) ? null : ids;
+  const ids = parts.map((p) =>
+    /^#?\d+$/.test(p) ? items.find((i) => (i.project ?? "") === folder && i.number === Number(p.replace("#", "")))?.id : undefined,
+  );
+  return ids.some((n) => n === undefined) ? null : (ids as number[]);
 }
 
 export function ItemEditor({ id }: { id: number | null }) {
@@ -779,7 +782,7 @@ export function ItemEditor({ id }: { id: number | null }) {
   const [kind, setKind] = useState<ItemKind>(start?.kind ?? kindFilter(read(KIND_KEY)) ?? "bug");
   const [prio, setPrio] = useState<Priority>(start ? priority(start) : "p2");
   // What it comes after, as typed: "#12, 14".
-  const [after, setAfter] = useState(() => idList(start?.blocked_by));
+  const [after, setAfter] = useState(() => idList(start?.blocked_by, items));
   const [title, setTitle] = useState(start?.title ?? "");
   const [text, setText] = useState(() => start?.body ?? (id === null ? (read(DRAFT_KEY) ?? "") : ""));
   const [folder, setFolder] = useState<string>(
@@ -800,7 +803,7 @@ export function ItemEditor({ id }: { id: number | null }) {
     loaded.current = item;
     setKind(item.kind);
     setPrio(priority(item));
-    setAfter(idList(item.blocked_by));
+    setAfter(idList(item.blocked_by, items));
     setTitle(item.title);
     setText(item.body);
     setFolder(item.project ?? "");
@@ -842,8 +845,8 @@ export function ItemEditor({ id }: { id: number | null }) {
 
   const save = async (andLaunch: boolean) => {
     if (busy || sending || empty) return;
-    const blocked_by = parseIds(after);
-    if (!blocked_by) return toast("Comes after: item numbers, like #12, 14");
+    const blocked_by = parseIds(after, items, folder);
+    if (!blocked_by) return toast("Comes after: item numbers in this repository, like #12, 14");
     setBusy(true);
     try {
       let saved = id;
@@ -906,7 +909,7 @@ export function ItemEditor({ id }: { id: number | null }) {
           <Back />
         </button>
         <div className="title">
-          <h1 className="title-name">{id === null ? "Write it down" : `Edit #${id}`}</h1>
+          <h1 className="title-name">{id === null ? "Write it down" : `Edit #${item?.number ?? id}`}</h1>
         </div>
       </header>
 

@@ -50,7 +50,7 @@ type Route =
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
  * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
- * `#/digest` what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/supervisor` what the supervisor waits on and did, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
+ * `#/summary` (`#/digest` still works) what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/supervisor` what the supervisor waits on and did, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
@@ -60,7 +60,7 @@ function route(): Route {
   if (location.hash === "#/backlog") return { page: "backlog" };
   if (location.hash === "#/decisions") return { page: "decisions" };
   if (location.hash === "#/docs") return { page: "docs" };
-  if (location.hash === "#/digest") return { page: "digest" };
+  if (location.hash === "#/summary" || location.hash === "#/digest") return { page: "digest" };
   if (location.hash === "#/history") return { page: "past" };
   if (location.hash === "#/search") return { page: "search" };
   if (location.hash === "#/supervisor") return { page: "supervisor" };

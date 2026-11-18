@@ -72,8 +72,8 @@ impl Ping {
             title = title.chars().take(TITLE_MAX - 1).collect::<String>() + "…";
         }
         let text = match new.len() {
-            1 => format!("{} proposed #{} {title}", newest.by, newest.id),
-            n => format!("{n} agent proposals, newest #{}", newest.id),
+            1 => format!("{} proposed #{} {title}", newest.by, newest.number),
+            n => format!("{n} agent proposals, newest #{}", newest.number),
         };
         Some(Ping {
             kind: Kind::Done,
@@ -854,7 +854,7 @@ mod tests {
 
     fn backlog_item(id: u32, status: &str, by: &str) -> Item {
         serde_json::from_value(serde_json::json!({
-            "id": id, "title": format!("item {id}"), "status": status, "by": by,
+            "id": id, "number": id, "title": format!("item {id}"), "status": status, "by": by,
             "created": 0, "updated": 0,
         }))
         .unwrap()

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
   id: 1,
+  number: 1,
   title: "t",
   body: "",
   kind: "bug",
@@ -178,6 +179,26 @@ describe("noteOrigin", () => {
     expect(noteOrigin({ ...n, taken: true })).toBe(" · from a take");
     expect(noteOrigin({ ...n, taken: true, aside: true, from: 9 })).toBe(" · while on #9");
     expect(noteOrigin({ ...n, taken: true, aside: true })).toBe(" · from outside the item");
+    // `from` is the global id; the number in its repository is what's shown.
+    expect(noteOrigin({ ...n, taken: true, aside: true, from: 40, from_number: 3 })).toBe(" · while on #3");
+  });
+});
+
+describe("per-repository numbers", () => {
+  const items = [item({ id: 40, number: 3 }), item({ id: 41, number: 1, project: "/r/other" })];
+  it("names an item by its number, and one that's gone by its id", () => {
+    expect(itemNo(items, 40)).toBe(3);
+    expect(itemNo(items, 41)).toBe(1);
+    expect(itemNo(items, 99)).toBe(99);
+  });
+
+  it("shows numbers in what ships, what a build order changes and what it applied", () => {
+    const shipped = [{ id: 40, number: 3, title: "", branch: "fix/a", against: "origin/main" }];
+    expect(shippedSummary(shipped, [{ id: 41, number: 1, title: "", why: "no commits of its own" }])).toBe(
+      "Shipped #3 · #1 no commits of its own (as of the last fetch)",
+    );
+    expect(stepChanges({ item: 40, reason: "", blocked_by: [41] }, items[0], items)).toBe("after #1");
+    expect(appliedSummary(true, { changed: [40], skipped: [[41, "done"]] }, items)).toBe("Changed #3; #1 left: done");
   });
 });
 
