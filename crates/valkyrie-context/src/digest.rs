@@ -606,7 +606,7 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
 /// What a run was about, one line.
 pub fn what(run: &Run, item: Option<&Item>, agent: &str) -> String {
     if let Some(item) = item {
-        return clip(&format!("#{} {}", item.id, item.title), MAX_WHAT);
+        return clip(&format!("#{} {}", item.number, item.title), MAX_WHAT);
     }
     let dir = run
         .cwd
@@ -989,12 +989,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_run_on_an_item_says_its_repository_number_not_its_id() {
+        let mut it = item(231, ItemStatus::Open, None);
+        it.number = 7;
+        let line = what(&run("working", None, None), Some(&it), "claude");
+        assert!(line.starts_with("#7 "), "{line}");
+    }
+
     fn item(id: u32, status: ItemStatus, pr: Option<&str>) -> Item {
         let mut i: Item = serde_json::from_value(json!({
             "id": id, "title": format!("item {id}"), "created": 0, "updated": 0,
         }))
         .unwrap();
-        (i.status, i.pr) = (status, pr.map(Into::into));
+        (i.status, i.pr, i.number) = (status, pr.map(Into::into), id);
         i
     }
 
