@@ -1425,10 +1425,21 @@ html.with-tabs .offline-banner {
   }
 }
 
+/* Less motion: transitions and animations run, but in 0.01 ms and once, so
+   nothing slides, fades or spins while colour, focus and state changes still
+   land and transitionend/animationend still fire. Page transitions and card
+   glides skip the View Transitions API under reduced motion (App.tsx,
+   glide.ts). Looks with rain opt back in below the wordmark rules. */
 @media (prefers-reduced-motion: reduce) {
-  * {
-    animation: none !important;
-    transition: none !important;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -3342,7 +3353,7 @@ html.with-tabs .offline-banner {
   }
 }
 
-/* Over the reduced-motion rule that stops every animation: picking a look with
+/* Over the reduced-motion rule that cuts every animation short: picking a look with
    rain asks for its effects, as in the TUI. */
 @media (prefers-reduced-motion: reduce) {
   [data-fx] .wordmark {
