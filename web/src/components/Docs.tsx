@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CommentState, DeletedDoc, Doc, DocComment, DocVersion } from "../proto";
 import { body, countByQuote, grouped, onlyIn, resolver, validKey } from "../lib/docs";
 import { clock } from "../lib/chat";
+import { itemNo } from "../lib/backlog";
 import {
   allDocs,
   commentDoc,
@@ -182,6 +183,7 @@ type Mode = "read" | "edit" | "history";
  */
 export function DocView({ docKey }: { docKey: string }) {
   const status = useApp((s) => s.status);
+  const items = useApp((s) => s.items);
   const [doc, setDoc] = useState<Doc | null>(null);
   const [list, setList] = useState<Doc[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -285,7 +287,7 @@ export function DocView({ docKey }: { docKey: string }) {
           <>
             <div className="doc-meta">
               <span className={`kind-chip kind-${doc.kind}`}>{doc.kind}</span>
-              {doc.item ? <span>backlog #{doc.item}</span> : null}
+              {doc.item ? <span>backlog #{itemNo(items, doc.item)}</span> : null}
               {doc.commit ? <code>{doc.commit.slice(0, 8)}</code> : null}
               <span className="doc-path">{doc.path}</span>
               {doc.id === 0 && <span>yours</span>}

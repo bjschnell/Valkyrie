@@ -2765,6 +2765,7 @@ impl App {
 
     async fn open_supervisor(&mut self) {
         self.supervisor = Some(supervisor::Page::default());
+        self.refresh_numbers();
         self.load_supervisor().await;
     }
 
@@ -2913,6 +2914,7 @@ impl App {
 
     async fn open_docs(&mut self) {
         self.docs = Some(docs::Page::default());
+        self.refresh_numbers();
         self.load_docs().await;
     }
 
@@ -3654,6 +3656,7 @@ impl App {
                 self.show_ping(ping);
             }
             self.items = items;
+            self.refresh_numbers();
             if let Some(page) = &mut self.backlog {
                 page.orders = orders.clone();
                 page.launches = launches.clone();
@@ -3910,6 +3913,19 @@ impl App {
                 at.elapsed() < lasts
             })
             .map(|(ping, _)| ping)
+    }
+
+    /// Gives the docs and supervisor pages the number each item id goes by, for
+    /// the lines that carry an id: a doc's item, a watched PR's.
+    fn refresh_numbers(&mut self) {
+        let numbers: std::collections::HashMap<u32, u32> =
+            self.items.iter().map(|i| (i.id, i.number)).collect();
+        if let Some(page) = &mut self.docs {
+            page.numbers = numbers.clone();
+        }
+        if let Some(page) = &mut self.supervisor {
+            page.numbers = numbers;
+        }
     }
 
     /// What people call item `id`: its number in its repository.
