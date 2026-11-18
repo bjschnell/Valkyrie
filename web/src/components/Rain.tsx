@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { rainFalls } from "../lib/rain";
+import { useApp } from "../store";
 
 const GLYPHS = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789Z:.=*+<>|";
 /** Breach protocol's codes. */
@@ -50,10 +52,19 @@ function drawRune(ctx: CanvasRenderingContext2D, x: number, y: number) {
 /**
  * Digital rain behind the page: one drop per column, each leaving a fading trail.
  * It falls under reduced motion too, as in the TUI: picking a look with rain asks
- * for it. Paused while the tab is hidden.
+ * for it. It stops while the tab is hidden and goes away while a card needs you,
+ * so nothing moves behind the work.
  */
 export function Rain() {
   const ref = useRef<HTMLCanvasElement>(null);
+  const waiting = useApp((s) => s.queue.length);
+  const waitingRef = useRef(waiting);
+  // Starts the frame loop again once it may fall: set by the effect below.
+  const wake = useRef<() => void>(() => {});
+  useEffect(() => {
+    waitingRef.current = waiting;
+    wake.current();
+  }, [waiting]);
 
   useEffect(() => {
     const canvas = ref.current;
@@ -124,19 +135,32 @@ export function Rain() {
     size();
     let last = 0;
     let raf = 0;
+    const falls = () => rainFalls(document.hidden, waitingRef.current);
+    // The loop ends itself when the rain stops, rather than spinning on idle frames.
     const loop = (t: number) => {
+      if (!falls()) {
+        raf = 0;
+        return;
+      }
       raf = requestAnimationFrame(loop);
-      if (document.hidden || t - last < FRAME_MS) return;
+      if (t - last < FRAME_MS) return;
       last = t;
       step();
     };
-    raf = requestAnimationFrame(loop);
+    const start = () => {
+      if (!raf && falls()) raf = requestAnimationFrame(loop);
+    };
+    wake.current = start;
+    start();
     window.addEventListener("resize", size);
+    document.addEventListener("visibilitychange", start);
     return () => {
       cancelAnimationFrame(raf);
+      wake.current = () => {};
       window.removeEventListener("resize", size);
+      document.removeEventListener("visibilitychange", start);
     };
   }, []);
 
-  return <canvas ref={ref} className="rain" aria-hidden="true" />;
+  return <canvas ref={ref} className="rain" aria-hidden="true" hidden={waiting > 0} />;
 }
