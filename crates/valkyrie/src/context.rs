@@ -319,7 +319,11 @@ pub async fn decisions(
                 .await?;
             let budget = valkyrie_context::inject::BUDGET;
             let (block, shown) = valkyrie_context::inject::laid_out(&root, &list, budget, &valk);
-            print!("{}{block}", valkyrie_context::inject::habits(&user, &valk));
+            print!(
+                "{}{block}{}",
+                valkyrie_context::inject::habits(&user, &valk),
+                valkyrie_context::inject::upstream(&root, &valk)
+            );
             // On stderr, so the block itself can still be piped.
             eprintln!(
                 "({} of {budget} characters: {} in full, {} as titles. \
@@ -959,6 +963,7 @@ pub fn hook(agent: &str, ambient: bool) {
                 &valk,
             );
             text.push_str(&block);
+            text.push_str(&valkyrie_context::inject::upstream(&root, &valk));
             if let Some(session) = payload["session_id"].as_str().filter(|s| !s.is_empty()) {
                 use valkyrie_context::served::Layer;
                 let serves = shown

@@ -4,6 +4,10 @@
 use std::path::{Path, PathBuf};
 use valkyrie_proto::NoWindow;
 
+/// Valkyrie's own GitHub repository, `owner/name`: where its releases come from and
+/// where agents in other projects report its bugs.
+pub const VALKYRIE_REPO: &str = "bjschnell/Valkyrie";
+
 /// The user's own scope (ADR-0016 §1): decisions that hold in every project, kept
 /// beside the projects' as if it were one. Not a real path, so no directory is
 /// ever taken for it, and [`root`] and [`key`] pass it through.
@@ -84,6 +88,34 @@ fn dot_git(git: &Path) -> Option<DotGit> {
     text.trim_start()
         .starts_with("gitdir:")
         .then_some(DotGit::File)
+}
+
+/// Whether the project at `root` (a [`root`], so a main worktree or a bare repo)
+/// is a clone of Valkyrie itself: one of its remotes in the git config points at
+/// [`VALKYRIE_REPO`]. Read from the config file, not `git`, for the hook's sake.
+pub fn is_valkyrie(root: &Path) -> bool {
+    let config = [root.join(".git").join("config"), root.join("config")]
+        .into_iter()
+        .find_map(|c| std::fs::read_to_string(c).ok());
+    config.is_some_and(|c| names_valkyrie(&c))
+}
+
+/// Whether a git config's text has a remote `url` naming [`VALKYRIE_REPO`], over
+/// https or ssh, with or without `.git`.
+fn names_valkyrie(config: &str) -> bool {
+    let repo = VALKYRIE_REPO.to_ascii_lowercase();
+    config.lines().any(|line| {
+        let Some((key, url)) = line.split_once('=') else {
+            return false;
+        };
+        if key.trim() != "url" {
+            return false;
+        }
+        let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let url = url.strip_suffix(".git").unwrap_or(&url);
+        url.strip_suffix(repo.as_str())
+            .is_some_and(|host| host.ends_with("github.com/") || host.ends_with("github.com:"))
+    })
 }
 
 /// `HEAD` of the checkout at `dir`, short; `None` outside git.
@@ -178,6 +210,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(dir).unwrap()
+    }
+
+    #[test]
+    fn a_clone_of_valkyrie_is_known_by_its_remote() {
+        for url in [
+            "https://github.com/bjschnell/Valkyrie.git",
+            "https://github.com/bjschnell/valkyrie",
+            "git@github.com:bjschnell/Valkyrie.git",
+            "ssh://git@github.com/bjschnell/Valkyrie/",
+        ] {
+            assert!(
+                names_valkyrie(&format!("[remote \"origin\"]\n\turl = {url}\n")),
+                "{url}"
+            );
+        }
+        for config in [
+            "[remote \"origin\"]\n\turl = https://github.com/someone/app.git\n",
+            "[remote \"origin\"]\n\turl = https://github.com/bjschnell/Valkyrie-fork\n",
+            "[remote \"origin\"]\n\turl = https://github.com/notbjschnell/Valkyrie\n",
+            "[branch \"main\"]\n\tpushurl-note = bjschnell/Valkyrie\n",
+        ] {
+            assert!(!names_valkyrie(config), "{config}");
+        }
+        let repo = tmp("valk-remote");
+        assert!(!is_valkyrie(&repo));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:bjschnell/Valkyrie.git\n",
+        )
+        .unwrap();
+        assert!(is_valkyrie(&repo));
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]
