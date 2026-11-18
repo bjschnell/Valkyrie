@@ -31,7 +31,7 @@ const DESTS: Record<NavKey, Dest> = {
     warm: () => prefetch("memory", fetchMemory),
   },
   search: { key: "search", hash: "#/search", label: "Search", icon: Search },
-  digest: { key: "digest", hash: "#/digest", label: "Digest", icon: Clock },
+  digest: { key: "digest", hash: "#/summary", label: "Summary", icon: Clock },
   past: { key: "past", hash: "#/history", label: "History", icon: Rewind, warm: () => prefetch("past", pastSessions) },
   supervisor: {
     key: "supervisor",

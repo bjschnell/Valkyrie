@@ -71,7 +71,7 @@ export function DigestView() {
           <Back />
         </button>
         <div className="title">
-          <h1 className="title-name">Away digest</h1>
+          <h1 className="title-name">Away summary</h1>
         </div>
         <button className="ghost digest-copy" disabled={!digest || digest.entries.length === 0} onClick={onCopy}>
           Copy
@@ -105,7 +105,7 @@ export function DigestView() {
             </button>
           ))}
         </div>
-        {digest === null && (failed ? <ErrorState what="the digest" why={failed} onRetry={reload} /> : <Loading rows={5} />)}
+        {digest === null && (failed ? <ErrorState what="the summary" why={failed} onRetry={reload} /> : <Loading rows={5} />)}
         {digest !== null && (
           <p className="digest-about">
             {digest.away ? "Since you left, " : "Since "}
