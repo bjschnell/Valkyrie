@@ -54,6 +54,25 @@ fn how_to_propose(valk: &str) -> String {
     )
 }
 
+/// Where a bug in Valkyrie itself goes from a project that isn't Valkyrie (`root`):
+/// its public GitHub issues, scrubbed of the user's private context, and only once
+/// the user has read the draft. In Valkyrie's own repo the backlog is the tracker,
+/// so this is empty there. Apart from the decisions' budget, like [`habits`].
+pub fn upstream(root: &Path, valk: &str) -> String {
+    if crate::project::is_user(root) || crate::project::is_valkyrie(root) {
+        return String::new();
+    }
+    let repo = crate::project::VALKYRIE_REPO;
+    format!(
+        "\n\nA bug in Valkyrie itself (`{valk}`, its hooks, daemon or UIs), not in this \
+         project, goes to its public issues: check `gh issue list -R {repo} --search \
+         \"<words>\"`, then draft one with the steps, `{valk} --version` and the OS. Leave \
+         out anything private: names, emails, hostnames, home paths, repo, project and \
+         branch names, tokens, and this project's code or logs. Show the user the draft \
+         and run `gh issue create -R {repo}` only once they've said yes."
+    )
+}
+
 pub(crate) fn rank(kind: DecisionKind) -> u8 {
     match kind {
         DecisionKind::Constraint => 0,
@@ -433,6 +452,32 @@ mod tests {
         assert!(skills.len() <= SKILL_BUDGET && skills.contains("more: `valk decisions`"));
         // Newest first.
         assert!(skills.contains("- #100 ") && !skills.contains("- #1 "));
+    }
+
+    #[test]
+    fn valkyrie_bugs_go_upstream_scrubbed_and_approved() {
+        let text = upstream(Path::new("/r/app"), "valk");
+        assert!(text.starts_with("\n\nA bug in Valkyrie itself"));
+        assert!(text.contains("`gh issue create -R bjschnell/Valkyrie"));
+        assert!(text.contains("`valk --version`"));
+        assert!(text.contains("home paths") && text.contains("tokens"));
+        assert!(text.contains("only once they've said yes"));
+        assert!(!text.contains("{repo}") && !text.contains("{valk}"));
+    }
+
+    #[test]
+    fn valkyries_own_repo_keeps_its_bugs_on_the_backlog() {
+        let repo = std::env::temp_dir().join(format!("valk-inject-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/bjschnell/Valkyrie.git\n",
+        )
+        .unwrap();
+        assert_eq!(upstream(&repo, "valk"), "");
+        assert_eq!(upstream(&crate::project::user(), "valk"), "");
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]
