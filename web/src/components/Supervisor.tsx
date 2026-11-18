@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WatchedPr } from "../proto";
-import { base, launchesOn, orderHref, orderSize } from "../lib/backlog";
+import { base, itemNo, launchesOn, orderHref, orderSize } from "../lib/backlog";
 import { stepChoices } from "../lib/step";
 import { stripLine, waitingOnYou, watchLine, type Wait } from "../lib/supervisor";
 import { age } from "../lib/time";
@@ -187,7 +187,7 @@ function WaitCard({ w, onDone }: { w: Wait; onDone: () => void }) {
       );
     }
     case "launch":
-      return card("ready", `#${w.offer.item} ${w.offer.title}`, `${w.offer.why} · on ${launchesOn(w.offer)} · ${base(w.offer.project)}`, [
+      return card("ready", `#${w.offer.number} ${w.offer.title}`, `${w.offer.why} · on ${launchesOn(w.offer)} · ${base(w.offer.project)}`, [
         <button key="leave" className="ghost" disabled={busy} onClick={() => void act(() => answerLaunch(w.offer, false))}>
           Leave
         </button>,
@@ -228,6 +228,7 @@ const STATE_LABEL: Record<WatchedPr["state"], string> = {
  * every minute while the page is open, since the poll runs every five.
  */
 function Watching({ refresh }: { refresh: number }) {
+  const items = useApp((s) => s.items);
   const status = useApp((s) => s.status);
   const now = useApp((s) => s.now);
   const { data: watch, failed, reload } = useCached("supervisor-watch", supervisorWatch);
@@ -267,7 +268,7 @@ function Watching({ refresh }: { refresh: number }) {
                 {p.merge_note && <span className="supervisor-merge-note">{p.merge_note}</span>}
               </span>
               <span className="supervisor-repo">
-                {p.item !== undefined ? `#${p.item}` : p.branch} · {base(p.project)}
+                {p.item !== undefined ? `#${itemNo(items, p.item)}` : p.branch} · {base(p.project)}
               </span>
             </li>
           ))}

@@ -606,7 +606,7 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
 /// What a run was about, one line.
 pub fn what(run: &Run, item: Option<&Item>, agent: &str) -> String {
     if let Some(item) = item {
-        return clip(&format!("#{} {}", item.id, item.title), MAX_WHAT);
+        return clip(&format!("#{} {}", item.number, item.title), MAX_WHAT);
     }
     let dir = run
         .cwd
@@ -706,7 +706,7 @@ pub fn when(ms: u64, tz: &TimeZone) -> String {
 /// The digest as markdown to paste: a heading per repository or day, a line per
 /// session, its agent's own last line under it.
 pub fn render(digest: &Digest, tz: &TimeZone) -> String {
-    let mut out = format!("# Away digest\n\n{}\n\n", about(digest, tz));
+    let mut out = format!("# Away summary\n\n{}\n\n", about(digest, tz));
     if digest.entries.is_empty() {
         out.push_str("No agent did anything in that time.\n");
         return out;
@@ -989,12 +989,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_run_on_an_item_says_its_repository_number_not_its_id() {
+        let mut it = item(231, ItemStatus::Open, None);
+        it.number = 7;
+        let line = what(&run("working", None, None), Some(&it), "claude");
+        assert!(line.starts_with("#7 "), "{line}");
+    }
+
     fn item(id: u32, status: ItemStatus, pr: Option<&str>) -> Item {
         let mut i: Item = serde_json::from_value(json!({
             "id": id, "title": format!("item {id}"), "created": 0, "updated": 0,
         }))
         .unwrap();
-        (i.status, i.pr) = (status, pr.map(Into::into));
+        (i.status, i.pr, i.number) = (status, pr.map(Into::into), id);
         i
     }
 
@@ -1330,7 +1338,7 @@ mod tests {
         let md = render(&digest, &TimeZone::UTC);
         assert_eq!(
             md,
-            "# Away digest\n\nSince you left, Mon 9 Nov 10:00 (1d 2h ago).\n\n\
+            "# Away summary\n\nSince you left, Mon 9 Nov 10:00 (1d 2h ago).\n\n\
              2 agent sessions: 2 waiting on PR/CI.\n\
              \n## valkyrie\n\n\
              - **waiting on PR/CI**: #9 Away digest: PR #12 open (claude, Tue 10 Nov 10:00–11:00)\n  > Opened PR #12.\n\

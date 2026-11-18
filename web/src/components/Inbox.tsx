@@ -65,7 +65,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
       n: to("#/new"),
       b: to("#/backlog"),
       d: to("#/decisions"),
-      a: to("#/digest"),
+      a: to("#/summary"),
       h: to("#/history"),
       s: to("#/supervisor"),
       "/": to("#/search"),

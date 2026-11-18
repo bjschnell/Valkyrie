@@ -141,6 +141,8 @@ pub(crate) struct Page {
     reader: Option<Reader>,
     /// The doc you just deleted, by its token and title, for `u`.
     undo: Option<(String, String)>,
+    /// Item id to the number its repository calls it, for a doc's "#N".
+    pub(crate) numbers: std::collections::HashMap<u32, u32>,
     /// Recently deleted, while `t` has it open.
     trash: Option<Trash>,
     /// The docs a wikilink was followed from, by key and scroll, for esc.
@@ -917,7 +919,7 @@ impl Page {
                         sub.push(format!("session {s}"));
                     }
                     if let Some(n) = d.item {
-                        sub.push(format!("#{n}"));
+                        sub.push(format!("#{}", self.numbers.get(&n).copied().unwrap_or(n)));
                     }
                     let sub = sub
                         .into_iter()
@@ -1064,7 +1066,7 @@ impl Page {
                 about.push(format!("session {s}"));
             }
             if let Some(n) = d.item {
-                about.push(format!("#{n}"));
+                about.push(format!("#{}", self.numbers.get(&n).copied().unwrap_or(n)));
             }
             about.push(d.path.clone());
             if open > 0 {

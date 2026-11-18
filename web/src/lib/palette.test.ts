@@ -71,7 +71,7 @@ describe("entries", () => {
   it("offers to accept proposed decisions and backlog items, and no others", () => {
     const d = (id: number, status: string) =>
       ({ id, project: "/r/valkyrie", title: `d${id}`, kind: "gotcha", status, provenance: { by: "claude" } }) as unknown as Decision;
-    const i = (id: number, status: string) => ({ id, title: `i${id}`, kind: "bug", status, by: "claude" }) as unknown as Item;
+    const i = (id: number, status: string) => ({ id, number: id, title: `i${id}`, kind: "bug", status, by: "claude" }) as unknown as Item;
     const list = entries(sources({ proposals: [d(1, "proposed"), d(2, "active")], items: [i(3, "proposed"), i(4, "open"), i(5, "shipped")] }));
     const accepts = list.filter((e) => e.label.startsWith("Accept"));
     expect(accepts.map((e) => e.label)).toEqual(["Accept gotcha: d1", "Accept #3: i3"]);

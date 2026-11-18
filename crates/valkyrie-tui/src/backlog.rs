@@ -242,12 +242,17 @@ pub(crate) enum Typing {
     /// A new item: Tab cycles its kind.
     Add { kind: ItemKind, text: LineEdit },
     /// A handoff note on item `id`.
-    Note { id: u32, text: LineEdit },
+    Note {
+        id: u32,
+        number: u32,
+        text: LineEdit,
+    },
     /// Item `id`'s title, its kind with Tab and its repository with Shift-Tab; the
     /// body stays as it is. `was` holds all three as the prompt opened, so only
     /// what changed here is sent.
     Edit {
         id: u32,
+        number: u32,
         kind: ItemKind,
         project: Option<PathBuf>,
         text: LineEdit,
@@ -274,6 +279,8 @@ const CLAUDE_MODELS: [&str; 4] = ["", "opus", "sonnet", "haiku"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LaunchForm {
     pub(crate) id: u32,
+    /// `id`'s number in its repository, for the title.
+    pub(crate) number: u32,
     pub(crate) agent: &'static str,
     /// Empty for the agent's own default.
     pub(crate) model: LineEdit,
@@ -299,6 +306,7 @@ impl LaunchForm {
         let agent = last_agent(item);
         let mut form = Self {
             id: item.id,
+            number: item.number,
             agent,
             model: LineEdit::default(),
             worktree: true,
@@ -626,7 +634,7 @@ impl Page {
                                     text: text.text().trim().into(),
                                 });
                             }
-                            Typing::Note { id, text } if !text.text().trim().is_empty() => {
+                            Typing::Note { id, text, .. } if !text.text().trim().is_empty() => {
                                 out.push(Do::Note {
                                     id,
                                     text: text.text().trim().into(),
@@ -638,6 +646,7 @@ impl Page {
                                 project,
                                 text,
                                 was,
+                                ..
                             } if !text.text().trim().is_empty() => {
                                 let title = text.text().trim();
                                 let title = (title != was.0).then(|| title.to_owned());
@@ -891,6 +900,7 @@ impl Page {
         boot: u64,
     ) -> Vec<Do> {
         let id = item.id;
+        let num = item.number;
         let live = live(item, sessions, boot).map(|s| s.id);
         let hand_over = taken_only(item, sessions, boot);
         let launchable = item.status == ItemStatus::Open && (live.is_none() || hand_over);
@@ -899,10 +909,10 @@ impl Page {
                 Some(s) if !hand_over => Do::Attach(s),
                 _ if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
                 _ if !launchable => {
-                    Do::Say(format!("#{id} is {}: o reopens it", item.status.as_str()))
+                    Do::Say(format!("#{num} is {}: o reopens it", item.status.as_str()))
                 }
                 _ if item.project.is_none() => {
-                    Do::Say(format!("#{id} has no folder yet: pick one in the web app"))
+                    Do::Say(format!("#{num} has no folder yet: pick one in the web app"))
                 }
                 _ => Do::Launch {
                     id,
@@ -923,27 +933,27 @@ impl Page {
             }
             b"L" if item.status == ItemStatus::Proposed => Do::Say("accept it first: a".into()),
             b"L" if !launchable && live.is_some() => {
-                Do::Say(format!("an agent is on #{id}: ↩ opens it"))
+                Do::Say(format!("an agent is on #{num}: ↩ opens it"))
             }
             b"L" if !launchable => {
-                Do::Say(format!("#{id} is {}: o reopens it", item.status.as_str()))
+                Do::Say(format!("#{num} is {}: o reopens it", item.status.as_str()))
             }
-            b"L" => Do::Say(format!("#{id} has no folder yet: pick one in the web app")),
+            b"L" => Do::Say(format!("#{num} has no folder yet: pick one in the web app")),
             b"a" if item.status == ItemStatus::Proposed => Do::Status(id, ItemStatus::Open),
             b"s" if item.status == ItemStatus::Open || item.agent_filed() => {
                 Do::Status(id, ItemStatus::Shipped)
             }
             b"d" if item.status != ItemStatus::Dropped => Do::Status(id, ItemStatus::Dropped),
-            b"B" if item.sessions.is_empty() => Do::Say(format!("#{id} isn't started")),
+            b"B" if item.sessions.is_empty() => Do::Say(format!("#{num} isn't started")),
             b"B" if item.pr.is_some() => {
-                Do::Say(format!("#{id} has a pull request: ship or drop it"))
+                Do::Say(format!("#{num} has a pull request: ship or drop it"))
             }
             b"B" if live.is_some() && self.returning != Some(id) => {
                 self.returning = Some(id);
-                Do::Say(format!("B again stops its agent and returns #{id}"))
+                Do::Say(format!("B again stops its agent and returns #{num}"))
             }
             b"B" if matches!(lane, Lane::Done | Lane::Proposed) => {
-                Do::Say(format!("#{id} is {}", lane.title()))
+                Do::Say(format!("#{num} is {}", lane.title()))
             }
             b"B" => {
                 self.returning = None;
@@ -965,7 +975,7 @@ impl Page {
                         priority: Some(p),
                         cwd: None,
                     },
-                    None => Do::Say(format!("#{id} is already {}", item.priority.as_str())),
+                    None => Do::Say(format!("#{num} is already {}", item.priority.as_str())),
                 }
             }
             b"o" if lane == Lane::Done => Do::Status(id, ItemStatus::Open),
@@ -973,6 +983,7 @@ impl Page {
             b"N" => {
                 self.typing = Some(Typing::Note {
                     id,
+                    number: item.number,
                     text: LineEdit::default(),
                 });
                 return Vec::new();
@@ -980,6 +991,7 @@ impl Page {
             b"e" => {
                 self.typing = Some(Typing::Edit {
                     id,
+                    number: item.number,
                     kind: item.kind,
                     project: item.project.clone(),
                     text: LineEdit::new(item.title.clone()),
@@ -987,14 +999,14 @@ impl Page {
                 });
                 return Vec::new();
             }
-            b"x" if live.is_some() => Do::Say(format!("an agent is still running on #{id}")),
+            b"x" if live.is_some() => Do::Say(format!("an agent is still running on #{num}")),
             b"x" if self.armed == Some(id) => {
                 self.armed = None;
                 Do::Delete(id)
             }
             b"x" => {
                 self.armed = Some(id);
-                Do::Say(format!("x again deletes #{id} for good"))
+                Do::Say(format!("x again deletes #{num} for good"))
             }
             _ => return Vec::new(),
         };
@@ -1137,7 +1149,7 @@ impl Page {
                     },
                     match self.waiting_launch(rows) {
                         Some(o) => vec![
-                            format!(" #{} ready: R starts it, X leaves it ", o.item)
+                            format!(" #{} ready: R starts it, X leaves it ", o.number)
                                 .fg(t.accent)
                                 .bold(),
                         ],
@@ -1212,7 +1224,24 @@ impl Page {
                 .as_ref()
                 .filter(|(id, updated, _)| *id == item.id && *updated == item.updated)
                 .and_then(|(_, _, f)| f.as_ref());
-            let text = detail_lines(item, *lane, live(item, sessions, boot), facts, now, t);
+            let blocked: Vec<u32> = item
+                .blocked_by
+                .iter()
+                .map(|b| {
+                    rows.iter()
+                        .find(|(_, i)| i.id == *b)
+                        .map_or(*b, |(_, i)| i.number)
+                })
+                .collect();
+            let text = detail_lines(
+                item,
+                *lane,
+                live(item, sessions, boot),
+                facts,
+                &blocked,
+                now,
+                t,
+            );
             let pane = Block::new()
                 .borders(if wide {
                     ratatui::widgets::Borders::LEFT
@@ -1328,14 +1357,15 @@ fn order_lines(
     for (n, step) in order.steps.iter().enumerate() {
         let start = lines.len();
         let item = rows.iter().map(|(_, i)| i).find(|i| i.id == step.item);
-        let changes = step_changes(step, item);
+        let changes = step_changes(step, item, rows);
         let tick = match (step.change().is_some(), view.skip.contains(&step.item)) {
             (false, _) => "   ",
             (true, true) => "[ ]",
             (true, false) => "[x]",
         };
         let title = item.map_or("(not shown)", |i| i.title.as_str());
-        let head = format!(" {tick} {:>2}. #{} ", n + 1, step.item);
+        let number = item.map_or(step.item, |i| i.number);
+        let head = format!(" {tick} {:>2}. #{number} ", n + 1);
         let room = width.saturating_sub(head.chars().count() + changes.chars().count() + 2);
         let mut line = Line::from(vec![
             head.fg(if n == view.cursor { t.accent } else { t.fg })
@@ -1370,7 +1400,11 @@ fn order_scroll(at: std::ops::Range<usize>, room: usize) -> usize {
 }
 
 /// What accepting `step` changes on `item`: `p2→p1, after #37`; empty for none.
-pub(crate) fn step_changes(step: &valkyrie_proto::OrderStep, item: Option<&Item>) -> String {
+pub(crate) fn step_changes(
+    step: &valkyrie_proto::OrderStep,
+    item: Option<&Item>,
+    rows: &[(Lane, Item)],
+) -> String {
     let mut parts = Vec::new();
     if let Some(p) = step.priority {
         parts.push(match item {
@@ -1383,7 +1417,13 @@ pub(crate) fn step_changes(step: &valkyrie_proto::OrderStep, item: Option<&Item>
         let added: Vec<String> = after
             .iter()
             .filter(|b| !had.contains(b))
-            .map(|b| format!("#{b}"))
+            .map(|b| {
+                let number = rows
+                    .iter()
+                    .find(|(_, i)| i.id == *b)
+                    .map_or(*b, |(_, i)| i.number);
+                format!("#{number}")
+            })
             .collect();
         if !added.is_empty() {
             parts.push(format!("after {}", added.join(", ")));
@@ -1423,7 +1463,7 @@ fn launch_window(frame: &mut ratatui::Frame, over: Rect, form: &LaunchForm, t: &
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(style::Style::new().fg(t.accent))
-        .title(format!(" Launch #{} ", form.id).fg(t.fg).bold())
+        .title(format!(" Launch #{} ", form.number).fg(t.fg).bold())
         .style(style::Style::new().bg(t.panel).fg(t.fg));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -1522,7 +1562,7 @@ pub(crate) fn shipped_summary(
     unfetched: usize,
     said: Said,
 ) -> String {
-    let ids: Vec<String> = shipped.iter().map(|s| format!("#{}", s.id)).collect();
+    let ids: Vec<String> = shipped.iter().map(|s| format!("#{}", s.number)).collect();
     let branches: Vec<String> = shipped
         .iter()
         .map(|s| {
@@ -1531,8 +1571,8 @@ pub(crate) fn shipped_summary(
                 .filter_map(|(on, mark)| on.then_some(mark))
                 .collect();
             match marks.is_empty() {
-                true => format!("#{} {}", s.id, s.branch),
-                false => format!("#{} {} ({})", s.id, s.branch, marks.join(", ")),
+                true => format!("#{} {}", s.number, s.branch),
+                false => format!("#{} {} ({})", s.number, s.branch, marks.join(", ")),
             }
         })
         .collect();
@@ -1548,7 +1588,7 @@ pub(crate) fn shipped_summary(
         parts.push(format!("{not_merged} not merged"));
     }
     for k in kept.iter().filter(|k| k.why != "not merged") {
-        parts.push(format!("#{} {}", k.id, k.why));
+        parts.push(format!("#{} {}", k.number, k.why));
     }
     if unfetched > 0 {
         parts.push(format!("{unfetched} not fetched, judged as last fetched"));
@@ -1581,7 +1621,7 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
         .as_ref()
         .and_then(|p| p.file_name())
         .map_or("no folder".into(), |n| n.to_string_lossy().into_owned());
-    let head = format!(" #{:<4}", item.id);
+    let head = format!(" #{:<4}", item.number);
     let prio = format!("{:<3}", item.priority.as_str());
     let kind = format!("{:<8}", item.kind.as_str());
     // The lane as a column too, so a row still says its state when the heading scrolls away.
@@ -1624,7 +1664,7 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
 /// An item on the home screen: its lane, number and title.
 pub(crate) fn home_line(item: &Item, lane: Lane, width: usize, t: &Theme) -> Line<'static> {
     let label = format!(" {:<10}", lane.title());
-    let id = format!("#{:<4}", item.id);
+    let id = format!("#{:<4}", item.number);
     let room = width.saturating_sub(label.len() + id.len());
     Line::from(vec![
         label.fg(lane.color(t)).bold(),
@@ -1641,29 +1681,30 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             kind_color(*kind, t),
             text,
         ),
-        Typing::Note { id, text } => (format!(" note on #{id} "), t.accent, text),
+        Typing::Note { number, text, .. } => (format!(" note on #{number} "), t.accent, text),
         Typing::Edit {
-            id,
+            number,
             kind,
             project,
             text,
             was,
+            ..
         } => (
             match project.as_ref().filter(|p| Some(*p) != was.2.as_ref()) {
                 Some(p) => format!(
-                    " #{id} {} → {} ",
+                    " #{number} {} → {} ",
                     kind.as_str(),
                     p.file_name().map_or_else(
                         || p.display().to_string(),
                         |n| n.to_string_lossy().into_owned()
                     )
                 ),
-                None => format!(" #{id} {} ", kind.as_str()),
+                None => format!(" #{number} {} ", kind.as_str()),
             },
             kind_color(*kind, t),
             text,
         ),
-        Typing::Launch(form) => (format!(" #{} model ", form.id), t.accent, &form.model),
+        Typing::Launch(form) => (format!(" #{} model ", form.number), t.accent, &form.model),
     };
     let room = width.saturating_sub(label.chars().count() + 1);
     let mut spans = vec![label.fg(t.bg).bg(color).bold(), " ".into()];
@@ -1677,12 +1718,13 @@ fn detail_lines(
     lane: Lane,
     live: Option<&SessionInfo>,
     facts: Option<&ItemFacts>,
+    blocked: &[u32],
     now: u64,
     t: &Theme,
 ) -> Vec<Line<'static>> {
     let mut out = vec![
         Line::from(vec![
-            format!(" #{} ", item.id).fg(t.muted),
+            format!(" #{} ", item.number).fg(t.muted),
             item.title.clone().fg(t.fg).bold(),
         ]),
         Line::from(vec![
@@ -1712,7 +1754,7 @@ fn detail_lines(
         ));
     }
     if !item.blocked_by.is_empty() {
-        let ids: Vec<String> = item.blocked_by.iter().map(|id| format!("#{id}")).collect();
+        let ids: Vec<String> = blocked.iter().map(|n| format!("#{n}")).collect();
         out.push(Line::from(
             format!(" after {}, not finished yet", ids.join(", ")).fg(t.accent2),
         ));
@@ -1782,6 +1824,7 @@ mod tests {
             priority: Default::default(),
             blocked_by: Vec::new(),
             id,
+            number: id,
             title: format!("item {id}"),
             body: String::new(),
             kind: ItemKind::Bug,
@@ -1840,6 +1883,7 @@ mod tests {
             id: 5,
             project: "/r/app".into(),
             item: 2,
+            number: 2,
             title: "item 2".into(),
             agent: "claude".into(),
             model: String::new(),
@@ -1982,10 +2026,10 @@ mod tests {
             blocked_by,
         };
         assert_eq!(
-            step_changes(&step(Some(Priority::P1), Some(vec![2, 5])), Some(&i)),
+            step_changes(&step(Some(Priority::P1), Some(vec![2, 5])), Some(&i), &[]),
             "p2→p1, after #2"
         );
-        assert_eq!(step_changes(&step(None, None), Some(&i)), "");
+        assert_eq!(step_changes(&step(None, None), Some(&i), &[]), "");
     }
 
     #[test]
@@ -2270,7 +2314,7 @@ mod tests {
         };
         assert_eq!(lane(&untaken, &[], 7), Lane::Proposed);
         let t = crate::theme::DRACULA;
-        let text: Vec<String> = detail_lines(&filed, Lane::Running, None, None, 0, &t)
+        let text: Vec<String> = detail_lines(&filed, Lane::Running, None, None, &[], 0, &t)
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -2335,7 +2379,7 @@ mod tests {
         };
         assert_eq!(lane(&shipped, &[], 7), Lane::Done);
         let t = crate::theme::DRACULA;
-        let text: Vec<String> = detail_lines(&pr(1), Lane::Review, None, None, 0, &t)
+        let text: Vec<String> = detail_lines(&pr(1), Lane::Review, None, None, &[], 0, &t)
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -2569,6 +2613,7 @@ mod tests {
     fn the_ship_merged_summary_counts_what_stayed() {
         let shipped = |id| ShippedItem {
             id,
+            number: id,
             title: String::new(),
             branch: format!("fix/{id}"),
             branch_taken: id == 4,
@@ -2577,6 +2622,7 @@ mod tests {
             note: None,
         };
         let kept = |id, why: &str| KeptItem {
+            number: id,
             id,
             title: String::new(),
             why: why.into(),
@@ -2625,6 +2671,7 @@ mod tests {
     fn an_answer_arms_only_an_open_page_and_says_shipped_only_when_it_did() {
         let found = [ShippedItem {
             id: 1,
+            number: 1,
             title: String::new(),
             branch: "fix/a".into(),
             branch_taken: false,
@@ -2662,7 +2709,7 @@ mod tests {
             pr: Some(pr.into()),
             ..item(1, 1)
         };
-        let text: Vec<String> = detail_lines(&taken, Lane::Review, None, None, 0, &t)
+        let text: Vec<String> = detail_lines(&taken, Lane::Review, None, None, &[], 0, &t)
             .iter()
             .map(|l| l.to_string())
             .collect();
