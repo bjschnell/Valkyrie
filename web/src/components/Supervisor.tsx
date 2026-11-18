@@ -45,9 +45,9 @@ export function SupervisorStrip() {
   const line = stripLine(waits.length, log?.entries[0]);
   if (!line) return null;
   return (
-    <button className="supervisor-strip" onClick={() => (location.hash = "#/supervisor")}>
-      <span className="supervisor-strip-name">Supervisor</span>
-      <span className="supervisor-strip-line">{line}</span>
+    <button className="quiet-line" onClick={() => (location.hash = "#/supervisor")}>
+      <span className="quiet-line-name">Supervisor</span>
+      <span className="quiet-line-text">{line}</span>
       <Chevron />
     </button>
   );

@@ -4341,37 +4341,95 @@ button.as-text {
   align-self: flex-start;
 }
 
-/* The supervisor (backlog #180): a strip on home, a page of its own. */
-.supervisor-strip {
+/* The supervisor (backlog #180): a line on home, a page of its own. */
+
+/* Home's quiet lines (backlog #204): below Needs you, one line each, no chrome,
+ * so the cards above stay the only loud thing on the page. */
+.quiet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 var(--space-45);
+}
+
+.quiet:empty {
+  display: none;
+}
+
+.quiet-group > .cards {
+  margin-top: var(--space-2);
+}
+
+.quiet-line {
   display: flex;
   align-items: center;
   gap: var(--space-25);
   width: 100%;
-  margin-bottom: var(--space-35);
-  padding: var(--space-25) var(--space-35);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  padding: var(--space-15) var(--space-1);
+  border: 0;
   border-radius: var(--radius-md);
-  background: var(--card);
+  background: none;
   color: inherit;
   font: inherit;
+  font-size: var(--text-sm);
   text-align: left;
   cursor: pointer;
 }
 
-.supervisor-strip-name {
-  flex: none;
-  font-weight: var(--weight-semibold);
-  color: var(--accent);
+@media (hover: hover) {
+  .quiet-line:hover {
+    background: var(--card);
+  }
 }
 
-.supervisor-strip-line {
+.quiet-line > svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.quiet-line[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+
+.quiet-line-name {
+  flex: none;
+  font-weight: var(--weight-semibold);
+  color: var(--soft);
+}
+
+.quiet-line-text {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
-  font-size: var(--text-sm);
+}
+
+/* The quota as text, no bars: a warning still takes its colour. */
+.quota.quiet-quota {
+  margin: 0;
+  padding: var(--space-15) var(--space-1);
+  gap: var(--space-15) var(--space-3);
+}
+
+.quota.quiet-quota .quota-who {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: var(--weight-semibold);
+}
+
+.quota.quiet-quota .quota-used {
+  color: var(--muted);
+}
+
+.quota.quiet-quota .quota-low .quota-used,
+.quota.quiet-quota .quota-full .quota-used {
+  color: var(--level);
+}
+
+.quiet .hint {
+  margin: var(--space-2) 0 0;
 }
 
 .supervisor-card {

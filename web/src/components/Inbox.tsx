@@ -99,15 +99,11 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
       </header>
 
       <main className="inbox">
-        <QuotaMeter />
-        <NotifyHint />
-        <AllowAll />
-        <SupervisorStrip />
-        <Proposals />
         <section>
           <h2 className="section-title">
             Needs you <span className="count">{queue.length}</span>
           </h2>
+          <AllowAll />
           {queue.length === 0 ? (
             <div className="calm">
               <div className="calm-mark">✓</div>
@@ -131,6 +127,13 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
             </div>
           )}
         </section>
+
+        <div className="quiet">
+          <SupervisorStrip />
+          <Proposals />
+          <QuotaMeter quiet />
+          <NotifyHint />
+        </div>
 
         <section>
           <h2 className="section-title">
