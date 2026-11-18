@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REPO: &str = "bjschnell/Valkyrie";
+const REPO: &str = valkyrie_context::project::VALKYRIE_REPO;
 /// The commit a release build was made from (release.yml sets it); a build from
 /// source has none and never downloads a release over itself.
 const COMMIT: Option<&str> = option_env!("VALK_COMMIT");
