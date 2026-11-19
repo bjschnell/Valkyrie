@@ -239,10 +239,14 @@ fn one_line(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::context::{AS_CALLER, Caller};
+    #[cfg(unix)]
     use std::path::Path;
+    #[cfg(unix)]
     use std::process::Command;
 
+    #[cfg(unix)]
     fn caller(agent: Option<&str>) {
         let agent = agent.map(str::to_owned);
         AS_CALLER.with(|c| {
@@ -255,7 +259,9 @@ mod tests {
         });
     }
 
+    // Spawns real sessions (`sleep`) and kills them, as the dispatch tests do.
     #[test]
+    #[cfg(unix)]
     fn one_session_started_by_the_user_reads_and_prompts_only_idle_agents() {
         let dir = std::env::temp_dir().join(format!("valk-overseer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
