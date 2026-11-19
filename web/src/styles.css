@@ -477,6 +477,16 @@ h1[tabindex="-1"]:focus {
   font-size: var(--text-md);
 }
 
+.calm-tutor {
+  margin-top: var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.launcher-tutor {
+  align-self: flex-start;
+}
+
 /* One track no wider than the list: an auto track grows to a card's unwrapped
    name and pushes the card past a narrow column (#195). */
 .cards {

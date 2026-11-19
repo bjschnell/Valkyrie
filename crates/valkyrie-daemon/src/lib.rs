@@ -28,6 +28,7 @@ mod restore;
 mod session;
 mod supervise;
 mod sweep;
+mod tutor;
 mod usage;
 mod watching;
 mod wiki;
@@ -1346,6 +1347,24 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 env,
             } => {
                 let result = match registry.wiki_explore(&cwd, stale, &agent, size, env).await {
+                    Ok((reply, started)) => {
+                        let reply = Ok(reply);
+                        if started {
+                            mark_driven(&registry, &reply, &mut driver, peer);
+                        }
+                        reply
+                    }
+                    Err(e) => Err(e),
+                };
+                (req, result)
+            }
+            ClientMsg::Tutor {
+                req,
+                agent,
+                size,
+                env,
+            } => {
+                let result = match registry.tutor(&agent, size, env).await {
                     Ok((reply, started)) => {
                         let reply = Ok(reply);
                         if started {

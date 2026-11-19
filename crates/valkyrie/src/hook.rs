@@ -549,6 +549,35 @@ pub fn setup_claude(
     Ok(())
 }
 
+/// Writes the tutor as a Claude Code skill in `skills` (`<dir>/valk-tutor/SKILL.md`),
+/// so `/valk-tutor` starts it in any Claude session; with `remove`, takes it out.
+/// `valk` is the command the skill's agent runs. Only `valk setup claude` does
+/// this: the hooks Valkyrie keeps in sync on its own don't touch your skills.
+pub fn setup_tutor_skill(valk: &str, skills: &Path, remove: bool, dry_run: bool) -> Result<()> {
+    let dir = skills.join(valkyrie_context::tutor::SKILL);
+    let path = dir.join("SKILL.md");
+    let text = valkyrie_context::tutor::skill(valk);
+    if dry_run {
+        let verb = if remove { "remove" } else { "write" };
+        println!("would {verb} {}", path.display());
+        return Ok(());
+    }
+    if remove {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+            println!("removed the /valk-tutor skill");
+        }
+        return Ok(());
+    }
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    println!("installed the /valk-tutor skill in {}", path.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +665,24 @@ mod tests {
         let long = format!("echo {} && gh pr merge 81", "x".repeat(MAX_STRING));
         let mut payload = pre_tool(&long);
         assert!(merge_guard("claude", &mut payload, &OnMain).is_some());
+    }
+
+    #[test]
+    fn the_tutor_skill_goes_in_and_comes_out() {
+        let skills = std::env::temp_dir().join(format!("vk-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&skills);
+        setup_tutor_skill("/x/valk", &skills, false, false).unwrap();
+        let path = skills.join("valk-tutor/SKILL.md");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("---\nname: valk-tutor\n"), "{text}");
+        assert!(text.contains("/x/valk pane split"));
+        // Again is a no-op, and a dry run writes nothing.
+        setup_tutor_skill("/x/valk", &skills, false, false).unwrap();
+        setup_tutor_skill("/x/valk", &skills, true, true).unwrap();
+        assert!(path.exists());
+        setup_tutor_skill("/x/valk", &skills, true, false).unwrap();
+        assert!(!skills.join("valk-tutor").exists());
+        let _ = std::fs::remove_dir_all(&skills);
     }
 
     #[test]

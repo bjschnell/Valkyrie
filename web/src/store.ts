@@ -1022,6 +1022,18 @@ export async function wikiExplore(cwd: string, stale: boolean): Promise<SessionI
   return reply.info.id;
 }
 
+/** Starts the tutor, an agent that teaches Valkyrie one lesson at a time, and
+ * returns its session: the running one, if one is already teaching. Throws with
+ * the daemon's reason. */
+export async function startTutor(): Promise<SessionId> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "tutor", agent: "claude", size: SPAWN_SIZE, env: [] });
+  if (reply.t !== "session") throw new Error("unexpected reply");
+  void refresh();
+  reportColors(reply.info.id);
+  return reply.info.id;
+}
+
 /** The sessions whose history since `sinceMs` holds every word of `query`,
  * newest first (backlog #106). Throws with the daemon's reason. */
 export async function searchHistory(query: string, sinceMs: number | null, limit = 30): Promise<SearchResults> {

@@ -265,6 +265,21 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<wiki::WikiCmd>,
     },
+    /// Learn Valkyrie: start an agent that teaches it one hands-on lesson at a
+    /// time, in your home directory, and open it. One already running is opened
+    /// instead. The TUI's `?` and the web app start the same one.
+    Tutor {
+        /// The agent that teaches.
+        #[arg(long, default_value = "claude", value_parser = ["claude", "codex"])]
+        agent: String,
+        /// Print the tutor's brief instead of starting it.
+        #[arg(long)]
+        print: bool,
+        /// Print the session's id instead of opening it. Without a terminal,
+        /// that's what it does anyway.
+        #[arg(short, long, conflicts_with = "print")]
+        detach: bool,
+    },
     /// The worktrees sessions and backlog launches made beside the repository.
     #[command(subcommand)]
     Worktree(worktree::WorktreeCmd),
@@ -478,6 +493,8 @@ enum SetupCmd {
     /// Add Valkyrie's hooks to Claude Code's own settings (~/.claude/settings.json),
     /// so a `claude` typed in any Valkyrie session gets the project's decisions and
     /// is watched like one Valkyrie started. `valk` does this itself while Context is on.
+    /// Also installs the `/valk-tutor` skill (~/.claude/skills/valk-tutor), which
+    /// teaches Valkyrie as `valk tutor` does.
     Claude {
         /// Print the resulting settings.json instead of writing it.
         #[arg(long)]
@@ -1091,6 +1108,34 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Ok(())
             }
         }
+        Some(Cmd::Tutor {
+            agent,
+            print,
+            detach,
+        }) => {
+            if print {
+                print!(
+                    "{}",
+                    valkyrie_context::tutor::brief(&valkyrie_context::valk_command())
+                );
+                return Ok(());
+            }
+            let attach = !detach && require_tty().is_ok();
+            let (client, pushes) = connect(&socket).await?;
+            let size = valkyrie_tui::session_size().unwrap_or(Size {
+                cols: 120,
+                rows: 40,
+            });
+            let info = client
+                .tutor(agent, size, valkyrie_proto::login_env())
+                .await?;
+            if attach {
+                valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+            } else {
+                println!("{}", info.id);
+                Ok(())
+            }
+        }
         Some(Cmd::Doc(cmd)) => doc::run(&connect(&socket).await?.0, cmd).await,
         Some(Cmd::Note {
             text,
@@ -1166,7 +1211,13 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 Some(exe) => std::path::absolute(exe)?,
                 None => std::env::current_exe()?,
             };
-            hook::setup_claude(&exe, &hook::claude_settings_path(), remove, dry_run, false)
+            let settings = hook::claude_settings_path();
+            hook::setup_claude(&exe, &settings, remove, dry_run, false)?;
+            let valk = match std::env::current_exe().is_ok_and(|me| me == exe) {
+                true => valkyrie_context::valk_command(),
+                false => exe.to_string_lossy().into_owned(),
+            };
+            hook::setup_tutor_skill(&valk, &settings.with_file_name("skills"), remove, dry_run)
         }
         Some(Cmd::Setup(SetupCmd::Web {
             listen,

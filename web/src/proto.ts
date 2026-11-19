@@ -732,6 +732,8 @@ export type Request =
   /** Starts the agent that writes `cwd`'s wiki, or with `stale` rewrites just
    * the stale pages; replies `session`, the running one if it's already at it. */
   | { t: "wiki_explore"; cwd: string; stale: boolean; agent: string; size: { cols: number; rows: number }; env: [string, string | null][] }
+  /** Starts the agent that teaches Valkyrie, or finds the one running (backlog #226, protocol 48). */
+  | { t: "tutor"; agent: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   /** Every doc, newest first; replies `docs`. */
   /** `count_only`: no docs, just the unread count (the Inbox's poll). */
   | { t: "docs"; count_only?: boolean }

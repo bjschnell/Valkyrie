@@ -32,6 +32,7 @@ pub mod served;
 pub mod skill;
 pub mod stale;
 pub mod steps;
+pub mod tutor;
 pub mod usage;
 pub mod wiki;
 
