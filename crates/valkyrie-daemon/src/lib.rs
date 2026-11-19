@@ -26,6 +26,7 @@ mod quota;
 mod restore;
 mod session;
 mod supervise;
+mod sweep;
 mod usage;
 mod watching;
 pub mod work;
@@ -634,6 +635,7 @@ async fn serve_forever(
     }
     tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(watch_prs(registry.clone()));
+    tokio::spawn(sweep::run(registry.clone()));
     tokio::spawn(dispatch::run(registry.clone()));
     tokio::spawn(tick(registry.clone()));
     tokio::spawn(restore::keep(
