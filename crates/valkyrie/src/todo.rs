@@ -415,6 +415,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 .map(std::path::absolute)
                 .collect::<std::io::Result<_>>()?;
             let new = NewItem {
+                parent: None,
                 title: if body.is_some() {
                     text.clone()
                 } else {
@@ -691,6 +692,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 b => b,
             };
             let change = ItemChange::Edit {
+                parent: None,
                 title,
                 body,
                 kind,

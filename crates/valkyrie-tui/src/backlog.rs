@@ -1821,6 +1821,8 @@ mod tests {
 
     fn item(id: u32, updated: u64) -> Item {
         Item {
+            parent: None,
+            pr_merged: false,
             priority: Default::default(),
             blocked_by: Vec::new(),
             id,

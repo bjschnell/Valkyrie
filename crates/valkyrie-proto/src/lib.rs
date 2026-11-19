@@ -45,7 +45,7 @@ pub use search::{SearchField, SearchHit, SearchResults};
 pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 44;
+pub const PROTOCOL: u32 = 45;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once

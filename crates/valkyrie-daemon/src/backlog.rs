@@ -13,6 +13,16 @@ use valkyrie_proto::{
     ShippedItem, Size, SpawnSpec,
 };
 
+/// How many of `item`'s pieces in `items` are still open: a parent with any
+/// waits for them rather than shipping.
+fn open_pieces(item: &Item, items: &[Item]) -> usize {
+    item.children(items).iter().filter(|c| !c.closed()).count()
+}
+
+fn closed(status: ItemStatus) -> bool {
+    matches!(status, ItemStatus::Shipped | ItemStatus::Dropped)
+}
+
 /// Every item, pushed to queue watchers with the queue.
 pub(crate) type Items = Arc<Vec<Item>>;
 
@@ -126,7 +136,7 @@ impl Registry {
     ) -> Result<Reply> {
         let caller = self.caller(peer);
         let session = caller.session.as_ref().map(|s| (self.boot, s.info().id));
-        let (item, was) = {
+        let (item, was, was_parent) = {
             let backlog = self.backlog.lock().unwrap();
             let current = backlog.get(id)?;
             let own = caller.agent.is_some() && session.is_some() && current.filed_by == session;
@@ -162,17 +172,92 @@ impl Registry {
                     tracing::warn!(id, session = s, "returned item's session: {e}");
                 }
             }
-            (item, current.status)
+            (item, current.status, current.parent)
         };
         if was == ItemStatus::Proposed && item.status == ItemStatus::Open {
             self.tell_filer(&item);
         }
         let (item, note) = self.after_change(item).await?;
+        // A piece shipped, dropped, reopened or moved: its group, and the one it
+        // left, follow.
+        let reopened = closed(was) && !item.closed();
+        for parent in [item.parent, was_parent].into_iter().flatten() {
+            self.roll_up(parent, reopened).await;
+        }
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
             note,
         })
+    }
+
+    /// Keeps a group's parent in step with its pieces (backlog #235). Once every
+    /// piece is shipped or dropped, an open parent ships too, with a note saying
+    /// so, unless it was started on its own and its pull request hasn't merged:
+    /// that work ships when its PR does. A piece just reopened (`reopened`) while
+    /// its parent is shipped reopens the parent; nothing else does, so a parent
+    /// the user shipped by hand stays shipped. Returns the parent as it is then,
+    /// if changed.
+    pub(crate) async fn roll_up(&self, parent: u32, reopened: bool) -> Option<Item> {
+        let items = self.backlog.lock().unwrap().load();
+        let p = items.iter().find(|i| i.id == parent)?;
+        let children = p.children(&items);
+        if children.is_empty() {
+            return None;
+        }
+        let open = children.iter().filter(|c| !c.closed()).count();
+        let (status, text) = match p.status {
+            ItemStatus::Open if open == 0 => {
+                let own_work = p.pr.is_some() || !p.sessions.is_empty() || p.branch.is_some();
+                if own_work && !p.pr_merged {
+                    return None;
+                }
+                let n = children.len();
+                (
+                    ItemStatus::Shipped,
+                    format!("Shipped: all {n} of its pieces are shipped or dropped."),
+                )
+            }
+            ItemStatus::Shipped if reopened && open > 0 => (
+                ItemStatus::Open,
+                format!("Reopened: {open} of its pieces are open again."),
+            ),
+            _ => return None,
+        };
+        let shipping = status == ItemStatus::Shipped;
+        let p = p.clone();
+        let changed = if shipping {
+            match self.ship_one(&p).await? {
+                Ok((item, _)) => item,
+                Err(e) => {
+                    tracing::warn!(parent, "couldn't ship a finished group: {e:#}");
+                    return None;
+                }
+            }
+        } else {
+            let open = ItemChange::Status { status };
+            match self
+                .backlog
+                .lock()
+                .unwrap()
+                .change(parent, &open, now_secs())
+            {
+                Ok(item) => item,
+                Err(e) => {
+                    tracing::warn!(parent, "couldn't reopen a group: {e:#}");
+                    return None;
+                }
+            }
+        };
+        let noted = self.backlog.lock().unwrap().note(
+            parent,
+            "valkyrie",
+            &text,
+            backlog::NoteOrigin::Brief,
+            now_secs(),
+        );
+        tracing::info!(parent, shipping, "a group followed its pieces");
+        Some(noted.unwrap_or(changed))
     }
 
     /// Tells the session that filed `item`, if it's still running, that the user
@@ -490,11 +575,11 @@ impl Registry {
         if !dry_run {
             self.vouch(peer, "shipping backlog items")?;
         }
-        let items = self.backlog.lock().unwrap().load();
+        let all = self.backlog.lock().unwrap().load();
         let mut shipped = Vec::new();
         let mut kept = Vec::new();
         let mut judged = Vec::new();
-        for item in items {
+        for item in all.clone() {
             if only.as_ref().is_some_and(|ids| !ids.contains(&item.id)) {
                 continue;
             }
@@ -509,6 +594,16 @@ impl Registry {
             let filed = item.agent_filed();
             let (id, title) = (item.id, item.title.clone());
             judged.push(id);
+            let open = open_pieces(&item, &all);
+            if open > 0 {
+                kept.push(KeptItem {
+                    id,
+                    number: item.number,
+                    title,
+                    why: format!("{open} of its pieces still open"),
+                });
+                continue;
+            }
             let checkout = item.checkout.clone().filter(|c| c.is_dir());
             let (judged_branch, branch_taken) = (branch.clone(), item.branch_taken);
             let merged = tokio::task::spawn_blocking(move || match checkout {
@@ -595,6 +690,17 @@ impl Registry {
     /// proposed, it's marked unaccepted (ADR-0012 §3). Who may is the caller's to
     /// check: the user's `ship --merged`, or the daemon on a merged PR.
     async fn ship_judged(&self, judged: &Item) -> Option<Result<(Item, Option<String>)>> {
+        let done = self.ship_one(judged).await;
+        if let (Some(Ok((item, _))), Some(parent)) = (&done, judged.parent)
+            && item.status == ItemStatus::Shipped
+        {
+            self.roll_up(parent, false).await;
+        }
+        done
+    }
+
+    /// `ship_judged` without its group following.
+    async fn ship_one(&self, judged: &Item) -> Option<Result<(Item, Option<String>)>> {
         let id = judged.id;
         let changed = {
             let backlog = self.backlog.lock().unwrap();
@@ -630,8 +736,9 @@ impl Registry {
         let items = self.backlog.lock().unwrap().load();
         let mut shipped = 0;
         let mut changed = false;
-        for item in items {
-            if !matches!(item.status, ItemStatus::Open | ItemStatus::Proposed) {
+        for item in items.iter().cloned() {
+            // Merged already, waiting on its pieces: nothing left to read.
+            if !matches!(item.status, ItemStatus::Open | ItemStatus::Proposed) || item.pr_merged {
                 continue;
             }
             let Some(url) = item.pr.clone() else {
@@ -693,6 +800,31 @@ impl Registry {
                     Ok(Some(_)) => changed = true,
                     Ok(None) => {}
                     Err(e) => tracing::warn!(id, "couldn't record its PR's state: {e:#}"),
+                }
+                continue;
+            }
+            // Read again: a piece shipped earlier in this pass may have been its last.
+            let open = open_pieces(&item, &self.backlog.lock().unwrap().load());
+            if open > 0 {
+                let text = format!(
+                    "PR {url} merged; it ships once its {open} open pieces are shipped or dropped."
+                );
+                let backlog = self.backlog.lock().unwrap();
+                match backlog.pr_merged(id, &url) {
+                    Ok(Some(_)) => {
+                        changed = true;
+                        if let Err(e) = backlog.note(
+                            id,
+                            "valkyrie",
+                            &text,
+                            backlog::NoteOrigin::Brief,
+                            now_secs(),
+                        ) {
+                            tracing::warn!(id, "couldn't note the merge on its card: {e:#}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(id, "couldn't record its PR merged: {e:#}"),
                 }
                 continue;
             }
@@ -795,6 +927,9 @@ impl Registry {
         }
         let item = self.backlog.lock().unwrap().delete(id)?;
         tracing::info!(id, "backlog item deleted");
+        if let Some(parent) = item.parent {
+            self.roll_up(parent, false).await;
+        }
         self.refresh_items();
         Ok(Reply::Item {
             item: Box::new(item),
@@ -1612,6 +1747,7 @@ mod tests {
             }))
         });
         let edit = ItemChange::Edit {
+            parent: None,
             priority: None,
             blocked_by: None,
             title: Some("Hijacked".into()),
@@ -1710,6 +1846,7 @@ mod tests {
             .change_item(
                 mine,
                 ItemChange::Edit {
+                    parent: None,
                     priority: None,
                     blocked_by: None,
                     title: Some("Mine".into()),

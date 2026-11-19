@@ -963,6 +963,7 @@ mod tests {
 
         // The left one, once edited, is offered again; off, nothing is.
         let edit = ItemChange::Edit {
+            parent: None,
             title: Some("item 1, again".into()),
             body: None,
             kind: None,
