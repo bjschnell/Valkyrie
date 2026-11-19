@@ -1,11 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Decision, Note } from "../proto";
 import { SHELVES, type Shelf, byProject, ended, inFull, matches, pinnable, shelf } from "../lib/decisions";
 import { live, notesByProject } from "../lib/notes";
 import { scopeName } from "../lib/scope";
 import { age } from "../lib/time";
 import { allDecisions, allNotes, correctNote, deleteNote, review, useApp } from "../store";
-import { DecisionEditor } from "./Decisions";
+import { DecisionEditor, ToReview } from "./Decisions";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
@@ -27,7 +27,7 @@ const home = () => {
 type Tab = Shelf | "notes";
 const TABS: Tab[] = [...SHELVES, "notes"];
 
-/** What an empty shelf says to do next. Agents' proposals wait in the inbox. */
+/** What an empty shelf says to do next. Agents' proposals show under To review. */
 const EMPTY_HINT: Record<Tab, string> = {
   decisions: "Agents propose decisions as they work; the ones you accept land here.",
   skills: "Agents propose procedures worth repeating; the ones you accept land here.",
@@ -49,12 +49,22 @@ const ABOUT: Record<Tab, string> = {
 /**
  * Everything Valkyrie remembers for agents, to review, reword, retire or bring
  * back: decisions, skills, policies, your habits (ADR-0007, ADR-0016) and the
- * agents' notes (ADR-0017). Proposals wait in the inbox, not here.
+ * agents' notes (ADR-0017). Proposals wait on top, under To review, as they do
+ * on the inbox.
  */
 export function DecisionList() {
   const { data: memory, failed: why, reload: load } = useCached("memory", fetchMemory);
   const decisions = memory?.decisions ?? null;
   const notes = memory?.notes ?? null;
+  // An accepted proposal (here or anywhere) lands on a shelf: fetch again once
+  // the daemon says so, not when its card leaves (that's before the undo runs out).
+  const pushes = useApp((s) => s.proposalPushes);
+  const seen = useRef(pushes);
+  useEffect(() => {
+    if (seen.current === pushes) return;
+    seen.current = pushes;
+    void load();
+  }, [pushes, load]);
     const [tab, setTab] = useState<Tab>("decisions");
   const [only, setOnly] = useState<string | null>(null);
   const [showEnded, setShowEnded] = useState(false);
@@ -105,6 +115,7 @@ export function DecisionList() {
       </header>
 
       <main className="inbox">
+        <ToReview />
         <div className="kind-pick memory-tabs" role="tablist" aria-label="What">
           {TABS.map((t) => (
             <button
@@ -174,7 +185,7 @@ export function DecisionList() {
                   ? { label: "Show what's in use", run: () => setShowEnded(false) }
                   : only !== null
                     ? { label: "Show every project", run: () => setOnly(null) }
-                    : { label: "Check the inbox for proposals", run: () => (location.hash = "#/") }
+                    : undefined
             }
           />
         )}

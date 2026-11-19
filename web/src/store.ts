@@ -99,6 +99,8 @@ interface State {
   queue: QueueItem[];
   /** Decisions agents proposed, waiting on the human (ADR-0007). */
   proposals: Decision[];
+  /** Counts the daemon's proposal pushes: one lands after an accept takes effect. */
+  proposalPushes: number;
   /** Docs an agent wrote since the Docs list was last opened (ADR-0021 §5): a count, never cards. */
   unreadDocs: number;
   /** The backlog (DESIGN §8.12), as the daemon pushes it. */
@@ -149,6 +151,7 @@ export const useApp = create<State>(() => ({
   sessions: [],
   queue: [],
   proposals: [],
+  proposalPushes: 0,
   unreadDocs: 0,
   items: [],
   orders: [],
@@ -412,6 +415,7 @@ function onPush(msg: ServerMsg): void {
       break;
     case "proposals":
       raw = { ...raw, proposals: msg.items };
+      set({ proposalPushes: get().proposalPushes + 1 });
       show();
       break;
     case "items":
