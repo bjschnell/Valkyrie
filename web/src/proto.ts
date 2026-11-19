@@ -176,6 +176,29 @@ export interface PastSession extends DigestEntry {
   regrow?: string;
 }
 
+/** A repository wiki page (backlog #210), pages agents write for agents on how
+ * the code is built. A listing leaves `body` empty. */
+export interface WikiPage {
+  slug: string;
+  title: string;
+  summary: string;
+  /** The paths it covers, from the repository root. */
+  scope: string[];
+  /** The commit it was written at, short. */
+  commit?: string | null;
+  /** Unix seconds. */
+  updated: number;
+  /** Why it may be out of date; absent: it isn't. */
+  stale?: string | null;
+  body: string;
+}
+
+export interface WikiListing {
+  /** The repository the pages are for. */
+  root: string;
+  pages: WikiPage[];
+}
+
 /** Where in a session a search hit was found (backlog #106): your prompt, the
  * agent's closing reply, a file it wrote, or what it was about. */
 export type SearchField = "you" | "agent" | "file" | "about";
@@ -702,6 +725,13 @@ export type Request =
   | { t: "note"; note: { cwd: string; text: string; replaces?: number } }
   /** Deletes a note, leaving a tombstone; replies `tombstone`. */
   | { t: "note_rm"; cwd: string; id: number }
+  /** The wiki of `cwd`'s repository, without bodies (protocol 47); replies `wiki`. */
+  | { t: "wiki"; cwd: string }
+  /** One wiki page in full; replies `wiki_page`. */
+  | { t: "wiki_page"; cwd: string; page: string }
+  /** Starts the agent that writes `cwd`'s wiki, or with `stale` rewrites just
+   * the stale pages; replies `session`, the running one if it's already at it. */
+  | { t: "wiki_explore"; cwd: string; stale: boolean; agent: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   /** Every doc, newest first; replies `docs`. */
   /** `count_only`: no docs, just the unread count (the Inbox's poll). */
   | { t: "docs"; count_only?: boolean }
@@ -807,6 +837,8 @@ export type Reply =
   | { t: "notes"; listing: { notes: Note[] } }
   | { t: "note"; note: Note }
   | { t: "tombstone"; tombstone: { id: number } }
+  | { t: "wiki"; listing: WikiListing }
+  | { t: "wiki_page"; page: WikiPage }
   | { t: "doc"; doc: Doc }
   /** `to`: on a new comment, the running session that hears it at its next prompt. */
   | { t: "doc_comments"; comments: DocComment[]; to?: string }

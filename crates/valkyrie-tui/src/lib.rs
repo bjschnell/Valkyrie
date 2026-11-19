@@ -27,6 +27,7 @@ mod rain;
 mod settings;
 mod supervisor;
 mod theme;
+mod wiki;
 
 use anyhow::Result;
 use keys::{Action, Key, Keymap};
@@ -295,6 +296,8 @@ struct App {
     past: Option<past::Page>,
     /// The Docs page is open (`D` on the home screen).
     docs: Option<docs::Page>,
+    /// The repository wiki is open (`W` on the home screen).
+    wiki: Option<wiki::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
     /// The selected session's screen text, for the preview pane.
@@ -471,6 +474,7 @@ impl App {
             supervisor: None,
             past: None,
             docs: None,
+            wiki: None,
             editing: None,
             preview: None,
             pinger: Pinger::default(),
@@ -825,6 +829,9 @@ impl App {
         if self.past.is_some() {
             return self.past_keys(&bytes).await;
         }
+        if self.wiki.is_some() {
+            return self.wiki_keys(&bytes).await;
+        }
         // Over a session, the Docs page waits: your editor on a doc is one.
         if self.docs_shown() {
             return self.docs_keys(&bytes).await;
@@ -907,6 +914,9 @@ impl App {
         if self.past.is_some() {
             return self.past_keys(&bytes).await;
         }
+        if self.wiki.is_some() {
+            return self.wiki_keys(&bytes).await;
+        }
         if self.docs.is_some() {
             return self.docs_keys(&bytes).await;
         }
@@ -939,6 +949,7 @@ impl App {
             || self.digest.is_some()
             || self.supervisor.is_some()
             || self.past.is_some()
+            || self.wiki.is_some()
             || self.settings_cursor.is_some()
             || self.renaming.is_some()
         {
@@ -2623,6 +2634,7 @@ impl App {
             HomeKey::Supervisor => self.open_supervisor().await,
             HomeKey::Past => self.open_past().await,
             HomeKey::Docs => self.open_docs().await,
+            HomeKey::Wiki => self.open_wiki(selected).await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
     }
@@ -2922,6 +2934,86 @@ impl App {
                     }
                 }
                 past::Do::Say(text) => self.say(text),
+            }
+        }
+    }
+
+    /// Opens the wiki of the selected session's repository, else the one the TUI
+    /// started in.
+    async fn open_wiki(&mut self, selected: Option<SessionId>) {
+        let cwd = selected
+            .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+            .map(|s| s.cwd.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .filter(|d| remote().is_some() || in_repository(d));
+        let Some(cwd) = cwd else {
+            self.say("the wiki is a repository's: select a session in one".into());
+            return;
+        };
+        self.wiki = Some(wiki::Page::new(cwd));
+        self.load_wiki().await;
+    }
+
+    async fn load_wiki(&mut self) {
+        let Some(repo) = self.wiki.as_ref().map(|p| p.repo.clone()) else {
+            return;
+        };
+        let got = self.client.wiki(repo).await.map_err(|e| format!("{e:#}"));
+        if let Some(page) = &mut self.wiki {
+            if let Ok(l) = &got {
+                page.repo = l.root.clone();
+            }
+            page.loaded(got);
+        }
+    }
+
+    /// Keys while the wiki is open: an exploration opens the session it started.
+    async fn wiki_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.wiki else {
+            return;
+        };
+        for act in page.keys(bytes) {
+            match act {
+                wiki::Do::Close => self.wiki = None,
+                wiki::Do::Load => self.load_wiki().await,
+                wiki::Do::Read(slug) => {
+                    let Some(repo) = self.wiki.as_ref().map(|p| p.repo.clone()) else {
+                        return;
+                    };
+                    match self.client.wiki_page(repo, slug).await {
+                        Ok(full) => {
+                            if let Some(page) = &mut self.wiki {
+                                page.read(full);
+                            }
+                        }
+                        Err(e) => self.say(format!("couldn't read it: {e:#}")),
+                    }
+                }
+                wiki::Do::Explore { stale } => {
+                    let Some(repo) = self.wiki.as_ref().map(|p| p.repo.clone()) else {
+                        return;
+                    };
+                    let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+                    match self
+                        .client
+                        .wiki_explore(repo, stale, "claude".into(), size, spawn_env())
+                        .await
+                    {
+                        Ok(info) => {
+                            self.wiki = None;
+                            self.refresh().await;
+                            self.attach(info.id).await;
+                            return;
+                        }
+                        Err(e) => {
+                            if let Some(page) = &mut self.wiki {
+                                page.starting = false;
+                            }
+                            self.say(format!("couldn't start the wiki agent: {e:#}"));
+                        }
+                    }
+                }
+                wiki::Do::Say(text) => self.say(text),
             }
         }
     }
@@ -3807,6 +3899,7 @@ impl App {
                         && self.digest.is_none()
                         && self.supervisor.is_none()
                         && self.past.is_none()
+                        && self.wiki.is_none()
                         && !self.docs_shown()
                         && self.backlog.is_none()
                         && !self.mini_open()
@@ -3851,6 +3944,9 @@ impl App {
             }
             if let Some(page) = &self.past {
                 page.draw(frame, self.settings.theme, &jiff::tz::TimeZone::system());
+            }
+            if let Some(page) = &self.wiki {
+                page.draw(frame, self.settings.theme);
             }
             if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, self.settings.theme);
@@ -5966,6 +6062,8 @@ fn footer_line(
         ("D", "docs"),
         (",", "settings"),
         (".", "keys"),
+        // Past `keys`: a narrow bar cuts its tail, and the ones before it are older.
+        ("W", "wiki"),
         ("p", "pair"),
         ("q", "quit"),
     ];
@@ -5998,6 +6096,7 @@ fn chip_key(label: &str) -> HomeKey {
         "s" => HomeKey::Supervisor,
         "h" => HomeKey::Past,
         "D" => HomeKey::Docs,
+        "W" => HomeKey::Wiki,
         "," => HomeKey::Settings,
         "." => HomeKey::Keys,
         "p" => HomeKey::AddDevice,
@@ -6600,6 +6699,8 @@ enum HomeKey {
     Past,
     /// Open the Docs page.
     Docs,
+    /// Open the repository wiki.
+    Wiki,
     /// Write the selected agent session down as a backlog item.
     Adopt,
     /// Take the other step offered on the selected flagged session.
@@ -6666,6 +6767,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b's' => Some(HomeKey::Supervisor),
             b'h' => Some(HomeKey::Past),
             b'D' => Some(HomeKey::Docs),
+            b'W' => Some(HomeKey::Wiki),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
