@@ -1629,7 +1629,9 @@ impl Session {
             if now.saturating_sub(input.max(output)) < quiet_ms {
                 return false;
             }
-            self.pty.foreground() == Some(pid as i32)
+            // Nothing of its own left: no job stopped with Ctrl+Z, none in the
+            // background, nothing it `exec`ed into.
+            self.pty.foreground() == Some(pid as i32) && !has_children(pid)
         }
         #[cfg(not(unix))]
         {
@@ -1815,6 +1817,18 @@ fn bare_shell(command: &[String]) -> bool {
         && args
             .iter()
             .all(|a| a.starts_with('-') && !a.starts_with("-c") && a != "--command")
+}
+
+/// Whether `pid` has any child process, by `pgrep -P`; one that can't be
+/// asked counts as having some.
+#[cfg(unix)]
+fn has_children(pid: u32) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_or(true, |s| s.code() != Some(1))
 }
 
 fn scan_kind(due: bool, now: u64, last_output_ms: u64, last_scan_ms: u64) -> Option<bool> {

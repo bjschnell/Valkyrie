@@ -29,6 +29,31 @@ const EVERY: Duration = Duration::from_secs(10 * 60);
 const FIRST: Duration = Duration::from_secs(5 * 60);
 /// Untouched this long, a worktree `origin` has all of is abandoned.
 pub(crate) const STALE_SECS: u64 = 14 * 24 * 60 * 60;
+/// Moved this lately, a worktree may be in use from outside any session in it
+/// (an agent working there by path, an editor), so it waits.
+const RECENT_SECS: u64 = 60 * 60;
+/// Ignored files that are only build output or tool state, rebuilt on demand:
+/// anything else ignored (`.env`, a local database, an editor's swap file)
+/// keeps the worktree, since nobody is asked before it would go.
+const REBUILT: [&str; 17] = [
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "gen",
+    "out",
+    ".omc",
+    ".next",
+    ".turbo",
+    ".cache",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    "coverage",
+    ".gradle",
+];
 /// A shell left at its prompt this long is idle (see `Session::idle_shell`).
 const SHELL_QUIET_MS: u64 = 10 * 60 * 1000;
 
@@ -101,13 +126,28 @@ pub(crate) fn judge(wt: &Linked, items: &[&Item], sessions: &[Seen], now: u64) -
     if wt.dirty > 0 {
         return Verdict::Keep(format!("has changes ({} files)", wt.dirty));
     }
+    let precious: Vec<&str> = wt
+        .ignored
+        .iter()
+        .map(String::as_str)
+        .filter(|e| !rebuilt(e))
+        .collect();
+    if !precious.is_empty() {
+        let shown = precious[..precious.len().min(3)].join(", ");
+        return Verdict::Keep(format!(
+            "has ignored files that aren't build output: {shown}"
+        ));
+    }
     let landed = wt.merged || wt.squashed;
     let idle_for = wt.moved.map(|at| now.saturating_sub(at));
-    // Still on the item's branch: a checkout reused for other work since is
-    // judged as any other.
+    if idle_for.is_some_and(|s| s < RECENT_SECS) {
+        return keep("moved within the hour");
+    }
+    // Still on the item's branch: a checkout reused for other work since, or
+    // a detached one, is judged as any other.
     let finished = items
         .iter()
-        .find(|i| i.branch.is_none() || i.branch == wt.branch);
+        .find(|i| i.branch.is_some() && i.branch == wt.branch);
     let why = if let Some(done) = finished {
         let how = match done.status {
             ItemStatus::Dropped => "dropped",
@@ -136,6 +176,13 @@ pub(crate) fn judge(wt: &Linked, items: &[&Item], sessions: &[Seen], now: u64) -
     Verdict::Go { why, close }
 }
 
+/// Whether the ignored entry `entry` (`web/node_modules/`, `x.tsbuildinfo`) is
+/// only build output.
+fn rebuilt(entry: &str) -> bool {
+    let name = entry.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    REBUILT.contains(&name) || name.ends_with(".tsbuildinfo")
+}
+
 impl Registry {
     /// One sweep at `now` (seconds): takes away every worktree `judge` says is
     /// done, in each repository a backlog item or a live session is in, and takes
@@ -162,6 +209,9 @@ impl Registry {
                 continue;
             };
             for wt in survey.linked {
+                // Read again for each: a survey can take a while, and an item
+                // launched on this checkout meanwhile must count.
+                let items = self.backlog.lock().unwrap().load();
                 let mine: Vec<&Item> = items
                     .iter()
                     .filter(|i| {
@@ -174,6 +224,18 @@ impl Registry {
                 let Verdict::Go { why, close } = judge(&wt, &mine, &sessions, now) else {
                     continue;
                 };
+                // Nothing moved or changed there since the survey: else closing
+                // a shell would come to nothing, as git keeps the worktree.
+                if !close.is_empty() {
+                    let (path, head) = (wt.path.clone(), wt.head.clone());
+                    let same =
+                        tokio::task::spawn_blocking(move || worktree::unchanged(&path, &head))
+                            .await
+                            .unwrap_or(false);
+                    if !same {
+                        continue;
+                    }
+                }
                 for id in close {
                     if let Err(e) = self.kill_session(id) {
                         tracing::warn!(%id, "couldn't close an idle shell: {e:#}");
@@ -237,9 +299,6 @@ impl Registry {
                 || checkout.exists()
             {
                 continue;
-            }
-            if let Some(repo) = item.project.as_deref().filter(|p| p.is_dir()) {
-                let _ = worktree::forget_missing(repo, checkout);
             }
             match self.backlog.lock().unwrap().cleared(item.id, now_secs()) {
                 Ok(_) => changed = true,
@@ -358,7 +417,7 @@ mod tests {
         assert_eq!(judge(&wt, &[], &[], now), Verdict::Keep("not done".into()));
         // Pushed but touched lately: still not done.
         wt.pushed = true;
-        wt.moved = Some(now - 60);
+        wt.moved = Some(now - RECENT_SECS);
         assert_eq!(judge(&wt, &[], &[], now), Verdict::Keep("not done".into()));
         // Pushed and untouched past STALE_SECS: abandoned.
         wt.moved = Some(0);
@@ -367,8 +426,22 @@ mod tests {
         // only once it's stale, since it may be a worktree just made.
         let mut merged = linked("/r/app-b");
         merged.merged = true;
-        merged.moved = Some(now);
+        merged.moved = Some(now - 60);
+        assert_eq!(
+            judge(&merged, &[], &[], now),
+            Verdict::Keep("moved within the hour".into())
+        );
+        merged.moved = Some(now - RECENT_SECS);
         assert!(matches!(judge(&merged, &[], &[], now), Verdict::Go { .. }));
+        // Build output goes with it; anything else ignored keeps it.
+        merged.ignored = vec!["web/node_modules/".into(), "x.tsbuildinfo".into()];
+        assert!(matches!(judge(&merged, &[], &[], now), Verdict::Go { .. }));
+        merged.ignored.push(".env".into());
+        assert_eq!(
+            judge(&merged, &[], &[], now),
+            Verdict::Keep("has ignored files that aren't build output: .env".into())
+        );
+        merged.ignored.clear();
         merged.no_commits = true;
         assert_eq!(
             judge(&merged, &[], &[], now),
@@ -385,11 +458,12 @@ mod tests {
             Verdict::Keep("has changes (2 files)".into())
         );
         let mut open: Item = serde_json::from_value(serde_json::json!({
-            "id": 1, "number": 7, "title": "t", "status": "open", "created": 1, "updated": 1
+            "id": 1, "number": 7, "title": "t", "status": "open", "branch": "b",
+            "created": 1, "updated": 1
         }))
         .unwrap();
         let mut shipped = linked("/r/app-b");
-        shipped.moved = Some(now);
+        shipped.moved = Some(now - RECENT_SECS);
         assert_eq!(
             judge(&shipped, &[&open], &[], now),
             Verdict::Keep("backlog #7 is open on it".into())
@@ -404,13 +478,20 @@ mod tests {
                 close: Vec::new()
             }
         );
-        // Reused for another branch since, it's judged as any other worktree.
+        // Reused for another branch since, or detached, it's judged as any other
+        // worktree.
         open.branch = Some("other".into());
         assert_eq!(
             judge(&shipped, &[&open], &[], now),
             Verdict::Keep("not done".into())
         );
         open.branch = Some("b".into());
+        shipped.branch = None;
+        assert_eq!(
+            judge(&shipped, &[&open], &[], now),
+            Verdict::Keep("not done".into())
+        );
+        shipped.branch = Some("b".into());
         // A program in it keeps it; an idle shell there is closed first.
         let busy = [seen(1, "/r/app-b/src", false), seen(2, "/r/app-b", true)];
         assert_eq!(
@@ -502,7 +583,7 @@ mod tests {
 
         // Let the shell reach its prompt and hand back the foreground.
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let later = now_secs() + 60 * 60;
+        let later = now_secs() + 2 * RECENT_SECS;
         let swept = registry.sweep_worktrees(later).await;
         // The shell idle in the merged one was closed, and it went with its branch.
         assert_eq!(swept.len(), 1, "{swept:?}");

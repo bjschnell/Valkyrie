@@ -193,7 +193,7 @@ pub(crate) fn regrow(checkout: &Path, path: &Path, branch: &str) -> Result<()> {
 /// the folder is gone (deleted, not `git worktree remove`d): git won't add one
 /// there again until it forgets. What `git worktree prune` does, for this path
 /// only, leaving any other missing worktree (one on a disk not mounted) alone.
-pub(crate) fn forget_missing(checkout: &Path, path: &Path) -> Result<()> {
+fn forget_missing(checkout: &Path, path: &Path) -> Result<()> {
     let common = git_out(
         checkout,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -423,6 +423,13 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         against,
         linked,
     })
+}
+
+/// Whether the worktree at `path` is still at `head` with nothing uncommitted,
+/// as a survey found it; ignored files don't count.
+pub(crate) fn unchanged(path: &Path, head: &str) -> bool {
+    git_out(path, &["rev-parse", "HEAD"]).is_ok_and(|h| h == head)
+        && git_raw(path, &["status", "--porcelain", "-z"]).is_ok_and(|s| s.is_empty())
 }
 
 /// When the `HEAD` of the worktree at `path` last moved, from its own reflog
