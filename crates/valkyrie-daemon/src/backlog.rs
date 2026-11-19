@@ -943,10 +943,19 @@ impl Registry {
         let (Some(project), Some(checkout)) = (item.project.clone(), item.checkout.clone()) else {
             return Ok((true, String::new()));
         };
-        let busy = self
-            .listed()
-            .iter()
-            .any(|s| !s.exited() && s.info().cwd.starts_with(&checkout));
+        // Where each runs now, and where it started: a session launched here and
+        // moved on to a follow-up item, or whose program runs elsewhere for now,
+        // still comes back. Compared canonically: the OS spells a session's folder
+        // resolved (case and short names on Windows, links), the card as made.
+        let canonical =
+            |p: &std::path::Path| valkyrie_proto::canonical(p).unwrap_or_else(|_| p.to_path_buf());
+        let inside = canonical(&checkout);
+        let busy = self.listed().iter().any(|s| {
+            !s.exited()
+                && [s.info().cwd, s.started_in().to_path_buf()]
+                    .iter()
+                    .any(|at| canonical(at).starts_with(&inside))
+        });
         if busy {
             return Ok((
                 false,
@@ -958,6 +967,11 @@ impl Registry {
         }
         let branch = item.branch.clone();
         Ok(tokio::task::spawn_blocking(move || {
+            if checkout.is_dir()
+                && let Some(why) = worktree::kept_for(&project, &checkout, branch.as_deref())
+            {
+                return (false, format!("kept {}: {why}", checkout.display()));
+            }
             // Merged, squash merges included: then the branch goes too, though
             // `git branch -d` would keep a squashed one.
             let merged = worktree::merged_head(&project, &checkout);
@@ -2047,6 +2061,147 @@ mod tests {
             )
             .unwrap();
         assert_eq!(registry.item_of(session).map(|i| i.id), Some(first));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backlog #238: shipping takes an item's worktree only when nothing is still
+    /// using it. A session started there (though its program has gone elsewhere),
+    /// or in it under another spelling of its path, keeps it; so does a checkout
+    /// switched to another item's branch, or holding commits not in the default
+    /// branch. One git can't take whole is left whole, not half-deleted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shipped_worktree_stays_while_anything_still_uses_it() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let dir = std::env::temp_dir().join(format!("valkyrie-inuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(real.join("app")).unwrap();
+        let real = valkyrie_proto::canonical(&real).unwrap();
+        // How the checkout was spelled when it was made: not as the OS reports a
+        // session's folder (Windows' short names and case, a symlink here).
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(at)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        let main = real.join("app");
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let spawn = |command: &str, cwd: &Path| {
+            let spec = SpawnSpec {
+                command: vec!["sh".into(), "-c".into(), command.into()],
+                cwd: Some(cwd.to_path_buf()),
+                name: None,
+                size: Size { cols: 40, rows: 10 },
+                env: Vec::new(),
+                worktree: None,
+                hidden: false,
+            };
+            let Reply::Session { info } = crate::spawn(&registry, spec).unwrap() else {
+                panic!("no session");
+            };
+            info.id
+        };
+        // A worktree for item `n` on `branch`, recorded through the link.
+        let launched = |n: u32, branch: &str| {
+            let name = format!("app-{n}");
+            git(
+                &main,
+                &["worktree", "add", "-q", "-b", branch, &format!("../{name}")],
+            );
+            let new = NewItem {
+                title: format!("item {n}"),
+                cwd: Some(main.clone()),
+                ..Default::default()
+            };
+            let b = registry.backlog.lock().unwrap();
+            let id = b.add(&new, "human", 1).unwrap().id;
+            let open = ItemChange::Status {
+                status: ItemStatus::Open,
+            };
+            b.change(id, &open, 1).unwrap();
+            let checkout = Some((branch.to_owned(), link.join(&name)));
+            let item = b.launched(id, 99, registry.boot, &[], checkout, 1).unwrap();
+            (item, real.join(name))
+        };
+        let ship = |item: Item| {
+            let registry = &registry;
+            async move {
+                let (item, note) = registry.ship_one(&item).await.unwrap().unwrap();
+                assert_eq!(item.status, ItemStatus::Shipped);
+                (item, note.unwrap_or_default())
+            }
+        };
+
+        // 1. A session runs in it, as the OS spells its folder.
+        let (inside, at) = launched(1, "fix/1-a");
+        let s = spawn("exec sleep 30", &at);
+        // 2. A session was launched in it, and its program runs elsewhere now.
+        let (moved, moved_at) = launched(2, "fix/2-b");
+        let m = spawn("cd / && exec sleep 30", &moved_at);
+        // Let the ticks read where each runs now.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        for (item, at) in [(inside, &at), (moved, &moved_at)] {
+            let (card, note) = ship(item).await;
+            assert!(at.join(".git").exists(), "{note}");
+            assert!(note.contains("a session is still running in it"), "{note}");
+            assert!(card.checkout.is_some(), "the card keeps its checkout");
+        }
+        registry.kill_session(s).unwrap();
+        registry.kill_session(m).unwrap();
+
+        // 3. Switched to another item's branch, clean, nothing running.
+        let (switched, switched_at) = launched(3, "fix/3-c");
+        git(&switched_at, &["switch", "-q", "-c", "fix/4-next"]);
+        let (_, note) = ship(switched).await;
+        assert!(switched_at.join(".git").exists(), "{note}");
+        assert!(note.contains("on fix/4-next, not fix/3-c"), "{note}");
+
+        // 4. Commits not in the default branch.
+        let (ahead, ahead_at) = launched(5, "fix/5-e");
+        git(&ahead_at, &["commit", "-q", "--allow-empty", "-m", "wip"]);
+        let (_, note) = ship(ahead).await;
+        assert!(ahead_at.join(".git").exists(), "{note}");
+        assert!(note.contains("not merged"), "{note}");
+
+        // 5. Something holds its folder (Windows: a shell in it), so git can't
+        // take it whole: it stays whole, not emptied.
+        let (held, held_at) = launched(6, "fix/6-f");
+        std::fs::write(held_at.join("README"), "hi\n").unwrap();
+        git(&held_at, &["add", "README"]);
+        git(&held_at, &["commit", "-q", "-m", "readme"]);
+        git(&main, &["merge", "-q", "--ff-only", "fix/6-f"]);
+        let perms = |mode| std::fs::set_permissions(&real, std::fs::Permissions::from_mode(mode));
+        perms(0o555).unwrap();
+        let (_, note) = ship(held).await;
+        perms(0o755).unwrap();
+        assert!(held_at.join(".git").exists(), "{note}");
+        assert!(held_at.join("README").exists(), "{note}");
+        assert!(note.starts_with("kept "), "{note}");
+
+        // 6. Done with and nothing on it: it goes, with its merged branch.
+        let (done, done_at) = launched(7, "fix/7-g");
+        let (card, note) = ship(done).await;
+        assert!(!done_at.exists(), "{note}");
+        assert_eq!(card.checkout, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

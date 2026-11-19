@@ -143,8 +143,8 @@ pub fn remove(
             format!("kept {shown}: its HEAD moved since it was checked"),
         );
     }
-    if let Err(e) = git(repo, &["worktree", "remove", &path.to_string_lossy()]) {
-        return (false, format!("kept {shown}: {e:#}"));
+    if let Err(why) = take_whole(repo, path) {
+        return (false, format!("kept {shown}: {why}"));
     }
     let Some(branch) = branch.filter(|b| valid(repo, b).is_ok()) else {
         return (true, format!("took away {shown}"));
@@ -172,6 +172,35 @@ pub fn remove(
             true,
             format!("took away {shown}; kept branch {branch}: {e:#}"),
         ),
+    }
+}
+
+/// `git worktree remove`s the clean worktree at `path` whole or not at all
+/// (backlog #238). Git deletes what it can and stops at the first thing it can't,
+/// so a folder something holds (a shell's on Windows) was left emptied, without
+/// its `.git`. Renamed aside first, in one step that fails while anything holds
+/// it, only then is it deleted; if that still fails, it's moved back.
+fn take_whole(repo: &Path, path: &Path) -> std::result::Result<(), String> {
+    match git_out(path, &["status", "--porcelain"]) {
+        Ok(changes) if !changes.is_empty() => {
+            let n = changes.lines().count();
+            return Err(format!("it has changes ({n} files)"));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("{e:#}")),
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let aside = path.with_file_name(format!(".{name}.removing-{}", std::process::id()));
+    let (from, to) = (path.to_string_lossy(), aside.to_string_lossy());
+    git(repo, &["worktree", "move", &from, &to]).map_err(|e| format!("{e:#}"))?;
+    let Err(e) = git(repo, &["worktree", "remove", &to]) else {
+        return Ok(());
+    };
+    match git(repo, &["worktree", "move", &to, &from]) {
+        Ok(()) => Err(format!("{e:#}")),
+        Err(back) => Err(format!(
+            "{e:#}; what's left is at {to} (moving it back: {back:#})"
+        )),
     }
 }
 
@@ -725,6 +754,39 @@ pub fn merged_head(repo: &Path, checkout: &Path) -> Option<String> {
     tips.iter()
         .any(|tip| ancestor(repo, &head, tip) || squashed(repo, &head, tip))
         .then_some(head)
+}
+
+/// Why the clean worktree at `checkout` of a shipped item on `branch` must stay
+/// (backlog #238), else `None`: a session took it on to other work, so it's on
+/// another branch or none, or it holds commits not in the default branch as last
+/// fetched (a squash merge counts as in).
+pub(crate) fn kept_for(repo: &Path, checkout: &Path, branch: Option<&str>) -> Option<String> {
+    let on = git_out(checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    match (&on, branch) {
+        (Ok(on), Some(branch)) if on != branch => {
+            return Some(format!("it's on {on}, not {branch}"));
+        }
+        (Err(_), Some(branch)) => return Some(format!("it isn't on {branch}")),
+        _ => {}
+    }
+    let Ok(head) = git_out(checkout, &["rev-parse", "--verify", "--quiet", "HEAD"]) else {
+        return Some("its HEAD can't be read".to_owned());
+    };
+    let (against, tips) = tips(repo, true);
+    if tips.is_empty() {
+        return Some("no default branch to judge its commits against".to_owned());
+    }
+    if tips
+        .iter()
+        .any(|tip| ancestor(repo, &head, tip) || squashed(repo, &head, tip))
+    {
+        return None;
+    }
+    let what = on.unwrap_or_else(|_| "it".to_owned());
+    Some(format!(
+        "{what} has commits not merged into {}",
+        against.join(" or ")
+    ))
 }
 
 fn ancestor(repo: &Path, head: &str, tip: &str) -> bool {
