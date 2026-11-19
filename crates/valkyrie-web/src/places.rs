@@ -1,15 +1,10 @@
 //! Folders for the new-session launcher (DESIGN §8.8): where sessions already run,
-//! the git repos under the usual roots, and a listing to browse into any folder.
-//! Only directories are listed, never files.
+//! and a listing to browse into any folder. The repositories it offers are the
+//! daemon's one list (backlog #240). Only directories are listed, never files.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-/// Where people keep repos, under the home directory.
-const ROOTS: &[&str] = &["repos", "src", "code", "projects", "dev", "work", "git"];
-/// Repos suggested; the most recently touched first.
-const MAX_REPOS: usize = 40;
 /// Entries in one listing.
 const MAX_LIST: usize = 400;
 
@@ -28,8 +23,6 @@ pub struct Places {
     pub shell: String,
     /// Where sessions run now, most recent first.
     pub recent: Vec<Place>,
-    /// Git repos under the usual roots, most recently changed first.
-    pub repos: Vec<Place>,
 }
 
 pub fn home() -> PathBuf {
@@ -49,52 +42,7 @@ pub fn place(path: &Path, home: &Path) -> Place {
 }
 
 fn label(path: &Path, home: &Path) -> String {
-    match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => {
-            let rest = rest.display().to_string();
-            #[cfg(windows)]
-            let rest = rest.replace('\\', "/");
-            format!("~/{rest}")
-        }
-        Err(_) => path.display().to_string(),
-    }
-}
-
-/// Git repos one level under each root, newest first.
-pub fn repos(home: &Path) -> Vec<Place> {
-    let mut found: Vec<(SystemTime, PathBuf)> = Vec::new();
-    for root in ROOTS {
-        let Ok(entries) = std::fs::read_dir(home.join(root)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() || hidden(&path) {
-                continue;
-            }
-            let git = path.join(".git");
-            if let (true, Ok(meta)) = (
-                valkyrie_context::project::is_checkout(&path),
-                git.metadata(),
-            ) {
-                // The index changes with most git work; the directory itself rarely.
-                let touched = git
-                    .join("index")
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .or_else(|_| meta.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                found.push((touched, path));
-            }
-        }
-    }
-    found.sort_by_key(|(touched, _)| std::cmp::Reverse(*touched));
-    found
-        .into_iter()
-        .take(MAX_REPOS)
-        .map(|(_, path)| place(&path, home))
-        .collect()
+    valkyrie_context::repos::label(path, home)
 }
 
 fn hidden(path: &Path) -> bool {
@@ -154,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_repos_and_lists_folders() {
+    fn lists_folders() {
         let home = std::env::temp_dir().join(format!("valk-places-{}", std::process::id()));
         for dir in [
             "repos/a/.git",
@@ -171,9 +119,6 @@ mod tests {
             std::fs::write(home.join(repo).join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         }
         std::fs::create_dir_all(home.join("repos/stray/.git")).unwrap();
-        let mut labels: Vec<String> = repos(&home).into_iter().map(|p| p.label).collect();
-        labels.sort();
-        assert_eq!(labels, ["~/code/c", "~/repos/a", "~/repos/b"]);
 
         let listing = list("~/repos", &home).unwrap();
         assert_eq!(listing.label, "~/repos");

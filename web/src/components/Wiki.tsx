@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import type { WikiListing, WikiPage } from "../proto";
-import { toast, useApp, wikiExplore, wikiListing, wikiPage } from "../store";
+import { toast, wikiExplore, wikiListing, wikiPage } from "../store";
 import { useCached } from "../cache";
-import { exploreLabel, staleCount, wikiRepos, wikiSummary } from "../lib/wiki";
+import { exploreLabel, staleCount, wikiSummary } from "../lib/wiki";
+import { repoChoices } from "../lib/repos";
+import { RepoSelect, useRepos } from "./Repos";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
 import { Back } from "./icons";
@@ -38,9 +40,8 @@ const home = () => {
  * second tap first, since it starts an agent, then opens its session.
  */
 export function WikiView() {
-  const items = useApp((s) => s.items);
-  const sessions = useApp((s) => s.sessions);
-  const choices = wikiRepos(items, sessions);
+  const { list } = useRepos();
+  const choices = repoChoices(list);
   const [picked, setPicked] = useState<string | null>(readRepo);
   const repo = picked !== null && choices.some((c) => c.repo === picked) ? picked : (choices[0]?.repo ?? null);
   const [reading, setReading] = useState<WikiPage | null>(null);
@@ -66,16 +67,22 @@ export function WikiView() {
         </div>
       </header>
       <main className={`inbox ${reading ? "doc-page" : ""}`}>
-        {repo === null && (
-          <EmptyState
-            title="No repository to show"
-            hint="The wiki is a repository's. Start a session in one, or write a backlog item for one, and it shows up here."
-            action={{ label: "Start a session", run: () => (location.hash = "#/new") }}
-          />
+        {repo === null && list !== null && (
+          <>
+            <div className="backlog-filter">
+              <RepoSelect value="" none="No repository yet" onChange={pick} />
+            </div>
+            <EmptyState
+              title="No repository to show"
+              hint="The wiki is a repository's. Start a session in one, write a backlog item for one, or add one above, and it shows up here."
+              action={{ label: "Start a session", run: () => (location.hash = "#/new") }}
+            />
+          </>
         )}
+        {repo === null && list === null && <Loading rows={5} />}
         {repo !== null && reading && <Reader page={reading} />}
         {repo !== null && !reading && (
-          <Listing repo={repo} choices={choices} onPick={pick} onRead={setReading} />
+          <Listing repo={repo} onPick={pick} onRead={setReading} />
         )}
       </main>
     </div>
@@ -84,12 +91,10 @@ export function WikiView() {
 
 function Listing({
   repo,
-  choices,
   onPick,
   onRead,
 }: {
   repo: string;
-  choices: { repo: string; label: string }[];
   onPick: (repo: string) => void;
   onRead: (page: WikiPage) => void;
 }) {
@@ -110,17 +115,9 @@ function Listing({
 
   return (
     <>
-      {choices.length > 1 && (
-        <div className="backlog-filter">
-          <select aria-label="Repository" value={repo} onChange={(e) => onPick(e.target.value)}>
-            {choices.map((c) => (
-              <option key={c.repo} value={c.repo} title={c.repo}>
-                {c.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+      <div className="backlog-filter">
+        <RepoSelect value={repo} onChange={onPick} />
+      </div>
       {listing === null && (failed ? <ErrorState what="the wiki" why={failed} onRetry={reload} /> : <Loading rows={5} />)}
       {listing !== null && <Actions repo={repo} listing={listing} />}
       {listing !== null && listing.pages.length === 0 && (

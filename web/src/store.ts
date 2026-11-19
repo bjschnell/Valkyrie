@@ -14,6 +14,8 @@ import type {
   SupervisorEntry,
   WatchedPr,
   PastSession,
+  RepoEdit,
+  RepoList,
   WikiListing,
   WikiPage,
   SearchResults,
@@ -992,6 +994,23 @@ export async function resume(key: string): Promise<SessionId> {
   void refresh();
   reportColors(reply.info.id);
   return reply.info.id;
+}
+
+/** The repositories every picker offers (backlog #240). */
+export async function repoList(): Promise<RepoList> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "repos" });
+  if (reply.t !== "repos") throw new Error("unexpected reply");
+  return reply.list;
+}
+
+/** Changes which repositories pickers offer; the list as it is after. Throws
+ * with the daemon's reason (not a git repository, no such folder). */
+export async function repoEdit(edit: RepoEdit): Promise<RepoList> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "repo_edit", edit });
+  if (reply.t !== "repos") throw new Error("unexpected reply");
+  return reply.list;
 }
 
 /** The wiki of `cwd`'s repository (backlog #210). Throws with the daemon's reason. */

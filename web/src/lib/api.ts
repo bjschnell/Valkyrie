@@ -38,7 +38,6 @@ export interface Places {
   home: string;
   shell: string;
   recent: Place[];
-  repos: Place[];
 }
 
 export interface Listing {

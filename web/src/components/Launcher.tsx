@@ -5,6 +5,9 @@ import { Back, Chevron } from "./icons";
 import { TutorButton } from "./Tutor";
 import { MicButton } from "./Mic";
 import { QuotaMeter } from "./Quota";
+import { useRepos } from "./Repos";
+import { isKnown, isScanned } from "../lib/repos";
+import type { RepoEdit, RepoList } from "../proto";
 
 type Agent = "claude" | "codex" | "shell";
 
@@ -56,6 +59,7 @@ export function Launcher() {
   const [places, setPlaces] = useState<Places | null>(null);
   const [browsing, setBrowsing] = useState<Listing | null>(null);
   const [busy, setBusy] = useState(false);
+  const { list: repos, edit } = useRepos();
   const area = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -170,6 +174,16 @@ export function Launcher() {
               <span className="folder-name">Use {browsing.label}</span>
               {browsing.git && <span className="git">git</span>}
             </button>
+            {browsing.git && !isKnown(repos, browsing.path) && (
+              <button className="folder use" onClick={() => void edit({ do: "add", path: browsing.path })}>
+                <span className="folder-name">Add {browsing.label} to repos</span>
+              </button>
+            )}
+            {!browsing.git && !isScanned(repos, browsing.path) && (
+              <button className="folder use" onClick={() => void edit({ do: "scan", path: browsing.path })}>
+                <span className="folder-name">Find repos in {browsing.label}</span>
+              </button>
+            )}
             {browsing.dirs.map((d) => (
               <button key={d.path} className="folder" onClick={() => void browse(d.path)}>
                 <span className="folder-name">{d.label.split("/").pop()}</span>
@@ -182,11 +196,18 @@ export function Launcher() {
         ) : (
           <div className="folders">
             <FolderGroup title="Open in sessions" places={places?.recent ?? []} current={folder} onPick={pick} />
-            <FolderGroup title="Repos" places={places?.repos ?? []} current={folder} onPick={pick} />
+            <FolderGroup
+              title="Repos"
+              places={(repos?.repos ?? []).map((r) => ({ ...r, git: true }))}
+              current={folder}
+              onPick={pick}
+              onHide={(p) => void edit({ do: "hide", path: p.path })}
+            />
             <button className="folder browse" onClick={() => void browse(folder || places?.home || "~")}>
               <span className="folder-name">Browse from {label || "~"}…</span>
               <Chevron />
             </button>
+            <RepoSources list={repos} onEdit={(e) => void edit(e)} />
           </div>
         )}
 
@@ -239,11 +260,14 @@ function FolderGroup({
   places,
   current,
   onPick,
+  onHide,
 }: {
   title: string;
   places: Place[];
   current: string;
   onPick: (p: Place) => void;
+  /** Stops offering one, with a button on its row. */
+  onHide?: (p: Place) => void;
 }) {
   const [all, setAll] = useState(false);
   if (places.length === 0) return null;
@@ -251,17 +275,70 @@ function FolderGroup({
   return (
     <>
       <div className="folders-title">{title}</div>
-      {shown.map((p) => (
-        <button key={p.path} className={`folder ${p.path === current ? "picked" : ""}`} onClick={() => onPick(p)}>
-          <span className="folder-name">{p.label}</span>
-          {p.git && <span className="git">git</span>}
-        </button>
-      ))}
+      {shown.map((p) =>
+        onHide ? (
+          <div key={p.path} className={`folder-row ${p.path === current ? "picked" : ""}`}>
+            <button className="folder" onClick={() => onPick(p)}>
+              <span className="folder-name">{p.label}</span>
+              {p.git && <span className="git">git</span>}
+            </button>
+            <button className="folder-hide" aria-label={`Hide ${p.label}`} title="Don't offer this repo" onClick={() => onHide(p)}>
+              ×
+            </button>
+          </div>
+        ) : (
+          <button key={p.path} className={`folder ${p.path === current ? "picked" : ""}`} onClick={() => onPick(p)}>
+            <span className="folder-name">{p.label}</span>
+            {p.git && <span className="git">git</span>}
+          </button>
+        ),
+      )}
       {places.length > shown.length && (
         <button className="folder more" onClick={() => setAll(true)}>
           <span className="folder-name">{places.length - shown.length} more</span>
         </button>
       )}
+    </>
+  );
+}
+
+/** Where the repos come from: the folders scanned, each one you can stop, and
+ * the repos hidden, each one you can bring back. Folded until asked for. */
+function RepoSources({ list, onEdit }: { list: RepoList | null; onEdit: (e: RepoEdit) => void }) {
+  const [open, setOpen] = useState(false);
+  if (!list) return null;
+  const n = list.folders.length;
+  const hidden = list.hidden.length;
+  const summary = `Finding repos in ${n} folder${n === 1 ? "" : "s"}${hidden ? `, ${hidden} hidden` : ""}`;
+  return (
+    <>
+      <button className="folder more" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="folder-name">{summary}</span>
+      </button>
+      {open &&
+        list.folders.map((f) => (
+          <div key={f.path} className="folder-row">
+            <span className="folder">
+              <span className="folder-name">{f.label}</span>
+            </span>
+            <button className="folder-hide" aria-label={`Stop looking in ${f.label}`} title="Stop looking here" onClick={() => onEdit({ do: "unscan", path: f.path })}>
+              ×
+            </button>
+          </div>
+        ))}
+      {open && n === 0 && <div className="empty">No folders. Browse to one and pick "Find repos in" it.</div>}
+      {open && hidden > 0 && <div className="folders-title">Hidden</div>}
+      {open &&
+        list.hidden.map((h) => (
+          <div key={h.path} className="folder-row">
+            <span className="folder">
+              <span className="folder-name">{h.label}</span>
+            </span>
+            <button className="ghost folder-show" onClick={() => onEdit({ do: "unhide", path: h.path })}>
+              Show
+            </button>
+          </div>
+        ))}
     </>
   );
 }

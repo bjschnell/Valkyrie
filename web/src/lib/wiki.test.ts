@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { Item, SessionInfo, WikiListing, WikiPage } from "../proto";
-import { exploreLabel, staleCount, wikiRepos, wikiSummary } from "./wiki";
+import type { WikiListing, WikiPage } from "../proto";
+import { exploreLabel, staleCount, wikiSummary } from "./wiki";
 
-const item = (project?: string) => ({ project }) as Item;
-const session = (cwd: string) => ({ cwd }) as SessionInfo;
 const page = (slug: string, stale?: string): WikiPage => ({
   slug,
   title: slug,
@@ -14,24 +12,6 @@ const page = (slug: string, stale?: string): WikiPage => ({
   body: "",
 });
 const listing = (...pages: WikiPage[]): WikiListing => ({ root: "/r/app", pages });
-
-describe("wikiRepos", () => {
-  it("offers backlog repos and session dirs, but not a repo's worktrees or subfolders", () => {
-    const got = wikiRepos(
-      [item("/r/app"), item("/r/app"), item()],
-      [session("/r/app-feat-x"), session("/r/app/web"), session("/r/tool"), session("/r/app")],
-    );
-    expect(got).toEqual([
-      { repo: "/r/app", label: "app" },
-      { repo: "/r/tool", label: "tool" },
-    ]);
-  });
-
-  it("names two repos with one name by their paths", () => {
-    const got = wikiRepos([item("/a/app"), item("/b/app")], []);
-    expect(got.map((c) => c.label)).toEqual(["/a/app", "/b/app"]);
-  });
-});
 
 describe("labels", () => {
   it("counts pages and stale ones", () => {

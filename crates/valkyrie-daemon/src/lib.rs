@@ -24,6 +24,7 @@ mod pairing;
 mod promote;
 mod pty;
 mod quota;
+mod repos;
 mod restore;
 mod session;
 mod supervise;
@@ -1327,6 +1328,23 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 (
                     req,
                     listed.map_err(|e| anyhow::anyhow!("listing the wiki: {e}")),
+                )
+            }
+            ClientMsg::Repos { req } => {
+                // Scans folders and resolves checkouts: off the connection's thread.
+                let registry = registry.clone();
+                let listed = tokio::task::spawn_blocking(move || registry.repos()).await;
+                (
+                    req,
+                    listed.map_err(|e| anyhow::anyhow!("listing repositories: {e}")),
+                )
+            }
+            ClientMsg::RepoEdit { req, edit } => {
+                let registry = registry.clone();
+                let edited = tokio::task::spawn_blocking(move || registry.repo_edit(&edit)).await;
+                (
+                    req,
+                    edited.unwrap_or_else(|e| Err(anyhow::anyhow!("changing repositories: {e}"))),
                 )
             }
             ClientMsg::WikiPage { req, cwd, page } => {

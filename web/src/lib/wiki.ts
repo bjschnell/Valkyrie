@@ -1,23 +1,7 @@
-// The repository wiki (backlog #210): which repositories the page offers, and
-// what its buttons say.
+// The repository wiki (backlog #210): what its buttons say. Which repositories
+// it offers is the daemon's one list (lib/repos.ts).
 
-import type { Item, SessionInfo, WikiListing } from "../proto";
-import { base } from "./backlog";
-
-/** The repositories to offer: every backlog item's, then each session's
- * directory that isn't one of those or a worktree of one (`<repo>-<branch>`
- * beside it, as `valk` names them). The daemon resolves any to its root. */
-export function wikiRepos(items: Item[], sessions: SessionInfo[]): { repo: string; label: string }[] {
-  const roots = [...new Set(items.flatMap((i) => (i.project ? [i.project] : [])))];
-  const covered = (dir: string) =>
-    roots.some((r) => dir === r || dir.startsWith(`${r}/`) || base(dir).startsWith(`${base(r)}-`));
-  const extra = [...new Set(sessions.map((s) => s.cwd))].filter((d) => d && !covered(d));
-  const named = [...roots, ...extra].map((repo) => ({ repo, label: base(repo) }));
-  const clash = (label: string) => named.filter((n) => n.label === label).length > 1;
-  const out = named.map((n) => (clash(n.label) ? { ...n, label: n.repo } : n));
-  out.sort((a, b) => a.label.localeCompare(b.label) || a.repo.localeCompare(b.repo));
-  return out;
-}
+import type { WikiListing } from "../proto";
 
 export const staleCount = (l: WikiListing | null) => l?.pages.filter((p) => p.stale).length ?? 0;
 

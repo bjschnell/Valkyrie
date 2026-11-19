@@ -25,6 +25,7 @@ pub mod project;
 pub mod promote;
 pub mod recall;
 pub mod reply;
+pub mod repos;
 pub mod retro;
 pub mod scope;
 pub mod search;
