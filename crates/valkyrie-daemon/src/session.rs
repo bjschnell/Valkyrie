@@ -1609,6 +1609,37 @@ impl Session {
         state.driven_by.clone()
     }
 
+    /// Whether this is a bare shell left at its prompt, unused since `quiet_ms`
+    /// before `now`: what's left in a tab when its agent was stopped with Ctrl+C,
+    /// so closing it loses nothing (backlog #235). A shell running a command has
+    /// handed that command the terminal's foreground; one started with `-c`, or
+    /// anything that isn't a shell, never counts. Unix only: Windows has no
+    /// foreground group to tell a prompt from a running command.
+    pub fn idle_shell(&self, now: u64, quiet_ms: u64) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid else {
+                return false;
+            };
+            if self.exited() || self.agent_behind().is_some() || !bare_shell(&self.command) {
+                return false;
+            }
+            let input = self.last_input_ms.load(Ordering::Relaxed);
+            let output = self.state.lock().unwrap().last_output_ms;
+            if now.saturating_sub(input.max(output)) < quiet_ms {
+                return false;
+            }
+            // Nothing of its own left: no job stopped with Ctrl+Z, none in the
+            // background, nothing it `exec`ed into.
+            self.pty.foreground() == Some(pid as i32) && !has_children(pid)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (now, quiet_ms);
+            false
+        }
+    }
+
     /// The PTY's terminal device (`foreground::dev_key`), the controlling terminal of
     /// whatever runs in it. Windows has no such thing.
     #[cfg(windows)]
@@ -1769,6 +1800,37 @@ fn live_report(report: &Option<(String, u64)>, now: u64) -> Option<String> {
 }
 
 /// Whether to scan on this tick: `Some(true)` quiet scan, `Some(false)` glance.
+/// Whether `command` starts an interactive shell and nothing else: a known shell,
+/// with only flags (`-l`, `-i`), never `-c` or a script.
+#[cfg(unix)]
+fn bare_shell(command: &[String]) -> bool {
+    const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "nu", "elvish"];
+    let Some((program, args)) = command.split_first() else {
+        return false;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .trim_start_matches('-');
+    SHELLS.contains(&name)
+        && args
+            .iter()
+            .all(|a| a.starts_with('-') && !a.starts_with("-c") && a != "--command")
+}
+
+/// Whether `pid` has any child process, by `pgrep -P`; one that can't be
+/// asked counts as having some.
+#[cfg(unix)]
+fn has_children(pid: u32) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_or(true, |s| s.code() != Some(1))
+}
+
 fn scan_kind(due: bool, now: u64, last_output_ms: u64, last_scan_ms: u64) -> Option<bool> {
     if !due {
         return None;
