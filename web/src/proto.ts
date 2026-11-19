@@ -46,6 +46,8 @@ export interface SessionInfo {
   overlap?: string;
   /** A short status it published with `valk status`, e.g. "tests 41/50" (protocol 39). */
   report?: string;
+  /** The supervisor session: at most one runs (ADR-0019 §10, protocol 45). */
+  supervisor?: boolean;
 }
 
 export interface QueueItem {
@@ -487,7 +489,7 @@ export interface Item {
   priority?: Priority;
   /** Items to finish first: advisory, it sorts below the ready ones while one is open. */
   blocked_by?: number[];
-  /** The item it's a piece of (protocol 45): one level deep, same repository. */
+  /** The item it's a piece of (protocol 46): one level deep, same repository. */
   parent?: number;
   /** Its pull request merged while some of its pieces were open: it ships with them. */
   pr_merged?: boolean;
@@ -742,6 +744,8 @@ export type Request =
   /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
   | { t: "plan_order"; cwd: string }
   | { t: "supervisor_log" }
+  /** Starts the supervisor session, or replies with the one already running (protocol 45). */
+  | { t: "supervisor_session"; cwd: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   | { t: "supervisor_watch" }
   /** The user only: `items` accepts only those items' changes, absent all of them. */
   | {

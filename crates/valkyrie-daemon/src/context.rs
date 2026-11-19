@@ -461,6 +461,15 @@ impl Registry {
             }
             text = said.join("\n");
         }
+        // The supervisor session hears the whole roster on every prompt
+        // (ADR-0019 §10): it's what it works from.
+        if me.is_supervisor() {
+            let roster = self.roster(id);
+            text = match text.is_empty() {
+                true => roster,
+                false => format!("{roster}\n{text}"),
+            };
+        }
         Ok(Reply::Text { text })
     }
 

@@ -4,7 +4,7 @@ import { base, itemNo, launchesOn, orderHref, orderSize } from "../lib/backlog";
 import { stepChoices } from "../lib/step";
 import { stripLine, waitingOnYou, watchLine, type Wait } from "../lib/supervisor";
 import { age } from "../lib/time";
-import { answerLaunch, decide, supervisorLog, supervisorWatch, takeStep, useApp } from "../store";
+import { answerLaunch, decide, supervisorLog, supervisorSession, supervisorWatch, takeStep, toast, useApp } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
@@ -64,9 +64,21 @@ export function SupervisorView() {
   const [answered, setAnswered] = useState(0);
   const { log, failed, reload } = useLog(`${waits.length}:${answered}`);
   const done = () => setAnswered((n) => n + 1);
+  const [opening, setOpening] = useState(false);
+  const openSession = async () => {
+    if (opening) return;
+    setOpening(true);
+    try {
+      const id = await supervisorSession();
+      location.hash = `#/s/${id}`;
+    } catch (e) {
+      toast(`Supervisor session: ${(e as Error).message}`);
+      setOpening(false);
+    }
+  };
 
-  // q or Esc goes back, when you aren't typing.
-  usePageKeys("supervisor", { q: home, Escape: home });
+  // q or Esc goes back, when you aren't typing; c opens the supervisor session.
+  usePageKeys("supervisor", { q: home, Escape: home, c: () => void openSession() });
 
   return (
     <div className="page">
@@ -78,6 +90,9 @@ export function SupervisorView() {
           <h1 className="title-name">Supervisor</h1>
           <div className="title-sub">{log && !log.on ? "off: valk supervise on turns it back on" : "watches PRs and the backlog after agents stop"}</div>
         </div>
+        <button className="ghost" disabled={opening || log?.on === false} onClick={() => void openSession()} title="One agent that reads every session and prompts the idle ones (c)">
+          Session
+        </button>
       </header>
       <main className="inbox supervisor">
         <section>

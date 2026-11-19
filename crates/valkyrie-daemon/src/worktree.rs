@@ -306,6 +306,12 @@ pub struct Linked {
     /// request does, squashed ones included.
     pub upstream_gone: bool,
     pub locked: bool,
+    /// `origin` has its branch, at its `HEAD` or past it: taking the worktree away
+    /// loses no commit anywhere.
+    pub(crate) pushed: bool,
+    /// When its `HEAD` last moved (a commit, checkout or reset there), in seconds
+    /// since the epoch, from its own reflog; `None` without one.
+    pub(crate) moved: Option<u64>,
     /// Its folder is gone, though git still lists it.
     pub missing: bool,
     /// Files changed or untracked but not committed.
@@ -381,7 +387,13 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
             )
             .is_ok_and(|track| track == "[gone]")
         });
+        let pushed = branch.as_ref().is_some_and(|b| {
+            let reference = format!("refs/remotes/origin/{b}");
+            git_out(&repo, &["rev-parse", "--verify", "--quiet", &reference])
+                .is_ok_and(|theirs| ancestor(&repo, &head, &theirs))
+        });
         let missing = !path.is_dir();
+        let moved = (!missing).then(|| last_moved(&path)).flatten();
         let status = match missing {
             true => String::new(),
             false => {
@@ -392,6 +404,8 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         let (ignored, dirty): (Vec<&str>, Vec<&str>) = entries.partition(|e| e.starts_with("!! "));
         linked.push(Linked {
             locked: field("locked").is_some(),
+            pushed,
+            moved,
             path,
             branch,
             head,
@@ -409,6 +423,26 @@ pub fn survey(dir: &Path, remote: bool) -> Result<Survey> {
         against,
         linked,
     })
+}
+
+/// Whether the worktree at `path` is still at `head` with nothing uncommitted,
+/// as a survey found it; ignored files don't count.
+pub(crate) fn unchanged(path: &Path, head: &str) -> bool {
+    git_out(path, &["rev-parse", "HEAD"]).is_ok_and(|h| h == head)
+        && git_raw(path, &["status", "--porcelain", "-z"]).is_ok_and(|s| s.is_empty())
+}
+
+/// When the `HEAD` of the worktree at `path` last moved, from its own reflog
+/// (each worktree keeps one): seconds since the epoch.
+fn last_moved(path: &Path) -> Option<u64> {
+    let at = git_out(
+        path,
+        &["log", "-g", "-1", "--date=unix", "--format=%gd", "HEAD"],
+    )
+    .ok()?;
+    // `HEAD@{1794000000}`
+    let inner = at.split_once('{')?.1.strip_suffix('}')?;
+    inner.parse().ok()
 }
 
 impl crate::Registry {

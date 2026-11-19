@@ -15,6 +15,7 @@ mod statusline;
 mod todo;
 mod tools;
 mod update;
+mod wiki;
 mod worktree;
 
 use anyhow::{Context, Result, bail};
@@ -256,6 +257,14 @@ enum Cmd {
     /// docs folder (your Obsidian vault, if you point it there).
     #[command(subcommand)]
     Doc(doc::DocCmd),
+    /// This repository's agent wiki: pages agents write for agents about how the
+    /// code is built, so the next one designs against it without re-exploring.
+    /// Kept in Valkyrie's store, not the repository. Lists the pages without a
+    /// command; `valk wiki explore` starts an agent that writes them.
+    Wiki {
+        #[command(subcommand)]
+        action: Option<wiki::WikiCmd>,
+    },
     /// The worktrees sessions and backlog launches made beside the repository.
     #[command(subcommand)]
     Worktree(worktree::WorktreeCmd),
@@ -380,10 +389,15 @@ enum Cmd {
     },
     /// Whether the supervisor offers and takes steps on flagged sessions
     /// (ADR-0019): on (the default) or off. Off, the PR poll still flags them.
-    /// Without one, shows which.
+    /// Without one, shows which. `session` starts the supervisor session: one
+    /// Claude session that reads every agent session and prompts the idle ones
+    /// (or finds the one already running) and prints its id.
     Supervise {
-        #[arg(value_parser = ["on", "off"])]
+        #[arg(value_parser = ["on", "off", "session"])]
         mode: Option<String>,
+        /// With `session`: open it in the TUI.
+        #[arg(long)]
+        attach: bool,
     },
     /// Raise a toast on every open `valk`, with a sound if you ask for one. With none
     /// open, it is a desktop notification (and the sound) from this process.
@@ -1046,6 +1060,37 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 None => Ok(()),
             }
         }
+        Some(Cmd::Wiki { action }) => {
+            let action = action.unwrap_or(wiki::WikiCmd::List);
+            if wiki::run_local(&action)?.is_some() {
+                return Ok(());
+            }
+            let wiki::WikiCmd::Explore {
+                stale,
+                agent,
+                print,
+                attach,
+            } = action
+            else {
+                unreachable!("run_local handles the rest");
+            };
+            let (root, brief) = wiki::explore_brief(stale)?;
+            if print {
+                print!("{brief}");
+                return Ok(());
+            }
+            if attach {
+                require_tty()?;
+            }
+            let (client, pushes) = connect(&socket).await?;
+            let info = wiki::explore(&client, root, brief, agent).await?;
+            if attach {
+                valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+            } else {
+                println!("{}", info.id);
+                Ok(())
+            }
+        }
         Some(Cmd::Doc(cmd)) => doc::run(&connect(&socket).await?.0, cmd).await,
         Some(Cmd::Note {
             text,
@@ -1283,7 +1328,35 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Supervise { mode }) => {
+        Some(Cmd::Supervise { mode, attach }) if mode.as_deref() == Some("session") => {
+            if attach {
+                require_tty()?;
+            }
+            let (client, pushes) = connect(&socket).await?;
+            let size = valkyrie_tui::session_size()
+                .ok()
+                .filter(|s| s.cols >= 20 && s.rows >= 4)
+                .unwrap_or(Size {
+                    cols: 120,
+                    rows: 40,
+                });
+            let (cwd, env) = match is_remote() {
+                // Its daemon's home: this machine's directory means nothing there.
+                true => (PathBuf::new(), Vec::new()),
+                false => (std::env::current_dir()?, valkyrie_proto::login_env()),
+            };
+            let info = client.supervisor_session(cwd, size, env).await?;
+            if attach {
+                valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+            } else {
+                println!("{}", info.id);
+                Ok(())
+            }
+        }
+        Some(Cmd::Supervise { mode, attach }) => {
+            if attach {
+                bail!("--attach goes with `valk supervise session`");
+            }
             let client = connect(&socket).await?.0;
             let on = client.supervise(mode.map(|m| m == "on")).await?;
             println!(

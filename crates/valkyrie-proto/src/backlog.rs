@@ -404,7 +404,7 @@ pub enum ItemChange {
         /// The whole list, replacing the one it has; empty clears it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocked_by: Option<Vec<u32>>,
-        /// The item it's a piece of (protocol 45); `0` makes it stand alone again.
+        /// The item it's a piece of (protocol 46); `0` makes it stand alone again.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<u32>,
     },
