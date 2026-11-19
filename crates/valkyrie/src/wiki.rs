@@ -4,14 +4,14 @@
 //! the agent that writes it.
 
 use crate::context::{head_commit, store_base, valk_command};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use valkyrie_context::Store;
 use valkyrie_context::wiki::{self, NewPage, Page};
+use valkyrie_proto::Size;
 use valkyrie_proto::client::Client;
-use valkyrie_proto::{Size, SpawnSpec};
 
 #[derive(Subcommand)]
 pub enum WikiCmd {
@@ -169,45 +169,28 @@ pub fn run_local(cmd: &WikiCmd) -> Result<Option<()>> {
     Ok(Some(()))
 }
 
-/// The brief for `valk wiki explore`, or why there's nothing to do.
+/// The brief `explore` starts its agent with, checked here so `--print` and a
+/// refusal ("no page is stale") need no daemon.
 pub fn explore_brief(stale_only: bool) -> Result<(PathBuf, String)> {
     let (store, root) = here()?;
-    if !root.join(".git").exists() {
-        bail!("{} isn't a git repository", root.display());
-    }
-    let pages = store.wiki(&root);
-    let stale_why = wiki::staleness(&root, &pages);
-    let stale: Vec<&Page> = pages
-        .iter()
-        .filter(|p| stale_why.contains_key(&p.slug))
-        .collect();
-    if stale_only && stale.is_empty() {
-        bail!("no page is stale");
-    }
-    let stale = if stale_only { stale } else { Vec::new() };
-    Ok((root, wiki::brief(&pages, &stale, &valk_command())))
+    let brief = wiki::explore_brief(&root, &store.wiki(&root), stale_only, &valk_command())?;
+    Ok((root, brief))
 }
 
-/// Starts the agent that writes the wiki, in the repository's root.
+/// Starts the agent through the daemon, which builds the same brief, as the
+/// TUI and the web app do.
 pub async fn explore(
     client: &Client,
     root: PathBuf,
-    brief: String,
+    stale: bool,
     agent: String,
 ) -> Result<valkyrie_proto::SessionInfo> {
+    let size = Size {
+        cols: 120,
+        rows: 40,
+    };
     client
-        .spawn(SpawnSpec {
-            command: vec![agent, brief],
-            cwd: Some(root),
-            name: Some("wiki".into()),
-            size: Size {
-                cols: 120,
-                rows: 40,
-            },
-            env: valkyrie_proto::login_env(),
-            worktree: None,
-            hidden: false,
-        })
+        .wiki_explore(root, stale, agent, size, valkyrie_proto::login_env())
         .await
 }
 

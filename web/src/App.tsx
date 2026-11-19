@@ -4,6 +4,7 @@ import { Backlog, ItemEditor, OrderPage } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
 import { DigestView } from "./components/Digest";
 import { PastView } from "./components/Past";
+import { WikiView } from "./components/Wiki";
 import { SearchView } from "./components/Search";
 import { SupervisorView } from "./components/Supervisor";
 import { DocView, DocsList } from "./components/Docs";
@@ -38,6 +39,7 @@ type Route =
   | { page: "docs" }
   | { page: "digest" }
   | { page: "past" }
+  | { page: "wiki" }
   | { page: "search" }
   | { page: "supervisor" }
   | { page: "doc"; key: string }
@@ -50,7 +52,7 @@ type Route =
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
  * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
- * `#/summary` (`#/digest` still works) what every agent did while you were gone, `#/history` past sessions to resume, `#/search` session history, `#/supervisor` what the supervisor waits on and did, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
+ * `#/summary` (`#/digest` still works) what every agent did while you were gone, `#/history` past sessions to resume, `#/wiki` a repository's wiki, `#/search` session history, `#/supervisor` what the supervisor waits on and did, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
  */
 function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
@@ -62,6 +64,7 @@ function route(): Route {
   if (location.hash === "#/docs") return { page: "docs" };
   if (location.hash === "#/summary" || location.hash === "#/digest") return { page: "digest" };
   if (location.hash === "#/history") return { page: "past" };
+  if (location.hash === "#/wiki") return { page: "wiki" };
   if (location.hash === "#/search") return { page: "search" };
   if (location.hash === "#/supervisor") return { page: "supervisor" };
   const d = /^#\/docs\/([^/]+)$/.exec(location.hash);
@@ -107,7 +110,7 @@ function navKey(r: Route): NavKey | null {
 
 /** Pages reached from the nav, where a phone shows its tab bar. Deeper pages
  * (a session, a doc, an item) keep their back arrow and the whole screen. */
-const TOP = new Set<Route["page"]>(["inbox", "backlog", "docs", "decisions", "digest", "past", "search", "supervisor", "settings"]);
+const TOP = new Set<Route["page"]>(["inbox", "backlog", "docs", "decisions", "digest", "past", "wiki", "search", "supervisor", "settings"]);
 
 /** How deep a page is, so a transition knows forward from back. */
 const depth = (r: Route) => (TOP.has(r.page) ? 0 : r.page === "review" ? 2 : 1);
@@ -339,6 +342,7 @@ export function App() {
       {at.page === "docs" && <DocsList />}
       {at.page === "digest" && <DigestView />}
       {at.page === "past" && <PastView />}
+      {at.page === "wiki" && <WikiView />}
       {at.page === "search" && <SearchView />}
       {at.page === "supervisor" && <SupervisorView />}
       {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}

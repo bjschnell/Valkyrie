@@ -20,6 +20,7 @@ pub mod remote;
 pub mod screen;
 pub mod search;
 pub mod supervisor;
+pub mod wiki;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -43,9 +44,10 @@ pub use quota::{Quota, QuotaLimit};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 pub use search::{SearchField, SearchHit, SearchResults};
 pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
+pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 44;
+pub const PROTOCOL: u32 = 45;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -787,6 +789,32 @@ pub enum ClientMsg {
         cwd: PathBuf,
         id: u32,
     },
+    /// The wiki of the repository holding `cwd`, each page's staleness worked
+    /// out, without bodies (backlog #210, protocol 45). Replies `Wiki`.
+    Wiki {
+        req: ReqId,
+        cwd: PathBuf,
+    },
+    /// One wiki page in full. Replies `WikiPage`.
+    WikiPage {
+        req: ReqId,
+        cwd: PathBuf,
+        page: String,
+    },
+    /// Starts `agent` in the root of the repository holding `cwd`, briefed to
+    /// write its wiki; with `stale`, to rewrite only the stale pages (refused
+    /// when none is). Replies `Session`.
+    WikiExplore {
+        req: ReqId,
+        cwd: PathBuf,
+        #[serde(default)]
+        stale: bool,
+        agent: String,
+        size: Size,
+        /// As `SpawnSpec::env`.
+        #[serde(default)]
+        env: Vec<(String, Option<String>)>,
+    },
     /// Agent sessions of the last weeks that have ended, newest first, to
     /// resume one (backlog #150, protocol 42). Read-only. Replies `History`.
     History {
@@ -1047,6 +1075,12 @@ pub enum Reply {
     },
     Tombstone {
         tombstone: Tombstone,
+    },
+    Wiki {
+        listing: WikiListing,
+    },
+    WikiPage {
+        page: Box<WikiPage>,
     },
     Scrollback {
         /// The first row's line, counting from the oldest line in history.

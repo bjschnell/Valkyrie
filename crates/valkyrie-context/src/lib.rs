@@ -1327,6 +1327,24 @@ pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     renamed
 }
 
+/// How an agent should run Valkyrie: `valk` when that is this binary on `$PATH`,
+/// else this binary's full path.
+pub fn valk_command() -> String {
+    let Ok(me) = std::env::current_exe().and_then(|me| valkyrie_proto::canonical(&me)) else {
+        return "valk".into();
+    };
+    let name = format!("valk{}", std::env::consts::EXE_SUFFIX);
+    let on_path = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path)
+            .any(|dir| valkyrie_proto::canonical(&dir.join(&name)).is_ok_and(|p| p == me))
+    });
+    if on_path {
+        "valk".into()
+    } else {
+        me.to_string_lossy().into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

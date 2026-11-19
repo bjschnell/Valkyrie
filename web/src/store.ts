@@ -14,6 +14,8 @@ import type {
   SupervisorEntry,
   WatchedPr,
   PastSession,
+  WikiListing,
+  WikiPage,
   SearchResults,
   Doc,
   DeletedDoc,
@@ -975,6 +977,34 @@ export async function pastSessions(): Promise<PastSession[]> {
 export async function resume(key: string): Promise<SessionId> {
   if (!conn) throw new Error("not connected");
   const reply = await conn.request({ t: "resume", key, size: SPAWN_SIZE, env: [] });
+  if (reply.t !== "session") throw new Error("unexpected reply");
+  void refresh();
+  reportColors(reply.info.id);
+  return reply.info.id;
+}
+
+/** The wiki of `cwd`'s repository (backlog #210). Throws with the daemon's reason. */
+export async function wikiListing(cwd: string): Promise<WikiListing> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "wiki", cwd });
+  if (reply.t !== "wiki") throw new Error("unexpected reply");
+  return reply.listing;
+}
+
+/** One wiki page in full. Throws with the daemon's reason. */
+export async function wikiPage(cwd: string, page: string): Promise<WikiPage> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "wiki_page", cwd, page });
+  if (reply.t !== "wiki_page") throw new Error("unexpected reply");
+  return reply.page;
+}
+
+/** Starts the agent that maps `cwd`'s repository into its wiki (with `stale`,
+ * rewrites only the stale pages) and returns its session: the running one, if
+ * one is already at it. Throws with the daemon's reason. */
+export async function wikiExplore(cwd: string, stale: boolean): Promise<SessionId> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "wiki_explore", cwd, stale, agent: "claude", size: SPAWN_SIZE, env: [] });
   if (reply.t !== "session") throw new Error("unexpected reply");
   void refresh();
   reportColors(reply.info.id);

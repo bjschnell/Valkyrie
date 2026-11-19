@@ -28,6 +28,7 @@ export type PageKey =
   | "docs"
   | "digest"
   | "past"
+  | "wiki"
   | "search"
   | "supervisor"
   | "doc"
@@ -109,6 +110,7 @@ export const PAGE_KEYS = {
   settings: { q: "Go back", Escape: "Go back" },
   digest: { q: "Go back", Escape: "Go back" },
   past: { q: "Go back", Escape: "Go back" },
+  wiki: { q: "Go back (from a page, to the list)", Escape: "Go back (from a page, to the list)" },
   supervisor: { q: "Go back", Escape: "Go back" },
 } as const satisfies Partial<Record<PageKey, Record<string, string>>>;
 
@@ -124,6 +126,7 @@ const TITLE: Record<PageKey, string> = {
   docs: "Docs",
   digest: "Summary",
   past: "Past sessions",
+  wiki: "Wiki",
   search: "Search",
   supervisor: "Supervisor",
   doc: "Docs",

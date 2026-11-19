@@ -1078,7 +1078,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 require_tty()?;
             }
             let (client, pushes) = connect(&socket).await?;
-            let info = wiki::explore(&client, root, brief, agent).await?;
+            let info = wiki::explore(&client, root, stale, agent).await?;
             if attach {
                 valkyrie_tui::run(client, pushes, Some(info.id), socket).await
             } else {

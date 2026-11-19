@@ -462,6 +462,48 @@ impl Client {
         }
     }
 
+    pub async fn wiki(&self, cwd: PathBuf) -> Result<crate::WikiListing> {
+        match self.request(|req| ClientMsg::Wiki { req, cwd }).await? {
+            Reply::Wiki { listing } => Ok(listing),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    pub async fn wiki_page(&self, cwd: PathBuf, page: String) -> Result<crate::WikiPage> {
+        match self
+            .request(|req| ClientMsg::WikiPage { req, cwd, page })
+            .await?
+        {
+            Reply::WikiPage { page } => Ok(*page),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Starts the agent that writes the wiki of the repository holding `cwd`.
+    pub async fn wiki_explore(
+        &self,
+        cwd: PathBuf,
+        stale: bool,
+        agent: String,
+        size: crate::Size,
+        env: Vec<(String, Option<String>)>,
+    ) -> Result<crate::SessionInfo> {
+        match self
+            .request(|req| ClientMsg::WikiExplore {
+                req,
+                cwd,
+                stale,
+                agent,
+                size,
+                env,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(*info),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn write_doc(&self, doc: crate::NewDoc) -> Result<crate::Doc> {
         match self.request(|req| ClientMsg::WriteDoc { req, doc }).await? {
             Reply::Doc { doc } => Ok(*doc),

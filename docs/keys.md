@@ -14,6 +14,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 | | `n` · `x` · `r` | new shell · kill · rename |
 | | `w` · `h` | away summary · past sessions, `↩` resumes one |
 | | `s` | the supervisor: what waits on you and what it did ([supervisor](supervisor.md)) |
+| | `W` | the selected session's repository wiki: read pages, `e` maps the repository, `S` rewrites stale pages ([wiki](wiki.md)) |
 | | `,` · `.` | settings · keys |
 | Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |
