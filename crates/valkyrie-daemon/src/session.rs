@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 #[cfg(unix)]
@@ -153,6 +153,8 @@ pub struct SavedSession {
     hidden: bool,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    supervisor: bool,
 }
 
 /// What brings a session back after the daemon restarts (DESIGN §8.3).
@@ -165,6 +167,9 @@ pub struct RestoreEntry {
     pub conversation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
+    /// It was the supervisor session (ADR-0019 §10), and comes back as it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor: bool,
 }
 
 pub struct Session {
@@ -180,6 +185,9 @@ pub struct Session {
     pub clients: AtomicU32,
     /// Left out of lists and the restore file (`SpawnSpec::hidden`).
     hidden: bool,
+    /// The supervisor session (ADR-0019 §10): it sees every agent session and may
+    /// prompt the idle ones.
+    supervisor: AtomicBool,
     /// When a client last typed into it (ms since the epoch; 0: never).
     last_input_ms: AtomicU64,
     adapter: &'static dyn Adapter,
@@ -568,6 +576,9 @@ impl Session {
             Pty(fd),
             host,
         );
+        if saved.supervisor {
+            session.make_supervisor();
+        }
         if !saved.input.is_empty() {
             session.input.push(saved.input);
         }
@@ -593,6 +604,7 @@ impl Session {
             created_unix: meta.created_unix,
             clients: AtomicU32::new(0),
             hidden: meta.hidden,
+            supervisor: AtomicBool::new(false),
             last_input_ms: AtomicU64::new(0),
             adapter,
             state: Mutex::new(state),
@@ -733,6 +745,7 @@ impl Session {
             driven_by: state.driven_by.clone(),
             hidden: self.hidden,
             topic: state.topic.clone(),
+            supervisor: self.is_supervisor(),
             chat: state.chat.clone(),
             input: self
                 .input
@@ -1593,6 +1606,25 @@ impl Session {
         );
     }
 
+    /// Notes typing the supervisor session sent that was dropped, and why
+    /// (ADR-0019 §10).
+    pub fn log_refused_supervisor(&self, why: &str) {
+        self.state.lock().unwrap().log(
+            now_ms(),
+            "input_refused",
+            json!({"agent": "supervisor", "reason": why}),
+        );
+    }
+
+    /// Notes a prompt the supervisor session typed in (ADR-0019 §10).
+    pub fn log_supervisor_prompt(&self, text: &str) {
+        self.state.lock().unwrap().log(
+            now_ms(),
+            "supervisor",
+            json!({"trigger": "supervisor-session", "action": "prompt", "text": text}),
+        );
+    }
+
     /// Whether an agent started this session or typed into it.
     pub fn driven(&self) -> bool {
         self.state.lock().unwrap().driven_by.is_some()
@@ -1607,6 +1639,37 @@ impl Session {
             return Some(running.clone());
         }
         state.driven_by.clone()
+    }
+
+    /// Whether this is a bare shell left at its prompt, unused since `quiet_ms`
+    /// before `now`: what's left in a tab when its agent was stopped with Ctrl+C,
+    /// so closing it loses nothing (backlog #235). A shell running a command has
+    /// handed that command the terminal's foreground; one started with `-c`, or
+    /// anything that isn't a shell, never counts. Unix only: Windows has no
+    /// foreground group to tell a prompt from a running command.
+    pub fn idle_shell(&self, now: u64, quiet_ms: u64) -> bool {
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid else {
+                return false;
+            };
+            if self.exited() || self.agent_behind().is_some() || !bare_shell(&self.command) {
+                return false;
+            }
+            let input = self.last_input_ms.load(Ordering::Relaxed);
+            let output = self.state.lock().unwrap().last_output_ms;
+            if now.saturating_sub(input.max(output)) < quiet_ms {
+                return false;
+            }
+            // Nothing of its own left: no job stopped with Ctrl+Z, none in the
+            // background, nothing it `exec`ed into.
+            self.pty.foreground() == Some(pid as i32) && !has_children(pid)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (now, quiet_ms);
+            false
+        }
     }
 
     /// The PTY's terminal device (`foreground::dev_key`), the controlling terminal of
@@ -1662,6 +1725,7 @@ impl Session {
             cwd: self.live_cwd(&state),
             conversation: state.conversation.clone(),
             topic: state.topic.clone(),
+            supervisor: self.is_supervisor(),
         })
     }
 
@@ -1692,7 +1756,18 @@ impl Session {
             chat: state.chat.clone(),
             overlap: state.overlap.clone(),
             report: live_report(&state.report, now_ms()),
+            supervisor: self.is_supervisor(),
         }
+    }
+
+    /// Marks it the supervisor session (ADR-0019 §10); it stays marked.
+    pub fn make_supervisor(&self) {
+        self.supervisor.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether it's the supervisor session.
+    pub fn is_supervisor(&self) -> bool {
+        self.supervisor.load(Ordering::Relaxed)
     }
 
     /// Publishes a short status on the session (`valk status`), replacing any it
@@ -1769,6 +1844,37 @@ fn live_report(report: &Option<(String, u64)>, now: u64) -> Option<String> {
 }
 
 /// Whether to scan on this tick: `Some(true)` quiet scan, `Some(false)` glance.
+/// Whether `command` starts an interactive shell and nothing else: a known shell,
+/// with only flags (`-l`, `-i`), never `-c` or a script.
+#[cfg(unix)]
+fn bare_shell(command: &[String]) -> bool {
+    const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "nu", "elvish"];
+    let Some((program, args)) = command.split_first() else {
+        return false;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .trim_start_matches('-');
+    SHELLS.contains(&name)
+        && args
+            .iter()
+            .all(|a| a.starts_with('-') && !a.starts_with("-c") && a != "--command")
+}
+
+/// Whether `pid` has any child process, by `pgrep -P`; one that can't be
+/// asked counts as having some.
+#[cfg(unix)]
+fn has_children(pid: u32) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_or(true, |s| s.code() != Some(1))
+}
+
 fn scan_kind(due: bool, now: u64, last_output_ms: u64, last_scan_ms: u64) -> Option<bool> {
     if !due {
         return None;

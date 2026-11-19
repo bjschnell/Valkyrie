@@ -878,6 +878,28 @@ impl Client {
         }
     }
 
+    /// Starts the supervisor session, or finds the one already running (see
+    /// `ClientMsg::SupervisorSession`).
+    pub async fn supervisor_session(
+        &self,
+        cwd: PathBuf,
+        size: crate::Size,
+        env: Vec<(String, Option<String>)>,
+    ) -> Result<SessionInfo> {
+        match self
+            .request(|req| ClientMsg::SupervisorSession {
+                req,
+                cwd,
+                size,
+                env,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(*info),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Fails unless this process is a human's (see `ClientMsg::Vouch`).
     pub async fn vouch(&self, what: &str) -> Result<()> {
         let what = what.to_owned();

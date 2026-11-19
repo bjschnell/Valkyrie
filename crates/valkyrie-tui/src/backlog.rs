@@ -2194,6 +2194,7 @@ mod tests {
             chat: None,
             overlap: None,
             report: None,
+            supervisor: false,
         }
     }
 

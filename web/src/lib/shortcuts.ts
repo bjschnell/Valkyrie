@@ -111,7 +111,7 @@ export const PAGE_KEYS = {
   digest: { q: "Go back", Escape: "Go back" },
   past: { q: "Go back", Escape: "Go back" },
   wiki: { q: "Go back (from a page, to the list)", Escape: "Go back (from a page, to the list)" },
-  supervisor: { q: "Go back", Escape: "Go back" },
+  supervisor: { q: "Go back", Escape: "Go back", c: "Open the supervisor session" },
 } as const satisfies Partial<Record<PageKey, Record<string, string>>>;
 
 /** The pages whose plain keys are in PAGE_KEYS. */

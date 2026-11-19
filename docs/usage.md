@@ -38,6 +38,15 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
   branch is in `origin`'s default branch, with the branch, unless a session runs
   there, a backlog item owns it, it has no commits of its own, or it has changes.
   It lists the ignored files (`.env`, `target/`) that go with each.
+- The daemon also sweeps on its own every 10 minutes, so finished worktrees and
+  their build output don't fill the disk. A worktree goes when its backlog item
+  shipped or was dropped, when it's merged with commits of its own, or when
+  nothing moved in it for 14 days and all of it is merged or pushed to `origin`.
+  It never goes while it has changes, moved within the hour, holds ignored files
+  other than build output (`.env` keeps it; `target/`, `node_modules/` don't),
+  is locked, has an open item on it, or a program runs in it. A shell left idle
+  at its prompt there with no jobs (an agent stopped with Ctrl+C) is closed first. Its branch goes only if it's merged. Turn it off
+  with `worktree_sweep = off` in `settings.toml`.
 
 ## Another machine over SSH
 

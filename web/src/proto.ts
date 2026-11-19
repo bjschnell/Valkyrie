@@ -46,6 +46,8 @@ export interface SessionInfo {
   overlap?: string;
   /** A short status it published with `valk status`, e.g. "tests 41/50" (protocol 39). */
   report?: string;
+  /** The supervisor session: at most one runs (ADR-0019 §10, protocol 45). */
+  supervisor?: boolean;
 }
 
 export interface QueueItem {
@@ -715,7 +717,7 @@ export type Request =
   | { t: "note"; note: { cwd: string; text: string; replaces?: number } }
   /** Deletes a note, leaving a tombstone; replies `tombstone`. */
   | { t: "note_rm"; cwd: string; id: number }
-  /** The wiki of `cwd`'s repository, without bodies (protocol 45); replies `wiki`. */
+  /** The wiki of `cwd`'s repository, without bodies (protocol 46); replies `wiki`. */
   | { t: "wiki"; cwd: string }
   /** One wiki page in full; replies `wiki_page`. */
   | { t: "wiki_page"; cwd: string; page: string }
@@ -764,6 +766,8 @@ export type Request =
   /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
   | { t: "plan_order"; cwd: string }
   | { t: "supervisor_log" }
+  /** Starts the supervisor session, or replies with the one already running (protocol 45). */
+  | { t: "supervisor_session"; cwd: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   | { t: "supervisor_watch" }
   /** The user only: `items` accepts only those items' changes, absent all of them. */
   | {

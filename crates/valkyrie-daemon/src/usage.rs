@@ -28,6 +28,7 @@ pub(crate) fn feature(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::AnswerOrder { .. } => "answer_order",
         ClientMsg::AnswerLaunch { .. } => "answer_launch",
         ClientMsg::Supervise { .. } => "supervise",
+        ClientMsg::SupervisorSession { .. } => "supervisor_session",
         ClientMsg::TakeStep { .. } => "take_step",
         ClientMsg::TakeItem { .. } => "take_item",
         ClientMsg::AdoptSession { .. } => "adopt_session",

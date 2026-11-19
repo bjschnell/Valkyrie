@@ -1,6 +1,6 @@
 //! The repository wiki (backlog #210): pages agents write for agents about how
 //! the code is built, kept in the context store. The TUI and the web app list
-//! and read them, and start the agent that writes them (protocol 45).
+//! and read them, and start the agent that writes them (protocol 46).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

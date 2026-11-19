@@ -963,6 +963,17 @@ export async function supervisorWatch(): Promise<{ prs: WatchedPr[]; polled_at?:
   return { prs: reply.prs, polled_at: reply.polled_at, next_at: reply.next_at, on: reply.on };
 }
 
+/** Opens the supervisor session, starting it if none runs (ADR-0019 §10), in
+ * the daemon's default directory. Throws with the daemon's reason. */
+export async function supervisorSession(): Promise<SessionId> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "supervisor_session", cwd: "", size: SPAWN_SIZE, env: [] });
+  if (reply.t !== "session") throw new Error("unexpected reply");
+  void refresh();
+  reportColors(reply.info.id);
+  return reply.info.id;
+}
+
 /** Agent sessions that have ended, newest first (backlog #150). Throws with the
  * daemon's reason. */
 export async function pastSessions(): Promise<PastSession[]> {

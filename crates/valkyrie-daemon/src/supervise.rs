@@ -251,7 +251,7 @@ impl Supervisor {
         self.path.with_file_name("supervise-off")
     }
 
-    fn set_on(&mut self, on: bool) -> Result<()> {
+    pub(crate) fn set_on(&mut self, on: bool) -> Result<()> {
         let file = self.off_file();
         if on {
             match std::fs::remove_file(&file) {
@@ -933,13 +933,27 @@ impl Registry {
             roots
                 .iter()
                 .flat_map(|root| {
-                    store.steps(root, now).into_iter().map(|r| SupervisorEntry {
-                        at: r.at,
-                        project: root.clone(),
-                        said: steps::said(&r),
-                        policy: r.policy,
-                        pr: (!r.pr.is_empty()).then(|| r.pr.clone()),
-                    })
+                    let prompts = store
+                        .prompts(root, now)
+                        .into_iter()
+                        .map(|p| SupervisorEntry {
+                            at: p.at,
+                            project: root.clone(),
+                            said: p.said(),
+                            policy: None,
+                            pr: None,
+                        });
+                    store
+                        .steps(root, now)
+                        .into_iter()
+                        .map(|r| SupervisorEntry {
+                            at: r.at,
+                            project: root.clone(),
+                            said: steps::said(&r),
+                            policy: r.policy,
+                            pr: (!r.pr.is_empty()).then(|| r.pr.clone()),
+                        })
+                        .chain(prompts)
                 })
                 .collect()
         };
@@ -981,8 +995,14 @@ const LOG_SHOWN: usize = 300;
 /// supervisor's with them. It's kept in `settings.toml`, which the daemon reads as
 /// the hooks do, at the moment it matters.
 pub(crate) fn context_on() -> bool {
+    setting_on("VALK_PROJECT_CONTEXT", "context")
+}
+
+/// Whether the on-by-default setting `key` of `settings.toml` is on: only `false`
+/// or `off` turns it off, and `$env`, when set, wins over the file.
+pub(crate) fn setting_on(env: &str, key: &str) -> bool {
     let off = |v: &str| matches!(v.trim().trim_matches('"'), "false" | "off");
-    if let Ok(v) = std::env::var("VALK_PROJECT_CONTEXT") {
+    if let Ok(v) = std::env::var(env) {
         return !off(&v);
     }
     let path = valkyrie_proto::config_dir().join("settings.toml");
@@ -990,7 +1010,7 @@ pub(crate) fn context_on() -> bool {
         .unwrap_or_default()
         .lines()
         .filter_map(|l| l.split('#').next()?.split_once('='))
-        .any(|(k, v)| k.trim() == "context" && off(v))
+        .any(|(k, v)| k.trim() == key && off(v))
 }
 
 /// Runs `gh` in `dir`: its stdout, or an error. Killed past `timeout`.

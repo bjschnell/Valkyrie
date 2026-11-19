@@ -104,6 +104,8 @@ pub(crate) enum Do {
         accept: bool,
     },
     Say(String),
+    /// Open the supervisor session, starting it if none runs (ADR-0019 §10).
+    OpenSession,
 }
 
 /// The open page: the log as the daemon last said it, and which waiting row the
@@ -136,7 +138,8 @@ impl Page {
 
     /// Keys while the page is open: ↑/↓ (j/k) pick what waits; `a` (or ↩) takes
     /// what's offered, `o` the other step, `d` leaves or rejects it; ↩ on a build
-    /// order opens it; `r` loads again; Esc or `q` closes.
+    /// order opens it; `c` opens the supervisor session, starting it if none
+    /// runs; `r` loads again; Esc or `q` closes.
     pub(crate) fn keys(&mut self, mut bytes: &[u8], waits: &[Wait]) -> Vec<Do> {
         let mut out = Vec::new();
         let n = waits.len();
@@ -168,6 +171,7 @@ impl Page {
                     None => {}
                 },
                 b"r" => out.push(Do::Load),
+                b"c" => out.push(Do::OpenSession),
                 b"\x1b" if whole => out.push(Do::Close),
                 b"q" | [0x03] => out.push(Do::Close),
                 _ => {}
@@ -283,6 +287,7 @@ impl Page {
             hint(" a ", "take "),
             hint(" o ", "other step "),
             hint(" d ", "leave/reject "),
+            hint(" c ", "supervisor session "),
             hint(" r ", "reload "),
             hint(" esc ", "close "),
         ]
@@ -487,6 +492,12 @@ mod tests {
         assert!(matches!(waits[0], Wait::Launch(_)));
         assert!(matches!(waits[1], Wait::Order { steps: 2, .. }));
         assert!(matches!(&waits[2], Wait::Policy(d) if d.id == 12));
+    }
+
+    #[test]
+    fn c_opens_the_supervisor_session_even_with_nothing_waiting() {
+        let mut page = Page::default();
+        assert_eq!(page.keys(b"c", &[]), vec![Do::OpenSession]);
     }
 
     #[test]
