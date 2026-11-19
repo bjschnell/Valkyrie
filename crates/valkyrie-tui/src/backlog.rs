@@ -1013,10 +1013,12 @@ impl Page {
         vec![act]
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw(
         &self,
         frame: &mut ratatui::Frame,
         rows: &[(Lane, Item)],
+        all: &[Item],
         sessions: &[SessionInfo],
         boot: u64,
         now: u64,
@@ -1194,7 +1196,15 @@ impl Page {
             if i == self.cursor {
                 cursor_line = lines.len();
             }
-            lines.push(item_line(item, *lane, i == self.cursor, list.width, t));
+            let group = group_tag(item, all);
+            lines.push(item_line(
+                item,
+                *lane,
+                &group,
+                i == self.cursor,
+                list.width,
+                t,
+            ));
         }
         if rows.is_empty() {
             lines.push(Line::default());
@@ -1233,7 +1243,7 @@ impl Page {
                         .map_or(*b, |(_, i)| i.number)
                 })
                 .collect();
-            let text = detail_lines(
+            let mut text = detail_lines(
                 item,
                 *lane,
                 live(item, sessions, boot),
@@ -1242,6 +1252,10 @@ impl Page {
                 now,
                 t,
             );
+            // Its group, under the title and state lines.
+            let group = group_lines(item, all, t);
+            let at = text.len().min(2);
+            text.splice(at..at, group);
             let pane = Block::new()
                 .borders(if wide {
                     ratatui::widgets::Borders::LEFT
@@ -1615,7 +1629,58 @@ fn priority_color(p: Priority, t: &Theme) -> style::Color {
     }
 }
 
-fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> Line<'static> {
+/// ` ↳#3` for a piece of #3, ` 2/5` for a group's parent with two of its five
+/// pieces shipped or dropped, else nothing.
+fn group_tag(item: &Item, all: &[Item]) -> String {
+    if let Some(p) = item.parent {
+        let number = all.iter().find(|i| i.id == p).map_or(p, |i| i.number);
+        return format!(" ↳#{number}");
+    }
+    match item.progress(all) {
+        (_, 0) => String::new(),
+        (done, of) => format!(" {done}/{of}"),
+    }
+}
+
+/// The detail pane's say on `item`'s group: the item it's a piece of, or its
+/// own pieces with their states.
+fn group_lines(item: &Item, all: &[Item], t: &Theme) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    if let Some(p) = item.parent.and_then(|p| all.iter().find(|i| i.id == p)) {
+        out.push(Line::from(
+            format!(
+                " piece of #{} {} ({})",
+                p.number,
+                p.title,
+                p.status.as_str()
+            )
+            .fg(t.accent),
+        ));
+    }
+    let pieces = item.children(all);
+    if !pieces.is_empty() {
+        let (done, of) = item.progress(all);
+        out.push(Line::from(
+            format!(" pieces {done}/{of} done").fg(t.accent).bold(),
+        ));
+        for c in pieces {
+            let fg = if c.closed() { t.muted } else { t.fg };
+            out.push(Line::from(
+                format!("   #{} {} ({})", c.number, c.title, c.status.as_str()).fg(fg),
+            ));
+        }
+    }
+    out
+}
+
+fn item_line(
+    item: &Item,
+    lane: Lane,
+    group: &str,
+    selected: bool,
+    width: u16,
+    t: &Theme,
+) -> Line<'static> {
     let folder = item
         .project
         .as_ref()
@@ -1638,6 +1703,7 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
             + prio.len()
             + kind.len()
             + state.len()
+            + group.chars().count()
             + after.len()
             + folder.chars().count()
             + 1,
@@ -1650,6 +1716,7 @@ fn item_line(item: &Item, lane: Lane, selected: bool, width: u16, t: &Theme) -> 
         state.fg(lane.color(t)),
         // Padded, so the folders line up at the right.
         format!("{:<room$}", fit(&item.title, room)).fg(title_fg),
+        group.to_owned().fg(t.accent),
         after.fg(t.accent2),
         folder.fg(t.muted),
     ]);
@@ -2842,12 +2909,50 @@ mod tests {
         ));
     }
 
+    /// Backlog #235: a piece points at its group, the group counts its pieces.
+    #[test]
+    fn a_group_shows_its_progress_and_its_pieces_point_at_it() {
+        let t = crate::theme::DRACULA;
+        let numbered = |id, number| Item {
+            number,
+            ..item(id, 1)
+        };
+        let mut parent = numbered(10, 1);
+        let mut one = numbered(11, 2);
+        let mut two = numbered(12, 3);
+        one.parent = Some(parent.id);
+        two.parent = Some(parent.id);
+        two.status = ItemStatus::Shipped;
+        parent.title = "the plan".into();
+        let all = vec![parent.clone(), one.clone(), two.clone()];
+        assert_eq!(group_tag(&parent, &all), " 1/2");
+        assert_eq!(
+            group_tag(&one, &all),
+            " ↳#1",
+            "the parent's number, not its id"
+        );
+        assert_eq!(group_tag(&numbered(13, 4), &all), "");
+        let text = |i: &Item| -> Vec<String> {
+            group_lines(i, &all, &t)
+                .iter()
+                .map(|l| l.to_string())
+                .collect()
+        };
+        assert_eq!(text(&one), [" piece of #1 the plan (open)"]);
+        let lines = text(&parent);
+        assert_eq!(lines[0], " pieces 1/2 done");
+        assert!(
+            lines[2].contains("#3") && lines[2].contains("shipped"),
+            "{lines:?}"
+        );
+    }
+
     #[test]
     fn each_row_shows_its_state_and_still_fits_the_width() {
         let t = crate::theme::DRACULA;
         for lane in Lane::ORDER {
             for width in [40u16, 80] {
-                let line = item_line(&item(1, 1), lane, true, width, &t);
+                let line = item_line(&item(1, 1), lane, " ↳#2", true, width, &t);
                 let text = line.to_string();
                 assert!(text.contains(lane.title()), "{lane:?} at {width}: {text:?}");
                 assert_eq!(
@@ -2911,7 +3016,7 @@ mod tests {
         // The row keeps only what's still open of what it waits on.
         assert_eq!(rows[2].1.blocked_by, [3]);
         let t = crate::theme::DRACULA;
-        let line: String = item_line(&rows[2].1, Lane::Backlog, false, 90, &t)
+        let line: String = item_line(&rows[2].1, Lane::Backlog, "", false, 90, &t)
             .spans
             .iter()
             .map(|s| s.content.as_ref())

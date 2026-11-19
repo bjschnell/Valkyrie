@@ -3838,7 +3838,15 @@ impl App {
             if let Some(page) = &self.backlog {
                 let rows = self.backlog_rows();
                 let t = self.settings.theme;
-                page.draw(frame, &rows, &self.sessions, self.boot(), now_ms(), t);
+                page.draw(
+                    frame,
+                    &rows,
+                    &self.items,
+                    &self.sessions,
+                    self.boot(),
+                    now_ms(),
+                    t,
+                );
             }
         })?;
         Ok(())
@@ -8148,6 +8156,7 @@ mod tests {
                 page.draw(
                     f,
                     &app.backlog_rows(),
+                    &app.items,
                     &app.sessions,
                     0,
                     0,
@@ -8194,6 +8203,7 @@ mod tests {
                 page.draw(
                     f,
                     &app.backlog_rows(),
+                    &app.items,
                     &app.sessions,
                     0,
                     0,
