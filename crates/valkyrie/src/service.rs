@@ -469,9 +469,10 @@ fn launchd_target(name: &str) -> String {
     format!("{}/{name}", launchd_domain())
 }
 
-/// A systemd user unit. The daemon `valk web` may start belongs in the unit's
-/// cgroup, so stopping or restarting the unit ends only the main process
-/// (`KillMode=process`): never the daemon and its sessions.
+/// A systemd user unit. The daemon `valk web` may start gets a scope of its own
+/// (`own_scope` in main.rs), so the unit isn't billed for its sessions. Where that
+/// can't be made it stays in the unit's cgroup, so stopping or restarting the unit
+/// ends only the main process (`KillMode=process`): never the daemon and its sessions.
 fn systemd_unit(command: &[String], env: &[(String, String)]) -> String {
     let exec = command
         .iter()

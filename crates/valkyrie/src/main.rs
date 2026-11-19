@@ -1726,11 +1726,17 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
         .create(true)
         .append(true)
         .open(log_dir.join("daemon.log"))?;
-    spawn_daemon(socket, &log).context("start daemon")?;
+    let mut scoped = own_scope();
+    let mut daemon = spawn_daemon(socket, &log, scoped).context("start daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         if let Ok(conn) = Client::connect(socket).await {
             return Ok(conn);
+        }
+        // systemd-run that couldn't make the scope: start it where we are.
+        if scoped && matches!(daemon.try_wait(), Ok(Some(status)) if !status.success()) {
+            scoped = false;
+            daemon = spawn_daemon(socket, &log, false).context("start daemon")?;
         }
     }
     bail!(
@@ -1743,9 +1749,13 @@ async fn start_or_connect(socket: &Path) -> Result<(Client, Pushes)> {
 /// herdr's server: closing the terminal or SSH connection that started it must not
 /// take the sessions down with it.
 #[cfg(unix)]
-fn spawn_daemon(socket: &Path, log: &std::fs::File) -> std::io::Result<()> {
+fn spawn_daemon(
+    socket: &Path,
+    log: &std::fs::File,
+    scoped: bool,
+) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
-    let mut daemon = daemon_command(socket, log)?;
+    let mut daemon = daemon_command(socket, log, scoped)?;
     // SAFETY: setsid is async-signal-safe.
     unsafe {
         daemon.pre_exec(|| {
@@ -1755,34 +1765,76 @@ fn spawn_daemon(socket: &Path, log: &std::fs::File) -> std::io::Result<()> {
             Ok(())
         });
     }
-    daemon.spawn().map(drop)
+    match daemon.spawn() {
+        // No systemd-run here after all.
+        Err(e) if scoped && e.kind() == std::io::ErrorKind::NotFound => {
+            spawn_daemon(socket, log, false)
+        }
+        spawned => spawned,
+    }
 }
 
 /// Starts `valk daemon` in the background, logging to `log`: no console (closing
 /// the terminal must not end it), and out of the starter's job if it may leave,
 /// so a task or terminal ending its job doesn't take the sessions along.
 #[cfg(windows)]
-fn spawn_daemon(socket: &Path, log: &std::fs::File) -> std::io::Result<()> {
+fn spawn_daemon(
+    socket: &Path,
+    log: &std::fs::File,
+    _scoped: bool,
+) -> std::io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{
         CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
     };
     let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
-    match daemon_command(socket, log)?
+    match daemon_command(socket, log, false)?
         .creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
     {
-        Ok(_) => Ok(()),
+        Ok(child) => Ok(child),
         // A job that doesn't allow it: stay in it.
-        Err(_) => daemon_command(socket, log)?
+        Err(_) => daemon_command(socket, log, false)?
             .creation_flags(flags)
-            .spawn()
-            .map(drop),
+            .spawn(),
     }
 }
 
-fn daemon_command(socket: &Path, log: &std::fs::File) -> std::io::Result<std::process::Command> {
-    let mut daemon = std::process::Command::new(std::env::current_exe()?);
+/// Whether this process runs in a systemd service's own cgroup, as `valk web`
+/// does under `valk setup web` (`cgroup` is `/proc/self/cgroup`).
+fn in_service(cgroup: &str) -> bool {
+    cgroup
+        .lines()
+        .any(|line| line.starts_with("0::") && line.trim_end().ends_with(".service"))
+}
+
+/// Whether the daemon this process starts should get a systemd scope of its own.
+/// Started from inside a service, it would stay in the service's cgroup with every
+/// session and build it runs, and the service would be billed for all of it: a
+/// `valk-web` of 30 MB showing as gigabytes (backlog #244). Only Linux has these.
+fn own_scope() -> bool {
+    cfg!(target_os = "linux")
+        && std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroup| in_service(&cgroup))
+}
+
+/// `valk daemon` on `socket`; with `scoped`, through `systemd-run --user --scope`,
+/// which starts it in a new scope unit and then becomes it.
+fn daemon_command(
+    socket: &Path,
+    log: &std::fs::File,
+    scoped: bool,
+) -> std::io::Result<std::process::Command> {
+    let exe = std::env::current_exe()?;
+    let mut daemon = if scoped {
+        let mut run = std::process::Command::new("systemd-run");
+        run.args(["--user", "--scope", "--collect", "--quiet"])
+            .arg("--description=Valkyrie daemon and its sessions")
+            .arg("--")
+            .arg(exe);
+        run
+    } else {
+        std::process::Command::new(exe)
+    };
     daemon
         .arg("--socket")
         .arg(socket)
@@ -1831,6 +1883,50 @@ fn init_logging() {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_daemon_started_from_a_service_gets_a_scope_of_its_own() {
+        use super::{daemon_command, in_service};
+        // `valk web` under `valk setup web`: whatever it starts is billed to its unit.
+        let web = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/valk-web.service\n";
+        assert!(in_service(web));
+        // A terminal, or a daemon's session: already somewhere of its own.
+        let term = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-ghostty.scope\n";
+        assert!(!in_service(term));
+        assert!(!in_service("0::/\n"));
+        assert!(!in_service(""));
+
+        let log = std::fs::File::open("/dev/null").unwrap();
+        let socket = std::path::Path::new("/run/user/1000/v.sock");
+        let plain = daemon_command(socket, &log, false).unwrap();
+        assert_eq!(plain.get_program(), std::env::current_exe().unwrap());
+        let scoped = daemon_command(socket, &log, true).unwrap();
+        assert_eq!(scoped.get_program(), "systemd-run");
+        let args: Vec<_> = scoped
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let at = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("a -- before the daemon");
+        assert!(args[..at].contains(&"--user".to_owned()));
+        assert!(args[..at].contains(&"--scope".to_owned()));
+        assert_eq!(
+            args[at + 1..],
+            [
+                exe,
+                "--socket".into(),
+                "/run/user/1000/v.sock".into(),
+                "daemon".into()
+            ]
+        );
+    }
     #[test]
     fn unescape() {
         assert_eq!(
