@@ -37,6 +37,9 @@ pub enum TodoCmd {
         /// An item to finish before this one; repeat for more.
         #[arg(long, value_name = "N")]
         after: Vec<Ref>,
+        /// The item it's a piece of; it goes in that item's repository.
+        #[arg(long, value_name = "N", conflicts_with_all = ["dir", "no_folder"])]
+        parent: Option<Ref>,
         /// Also take it for this session: work you're doing that nobody planned,
         /// tracked like a taken item (from inside a valk session).
         #[arg(long)]
@@ -120,6 +123,12 @@ pub enum TodoCmd {
         /// No longer wait on this item; repeat for more.
         #[arg(long, value_name = "N")]
         not_after: Vec<Ref>,
+        /// Make it a piece of this item, in the same repository.
+        #[arg(long, value_name = "N", conflicts_with = "no_parent")]
+        parent: Option<Ref>,
+        /// Make it stand alone again, no longer a piece of another.
+        #[arg(long)]
+        no_parent: bool,
     },
     /// Leave a note: on your own item, a handoff (what changed, what's left, what
     /// to check) that goes into the brief of its next launch; on any other, with
@@ -371,6 +380,17 @@ fn rank(item: &Item, items: &Items) -> String {
     format!("{} after {}", item.priority.as_str(), items.tags(&waits))
 }
 
+/// ` (piece of #3)` for a piece, ` [2/5]` for a group's parent, else nothing.
+fn group(item: &Item, items: &Items) -> String {
+    if let Some(p) = item.parent {
+        return format!(" (piece of {})", items.tag_id(p));
+    }
+    match item.progress(&items.all) {
+        (_, 0) => String::new(),
+        (done, of) => format!(" [{done}/{of}]"),
+    }
+}
+
 pub fn parse_kind(s: &str) -> Result<ItemKind, String> {
     ItemKind::parse(s).ok_or_else(|| "bug, feature, chore, spike or debt".into())
 }
@@ -393,6 +413,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             body,
             priority,
             after,
+            parent,
             take,
             branch,
             pr,
@@ -414,8 +435,9 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 .into_iter()
                 .map(std::path::absolute)
                 .collect::<std::io::Result<_>>()?;
+            let names = Items::load(client).await?;
             let new = NewItem {
-                parent: None,
+                parent: parent.as_ref().map(|p| names.resolve(p)).transpose()?,
                 title: if body.is_some() {
                     text.clone()
                 } else {
@@ -426,7 +448,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 cwd,
                 attachments,
                 priority,
-                blocked_by: Items::load(client).await?.ids(&after)?,
+                blocked_by: names.ids(&after)?,
             };
             let item = match take {
                 true => client.add_and_take(new, branch, pr).await?,
@@ -486,13 +508,14 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             }
             for i in &items {
                 println!(
-                    "{:<6} {:<3} {:<8} {:<12} {:<14} {}{}{}{}",
+                    "{:<6} {:<3} {:<8} {:<12} {:<14} {}{}{}{}{}",
                     names.tag(i),
                     i.priority.as_str(),
                     i.kind.as_str(),
                     lane(i, &sessions, boot),
                     short(&folder(i), 14),
                     i.title,
+                    group(i, &names),
                     match i.waiting_on(&every).as_slice() {
                         [] => String::new(),
                         ids => format!(" (after {})", names.tags(ids)),
@@ -622,6 +645,22 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 i.by
             );
             println!("folder: {}", folder(&i));
+            if let Some(p) = i.parent.and_then(|p| every.all.iter().find(|w| w.id == p)) {
+                println!(
+                    "piece of: {} {} ({})",
+                    every.tag(p),
+                    p.title,
+                    p.status.as_str()
+                );
+            }
+            let pieces = i.children(&every.all);
+            if !pieces.is_empty() {
+                let (done, of) = i.progress(&every.all);
+                println!("pieces: {done}/{of} shipped or dropped");
+                for c in pieces {
+                    println!("  {} {} ({})", every.tag(c), c.title, c.status.as_str());
+                }
+            }
             for w in every.all.iter().filter(|w| i.blocked_by.contains(&w.id)) {
                 println!(
                     "after: {} {} ({})",
@@ -665,6 +704,8 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             priority,
             after,
             not_after,
+            parent,
+            no_parent,
         } => {
             if title.is_none()
                 && body.is_none()
@@ -673,9 +714,11 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 && priority.is_none()
                 && after.is_empty()
                 && not_after.is_empty()
+                && parent.is_none()
+                && !no_parent
             {
                 bail!(
-                    "nothing to change: give --title, --body, --kind, --dir, --priority, --after or --not-after"
+                    "nothing to change: give --title, --body, --kind, --dir, --priority, --after, --not-after, --parent or --no-parent"
                 );
             }
             let names = Items::load(client).await?;
@@ -691,8 +734,13 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                 }
                 b => b,
             };
+            let parent = match (parent, no_parent) {
+                (Some(p), _) => Some(names.resolve(&p)?),
+                (None, true) => Some(0),
+                (None, false) => None,
+            };
             let change = ItemChange::Edit {
-                parent: None,
+                parent,
                 title,
                 body,
                 kind,

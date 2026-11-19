@@ -1422,6 +1422,97 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Backlog #235: a group's parent ships with its last piece, waits on its
+    /// pieces when its own PR merges first, and reopens when a piece does.
+    #[tokio::test]
+    async fn a_group_ships_with_its_last_piece() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-group-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
+        let (plan, one, two, own, piece) = {
+            let b = registry.backlog.lock().unwrap();
+            let add = |title: &str, parent| {
+                let new = NewItem {
+                    title: title.into(),
+                    parent,
+                    ..Default::default()
+                };
+                b.add(&new, "human", 1).unwrap().id
+            };
+            let with_pr = |id, n| {
+                b.taken(id, 3, 7, &[], None, Some(&url(n)), None, 1)
+                    .unwrap();
+            };
+            let plan = add("plan", None);
+            let (one, two) = (add("one", Some(plan)), add("two", Some(plan)));
+            let own = add("has its own PR", None);
+            let piece = add("its piece", Some(own));
+            with_pr(one, 1);
+            with_pr(own, 2);
+            with_pr(piece, 3);
+            (plan, one, two, own, piece)
+        };
+        let get = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        let merged = |which: &'static [&'static str]| -> PrLookup {
+            Arc::new(move |_, pr| match pr.rsplit('/').next() {
+                Some(n) if which.contains(&n) => Pr::merged(pr.to_owned()),
+                _ => Pr::Unknown,
+            })
+        };
+        // #2's PR merges and it ships; #4's merges too, but #4 waits on its piece.
+        assert_eq!(registry.ship_merged_prs(merged(&["1", "2"])).await, 1);
+        assert_eq!(get(one).status, ItemStatus::Shipped);
+        assert_eq!(get(plan).status, ItemStatus::Open, "#3 is still open");
+        let waiting = get(own);
+        assert_eq!(waiting.status, ItemStatus::Open);
+        assert!(waiting.pr_merged);
+        assert!(waiting.notes.last().unwrap().text.contains("1 open pieces"));
+        // Its piece's PR merges: the piece ships, and so does the parent.
+        assert_eq!(registry.ship_merged_prs(merged(&["3"])).await, 1);
+        assert_eq!(get(piece).status, ItemStatus::Shipped);
+        assert_eq!(get(own).status, ItemStatus::Shipped);
+        // The last piece of the plan is dropped: the plan, with no work of its
+        // own, ships with a note saying why.
+        let set = |id, status| {
+            registry
+                .backlog
+                .lock()
+                .unwrap()
+                .change(id, &ItemChange::Status { status }, 2)
+                .unwrap();
+        };
+        set(two, ItemStatus::Dropped);
+        registry.roll_up(plan, false).await.unwrap();
+        let shipped = get(plan);
+        assert_eq!(shipped.status, ItemStatus::Shipped);
+        assert!(
+            shipped
+                .notes
+                .last()
+                .unwrap()
+                .text
+                .contains("all 2 of its pieces")
+        );
+        // Nothing changes on a roll-up with nothing reopened...
+        assert!(registry.roll_up(plan, false).await.is_none());
+        // ...but a piece reopened reopens it.
+        set(two, ItemStatus::Open);
+        registry.roll_up(plan, true).await.unwrap();
+        assert_eq!(get(plan).status, ItemStatus::Open);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A PR that goes red after its session's last stop shows that session as
     /// blocked (backlog #67), once, and so does one that conflicts with its base
     /// after main moved (#69); a busy session, or another boot's, is left be.

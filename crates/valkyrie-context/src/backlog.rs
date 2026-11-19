@@ -261,8 +261,7 @@ impl Backlog {
             .unwrap_or(0)
     }
 
-    /// Forgets item `id` and its attachments.
-    /// Deletes item `id`; its children, if any, stand alone again.
+    /// Forgets item `id` and its attachments; its pieces, if any, stand alone again.
     pub fn delete(&self, id: u32) -> Result<Item> {
         let item = self.get(id)?;
         for mut child in self.load().into_iter().filter(|i| i.parent == Some(id)) {
@@ -1297,6 +1296,71 @@ mod tests {
         }
         let notes = b.get(1).unwrap().notes;
         assert_eq!((notes.len(), notes[19].text.as_str()), (MAX_NOTES, "29"));
+    }
+
+    /// Backlog #235: groups go one level deep, a piece's brief names its group,
+    /// and a deleted parent leaves its pieces standing alone.
+    #[test]
+    fn groups_go_one_level_deep_and_outlive_their_parent() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let piece = |title: &str, parent| NewItem {
+            parent: Some(parent),
+            ..new(title, "", ItemKind::Feature)
+        };
+        let parent = b
+            .add(
+                &new("group", "the whole plan", ItemKind::Feature),
+                "human",
+                1,
+            )
+            .unwrap();
+        let one = b.add(&piece("one", parent.id), "human", 1).unwrap();
+        let two = b.add(&piece("two", parent.id), "human", 1).unwrap();
+        let other = b.add(&new("other", "", ItemKind::Bug), "human", 1).unwrap();
+        assert_eq!((one.parent, two.parent), (Some(parent.id), Some(parent.id)));
+        assert_eq!(parent.progress(&b.load()), (0, 2));
+        let refused = |r: Result<Item>| r.unwrap_err().to_string();
+        let under = |id| ItemChange::Edit {
+            parent: Some(id),
+            title: None,
+            body: None,
+            kind: None,
+            cwd: None,
+            priority: None,
+            blocked_by: None,
+        };
+        assert!(refused(b.add(&piece("deeper", one.id), "human", 1)).contains("one level deep"));
+        assert!(refused(b.change(parent.id, &under(other.id), 2)).contains("pieces of its own"));
+        assert!(refused(b.change(other.id, &under(other.id), 2)).contains("itself"));
+        assert!(refused(b.add(&piece("nowhere", 99), "human", 1)).contains("no item"));
+        // Moved under another group, then back out with 0.
+        assert_eq!(
+            b.change(two.id, &under(other.id), 2).unwrap().parent,
+            Some(other.id)
+        );
+        assert_eq!(b.change(two.id, &under(0), 2).unwrap().parent, None);
+        b.change(two.id, &under(parent.id), 2).unwrap();
+        let done = ItemChange::Status {
+            status: ItemStatus::Dropped,
+        };
+        b.change(other.id, &done, 2).unwrap();
+        assert!(refused(b.add(&piece("late", other.id), "human", 1)).contains("reopen it first"));
+        // Briefs: a piece names its group and siblings; the parent its pieces.
+        let items = b.load();
+        let text = brief(&b.get(one.id).unwrap(), &items);
+        assert!(text.contains("one piece of #1 group"), "{text}");
+        assert!(
+            text.contains("the whole plan") && text.contains("#3 two (open)"),
+            "{text}"
+        );
+        let text = brief(&b.get(parent.id).unwrap(), &items);
+        assert!(
+            text.contains("split into these pieces") && text.contains("#2 one"),
+            "{text}"
+        );
+        b.delete(parent.id).unwrap();
+        assert!(b.load().iter().all(|i| i.parent.is_none()));
     }
 
     #[test]
