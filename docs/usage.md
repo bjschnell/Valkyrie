@@ -2,6 +2,7 @@
 
 ```sh
 valk                       # open the TUI
+valk tutor                 # learn Valkyrie: an agent teaches it, one lesson at a time
 valk new -a -- claude      # start Claude Code in a new session and attach
 valk new -- codex          # start Codex in the background
 valk new -w --name "fix login" -a -- claude   # in its own git worktree and branch
@@ -21,6 +22,19 @@ valk setup alias           # optional: type v instead of valk, if nothing else i
 valk --remote box          # the TUI here, on box's sessions, over SSH
 valk remote web box        # box's web app in this machine's browser, paired
 ```
+
+## Learning it: the tutor
+
+`valk tutor` starts an agent (Claude, or `--agent codex`) that teaches Valkyrie
+one hands-on lesson at a time: sessions and their states, driving one without
+attaching, the TUI, decisions, the backlog, the supervisor. It opens a shell
+pane beside itself for you to type in and reads what happened, so there is
+nothing to paste back. Before teaching a command it reads that command's
+`--help`, so it teaches the build you have. A second `valk tutor` opens the
+lesson in progress instead of starting over. `?` on the TUI's home screen
+and "Start the tutor" in the web app start the same one.
+`valk setup claude` also installs it as a skill, so `/valk-tutor` works in any
+Claude Code session, and `valk tutor --print` shows its brief.
 
 ## One worktree per agent
 

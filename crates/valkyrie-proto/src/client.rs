@@ -504,6 +504,27 @@ impl Client {
         }
     }
 
+    /// Starts the tutor, or finds the one running.
+    pub async fn tutor(
+        &self,
+        agent: String,
+        size: crate::Size,
+        env: Vec<(String, Option<String>)>,
+    ) -> Result<crate::SessionInfo> {
+        match self
+            .request(|req| ClientMsg::Tutor {
+                req,
+                agent,
+                size,
+                env,
+            })
+            .await?
+        {
+            Reply::Session { info } => Ok(*info),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn write_doc(&self, doc: crate::NewDoc) -> Result<crate::Doc> {
         match self.request(|req| ClientMsg::WriteDoc { req, doc }).await? {
             Reply::Doc { doc } => Ok(*doc),

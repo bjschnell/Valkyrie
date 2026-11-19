@@ -22,6 +22,7 @@ import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
 import { Mark, Wordmark } from "./Logo";
 import { usePageKeys } from "../lib/pageKeys";
+import { TutorButton } from "./Tutor";
 
 const go = (id: number) => {
   location.hash = `#/s/${id}`;
@@ -113,6 +114,11 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
                   ? `${working} working · nothing needs you`
                   : "Nothing needs you"}
               </div>
+              {sessions.length === 0 && (
+                <div className="calm-tutor">
+                  New here? <TutorButton label="Start the tutor" />
+                </div>
+              )}
             </div>
           ) : (
             <div className="cards">

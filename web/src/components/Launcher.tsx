@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Listing, type Place, type Places } from "../lib/api";
 import { spawn, toast, useApp } from "../store";
 import { Back, Chevron } from "./icons";
+import { TutorButton } from "./Tutor";
 import { MicButton } from "./Mic";
 import { QuotaMeter } from "./Quota";
 
@@ -221,6 +222,7 @@ export function Launcher() {
             </div>
           </label>
         )}
+        <TutorButton className="ghost launcher-tutor" label="New to Valkyrie? Start the tutor" />
       </main>
 
       <footer className="dock">

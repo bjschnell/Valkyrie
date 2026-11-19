@@ -47,7 +47,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 47;
+pub const PROTOCOL: u32 = 48;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -826,6 +826,17 @@ pub enum ClientMsg {
         cwd: PathBuf,
         #[serde(default)]
         stale: bool,
+        agent: String,
+        size: Size,
+        /// As `SpawnSpec::env`.
+        #[serde(default)]
+        env: Vec<(String, Option<String>)>,
+    },
+    /// Starts `agent` as the tutor, which teaches Valkyrie one lesson at a time
+    /// (backlog #226, protocol 48), in your home directory. One still running is
+    /// answered with itself. Replies `Session`.
+    Tutor {
+        req: ReqId,
         agent: String,
         size: Size,
         /// As `SpawnSpec::env`.

@@ -51,6 +51,7 @@ pub(crate) fn feature(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::Wiki { .. } => "wiki",
         ClientMsg::WikiPage { .. } => "wiki_page",
         ClientMsg::WikiExplore { .. } => "wiki_explore",
+        ClientMsg::Tutor { .. } => "tutor",
         ClientMsg::History { .. } => "history",
         ClientMsg::Resume { .. } => "resume",
         _ => return None,

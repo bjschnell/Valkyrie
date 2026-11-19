@@ -2635,6 +2635,7 @@ impl App {
             HomeKey::Past => self.open_past().await,
             HomeKey::Docs => self.open_docs().await,
             HomeKey::Wiki => self.open_wiki(selected).await,
+            HomeKey::Tutor => self.start_tutor().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
     }
@@ -2964,6 +2965,19 @@ impl App {
                 page.repo = l.root.clone();
             }
             page.loaded(got);
+        }
+    }
+
+    /// Starts the agent that teaches Valkyrie (backlog #226), or opens the one
+    /// already teaching.
+    async fn start_tutor(&mut self) {
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        match self.client.tutor("claude".into(), size, spawn_env()).await {
+            Ok(info) => {
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => self.say(format!("couldn't start the tutor: {e:#}")),
         }
     }
 
@@ -4307,13 +4321,26 @@ impl App {
                 ])
             }
             .centered();
+            // Nothing running at all: most likely someone new, so say where to learn.
+            let mut lines = vec![calm];
+            if self.sessions.is_empty() {
+                lines.push(Line::default());
+                lines.push(
+                    Line::from(vec![
+                        "new here? ".fg(t.muted),
+                        " ? ".fg(t.bg).bg(t.accent).bold(),
+                        " starts the tutor".fg(t.muted),
+                    ])
+                    .centered(),
+                );
+            }
             let [_, mid, _] = Layout::vertical([
                 Constraint::Fill(1),
-                Constraint::Length(1),
+                Constraint::Length(lines.len() as u16),
                 Constraint::Fill(1),
             ])
             .areas(inner);
-            frame.render_widget(Paragraph::new(calm), mid);
+            frame.render_widget(Paragraph::new(lines), mid);
         } else {
             let rows = self.queue.iter().map(|q| queue_row(q, now, spin, t));
             let mut state = TableState::default().with_selected(self.queue_index());
@@ -6064,6 +6091,7 @@ fn footer_line(
         (".", "keys"),
         // Past `keys`: a narrow bar cuts its tail, and the ones before it are older.
         ("W", "wiki"),
+        ("?", "tutor"),
         ("p", "pair"),
         ("q", "quit"),
     ];
@@ -6097,6 +6125,7 @@ fn chip_key(label: &str) -> HomeKey {
         "h" => HomeKey::Past,
         "D" => HomeKey::Docs,
         "W" => HomeKey::Wiki,
+        "?" => HomeKey::Tutor,
         "," => HomeKey::Settings,
         "." => HomeKey::Keys,
         "p" => HomeKey::AddDevice,
@@ -6701,6 +6730,8 @@ enum HomeKey {
     Docs,
     /// Open the repository wiki.
     Wiki,
+    /// Start the tutor, or open the one running.
+    Tutor,
     /// Write the selected agent session down as a backlog item.
     Adopt,
     /// Take the other step offered on the selected flagged session.
@@ -6768,6 +6799,7 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'h' => Some(HomeKey::Past),
             b'D' => Some(HomeKey::Docs),
             b'W' => Some(HomeKey::Wiki),
+            b'?' => Some(HomeKey::Tutor),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
@@ -6963,6 +6995,9 @@ mod tests {
         assert_eq!(home_keys_default(b"p"), [HomeKey::AddDevice]);
         // Shifted: `a` accepts a proposal, `A` adopts a session.
         assert_eq!(home_keys_default(b"aA"), [HomeKey::Accept, HomeKey::Adopt]);
+        // `?` starts the tutor, from the key or its chip.
+        assert_eq!(home_keys_default(b"?"), [HomeKey::Tutor]);
+        assert_eq!(chip_key("?"), HomeKey::Tutor);
     }
 
     /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)
