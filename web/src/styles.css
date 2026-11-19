@@ -3376,7 +3376,8 @@ html.with-tabs .offline-banner {
 .prio-p1 { --kind: var(--accent); }
 .prio-p2,
 .prio-p3 { --kind: var(--soft); }
-.item-after { color: var(--interrupted); }
+/* Past .item-live, which comes later and would give the lane's color. */
+.item-live.item-after { color: var(--interrupted); }
 .item-live.item-group { color: var(--accent); }
 .item-pieces {
   margin: var(--space-1) 0 0;

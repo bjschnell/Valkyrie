@@ -1197,10 +1197,12 @@ impl Page {
                 cursor_line = lines.len();
             }
             let group = group_tag(item, all);
+            let after = tags(item, &item.blocked_by, all);
             lines.push(item_line(
                 item,
                 *lane,
                 &group,
+                &after,
                 i == self.cursor,
                 list.width,
                 t,
@@ -1234,15 +1236,7 @@ impl Page {
                 .as_ref()
                 .filter(|(id, updated, _)| *id == item.id && *updated == item.updated)
                 .and_then(|(_, _, f)| f.as_ref());
-            let blocked: Vec<u32> = item
-                .blocked_by
-                .iter()
-                .map(|b| {
-                    rows.iter()
-                        .find(|(_, i)| i.id == *b)
-                        .map_or(*b, |(_, i)| i.number)
-                })
-                .collect();
+            let blocked = tags(item, &item.blocked_by, all);
             let mut text = detail_lines(
                 item,
                 *lane,
@@ -1673,10 +1667,31 @@ fn group_lines(item: &Item, all: &[Item], t: &Theme) -> Vec<Line<'static>> {
     out
 }
 
+/// What people call the items `ids` name, seen from `item` (decision #73): `#3`
+/// for one in its repository, `repo#3` for one in another, `#id` for one gone.
+fn tags(item: &Item, ids: &[u32], all: &[Item]) -> Vec<String> {
+    ids.iter()
+        .map(|id| match all.iter().find(|i| i.id == *id) {
+            Some(i) if i.project == item.project => format!("#{}", i.number),
+            Some(i) => {
+                let repo = i
+                    .project
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .map_or("no-folder".into(), |n| n.to_string_lossy().into_owned());
+                format!("{repo}#{}", i.number)
+            }
+            None => format!("#{id}"),
+        })
+        .collect()
+}
+
+/// `after`: what it still waits on, as `tags` names them.
 fn item_line(
     item: &Item,
     lane: Lane,
     group: &str,
+    after: &[String],
     selected: bool,
     width: u16,
     t: &Theme,
@@ -1693,10 +1708,10 @@ fn item_line(
     let state = format!("{:<12}", lane.title());
     let folder = format!("  {}", fit(&folder, 16));
     // What it still waits on (`rows_of` cut `blocked_by` to that), before the folder.
-    let after = match item.blocked_by.as_slice() {
+    let after = match after {
         [] => String::new(),
-        [one] => format!(" after #{one}"),
-        [one, rest @ ..] => format!(" after #{one} +{}", rest.len()),
+        [one] => format!(" after {one}"),
+        [one, rest @ ..] => format!(" after {one} +{}", rest.len()),
     };
     let room = (width as usize).saturating_sub(
         head.len()
@@ -1785,7 +1800,7 @@ fn detail_lines(
     lane: Lane,
     live: Option<&SessionInfo>,
     facts: Option<&ItemFacts>,
-    blocked: &[u32],
+    blocked: &[String],
     now: u64,
     t: &Theme,
 ) -> Vec<Line<'static>> {
@@ -1821,9 +1836,8 @@ fn detail_lines(
         ));
     }
     if !item.blocked_by.is_empty() {
-        let ids: Vec<String> = blocked.iter().map(|n| format!("#{n}")).collect();
         out.push(Line::from(
-            format!(" after {}, not finished yet", ids.join(", ")).fg(t.accent2),
+            format!(" after {}, not finished yet", blocked.join(", ")).fg(t.accent2),
         ));
     }
     if let Some(pr) = &item.pr {
@@ -2953,7 +2967,7 @@ mod tests {
         let t = crate::theme::DRACULA;
         for lane in Lane::ORDER {
             for width in [40u16, 80] {
-                let line = item_line(&item(1, 1), lane, " ↳#2", true, width, &t);
+                let line = item_line(&item(1, 1), lane, " ↳#2", &[], true, width, &t);
                 let text = line.to_string();
                 assert!(text.contains(lane.title()), "{lane:?} at {width}: {text:?}");
                 assert_eq!(
@@ -3017,12 +3031,27 @@ mod tests {
         // The row keeps only what's still open of what it waits on.
         assert_eq!(rows[2].1.blocked_by, [3]);
         let t = crate::theme::DRACULA;
-        let line: String = item_line(&rows[2].1, Lane::Backlog, "", false, 90, &t)
+        let after = tags(&rows[2].1, &rows[2].1.blocked_by, &all);
+        let line: String = item_line(&rows[2].1, Lane::Backlog, "", &after, false, 90, &t)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
         assert!(line.contains("p0") && line.contains("after #3"), "{line}");
+        // Backlog #239: named by its number in the repository, not the global id;
+        // one in another repository by that repository too.
+        let mut here = item(20, 1);
+        here.number = 2;
+        let mut there = item(21, 1);
+        there.number = 5;
+        there.project = Some("/r/other".into());
+        let mut waits = item(22, 1);
+        waits.blocked_by = vec![20, 21, 99];
+        let all = [here, there, waits.clone()];
+        assert_eq!(
+            tags(&waits, &waits.blocked_by, &all),
+            ["#2", "other#5", "#99"]
+        );
 
         let mut page = Page::default();
         let edit = |priority| Do::Edit {
