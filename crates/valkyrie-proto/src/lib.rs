@@ -47,7 +47,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 46;
+pub const PROTOCOL: u32 = 47;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -807,7 +807,7 @@ pub enum ClientMsg {
         id: u32,
     },
     /// The wiki of the repository holding `cwd`, each page's staleness worked
-    /// out, without bodies (backlog #210, protocol 46). Replies `Wiki`.
+    /// out, without bodies (backlog #210, protocol 47). Replies `Wiki`.
     Wiki {
         req: ReqId,
         cwd: PathBuf,

@@ -132,6 +132,16 @@ pub struct Item {
     /// ones and is named in its brief, but nothing refuses a take or launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<u32>,
+    /// The item it's a piece of (backlog #235): one level deep, in the same
+    /// repository. A child is a whole item of its own (branch, pull request,
+    /// ship); the parent groups them, and ships itself once every child is shipped
+    /// or dropped and its own pull request, if it has one, has merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    /// Its pull request merged while some of its children were still open: it
+    /// waits for them instead of shipping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pr_merged: bool,
     /// The repository it's for; `None` until one is picked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<PathBuf>,
@@ -217,6 +227,24 @@ impl Item {
     /// Filed but not taken, it waits in Proposed like any other proposal.
     pub fn agent_filed(&self) -> bool {
         self.status == ItemStatus::Proposed && self.filed_by.is_some() && !self.taken.is_empty()
+    }
+
+    /// Its children in `items`, the oldest first.
+    pub fn children<'a>(&self, items: &'a [Item]) -> Vec<&'a Item> {
+        items.iter().filter(|i| i.parent == Some(self.id)).collect()
+    }
+
+    /// How many of its children are shipped or dropped, of how many it has: the
+    /// `2/5` a parent shows.
+    pub fn progress(&self, items: &[Item]) -> (usize, usize) {
+        let children = self.children(items);
+        let done = children.iter().filter(|c| c.closed()).count();
+        (done, children.len())
+    }
+
+    /// Shipped or dropped.
+    pub fn closed(&self) -> bool {
+        matches!(self.status, ItemStatus::Shipped | ItemStatus::Dropped)
     }
 
     /// Those of `blocked_by` not shipped or dropped yet, as found in `items`; one
@@ -346,6 +374,9 @@ pub struct NewItem {
     pub priority: Priority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<u32>,
+    /// The item it's a piece of; it goes in that item's repository, whatever `cwd` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
     /// A folder inside the repository it's for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
@@ -373,6 +404,9 @@ pub enum ItemChange {
         /// The whole list, replacing the one it has; empty clears it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocked_by: Option<Vec<u32>>,
+        /// The item it's a piece of (protocol 46); `0` makes it stand alone again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<u32>,
     },
     /// Ships, drops or reopens it. Shipping also takes away a worktree its launch
     /// made, when nothing is left in it.
@@ -429,6 +463,7 @@ impl OrderStep {
             cwd: None,
             priority: self.priority,
             blocked_by: self.blocked_by.clone(),
+            parent: None,
         })
     }
 }

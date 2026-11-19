@@ -126,12 +126,17 @@ impl Backlog {
             .unwrap_or(0)
             .max(self.last())
             + 1;
-        // Outside git there's no project to work in, whichever client asked.
-        let project = new
-            .cwd
-            .as_deref()
-            .filter(|d| project::in_git(d))
-            .map(project::root);
+        let parent = parent_of(0, new.parent, &items)?;
+        // A piece goes where the item it's part of is; outside git there's no
+        // project to work in, whichever client asked.
+        let project = match parent.and_then(|p| items.iter().find(|i| i.id == p)) {
+            Some(p) => p.project.clone(),
+            None => new
+                .cwd
+                .as_deref()
+                .filter(|d| project::in_git(d))
+                .map(project::root),
+        };
         let number = items
             .iter()
             .filter(|i| i.project == project)
@@ -149,6 +154,8 @@ impl Backlog {
             kind: new.kind,
             priority: new.priority,
             blocked_by,
+            parent,
+            pr_merged: false,
             status: if by == "human" {
                 ItemStatus::Open
             } else {
@@ -175,6 +182,19 @@ impl Backlog {
         };
         self.write(&item)?;
         Ok(item)
+    }
+
+    /// Records that item `id`'s pull request `pr` merged while some of its pieces
+    /// were still open, so it waits for them instead of shipping. Ignored if the
+    /// item has since moved to another PR; `None` when nothing changed.
+    pub fn pr_merged(&self, id: u32, pr: &str) -> Result<Option<Item>> {
+        let mut item = self.get(id)?;
+        if item.pr.as_deref() != Some(pr) || item.pr_merged {
+            return Ok(None);
+        }
+        item.pr_merged = true;
+        self.write(&item)?;
+        Ok(Some(item))
     }
 
     /// Records whether item `id`'s pull request `pr` was last read closed without
@@ -241,9 +261,13 @@ impl Backlog {
             .unwrap_or(0)
     }
 
-    /// Forgets item `id` and its attachments.
+    /// Forgets item `id` and its attachments; its pieces, if any, stand alone again.
     pub fn delete(&self, id: u32) -> Result<Item> {
         let item = self.get(id)?;
+        for mut child in self.load().into_iter().filter(|i| i.parent == Some(id)) {
+            child.parent = None;
+            self.write(&child)?;
+        }
         let files = self.base.join("files").join(format!("{id:04}"));
         if files.exists() {
             std::fs::remove_dir_all(&files)
@@ -294,6 +318,7 @@ impl Backlog {
                 cwd,
                 priority,
                 blocked_by,
+                parent,
             } => {
                 if title.is_none()
                     && body.is_none()
@@ -301,14 +326,34 @@ impl Backlog {
                     && cwd.is_none()
                     && priority.is_none()
                     && blocked_by.is_none()
+                    && parent.is_none()
                 {
                     bail!("nothing to change");
+                }
+                let items = self.load();
+                if cwd.is_some() && (item.parent.is_some() || !item.children(&items).is_empty()) {
+                    bail!(
+                        "#{} is part of a group; ungroup it before moving it to another repository",
+                        item.number
+                    );
+                }
+                if let Some(parent) = parent {
+                    item.parent = parent_of(id, Some(*parent), &items)?;
+                    if let Some(p) = item.parent.and_then(|p| items.iter().find(|i| i.id == p))
+                        && p.project != item.project
+                    {
+                        bail!(
+                            "#{} is in another repository than #{}",
+                            p.number,
+                            item.number
+                        );
+                    }
                 }
                 if let Some(priority) = priority {
                     item.priority = *priority;
                 }
                 if let Some(ids) = blocked_by {
-                    item.blocked_by = blockers(id, ids, &item.blocked_by, &self.load())?;
+                    item.blocked_by = blockers(id, ids, &item.blocked_by, &items)?;
                 }
                 // A blank title is taken from the body when adding; here it would
                 // quietly move the body's first line.
@@ -605,6 +650,43 @@ fn blockers(id: u32, ids: &[u32], had: &[u32], items: &[Item]) -> Result<Vec<u32
     Ok(ids)
 }
 
+/// The parent item `id` (0 for one being added) may have: `None` for none or
+/// `0`; else one that exists, isn't `id`, isn't a piece of another (one level
+/// deep), and isn't shipped or dropped. An item with pieces of its own can't
+/// become one.
+fn parent_of(id: u32, parent: Option<u32>, items: &[Item]) -> Result<Option<u32>> {
+    let Some(p) = parent.filter(|&p| p != 0) else {
+        return Ok(None);
+    };
+    let Some(found) = items.iter().find(|i| i.id == p) else {
+        bail!("no item #{p}");
+    };
+    if p == id {
+        bail!("#{} can't be a piece of itself", found.number);
+    }
+    if let Some(up) = found.parent {
+        bail!(
+            "#{} is already a piece of #{}; groups go one level deep",
+            found.number,
+            number(items, up)
+        );
+    }
+    if found.closed() {
+        bail!(
+            "#{} is {}; reopen it first",
+            found.number,
+            found.status.as_str()
+        );
+    }
+    if id != 0 && items.iter().any(|i| i.parent == Some(id)) {
+        bail!(
+            "#{} has pieces of its own; groups go one level deep",
+            number(items, id)
+        );
+    }
+    Ok(Some(p))
+}
+
 /// Refuses a pull request that isn't one plain `https://` URL: it's shown as a
 /// link in the web app.
 pub fn pr_url(pr: &str) -> Result<()> {
@@ -733,6 +815,46 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
             text.push_str(&format!("- {}\n", a.display()));
         }
     }
+    if let Some(parent) = item.parent.and_then(|p| items.iter().find(|i| i.id == p)) {
+        text.push_str(&format!(
+            "\nThis is one piece of #{} {}. Deliver this piece only; the others are items of their own.\n",
+            parent.number, parent.title
+        ));
+        // An agent's text the user hasn't accepted never reaches a prompt (ADR-0007).
+        if parent.status != ItemStatus::Proposed && !parent.unaccepted && !parent.body.is_empty() {
+            text.push_str(&format!("\nWhat #{} is about:\n\n", parent.number));
+            text.push_str(&excerpt(&parent.body));
+            text.push('\n');
+        }
+        let siblings: Vec<_> = parent
+            .children(items)
+            .into_iter()
+            .filter(|c| c.id != item.id)
+            .collect();
+        if !siblings.is_empty() {
+            text.push_str("\nThe other pieces:\n");
+            for c in siblings {
+                text.push_str(&format!(
+                    "- #{} {} ({})\n",
+                    c.number,
+                    c.title,
+                    c.status.as_str()
+                ));
+            }
+        }
+    }
+    let pieces = item.children(items);
+    if !pieces.is_empty() {
+        text.push_str("\nIt's split into these pieces, each an item of its own with its own branch and pull request; work on what's left here, not on them:\n");
+        for c in pieces {
+            text.push_str(&format!(
+                "- #{} {} ({})\n",
+                c.number,
+                c.title,
+                c.status.as_str()
+            ));
+        }
+    }
     let waits = item.waiting_on(items);
     if !waits.is_empty() {
         // Advisory: the user launched it anyway, so say what it leans on and let
@@ -758,6 +880,18 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
     text.push('\n');
     text.push_str(&footer(item.number));
     text
+}
+
+/// Longest share of a parent's body a piece's brief carries.
+const MAX_EXCERPT: usize = 2000;
+
+/// `body` cut to `MAX_EXCERPT` characters, marked when cut.
+fn excerpt(body: &str) -> String {
+    if body.chars().count() <= MAX_EXCERPT {
+        return body.trim_end().to_owned();
+    }
+    let cut: String = body.chars().take(MAX_EXCERPT).collect();
+    format!("{}…", cut.trim_end())
 }
 
 /// What an agent on item `id` is asked to keep track of: the end of its brief.
@@ -1027,6 +1161,7 @@ mod tests {
         let b = Backlog::new(dir.path().join("b"));
         b.add(&new("x", "", ItemKind::Feature), "human", 1).unwrap();
         let edit = ItemChange::Edit {
+            parent: None,
             priority: None,
             blocked_by: None,
             title: Some("y".into()),
@@ -1037,6 +1172,7 @@ mod tests {
         b.change(1, &edit, 2).unwrap();
         // Only what an edit gives changes: a body edited elsewhere in between stays.
         let retitle = ItemChange::Edit {
+            parent: None,
             priority: None,
             blocked_by: None,
             title: Some("z".into()),
@@ -1050,6 +1186,7 @@ mod tests {
             ("z", "more", ItemKind::Bug)
         );
         let blank = ItemChange::Edit {
+            parent: None,
             priority: None,
             blocked_by: None,
             title: Some(" ".into()),
@@ -1062,6 +1199,7 @@ mod tests {
             "a blank title isn't taken from the body"
         );
         let nothing = ItemChange::Edit {
+            parent: None,
             priority: None,
             blocked_by: None,
             title: None,
@@ -1094,6 +1232,7 @@ mod tests {
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
         let edit = ItemChange::Edit {
+            parent: None,
             priority: None,
             blocked_by: None,
             title: None,
@@ -1157,6 +1296,71 @@ mod tests {
         }
         let notes = b.get(1).unwrap().notes;
         assert_eq!((notes.len(), notes[19].text.as_str()), (MAX_NOTES, "29"));
+    }
+
+    /// Backlog #235: groups go one level deep, a piece's brief names its group,
+    /// and a deleted parent leaves its pieces standing alone.
+    #[test]
+    fn groups_go_one_level_deep_and_outlive_their_parent() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        let piece = |title: &str, parent| NewItem {
+            parent: Some(parent),
+            ..new(title, "", ItemKind::Feature)
+        };
+        let parent = b
+            .add(
+                &new("group", "the whole plan", ItemKind::Feature),
+                "human",
+                1,
+            )
+            .unwrap();
+        let one = b.add(&piece("one", parent.id), "human", 1).unwrap();
+        let two = b.add(&piece("two", parent.id), "human", 1).unwrap();
+        let other = b.add(&new("other", "", ItemKind::Bug), "human", 1).unwrap();
+        assert_eq!((one.parent, two.parent), (Some(parent.id), Some(parent.id)));
+        assert_eq!(parent.progress(&b.load()), (0, 2));
+        let refused = |r: Result<Item>| r.unwrap_err().to_string();
+        let under = |id| ItemChange::Edit {
+            parent: Some(id),
+            title: None,
+            body: None,
+            kind: None,
+            cwd: None,
+            priority: None,
+            blocked_by: None,
+        };
+        assert!(refused(b.add(&piece("deeper", one.id), "human", 1)).contains("one level deep"));
+        assert!(refused(b.change(parent.id, &under(other.id), 2)).contains("pieces of its own"));
+        assert!(refused(b.change(other.id, &under(other.id), 2)).contains("itself"));
+        assert!(refused(b.add(&piece("nowhere", 99), "human", 1)).contains("no item"));
+        // Moved under another group, then back out with 0.
+        assert_eq!(
+            b.change(two.id, &under(other.id), 2).unwrap().parent,
+            Some(other.id)
+        );
+        assert_eq!(b.change(two.id, &under(0), 2).unwrap().parent, None);
+        b.change(two.id, &under(parent.id), 2).unwrap();
+        let done = ItemChange::Status {
+            status: ItemStatus::Dropped,
+        };
+        b.change(other.id, &done, 2).unwrap();
+        assert!(refused(b.add(&piece("late", other.id), "human", 1)).contains("reopen it first"));
+        // Briefs: a piece names its group and siblings; the parent its pieces.
+        let items = b.load();
+        let text = brief(&b.get(one.id).unwrap(), &items);
+        assert!(text.contains("one piece of #1 group"), "{text}");
+        assert!(
+            text.contains("the whole plan") && text.contains("#3 two (open)"),
+            "{text}"
+        );
+        let text = brief(&b.get(parent.id).unwrap(), &items);
+        assert!(
+            text.contains("split into these pieces") && text.contains("#2 one"),
+            "{text}"
+        );
+        b.delete(parent.id).unwrap();
+        assert!(b.load().iter().all(|i| i.parent.is_none()));
     }
 
     #[test]
@@ -1458,6 +1662,8 @@ mod tests {
     #[test]
     fn branches_follow_the_kind_and_title() {
         let mk = |id, title: &str, kind| Item {
+            parent: None,
+            pr_merged: false,
             priority: Default::default(),
             blocked_by: Vec::new(),
             id,
@@ -1542,6 +1748,7 @@ mod tests {
             .add(&new("three", "", ItemKind::Feature), "human", 3)
             .unwrap();
         let after = |ids: Vec<u32>| ItemChange::Edit {
+            parent: None,
             title: None,
             body: None,
             kind: None,
@@ -1599,6 +1806,7 @@ mod tests {
                 .is_empty()
         );
         let prio = ItemChange::Edit {
+            parent: None,
             title: None,
             body: None,
             kind: None,
