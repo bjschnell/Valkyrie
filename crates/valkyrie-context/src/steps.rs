@@ -114,6 +114,42 @@ impl Record {
     }
 }
 
+/// A prompt the supervisor session typed into another agent's session
+/// (ADR-0019 §10), a line in the project's `supervisor-prompts.jsonl`. Kept apart
+/// from `Record`: it's never learned into a policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub at: u64,
+    /// The session it went to, by name.
+    pub session: String,
+    /// What it typed, on one line.
+    pub text: String,
+}
+
+impl Prompt {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({"at": self.at, "session": self.session, "text": self.text})
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<Prompt> {
+        Some(Prompt {
+            at: v["at"].as_u64()?,
+            session: v["session"].as_str()?.to_owned(),
+            text: v["text"].as_str()?.to_owned(),
+        })
+    }
+
+    /// One line for the supervisor page: `supervisor session to api: "merge main in"`.
+    pub fn said(&self) -> String {
+        const SHOWN: usize = 80;
+        let text = match self.text.char_indices().nth(SHOWN) {
+            Some((cut, _)) => format!("{}…", &self.text[..cut]),
+            None => self.text.clone(),
+        };
+        format!("supervisor session to {}: \"{text}\"", self.session)
+    }
+}
+
 /// One line for the supervisor page (backlog #180): who acted and what on.
 /// `policy #12: fix CI on PR #101`, `you took: merge the base into PR #98`,
 /// `you left: rerun failed jobs on PR #9`, `you took: start #45`.

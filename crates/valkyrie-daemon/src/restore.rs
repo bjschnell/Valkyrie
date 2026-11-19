@@ -199,6 +199,9 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
                 tracing::info!(session = info.id, ?command, "restored");
                 if let Some(session) = registry.sessions.lock().unwrap().get(&info.id) {
                     session.set_topic(entry.topic.clone());
+                    if entry.supervisor {
+                        session.make_supervisor();
+                    }
                 }
                 ids.insert(place as SessionId, info.id);
                 restored += 1;

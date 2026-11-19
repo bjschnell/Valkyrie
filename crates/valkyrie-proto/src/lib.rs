@@ -45,7 +45,7 @@ pub use search::{SearchField, SearchHit, SearchResults};
 pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 44;
+pub const PROTOCOL: u32 = 45;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -240,6 +240,10 @@ pub struct SessionInfo {
     /// e.g. "tests 41/50" (backlog #117, protocol 39). Gone once its time is up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
+    /// The supervisor session (ADR-0019 §10, protocol 45): there's at most one
+    /// running, and clients mark its tab.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -545,6 +549,19 @@ pub enum ClientMsg {
     Supervise {
         req: ReqId,
         on: Option<bool>,
+    },
+    /// Starts the supervisor session (ADR-0019 §10, backlog #236, protocol 45):
+    /// one Claude session that reads every other agent session and prompts the
+    /// idle ones. With one already running, replies with it instead of starting
+    /// another. The user only, and not while `valk supervise off`. `size` and
+    /// `env` are as in `SpawnSpec`; an empty `cwd` is the daemon's default.
+    /// Replies `Session`.
+    SupervisorSession {
+        req: ReqId,
+        cwd: PathBuf,
+        size: Size,
+        #[serde(default)]
+        env: Vec<(String, Option<String>)>,
     },
     /// Takes a step on a flagged session (ADR-0019 §2, protocol 25): the user
     /// only, and only while the session still shows the flag raised at `seq`.

@@ -251,7 +251,7 @@ impl Supervisor {
         self.path.with_file_name("supervise-off")
     }
 
-    fn set_on(&mut self, on: bool) -> Result<()> {
+    pub(crate) fn set_on(&mut self, on: bool) -> Result<()> {
         let file = self.off_file();
         if on {
             match std::fs::remove_file(&file) {
@@ -933,13 +933,27 @@ impl Registry {
             roots
                 .iter()
                 .flat_map(|root| {
-                    store.steps(root, now).into_iter().map(|r| SupervisorEntry {
-                        at: r.at,
-                        project: root.clone(),
-                        said: steps::said(&r),
-                        policy: r.policy,
-                        pr: (!r.pr.is_empty()).then(|| r.pr.clone()),
-                    })
+                    let prompts = store
+                        .prompts(root, now)
+                        .into_iter()
+                        .map(|p| SupervisorEntry {
+                            at: p.at,
+                            project: root.clone(),
+                            said: p.said(),
+                            policy: None,
+                            pr: None,
+                        });
+                    store
+                        .steps(root, now)
+                        .into_iter()
+                        .map(|r| SupervisorEntry {
+                            at: r.at,
+                            project: root.clone(),
+                            said: steps::said(&r),
+                            policy: r.policy,
+                            pr: (!r.pr.is_empty()).then(|| r.pr.clone()),
+                        })
+                        .chain(prompts)
                 })
                 .collect()
         };

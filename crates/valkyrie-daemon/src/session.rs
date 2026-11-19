@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 #[cfg(unix)]
@@ -153,6 +153,8 @@ pub struct SavedSession {
     hidden: bool,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    supervisor: bool,
 }
 
 /// What brings a session back after the daemon restarts (DESIGN §8.3).
@@ -165,6 +167,9 @@ pub struct RestoreEntry {
     pub conversation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
+    /// It was the supervisor session (ADR-0019 §10), and comes back as it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supervisor: bool,
 }
 
 pub struct Session {
@@ -180,6 +185,9 @@ pub struct Session {
     pub clients: AtomicU32,
     /// Left out of lists and the restore file (`SpawnSpec::hidden`).
     hidden: bool,
+    /// The supervisor session (ADR-0019 §10): it sees every agent session and may
+    /// prompt the idle ones.
+    supervisor: AtomicBool,
     /// When a client last typed into it (ms since the epoch; 0: never).
     last_input_ms: AtomicU64,
     adapter: &'static dyn Adapter,
@@ -568,6 +576,9 @@ impl Session {
             Pty(fd),
             host,
         );
+        if saved.supervisor {
+            session.make_supervisor();
+        }
         if !saved.input.is_empty() {
             session.input.push(saved.input);
         }
@@ -593,6 +604,7 @@ impl Session {
             created_unix: meta.created_unix,
             clients: AtomicU32::new(0),
             hidden: meta.hidden,
+            supervisor: AtomicBool::new(false),
             last_input_ms: AtomicU64::new(0),
             adapter,
             state: Mutex::new(state),
@@ -733,6 +745,7 @@ impl Session {
             driven_by: state.driven_by.clone(),
             hidden: self.hidden,
             topic: state.topic.clone(),
+            supervisor: self.is_supervisor(),
             chat: state.chat.clone(),
             input: self
                 .input
@@ -1593,6 +1606,25 @@ impl Session {
         );
     }
 
+    /// Notes typing the supervisor session sent that was dropped, and why
+    /// (ADR-0019 §10).
+    pub fn log_refused_supervisor(&self, why: &str) {
+        self.state.lock().unwrap().log(
+            now_ms(),
+            "input_refused",
+            json!({"agent": "supervisor", "reason": why}),
+        );
+    }
+
+    /// Notes a prompt the supervisor session typed in (ADR-0019 §10).
+    pub fn log_supervisor_prompt(&self, text: &str) {
+        self.state.lock().unwrap().log(
+            now_ms(),
+            "supervisor",
+            json!({"trigger": "supervisor-session", "action": "prompt", "text": text}),
+        );
+    }
+
     /// Whether an agent started this session or typed into it.
     pub fn driven(&self) -> bool {
         self.state.lock().unwrap().driven_by.is_some()
@@ -1693,6 +1725,7 @@ impl Session {
             cwd: self.live_cwd(&state),
             conversation: state.conversation.clone(),
             topic: state.topic.clone(),
+            supervisor: self.is_supervisor(),
         })
     }
 
@@ -1723,7 +1756,18 @@ impl Session {
             chat: state.chat.clone(),
             overlap: state.overlap.clone(),
             report: live_report(&state.report, now_ms()),
+            supervisor: self.is_supervisor(),
         }
+    }
+
+    /// Marks it the supervisor session (ADR-0019 §10); it stays marked.
+    pub fn make_supervisor(&self) {
+        self.supervisor.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether it's the supervisor session.
+    pub fn is_supervisor(&self) -> bool {
+        self.supervisor.load(Ordering::Relaxed)
     }
 
     /// Publishes a short status on the session (`valk status`), replacing any it

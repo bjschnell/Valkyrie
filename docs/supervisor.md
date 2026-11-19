@@ -115,11 +115,44 @@ latest thing it did, and opens the page (`s` from the keyboard).
 The page is opened on purpose and closed again; it never stays up beside your
 sessions.
 
+## The supervisor session
+
+Some things no fixed step covers: an agent that stopped short of its PR, two
+agents whose work meets, or simply "what's everyone doing?". For those you can
+open one Claude session that oversees all the others
+([ADR-0019 §10](adr/0019-supervisor.md)):
+
+```sh
+valk supervise session            # start it (or find the one running); prints its id
+valk supervise session --attach   # and open it in the TUI
+```
+
+Or press `c` on the TUI's supervisor page, or Session on the web one.
+
+- There's only ever one. Starting it again opens the one already running, and
+  only you can start it, not an agent.
+- Each time you prompt it, it gets the roster of every live agent session in
+  every repository: state, what it's doing, any PR flag and the step on offer.
+  Its first answer is a status, and it waits for you before prompting anyone.
+- It reads sessions (`valk pane read`, `valk digest`, `valk todo`) and prompts
+  them with `valk pane prompt`. The daemon lets a prompt through only when that
+  agent is idle or done and the supervisor is on. A working agent, one waiting
+  on you, or your own shell refuses its typing.
+- Like every agent, it can't merge, ship, accept or drop anything.
+- Every prompt it sends shows under "What it did" (`supervisor session to api:
+  "…"`) and in the session's event log.
+
+It runs only while you keep it open, so it costs tokens only then. For now it's
+Claude only.
+
 ## Turning it off
 
 ```sh
 valk supervise off    # no steps offered or taken; the flags still show
 valk supervise on
 ```
+
+Off also stops the supervisor session from prompting other sessions, and from
+being started.
 
 Turning Context off in the settings stops only the automatic steps.
