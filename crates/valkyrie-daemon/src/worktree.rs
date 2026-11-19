@@ -716,21 +716,6 @@ pub fn branch_merged(repo: &Path, branch: &str) -> std::result::Result<String, S
     }
 }
 
-/// `branch_merged` for the worktree at `checkout`, so its own `HEAD` is what's
-/// judged; kept when it has something other than `branch` checked out.
-pub fn checkout_merged(
-    repo: &Path,
-    checkout: &Path,
-    branch: &str,
-) -> std::result::Result<String, String> {
-    let on = git_out(checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .map_err(|_| format!("{} isn't on a branch", checkout.display()))?;
-    if on != branch {
-        return Err(format!("checkout is on {on}, not its branch"));
-    }
-    branch_merged(repo, branch)
-}
-
 /// Whether `head` is `tip` or on its first-parent history: where the default
 /// branch itself has been, not a branch merged into it.
 fn first_parent(repo: &Path, head: &str, tip: &str) -> bool {
@@ -1410,27 +1395,20 @@ mod tests {
                 "{branch}"
             );
         }
-        // The worktree's own branch is judged, so a launch's checkout counts as
-        // what it holds.
+        // A branch committed to in a worktree is judged from the repository: the
+        // two share it.
         let at = create(&main, "fix/wt", None).unwrap().start;
         assert_eq!(
-            checkout_merged(&main, &at, "fix/wt"),
+            branch_merged(&main, "fix/wt"),
             Err("no commits of its own".into())
-        );
-        assert_eq!(
-            checkout_merged(&main, &at, "fix/other"),
-            Err("checkout is on fix/wt, not its branch".into())
         );
         std::fs::write(at.join("wt.txt"), "wt").unwrap();
         git(&at, &["add", "wt.txt"]).unwrap();
         git(&at, &[&me[..], &["commit", "--quiet", "-m", "wt"]].concat()).unwrap();
-        assert_eq!(
-            checkout_merged(&main, &at, "fix/wt"),
-            Err("not merged".into())
-        );
+        assert_eq!(branch_merged(&main, "fix/wt"), Err("not merged".into()));
         git(&main, &["merge", "--quiet", "--ff-only", "fix/wt"]).unwrap();
         let here = format!("main at {}", main.display());
-        assert_eq!(checkout_merged(&main, &at, "fix/wt"), Ok(here));
+        assert_eq!(branch_merged(&main, "fix/wt"), Ok(here));
     }
 
     #[test]

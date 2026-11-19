@@ -561,9 +561,11 @@ impl Registry {
     /// Ships every open item whose branch is merged into the default branch as
     /// last fetched, the user only: shipping is theirs, this is just many at once.
     /// Anyone may ask what would ship (`dry_run`); `only` ships just those items,
-    /// what the user was shown, each judged again. An item with a launch's
-    /// worktree is judged by what that checkout holds. Each goes as `valk todo
-    /// ship` would, so a launch's clean worktree goes too. The daemon doesn't
+    /// what the user was shown, each judged again. Each is judged by its own
+    /// branch, which a launch's worktree shares with the repository, whatever
+    /// that worktree holds now: a session may have taken it on to the next item
+    /// (backlog #241). Each goes as `valk todo ship` would, so a launch's clean
+    /// worktree goes too, and one still in use stays (#238). The daemon doesn't
     /// fetch: it has no credentials of the user's to fetch with, and the CLI and
     /// TUI fetch before asking.
     pub(crate) async fn ship_merged(
@@ -604,13 +606,10 @@ impl Registry {
                 });
                 continue;
             }
-            let checkout = item.checkout.clone().filter(|c| c.is_dir());
             let (judged_branch, branch_taken) = (branch.clone(), item.branch_taken);
-            let merged = tokio::task::spawn_blocking(move || match checkout {
-                Some(checkout) => worktree::checkout_merged(&project, &checkout, &branch),
-                None => worktree::branch_merged(&project, &branch),
-            })
-            .await?;
+            let merged =
+                tokio::task::spawn_blocking(move || worktree::branch_merged(&project, &branch))
+                    .await?;
             let against = match merged {
                 Ok(against) => against,
                 Err(why) => {
@@ -2207,6 +2206,87 @@ mod tests {
         let (card, note) = ship(done).await;
         assert!(!done_at.exists(), "{note}");
         assert_eq!(card.checkout, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backlog #241: a session that took an item's worktree on to the next item
+    /// leaves it on another branch. `ship --merged` judges the item by its own
+    /// branch all the same, ships it once that's merged, and keeps the worktree
+    /// for the work now in it (#238).
+    #[tokio::test]
+    async fn ship_merged_judges_an_item_by_its_branch_in_a_reused_worktree() {
+        use std::path::Path;
+        let dir = std::env::temp_dir().join(format!("valkyrie-reused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let dir = valkyrie_proto::canonical(&dir).unwrap();
+        let main = dir.join("app");
+        let git = |at: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(at)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "fix/1-a", "../app-1"],
+        );
+        let at = dir.join("app-1");
+        std::fs::write(at.join("a.txt"), "a").unwrap();
+        git(&at, &["add", "a.txt"]);
+        git(&at, &["commit", "-q", "-m", "a"]);
+        git(&main, &["merge", "-q", "--ff-only", "fix/1-a"]);
+        // The session moved on to the next item in the same folder.
+        git(&at, &["switch", "-q", "-c", "fix/2-next"]);
+        git(&at, &["commit", "-q", "--allow-empty", "-m", "next"]);
+
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        let id = {
+            let b = registry.backlog.lock().unwrap();
+            let new = NewItem {
+                title: "a".into(),
+                cwd: Some(main.clone()),
+                ..Default::default()
+            };
+            let id = b.add(&new, "human", 1).unwrap().id;
+            let open = ItemChange::Status {
+                status: ItemStatus::Open,
+            };
+            b.change(id, &open, 1).unwrap();
+            let checkout = Some(("fix/1-a".to_owned(), at.clone()));
+            b.launched(id, 99, registry.boot, &[], checkout, 1).unwrap();
+            id
+        };
+        // What would ship (anyone may ask; shipping is the user's, and this
+        // test runs under an agent), then shipped as `ship --merged` does.
+        let Reply::Shipped { shipped, kept } =
+            registry.ship_merged(true, None, None).await.unwrap()
+        else {
+            panic!("not a ship reply");
+        };
+        assert!(kept.is_empty(), "{kept:?}");
+        assert_eq!(shipped.len(), 1, "{shipped:?}");
+        let item = registry.backlog.lock().unwrap().get(id).unwrap();
+        let (_, note) = registry.ship_judged(&item).await.unwrap().unwrap();
+        let note = note.unwrap_or_default();
+        assert!(note.contains("it's on fix/2-next, not fix/1-a"), "{note}");
+        assert!(at.join(".git").exists(), "the worktree stays: {note}");
+        let card = registry.backlog.lock().unwrap().get(id).unwrap();
+        assert_eq!(card.status, ItemStatus::Shipped);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
