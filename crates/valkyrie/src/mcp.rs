@@ -148,6 +148,27 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {}}
         },
         {
+            "name": "list_wiki",
+            "description": "This repository's agent wiki: pages agents wrote for agents about how the code is built (its parts, data flow, invariants, how to add the usual change). One line a page, stale ones marked. Read the pages a task needs before exploring the code yourself.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "get_wiki_page",
+            "description": "One wiki page in full, with the paths it covers and whether they changed a lot since it was written. Check what it says against the code.",
+            "inputSchema": {"type": "object", "properties": {"page": {"type": "string", "description": "Its name, from list_wiki"}}, "required": ["page"]}
+        },
+        {
+            "name": "write_wiki_page",
+            "description": "Write or rewrite a wiki page for the agents that come after you: one area of this repository, for an agent about to change it. Name real files, types and functions; leave out what anyone sees in a minute. Use it to fix a page you found wrong or stale.",
+            "inputSchema": {"type": "object", "properties": {
+                "page": {"type": "string", "description": "Lowercase letters, digits and dashes: overview, daemon, web-api"},
+                "title": {"type": "string"},
+                "summary": {"type": "string", "description": "One line: what the page answers"},
+                "scope": {"type": "array", "items": {"type": "string"}, "description": "Directories and files it describes, relative to the repository root; when they change a lot, the page reads as stale"},
+                "body": {"type": "string", "description": "The markdown"}
+            }, "required": ["page", "title", "body"]}
+        },
+        {
             "name": "project_health",
             "description": "How this project's decisions stand: counts, and which may be out of date.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -158,6 +179,7 @@ fn tools() -> Value {
 async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) -> Result<String> {
     let all = || client.decisions(Some(cwd.to_path_buf()));
     match name {
+        "list_wiki" | "get_wiki_page" | "write_wiki_page" => wiki(cwd, name, args),
         "write_doc" => {
             let kind = match args["kind"].as_str() {
                 Some(k) => DocKind::parse(k).ok_or_else(|| anyhow::anyhow!("no doc kind {k}"))?,
@@ -382,6 +404,45 @@ async fn call(client: &Client, cwd: &std::path::Path, name: &str, args: &Value) 
 
 /// Logs what this agent was served (ADR-0014 §5), when it runs in a Valkyrie
 /// session.
+/// The wiki's tools, straight on the context store as `valk wiki` is.
+fn wiki(cwd: &std::path::Path, name: &str, args: &Value) -> Result<String> {
+    let store = valkyrie_context::Store::new(crate::context::store_base());
+    let root = valkyrie_context::project::root(cwd);
+    match name {
+        "list_wiki" => Ok(crate::wiki::listing(&root, &store.wiki(&root))),
+        "get_wiki_page" => {
+            let page = args["page"].as_str().unwrap_or("");
+            let p = store
+                .wiki_page(&root, page)
+                .ok_or_else(|| anyhow::anyhow!("no wiki page {page:?}; list_wiki names them"))?;
+            Ok(crate::wiki::shown(&root, &p))
+        }
+        _ => {
+            let text = |k: &str| args[k].as_str().unwrap_or("").to_owned();
+            let new = valkyrie_context::wiki::NewPage {
+                slug: text("page"),
+                title: text("title"),
+                summary: text("summary"),
+                scope: args["scope"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                body: text("body"),
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let p = store.write_wiki(&root, &new, crate::context::head_commit(&root), now)?;
+            Ok(format!("wiki page `{}` written: {}", p.slug, p.title))
+        }
+    }
+}
+
 fn served(cwd: &std::path::Path, serves: impl IntoIterator<Item = (u32, Layer)>) {
     let Some(session) = crate::context::reader() else {
         return;

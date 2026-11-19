@@ -154,6 +154,7 @@ more. `Alt-n` takes you to whichever one needs you. To add your phone, run
 [Install](docs/install.md) · [Using Valkyrie](docs/usage.md) ·
 [Keys](docs/keys.md) · [Settings](docs/settings.md) ·
 [Phone app](docs/phone.md) · [Project decisions](docs/decisions.md) ·
+[Repository wiki](docs/wiki.md) ·
 [Policies](docs/policies.md) · [Supervisor](docs/supervisor.md) ·
 [Backlog](docs/backlog.md) · [Contributing](docs/contributing.md)
 

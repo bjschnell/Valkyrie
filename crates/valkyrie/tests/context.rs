@@ -1247,6 +1247,9 @@ fn mcp_serves_and_proposes_decisions() {
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_decisions","arguments":{"query":"pnpm","include_inactive":true}}}"#,
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_decision","arguments":{"id":9}}}"#,
         r#"{"jsonrpc":"2.0","id":6,"method":"nope"}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"write_wiki_page","arguments":{"page":"overview","title":"Overview","summary":"What the parts are","body":"Two parts."}}}"#,
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_wiki_page","arguments":{"page":"overview"}}}"#,
+        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_wiki_page","arguments":{"page":"../x"}}}"#,
     ];
     let mut stdin = child.stdin.take().unwrap();
     for r in requests {
@@ -1259,9 +1262,9 @@ fn mcp_serves_and_proposes_decisions() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(replies.len(), 6, "{replies:?}");
+    assert_eq!(replies.len(), 9, "{replies:?}");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "valkyrie");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 13);
     let text = |i: usize| {
         replies[i]["result"]["content"][0]["text"]
             .as_str()
@@ -1273,6 +1276,19 @@ fn mcp_serves_and_proposes_decisions() {
     assert!(!text(3).contains("Use pnpm"), "{}", text(3));
     assert_eq!(replies[4]["result"]["isError"], true);
     assert_eq!(replies[5]["error"]["code"], -32601);
+    // The wiki, for agents without Valkyrie's hooks (backlog #210).
+    assert!(
+        text(6).starts_with("wiki page `overview` written"),
+        "{}",
+        text(6)
+    );
+    assert!(
+        text(7).starts_with("# Overview\nWhat the parts are\n")
+            && text(7).ends_with("Two parts.\n"),
+        "{}",
+        text(7)
+    );
+    assert_eq!(replies[8]["result"]["isError"], true);
     drop(daemon);
 }
 
@@ -2326,4 +2342,134 @@ fn one_note_write_proposes_every_cluster_due() {
     };
     assert_eq!(proposed.len(), 2, "{proposed:?}");
     drop(daemon);
+}
+
+/// Backlog #210: an agent writes the repository's wiki with `valk wiki write`,
+/// every session gets its index at start, and a page whose code changed a lot
+/// reads as stale, which `valk wiki explore --stale` then asks an agent to fix.
+#[test]
+fn the_wiki_is_written_indexed_and_goes_stale() {
+    let dir = std::env::temp_dir().join(format!("valkyrie-wiki-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join("src/daemon")).unwrap();
+    std::fs::write(repo.join("src/daemon/main.rs"), "fn main() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let base = dir.join("state/valkyrie/context");
+    let valk = |args: &[&str], stdin: &str, session: bool| -> (bool, String) {
+        let mut c = Command::new(BIN);
+        c.args(args)
+            .current_dir(&repo)
+            .env("VALK_CONTEXT", &base)
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("VALK_SOCKET", dir.join("no.sock"))
+            .env_remove("VALK_SESSION_HOOKS")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if session {
+            c.env("VALK_SESSION", "1");
+        } else {
+            c.env_remove("VALK_SESSION");
+        }
+        let mut child = c.spawn().unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+    let (ok, said) = valk(&["wiki"], "", false);
+    assert!(ok && said.contains("has no wiki yet"), "{said}");
+    let start = serde_json::json!({"hook_event_name":"SessionStart","cwd":repo}).to_string();
+    let (_, said) = valk(&["context-hook", "claude"], &start, true);
+    assert!(!said.contains("wiki show"), "{said}");
+    let (ok, said) = valk(
+        &[
+            "wiki",
+            "write",
+            "daemon",
+            "--title",
+            "The daemon",
+            "--summary",
+            "How sessions run",
+            "--scope",
+            "src/daemon",
+            "-",
+        ],
+        "It runs sessions.\n",
+        false,
+    );
+    assert!(ok, "{said}");
+    let (ok, said) = valk(
+        &[
+            "wiki", "write", "x", "--title", "X", "--scope", "../etc", "-",
+        ],
+        "y",
+        false,
+    );
+    assert!(!ok && said.contains("without `..`"), "{said}");
+    let (_, said) = valk(&["context-hook", "claude"], &start, true);
+    let out: serde_json::Value = serde_json::from_str(said.trim()).expect("one JSON object");
+    let added = out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        added.contains("wiki show <page>")
+            && added.contains("- daemon: The daemon. How sessions run"),
+        "{added}"
+    );
+    let (ok, said) = valk(&["wiki", "show", "daemon"], "", false);
+    assert!(
+        ok && said.contains("covers src/daemon") && said.ends_with("It runs sessions.\n"),
+        "{said}"
+    );
+    let (ok, said) = valk(&["wiki", "explore", "--stale", "--print"], "", false);
+    assert!(!ok && said.contains("no page is stale"), "{said}");
+    let (ok, said) = valk(&["wiki", "explore", "--print"], "", false);
+    assert!(
+        ok && said.contains("`overview` page") && said.contains("- daemon: The daemon"),
+        "{said}"
+    );
+    // The daemon's code is rewritten: the page goes stale.
+    let lots: String = (0..400).map(|n| format!("// {n}\n")).collect();
+    std::fs::write(repo.join("src/daemon/main.rs"), lots).unwrap();
+    git(&["commit", "-qam", "rewrite"]);
+    let (_, said) = valk(&["wiki", "list"], "", false);
+    assert!(said.contains("[stale: 401 lines changed"), "{said}");
+    let (_, said) = valk(&["context-hook", "claude"], &start, true);
+    assert!(said.contains("- daemon (stale): "), "{said}");
+    let (ok, said) = valk(&["wiki", "explore", "--stale", "--print"], "", false);
+    assert!(
+        ok && said.contains("These pages are stale") && said.contains("- daemon (src/daemon)"),
+        "{said}"
+    );
+    let (ok, _) = valk(&["wiki", "rm", "daemon"], "", false);
+    assert!(ok);
+    let (_, said) = valk(&["wiki"], "", false);
+    assert!(said.contains("has no wiki yet"), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
