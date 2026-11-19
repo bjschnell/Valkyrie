@@ -4325,6 +4325,11 @@ button.as-text {
 }
 
 /* The Memory page (#144): tabs, filters, ended entries and notes. */
+/* Proposals on the Memory page (#247), above the shelves. */
+.to-review {
+  margin-bottom: var(--space-6);
+}
+
 .memory-tabs {
   margin-bottom: var(--space-1);
 }

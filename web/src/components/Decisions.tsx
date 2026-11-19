@@ -38,6 +38,27 @@ export function Proposals() {
   );
 }
 
+/**
+ * The same proposals at the top of the Memory page (#247), open: it's where you'd
+ * go to review them, and its shelves only hold what you've accepted.
+ */
+export function ToReview() {
+  const proposals = useApp((s) => s.proposals);
+  if (proposals.length === 0) return null;
+  return (
+    <section className="to-review" aria-label="Decisions to review">
+      <h2 className="section-title">
+        To review <span className="count">{proposals.length}</span>
+      </h2>
+      <div className="cards">
+        {proposals.map((d) => (
+          <ProposalCard key={`${d.project}#${d.id}`} d={d} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function ProposalCard({ d }: { d: Decision }) {
   const now = useApp((s) => s.now);
   const [editing, setEditing] = useState(false);
