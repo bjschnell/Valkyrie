@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, type Places } from "../lib/api";
 import { editPatch } from "../lib/optimistic";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, itemNo, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, planScope, prLink, priority, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
+import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, itemNo, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
@@ -446,6 +446,11 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const now = useApp((s) => s.now);
   const items = useApp((s) => s.items);
   const waits = lane === "done" ? [] : waitingOn(item, items);
+  // Its group: the item it's a piece of, or how far its own pieces are.
+  const mine = pieces(item, items);
+  const [done, of] = progress(item, items);
+  const up = item.parent === undefined ? undefined : items.find((i) => i.id === item.parent);
+  const group = up ? `piece of #${up.number} ${up.title}` : of > 0 ? `${done}/${of} pieces done` : null;
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [expanded, setExpanded] = useState(false);
@@ -540,6 +545,16 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
           <div className="item-live item-after">
             after {waits.map((id) => `#${itemNo(items, id)}`).join(", ")}, not finished yet
           </div>
+        )}
+        {group && <div className="item-live item-group">{group}</div>}
+        {expanded && mine.length > 0 && (
+          <ul className="item-pieces">
+            {mine.map((p) => (
+              <li key={p.id} className={p.status === "shipped" || p.status === "dropped" ? "item-piece-done" : undefined}>
+                #{p.number} {p.title} <span className="card-age">{p.status}</span>
+              </li>
+            ))}
+          </ul>
         )}
         {lane === "proposed" && (
           <div className="item-live">
@@ -783,6 +798,8 @@ export function ItemEditor({ id }: { id: number | null }) {
   const [prio, setPrio] = useState<Priority>(start ? priority(start) : "p2");
   // What it comes after, as typed: "#12, 14".
   const [after, setAfter] = useState(() => idList(start?.blocked_by, items));
+  // The item it's a piece of, as typed: "#7", or empty for none.
+  const [partOf, setPartOf] = useState(() => idList(start?.parent ? [start.parent] : [], items));
   const [title, setTitle] = useState(start?.title ?? "");
   const [text, setText] = useState(() => start?.body ?? (id === null ? (read(DRAFT_KEY) ?? "") : ""));
   const [folder, setFolder] = useState<string>(
@@ -804,6 +821,7 @@ export function ItemEditor({ id }: { id: number | null }) {
     setKind(item.kind);
     setPrio(priority(item));
     setAfter(idList(item.blocked_by, items));
+    setPartOf(idList(item.parent ? [item.parent] : [], items));
     setTitle(item.title);
     setText(item.body);
     setFolder(item.project ?? "");
@@ -847,11 +865,14 @@ export function ItemEditor({ id }: { id: number | null }) {
     if (busy || sending || empty) return;
     const blocked_by = parseIds(after, items, folder);
     if (!blocked_by) return toast("Comes after: item numbers in this repository, like #12, 14");
+    const up = parseIds(partOf, items, folder);
+    if (!up || up.length > 1) return toast("Piece of: one item number in this repository, like #7");
+    const parent = up[0] ?? 0;
     setBusy(true);
     try {
       let saved = id;
       if (id === null) {
-        saved = await addItem({ title: "", body: text, kind, cwd: folder || null, attachments: ready, priority: prio, blocked_by });
+        saved = await addItem({ title: "", body: text, kind, cwd: folder || null, attachments: ready, priority: prio, blocked_by, parent: parent || undefined });
         write(DRAFT_KEY, null);
         write(FOLDER_KEY, folder || null);
       } else {
@@ -862,6 +883,7 @@ export function ItemEditor({ id }: { id: number | null }) {
           project: folder || null,
           priority: prio,
           blocked_by,
+          parent,
         });
         if (change && "clash" in change) {
           // Seen now: saving again replaces the other change with this one.
@@ -1018,6 +1040,16 @@ export function ItemEditor({ id }: { id: number | null }) {
             inputMode="numeric"
             placeholder="Items to finish first, like #12, 14"
             onChange={(e) => setAfter(e.target.value)}
+          />
+        </label>
+
+        <label className="field">
+          <span className="field-label">Piece of</span>
+          <input
+            value={partOf}
+            inputMode="numeric"
+            placeholder="The item it's part of, like #7"
+            onChange={(e) => setPartOf(e.target.value)}
           />
         </label>
 
