@@ -202,6 +202,29 @@ async fn spawn_applies_the_clients_login_env() {
     wait_dump(&client, id, |t| t.trim_end() == "/tmp/agent.test|unset").await;
 }
 
+/// A daemon started from inside an agent (`valk upgrade --local` from Claude Code's
+/// Bash tool) carries that agent's per-run markers. Passed on, they made every new
+/// claude think it was a child and stop saving its transcript, which blanked the
+/// web chat (#243). Sessions start without them, whoever asks; the user's own
+/// agent settings stay.
+#[tokio::test]
+async fn sessions_start_without_an_agents_runtime_markers() {
+    let (client, _pushes, _dir) = start().await;
+    let mut spec = sh(
+        r#"printf '%s|%s|%s|%s' "${CLAUDE_CODE_CHILD_SESSION-unset}" "${CLAUDECODE-unset}" \
+           "${CLAUDE_CODE_MESSAGING_TOKEN-unset}" "${CLAUDE_CODE_USE_BEDROCK-unset}""#,
+        SIZE,
+    );
+    spec.env = vec![
+        ("CLAUDE_CODE_CHILD_SESSION".into(), Some("1".into())),
+        ("CLAUDECODE".into(), Some("1".into())),
+        ("CLAUDE_CODE_MESSAGING_TOKEN".into(), Some("secret".into())),
+        ("CLAUDE_CODE_USE_BEDROCK".into(), Some("1".into())),
+    ];
+    let id = client.spawn(spec).await.unwrap().id;
+    wait_dump(&client, id, |t| t.trim_end() == "unset|unset|unset|1").await;
+}
+
 #[tokio::test]
 async fn input_round_trips_and_diffs_follow() {
     let (client, mut pushes, _dir) = start().await;

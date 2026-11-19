@@ -47,6 +47,29 @@ const FEED_CAPACITY: usize = 1024;
 /// How long `kill` waits after SIGHUP before escalating to SIGKILL.
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// What an agent sets for the programs it runs, about that one run. A daemon
+/// started from inside an agent (`valk upgrade --local` from Claude Code's Bash
+/// tool) holds them, and no session wants them: with `CLAUDE_CODE_CHILD_SESSION`
+/// a new claude takes itself for a child and saves no transcript, so the web chat
+/// has nothing to show. The user's own settings (`CLAUDE_CODE_USE_BEDROCK`,
+/// `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) aren't markers, so they stay.
+const AGENT_RUN_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SSE_PORT",
+    "AI_AGENT",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+];
 /// Screen heuristics run once output has been quiet this long, never per chunk.
 const SCAN_QUIET_MS: u64 = 150;
 /// ...and glance at least this often while output keeps coming: an animated spinner
@@ -369,6 +392,10 @@ impl Session {
                 Some(value) => cmd.env(key, value),
                 None => cmd.env_remove(key),
             }
+        }
+        // After the client's, so neither the daemon's own nor a client's get through.
+        for key in AGENT_RUN_ENV {
+            cmd.env_remove(key);
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

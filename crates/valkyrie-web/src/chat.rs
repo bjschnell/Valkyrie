@@ -858,6 +858,28 @@ impl Tail {
     }
 }
 
+/// What a relook does with where the daemon says the transcript is.
+#[derive(Debug, PartialEq)]
+enum Look {
+    /// Open this transcript and send it as the chat.
+    Open(PathBuf),
+    /// Tell the browser there's no conversation to show yet.
+    Missing,
+    /// Keep what it has.
+    Stay,
+}
+
+/// A transcript named but not on disk counts as none: Claude Code names it in its
+/// hooks before it writes it, and opening it would fail on every relook, leaving
+/// the browser with nothing to show. It's opened once it's there.
+fn look(chat: Option<PathBuf>, current: Option<&PathBuf>, told_missing: bool) -> Look {
+    match chat.filter(|path| path.is_file()) {
+        Some(path) if current != Some(&path) => Look::Open(path),
+        None if current.is_none() && !told_missing => Look::Missing,
+        _ => Look::Stay,
+    }
+}
+
 /// Follows one session's chat for a browser, sending `{"t":"chat",…}` messages to
 /// `tx` until it closes. A reset message replaces what the browser has; others add
 /// to it, replacing items with the same id.
@@ -888,8 +910,8 @@ async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>
                 return Ok(());
             };
             let current = tail.as_ref().map(|(path, _)| path);
-            match info.chat {
-                Some(path) if current != Some(&path) => {
+            match look(info.chat, current, told_missing) {
+                Look::Open(path) => {
                     let repo = info.cwd.to_string_lossy().into_owned();
                     let opened = path.clone();
                     let (t, items) = tokio::task::spawn_blocking(move || {
@@ -907,13 +929,13 @@ async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>
                     tail = Some((path, t));
                     continue;
                 }
-                None if tail.is_none() && !told_missing => {
+                Look::Missing => {
                     told_missing = true;
                     tx.send(json!({"t": "chat", "session": session, "reset": true,
                                    "items": [], "missing": true}))
                         .await?;
                 }
-                _ => {}
+                Look::Stay => {}
             }
         }
         if let Some((path, t)) = tail.take() {
@@ -937,6 +959,29 @@ async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_named_transcript_not_yet_written_is_missing_until_it_is() {
+        // Claude Code names its transcript in every hook, before (or without)
+        // writing it. Opening it then failed, and the follower retried silently,
+        // so the browser sat on "Opening…" for good (#242).
+        let dir = std::env::temp_dir().join(format!("valk-chat-look-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("abc.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(look(Some(path.clone()), None, false), Look::Missing);
+        assert_eq!(look(Some(path.clone()), None, true), Look::Stay);
+
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(
+            look(Some(path.clone()), None, true),
+            Look::Open(path.clone())
+        );
+        assert_eq!(look(Some(path.clone()), Some(&path), false), Look::Stay);
+        assert_eq!(look(None, None, false), Look::Missing);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn feed(agent: Agent, lines: &[Value]) -> Vec<Item> {
         let mut m = Mapper::new(agent, "/w/app");
