@@ -2185,6 +2185,41 @@ html.with-tabs .offline-banner {
   color: var(--accent);
 }
 
+.folder-row {
+  display: flex;
+  align-items: center;
+}
+
+.folder-row > .folder {
+  flex: 1;
+  min-width: 0;
+}
+
+.folder-row.picked {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.folder-hide {
+  flex: none;
+  width: 40px;
+  align-self: stretch;
+  color: var(--muted);
+  font-size: var(--text-lg);
+}
+
+.folder-hide:active {
+  background: var(--raised);
+}
+
+.folder-show {
+  flex: none;
+  margin-right: var(--space-2);
+}
+
+.repo-add {
+  margin-top: var(--space-2);
+}
+
 .git {
   flex: none;
   padding: 1px var(--space-15);

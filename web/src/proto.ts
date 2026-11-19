@@ -199,6 +199,37 @@ export interface WikiListing {
   pages: WikiPage[];
 }
 
+/** A repository every picker offers (backlog #240): a main checkout's root. */
+export interface KnownRepo {
+  path: string;
+  /** `~/repos/valkyrie`, as it reads. */
+  label: string;
+  /** Added by hand, rather than found. */
+  added?: boolean;
+}
+
+export interface ScanFolder {
+  path: string;
+  label: string;
+}
+
+/** The daemon's one list of repositories (protocol 49). */
+export interface RepoList {
+  /** Most recently worked in first. */
+  repos: KnownRepo[];
+  /** The folders scanned for repositories, one level down. */
+  folders: ScanFolder[];
+  /** Repositories hidden, to offer back. */
+  hidden: ScanFolder[];
+}
+
+export type RepoEdit =
+  | { do: "add"; path: string }
+  | { do: "hide"; path: string }
+  | { do: "unhide"; path: string }
+  | { do: "scan"; path: string }
+  | { do: "unscan"; path: string };
+
 /** Where in a session a search hit was found (backlog #106): your prompt, the
  * agent's closing reply, a file it wrote, or what it was about. */
 export type SearchField = "you" | "agent" | "file" | "about";
@@ -725,6 +756,10 @@ export type Request =
   | { t: "note"; note: { cwd: string; text: string; replaces?: number } }
   /** Deletes a note, leaving a tombstone; replies `tombstone`. */
   | { t: "note_rm"; cwd: string; id: number }
+  /** The repositories pickers offer (backlog #240, protocol 49); replies `repos`. */
+  | { t: "repos" }
+  /** Changes which repositories pickers offer; replies `repos`. */
+  | { t: "repo_edit"; edit: RepoEdit }
   /** The wiki of `cwd`'s repository, without bodies (protocol 47); replies `wiki`. */
   | { t: "wiki"; cwd: string }
   /** One wiki page in full; replies `wiki_page`. */
@@ -840,6 +875,7 @@ export type Reply =
   | { t: "note"; note: Note }
   | { t: "tombstone"; tombstone: { id: number } }
   | { t: "wiki"; listing: WikiListing }
+  | { t: "repos"; list: RepoList }
   | { t: "wiki_page"; page: WikiPage }
   | { t: "doc"; doc: Doc }
   /** `to`: on a new comment, the running session that hears it at its next prompt. */

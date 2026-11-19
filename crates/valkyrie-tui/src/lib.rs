@@ -241,6 +241,8 @@ struct App {
     proposals: Vec<Decision>,
     /// Every backlog item, as last pushed (DESIGN §8.12).
     items: Vec<Item>,
+    /// The repositories pickers offer (backlog #240), as the backlog last fetched it.
+    repo_list: valkyrie_proto::RepoList,
     /// Build orders waiting on the user, as last pushed with the items.
     orders: Vec<valkyrie_proto::OrderProposal>,
     /// Ready items the supervisor offers to start, as last pushed with the items.
@@ -448,6 +450,7 @@ impl App {
             sessions: Vec::new(),
             proposals: Vec::new(),
             items: Vec::new(),
+            repo_list: Default::default(),
             quota: None,
             backlog: None,
             retire_armed: None,
@@ -3384,6 +3387,29 @@ impl App {
         self.backlog_facts().await;
     }
 
+    /// The daemon's list of repositories, for an edit to move an item to: asked
+    /// for as an edit opens, not to hold up the page. A daemon slow to answer
+    /// leaves the list as it was, the items' own repositories at least.
+    async fn load_repos(&mut self) {
+        let asked = self.client.repos();
+        if let Ok(Ok(list)) = tokio::time::timeout(Duration::from_millis(500), asked).await {
+            self.repo_list = list;
+        }
+    }
+
+    /// The repositories an edit can move an item to, by name.
+    fn edit_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .items
+            .iter()
+            .filter_map(|i| i.project.clone())
+            .chain(self.repo_list.repos.iter().map(|r| r.path.clone()))
+            .collect();
+        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
+        roots.dedup();
+        roots
+    }
+
     /// The backlog, its cursor on item `id` (a proposal's toast).
     async fn open_backlog_at(&mut self, id: u32) {
         self.toast = None;
@@ -3465,6 +3491,7 @@ impl App {
     async fn backlog_keys(&mut self, bytes: &[u8]) {
         let rows = self.backlog_rows();
         let boot = self.boot();
+        let roots = self.edit_roots();
         let Some(page) = &mut self.backlog else {
             return;
         };
@@ -3476,13 +3503,7 @@ impl App {
             page.typing = Some(backlog::Typing::add());
             bytes = &bytes[len..];
         }
-        let mut roots: Vec<PathBuf> = self
-            .items
-            .iter()
-            .filter_map(|i| i.project.clone())
-            .collect();
-        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
-        roots.dedup();
+        let editing = matches!(page.typing, Some(backlog::Typing::Edit { .. }));
         page.roots = roots;
         let todo = page.keys(bytes, &rows, &self.sessions, boot);
         for act in todo {
@@ -3511,6 +3532,19 @@ impl App {
         {
             self.backlog = None;
         }
+        // An edit just opened: the daemon's list, for Shift-Tab to step through.
+        if !editing
+            && self
+                .backlog
+                .as_ref()
+                .is_some_and(|p| matches!(p.typing, Some(backlog::Typing::Edit { .. })))
+        {
+            self.load_repos().await;
+            let roots = self.edit_roots();
+            if let Some(page) = &mut self.backlog {
+                page.roots = roots;
+            }
+        }
         self.backlog_facts().await;
     }
 
@@ -3519,6 +3553,27 @@ impl App {
         match act {
             Do::Close => self.backlog = None,
             Do::Say(text) => self.say(text),
+            Do::AddRepo { path, back } => {
+                let mut back = *back;
+                let edit = valkyrie_proto::RepoEdit::Add {
+                    path: PathBuf::from(&path),
+                };
+                match self.client.repo_edit(edit).await {
+                    Ok(list) => {
+                        let root = added_repo(&self.repo_list, &list, &path);
+                        if let (Some(root), backlog::Typing::Edit { project, .. }) =
+                            (root, &mut back)
+                        {
+                            *project = Some(root);
+                        }
+                        self.repo_list = list;
+                    }
+                    Err(e) => self.say(format!("{e:#}")),
+                }
+                if let Some(page) = &mut self.backlog {
+                    page.typing = Some(back);
+                }
+            }
             Do::Attach(id) => {
                 self.backlog = None;
                 self.switch_to(id).await;
@@ -6870,6 +6925,28 @@ fn edit_file(body: &str) -> std::io::Result<PathBuf> {
 /// Whether `dir` is in a git repository (as the CLI and daemon see it).
 fn in_repository(dir: &Path) -> bool {
     valkyrie_context::project::in_git(dir)
+}
+
+/// Which repository adding `typed` gave (backlog #240): the daemon keeps a
+/// worktree's main checkout, resolved, so it may not read as typed. The one added
+/// by hand that wasn't before, else the one that reads as typed.
+fn added_repo(
+    before: &valkyrie_proto::RepoList,
+    after: &valkyrie_proto::RepoList,
+    typed: &str,
+) -> Option<PathBuf> {
+    let was = |p: &PathBuf| before.repos.iter().any(|r| r.added && r.path == *p);
+    after
+        .repos
+        .iter()
+        .find(|r| r.added && !was(&r.path))
+        .or_else(|| {
+            after
+                .repos
+                .iter()
+                .find(|r| r.path == std::path::Path::new(typed) || r.label == typed)
+        })
+        .map(|r| r.path.clone())
 }
 
 #[cfg(test)]

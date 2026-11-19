@@ -462,6 +462,25 @@ impl Client {
         }
     }
 
+    /// The repositories pickers offer (backlog #240).
+    pub async fn repos(&self) -> Result<crate::RepoList> {
+        match self.request(|req| ClientMsg::Repos { req }).await? {
+            Reply::Repos { list } => Ok(list),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Changes which repositories pickers offer; the list as it is after.
+    pub async fn repo_edit(&self, edit: crate::RepoEdit) -> Result<crate::RepoList> {
+        match self
+            .request(|req| ClientMsg::RepoEdit { req, edit })
+            .await?
+        {
+            Reply::Repos { list } => Ok(list),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     pub async fn wiki(&self, cwd: PathBuf) -> Result<crate::WikiListing> {
         match self.request(|req| ClientMsg::Wiki { req, cwd }).await? {
             Reply::Wiki { listing } => Ok(listing),

@@ -465,7 +465,6 @@ async fn places_route(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
         places::Places {
             home: home.to_string_lossy().into_owned(),
             shell: places::shell(),
-            repos: places::repos(&home),
             recent,
         }
     })

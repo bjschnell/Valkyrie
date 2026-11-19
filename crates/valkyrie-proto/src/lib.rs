@@ -17,6 +17,7 @@ pub mod notes;
 pub mod pastes;
 pub mod quota;
 pub mod remote;
+pub mod repos;
 pub mod screen;
 pub mod search;
 pub mod supervisor;
@@ -41,13 +42,14 @@ pub use docs::{
 pub use layout::{Axis, Pane, Side};
 pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
 pub use quota::{Quota, QuotaLimit};
+pub use repos::{KnownRepo, RepoEdit, RepoList, ScanFolder};
 pub use screen::{Color, Cursor, CursorShape, Modes, Row, ScreenUpdate, Span, Style};
 pub use search::{SearchField, SearchHit, SearchResults};
 pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 48;
+pub const PROTOCOL: u32 = 49;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -843,6 +845,15 @@ pub enum ClientMsg {
         #[serde(default)]
         env: Vec<(String, Option<String>)>,
     },
+    /// The repositories pickers offer (backlog #240, protocol 49). Replies `Repos`.
+    Repos {
+        req: ReqId,
+    },
+    /// Changes which repositories pickers offer. Replies `Repos`, as it is now.
+    RepoEdit {
+        req: ReqId,
+        edit: RepoEdit,
+    },
     /// Agent sessions of the last weeks that have ended, newest first, to
     /// resume one (backlog #150, protocol 42). Read-only. Replies `History`.
     History {
@@ -1106,6 +1117,9 @@ pub enum Reply {
     },
     Wiki {
         listing: WikiListing,
+    },
+    Repos {
+        list: RepoList,
     },
     WikiPage {
         page: Box<WikiPage>,

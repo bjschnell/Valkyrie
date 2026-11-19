@@ -260,6 +260,9 @@ pub(crate) enum Typing {
     },
     /// `L`'s window: what item `id` launches with.
     Launch(LaunchForm),
+    /// A repository to add by path (`^R` in an edit, backlog #240): Enter adds it
+    /// and goes back to `back` with it picked, Esc goes back as it was.
+    Repo { text: LineEdit, back: Box<Typing> },
 }
 
 /// A field of the launch window.
@@ -431,7 +434,8 @@ pub(crate) struct Page {
     pub(crate) order: Option<OrderView>,
     /// Ready items the supervisor offers to start, as last pushed.
     pub(crate) launches: Vec<LaunchOffer>,
-    /// Every repository some item is for, as last pushed: what an edit can move to.
+    /// The repositories an edit can move an item to: the daemon's list and every
+    /// item's, by name.
     pub(crate) roots: Vec<PathBuf>,
 }
 
@@ -496,6 +500,11 @@ pub(crate) enum Do {
     CheckMerged,
     /// Ship these, the ones shown, if they're still merged.
     ShipMerged(Vec<u32>),
+    /// Add this repository to the list, then type `back` again with it picked.
+    AddRepo {
+        path: String,
+        back: Box<Typing>,
+    },
     /// Show the next repository's items (`Repo::next`).
     NextRepo,
     /// Ask for a build order of this repository (`P`).
@@ -588,10 +597,13 @@ impl Page {
                     continue;
                 }
                 let launching = matches!(typing, Typing::Launch(_));
+                let editing = matches!(typing, Typing::Edit { .. });
+                let adding_repo = matches!(typing, Typing::Repo { .. });
                 let text = match typing {
                     Typing::Add { text, .. }
                     | Typing::Note { text, .. }
-                    | Typing::Edit { text, .. } => text,
+                    | Typing::Edit { text, .. }
+                    | Typing::Repo { text, .. } => text,
                     Typing::Launch(form) => &mut form.model,
                 };
                 // A paste is text, its line breaks spaces: a pasted error doesn't end
@@ -663,8 +675,23 @@ impl Page {
                                 }
                             }
                             Typing::Launch(form) => out.push(form.launch()),
+                            Typing::Repo { text, back } if !text.text().trim().is_empty() => {
+                                out.push(Do::AddRepo {
+                                    path: text.text().trim().into(),
+                                    back,
+                                });
+                            }
+                            // Nothing typed: back to the edit.
+                            Typing::Repo { back, .. } => self.typing = Some(*back),
                             _ => {}
                         }
+                    }
+                    [0x12] if editing => {
+                        let back = Box::new(self.typing.take().unwrap());
+                        self.typing = Some(Typing::Repo {
+                            text: LineEdit::new(String::new()),
+                            back,
+                        });
                     }
                     b"\x1b[Z" => {
                         if let Typing::Edit { project, .. } = typing {
@@ -689,6 +716,11 @@ impl Page {
                     b"\x1b[A" | b"\x1bOA" | b"\x1b[B" | b"\x1bOB" if launching => {
                         if let Typing::Launch(form) = typing {
                             form.step(key[key.len() - 1] == b'B');
+                        }
+                    }
+                    b"\x1b" | [0x03] if adding_repo && (whole || key == [0x03]) => {
+                        if let Some(Typing::Repo { back, .. }) = self.typing.take() {
+                            self.typing = Some(*back);
                         }
                     }
                     b"\x1b" if whole => self.typing = None,
@@ -782,7 +814,10 @@ impl Page {
         }
         match &mut self.typing {
             Some(
-                Typing::Add { text, .. } | Typing::Note { text, .. } | Typing::Edit { text, .. },
+                Typing::Add { text, .. }
+                | Typing::Note { text, .. }
+                | Typing::Edit { text, .. }
+                | Typing::Repo { text, .. },
             ) => text.insert(&decode(&mut self.partial, &typed)),
             Some(Typing::Launch(form)) => form.model.insert(&decode(&mut self.partial, &typed)),
             None => {}
@@ -1047,9 +1082,13 @@ impl Page {
                 hint(" ↩ ", "save "),
                 hint(" tab ", "kind "),
                 hint(" ⇧tab ", "repo "),
+                hint(" ^r ", "add repo "),
                 hint(" esc ", "cancel "),
             ]
             .concat(),
+            (Some(Typing::Repo { .. }), _) => {
+                [hint(" ↩ ", "add "), hint(" esc ", "back ")].concat()
+            }
             (Some(Typing::Note { .. }), _) => {
                 [hint(" ↩ ", "note "), hint(" esc ", "cancel ")].concat()
             }
@@ -1787,6 +1826,7 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
             text,
         ),
         Typing::Launch(form) => (format!(" #{} model ", form.number), t.accent, &form.model),
+        Typing::Repo { text, .. } => (" add repo, path ".to_owned(), t.accent, text),
     };
     let room = width.saturating_sub(label.chars().count() + 1);
     let mut spans = vec![label.fg(t.bg).bg(color).bold(), " ".into()];
@@ -2583,6 +2623,32 @@ mod tests {
                 text: "old ug".into()
             }]
         );
+    }
+
+    #[test]
+    fn ctrl_r_in_an_edit_adds_a_repository_by_path() {
+        let rows = rows(&[item(1, 1)], &[], 7);
+        let mut page = Page::default();
+        let press = |page: &mut Page, k: &[u8]| page.keys(k, &rows, &[], 7);
+        assert!(press(&mut page, b"e\x12").is_empty());
+        assert!(matches!(&page.typing, Some(Typing::Repo { .. })));
+        // Esc goes back to the edit, not out of it.
+        assert!(press(&mut page, b"\x1b").is_empty());
+        assert!(matches!(&page.typing, Some(Typing::Edit { id: 1, .. })));
+        // A pasted path, then Enter: added, with the edit to go back to.
+        let got = press(&mut page, b"\x12\x1b[200~~/far/away/app\x1b[201~\r");
+        let [Do::AddRepo { path, back }] = got.as_slice() else {
+            panic!("expected an add, got {got:?}");
+        };
+        assert_eq!(path, "~/far/away/app");
+        assert!(matches!(**back, Typing::Edit { id: 1, .. }));
+        assert_eq!(
+            page.typing, None,
+            "the app puts the edit back once it's added"
+        );
+        // Nothing typed: straight back to the edit.
+        assert!(press(&mut page, b"e\x12\r").is_empty());
+        assert!(matches!(&page.typing, Some(Typing::Edit { id: 1, .. })));
     }
 
     #[test]

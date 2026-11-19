@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { getJson, type Places } from "../lib/api";
 import { editPatch } from "../lib/optimistic";
 import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, itemNo, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
 import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
+import { RepoSelect } from "./Repos";
 import { Back, Clip, Plus } from "./icons";
 import { MicButton } from "./Mic";
 import { usePageKeys } from "../lib/pageKeys";
@@ -783,7 +783,6 @@ function parseIds(text: string, items: Item[], folder: string): number[] | null 
 }
 
 export function ItemEditor({ id }: { id: number | null }) {
-  const token = useApp((s) => s.token);
   const items = useApp((s) => s.items);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
@@ -806,7 +805,6 @@ export function ItemEditor({ id }: { id: number | null }) {
     // A new item goes where the board is filtered to, else where the last one went.
     () => start?.project ?? (id === null ? read(REPO_KEY) || (read(FOLDER_KEY) ?? "") : ""),
   );
-  const [places, setPlaces] = useState<Places | null>(null);
   const [files, setFiles] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -826,11 +824,6 @@ export function ItemEditor({ id }: { id: number | null }) {
     setText(item.body);
     setFolder(item.project ?? "");
   }, [item]);
-
-  useEffect(() => {
-    if (!token) return;
-    getJson<Places>(token, "/api/places").then(setPlaces, (e: Error) => toast(`Can't list folders: ${e.message}`));
-  }, [token]);
 
   useEffect(() => {
     if (id === null) write(DRAFT_KEY, text || null);
@@ -908,13 +901,6 @@ export function ItemEditor({ id }: { id: number | null }) {
       setBusy(false);
     }
   };
-
-  // Every repository it could be for, the one it's in first.
-  const choices = new Map<string, string>();
-  if (folder) choices.set(folder, base(folder));
-  for (const p of [...(places?.recent ?? []), ...(places?.repos ?? [])]) {
-    if (p.git && !choices.has(p.path)) choices.set(p.path, p.label);
-  }
 
   return (
     <div
@@ -1055,14 +1041,7 @@ export function ItemEditor({ id }: { id: number | null }) {
 
         <label className="field">
           <span className="field-label">Repository</span>
-          <select value={folder} onChange={(e) => setFolder(e.target.value)} disabled={!!item?.checkout}>
-            <option value="">Not sure yet</option>
-            {[...choices].map(([path, label]) => (
-              <option key={path} value={path}>
-                {label}
-              </option>
-            ))}
-          </select>
+          <RepoSelect value={folder} onChange={setFolder} none="Not sure yet" disabled={!!item?.checkout} />
         </label>
       </main>
 

@@ -62,6 +62,25 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
   at its prompt there with no jobs (an agent stopped with Ctrl+C) is closed first. Its branch goes only if it's merged. Turn it off
   with `worktree_sweep = off` in `settings.toml`.
 
+## Which repositories you're offered
+
+The launcher, the backlog's Repository field and the wiki all offer the same list
+of repositories, which the daemon keeps. A repository is on it when a session
+runs in it or a backlog item is for it, or it sits one level under a folder Valkyrie
+looks in (`~/repos`, `~/src`, `~/code`, `~/projects`, `~/dev`, `~/work` and `~/git` to
+start with). A worktree counts as its main checkout, however it's named.
+
+- **Web app:** in the New session screen, × on a repo hides it. Browse to a
+  repository and pick **Add … to repos**, or to a folder and pick **Find repos in …**
+  to have Valkyrie look in it too. **Finding repos in N folders** lists the folders
+  and the hidden repos: × stops looking in a folder, **Show** brings a repo back.
+  The backlog's Repository field and the wiki's picker end with **Add a
+  repository…**, which takes a path.
+- **TUI:** in a backlog edit (`e`), Shift-Tab steps through the list and `^R` adds
+  a repository by path, typed or pasted.
+
+Your changes are kept in `~/.config/valkyrie/repos.json`.
+
 ## Another machine over SSH
 
 `valk --remote HOST` opens the TUI here on HOST's sessions. HOST is anything
