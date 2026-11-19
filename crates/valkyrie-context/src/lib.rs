@@ -33,6 +33,7 @@ pub mod skill;
 pub mod stale;
 pub mod steps;
 pub mod usage;
+pub mod wiki;
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};

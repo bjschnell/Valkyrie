@@ -320,6 +320,10 @@ pub async fn decisions(
             let budget = valkyrie_context::inject::BUDGET;
             let (block, shown) = valkyrie_context::inject::laid_out(&root, &list, budget, &valk);
             print!("{}{block}", valkyrie_context::inject::habits(&user, &valk));
+            print!(
+                "{}",
+                wiki_index(&valkyrie_context::Store::new(store_base()), &root, &valk)
+            );
             // On stderr, so the block itself can still be piped.
             eprintln!(
                 "({} of {budget} characters: {} in full, {} as titles. \
@@ -873,7 +877,7 @@ pub(crate) fn not_working(times: usize) -> String {
 }
 
 /// `HEAD` of the checkout `dir` is in, short; `None` outside git.
-fn head_commit(dir: &Path) -> Option<String> {
+pub(crate) fn head_commit(dir: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .no_window()
         .args(["rev-parse", "--short", "HEAD"])
@@ -896,7 +900,7 @@ pub(crate) fn store_base() -> PathBuf {
 
 /// How an agent should run Valkyrie: `valk` when that is this binary on `$PATH`,
 /// else this binary's full path.
-fn valk_command() -> String {
+pub(crate) fn valk_command() -> String {
     let Ok(me) = std::env::current_exe().and_then(|me| valkyrie_proto::canonical(&me)) else {
         return "valk".into();
     };
@@ -959,6 +963,7 @@ pub fn hook(agent: &str, ambient: bool) {
                 &valk,
             );
             text.push_str(&block);
+            text.push_str(&wiki_index(&store, &root, &valk));
             if let Some(session) = payload["session_id"].as_str().filter(|s| !s.is_empty()) {
                 use valkyrie_context::served::Layer;
                 let serves = shown
@@ -1028,6 +1033,17 @@ pub fn hook(agent: &str, ambient: bool) {
         _ => return,
     };
     println!("{}", valkyrie_context::inject::hook_output(event, &text));
+}
+
+/// The repository wiki's index (backlog #210) for a session's start, after a
+/// blank line; empty without pages.
+fn wiki_index(store: &valkyrie_context::Store, root: &Path, valk: &str) -> String {
+    let pages = store.wiki(root);
+    if pages.is_empty() {
+        return String::new();
+    }
+    let stale = valkyrie_context::wiki::staleness(root, &pages);
+    format!("\n{}", valkyrie_context::wiki::index(&pages, &stale, valk))
 }
 
 /// The tools whose file a decision's scope is matched against (ADR-0014 §2).

@@ -15,6 +15,7 @@ mod statusline;
 mod todo;
 mod tools;
 mod update;
+mod wiki;
 mod worktree;
 
 use anyhow::{Context, Result, bail};
@@ -256,6 +257,14 @@ enum Cmd {
     /// docs folder (your Obsidian vault, if you point it there).
     #[command(subcommand)]
     Doc(doc::DocCmd),
+    /// This repository's agent wiki: pages agents write for agents about how the
+    /// code is built, so the next one designs against it without re-exploring.
+    /// Kept in Valkyrie's store, not the repository. Lists the pages without a
+    /// command; `valk wiki explore` starts an agent that writes them.
+    Wiki {
+        #[command(subcommand)]
+        action: Option<wiki::WikiCmd>,
+    },
     /// The worktrees sessions and backlog launches made beside the repository.
     #[command(subcommand)]
     Worktree(worktree::WorktreeCmd),
@@ -1043,6 +1052,37 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             match todo::run(&client, action).await? {
                 Some(info) => valkyrie_tui::run(client, pushes, Some(info.id), socket).await,
                 None => Ok(()),
+            }
+        }
+        Some(Cmd::Wiki { action }) => {
+            let action = action.unwrap_or(wiki::WikiCmd::List);
+            if wiki::run_local(&action)?.is_some() {
+                return Ok(());
+            }
+            let wiki::WikiCmd::Explore {
+                stale,
+                agent,
+                print,
+                attach,
+            } = action
+            else {
+                unreachable!("run_local handles the rest");
+            };
+            let (root, brief) = wiki::explore_brief(stale)?;
+            if print {
+                print!("{brief}");
+                return Ok(());
+            }
+            if attach {
+                require_tty()?;
+            }
+            let (client, pushes) = connect(&socket).await?;
+            let info = wiki::explore(&client, root, brief, agent).await?;
+            if attach {
+                valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+            } else {
+                println!("{}", info.id);
+                Ok(())
             }
         }
         Some(Cmd::Doc(cmd)) => doc::run(&connect(&socket).await?.0, cmd).await,
