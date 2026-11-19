@@ -478,6 +478,8 @@ export const PRIORITIES: Priority[] = ["p0", "p1", "p2", "p3"];
 
 export interface Item {
   id: number;
+  /** The number in its repository, from 1: the `#N` people see. `id` is the global key. */
+  number: number;
   title: string;
   body: string;
   kind: ItemKind;
@@ -530,6 +532,8 @@ export interface ItemNote {
   aside?: boolean;
   /** For an aside, the item that agent was on, when it was on one. */
   from?: number;
+  /** `from`'s number in its repository; absent on a note from before numbers. */
+  from_number?: number;
 }
 
 /** What an item's checkout holds, from git. */
@@ -545,6 +549,8 @@ export interface ItemFacts {
 /** An item `ship_merged` shipped: `against` is what its branch is merged into. */
 export interface ShippedItem {
   id: number;
+  /** Its number in its repository. */
+  number: number;
   title: string;
   /** The branch judged; `branch_taken` when a take, not a launch, set it. */
   branch: string;
@@ -558,6 +564,8 @@ export interface ShippedItem {
 /** An open item with a branch that `ship_merged` kept, and why. */
 export interface KeptItem {
   id: number;
+  /** Its number in its repository; 0 for an item that's gone. */
+  number: number;
   title: string;
   why: string;
 }
@@ -635,6 +643,8 @@ export interface LaunchOffer {
   id: number;
   project: string;
   item: number;
+  /** The item's number in its repository. */
+  number: number;
   title: string;
   /** The agent and model it starts on: its last launch, else claude's default. */
   agent: string;

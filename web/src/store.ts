@@ -40,7 +40,7 @@ import type {
 import { applyChat, type Chat } from "./lib/chat";
 import { choiceKeys, findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
-import { appliedSummary, shippedSummary, wouldShip } from "./lib/backlog";
+import { appliedSummary, itemNo, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
 import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
@@ -222,7 +222,7 @@ function popProposals(items: Item[]): void {
 
 /** Answers a proposal's toast, unless it was answered elsewhere meanwhile. */
 function answerProposal(id: number, status: Item["status"]): void {
-  if (get().items.find((i) => i.id === id)?.status !== "proposed") return toast(`#${id} was already answered`);
+  if (get().items.find((i) => i.id === id)?.status !== "proposed") return toast(`#${itemNo(get().items, id)} was already answered`);
   setStatus(id, status);
 }
 
@@ -1168,7 +1168,7 @@ export function setStatus(id: number, status: Item["status"]): void {
   const item = get().items.find((i) => i.id === id);
   // Reopening one shipped or dropped before it was accepted proposes it again.
   const shown = status === "open" && item?.unaccepted ? "proposed" : status;
-  hold(statusDone(item?.status, status, id), { t: "item", id, patch: { status: shown } }, () =>
+  hold(statusDone(item?.status, status, item?.number ?? id), { t: "item", id, patch: { status: shown } }, () =>
     sendChange(id, { do: "status", status }),
   );
 }
@@ -1183,7 +1183,7 @@ export function editItem(id: number, change: Extract<ItemChange, { do: "edit" }>
       location.hash = `#/backlog/${id}`;
     },
   };
-  hold(`Saved #${id}`, { t: "item", id, patch: editPatch(change) }, () => sendChange(id, change), retry);
+  hold(`Saved #${itemNo(get().items, id)}`, { t: "item", id, patch: editPatch(change) }, () => sendChange(id, change), retry);
 }
 
 /** Edits the daemon refused, by item, for the editor to open with again. */
@@ -1198,7 +1198,7 @@ export function takeFailedEdit(id: number): Extract<ItemChange, { do: "edit" }> 
 
 /** Deletes a backlog item at once, with Undo; the daemon hears when that's gone. */
 export function removeItem(id: number): void {
-  hold(`Deleted #${id}`, { t: "item_gone", id }, async () => {
+  hold(`Deleted #${itemNo(get().items, id)}`, { t: "item_gone", id }, async () => {
     if (!conn) throw new Error("not connected");
     const reply = await conn.request({ t: "delete_item", id });
     return reply.t === "item" ? (reply.note ?? null) : null;
@@ -1289,7 +1289,7 @@ export async function answerOrder(
       items,
     });
     if (reply.t === "order_applied")
-      toast(appliedSummary(accept, reply.applied));
+      toast(appliedSummary(accept, reply.applied, get().items));
     return true;
   } catch (e) {
     toast((e as Error).message);

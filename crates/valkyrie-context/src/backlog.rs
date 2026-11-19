@@ -65,13 +65,34 @@ impl Backlog {
             .filter_map(|text| serde_json::from_str(&text).ok())
             .collect();
         items.sort_by_key(|i: &Item| i.id);
+        number_legacy(&mut items);
         items
     }
 
     pub fn get(&self, id: u32) -> Result<Item> {
         let text =
             std::fs::read_to_string(self.path(id)).with_context(|| format!("no item #{id}"))?;
-        serde_json::from_str(&text).with_context(|| format!("item #{id} doesn't parse"))
+        let item: Item =
+            serde_json::from_str(&text).with_context(|| format!("item #{id} doesn't parse"))?;
+        if item.number != 0 {
+            return Ok(item);
+        }
+        // Written before numbers: its number depends on the items around it.
+        self.load()
+            .into_iter()
+            .find(|i| i.id == id)
+            .with_context(|| format!("no item #{id}"))
+    }
+
+    /// The number the next item in `project` gets: one past the highest there.
+    fn next_number(&self, project: Option<&PathBuf>) -> u32 {
+        self.load()
+            .iter()
+            .filter(|i| i.project.as_ref() == project)
+            .map(|i| i.number)
+            .max()
+            .unwrap_or(0)
+            + 1
     }
 
     /// Writes `new` down as the next item. `by` is `human` or the agent asking,
@@ -105,10 +126,24 @@ impl Backlog {
             .unwrap_or(0)
             .max(self.last())
             + 1;
+        // Outside git there's no project to work in, whichever client asked.
+        let project = new
+            .cwd
+            .as_deref()
+            .filter(|d| project::in_git(d))
+            .map(project::root);
+        let number = items
+            .iter()
+            .filter(|i| i.project == project)
+            .map(|i| i.number)
+            .max()
+            .unwrap_or(0)
+            + 1;
         write_atomic(&self.base.join("last"), &id.to_string())?;
         let attachments = self.keep(id, &new.attachments)?;
         let item = Item {
             id,
+            number,
             title,
             body,
             kind: new.kind,
@@ -119,12 +154,7 @@ impl Backlog {
             } else {
                 ItemStatus::Proposed
             },
-            // Outside git there's no project to work in, whichever client asked.
-            project: new
-                .cwd
-                .as_deref()
-                .filter(|d| project::in_git(d))
-                .map(project::root),
+            project,
             attachments,
             by: by.to_owned(),
             sessions: Vec::new(),
@@ -185,6 +215,7 @@ impl Backlog {
             // the brief.
             NoteOrigin::Aside(from) => (true, true, from),
         };
+        let from_number = from.and_then(|f| self.get(f).ok()).map_or(0, |f| f.number);
         item.notes.push(ItemNote {
             at: now,
             by: by.to_owned(),
@@ -192,6 +223,7 @@ impl Backlog {
             taken,
             aside,
             from,
+            from_number,
         });
         let over = item.notes.len().saturating_sub(MAX_NOTES);
         item.notes.drain(..over);
@@ -296,7 +328,14 @@ impl Backlog {
                     }
                     let root = project::root(cwd);
                     if item.checkout.is_some() && item.project.as_ref() != Some(&root) {
-                        bail!("#{id} already has a checkout in {}", display(&item.project));
+                        bail!(
+                            "#{} already has a checkout in {}",
+                            item.number,
+                            display(&item.project)
+                        );
+                    }
+                    if item.project.as_ref() != Some(&root) {
+                        item.number = self.next_number(Some(&root));
                     }
                     item.project = Some(root);
                 }
@@ -304,15 +343,19 @@ impl Backlog {
             ItemChange::Return => {
                 if !matches!(item.status, ItemStatus::Open) && !item.agent_filed() {
                     bail!(
-                        "#{id} is {}: only an item being worked on goes back",
+                        "#{} is {}: only an item being worked on goes back",
+                        item.number,
                         item.status.as_str()
                     );
                 }
                 if item.sessions.is_empty() {
-                    bail!("#{id} isn't started");
+                    bail!("#{} isn't started", item.number);
                 }
                 if item.pr.is_some() {
-                    bail!("#{id} has a pull request: ship or drop it instead");
+                    bail!(
+                        "#{} has a pull request: ship or drop it instead",
+                        item.number
+                    );
                 }
                 // Its branch and checkout stay, for the next launch to reuse.
                 item.sessions.clear();
@@ -461,7 +504,8 @@ impl Backlog {
             item.pr_closed &= item.pr.as_deref() == Some(pr);
             item.pr = Some(pr.to_owned());
         }
-        if item.project.is_none() {
+        if item.project.is_none() && project.is_some() {
+            item.number = self.next_number(project.as_ref());
             item.project = project;
         }
         item.updated = now;
@@ -482,6 +526,34 @@ impl Backlog {
         valkyrie_proto::ensure_private_dir(&self.base)?;
         write_atomic(&self.path(item.id), &serde_json::to_string_pretty(item)?)
     }
+}
+
+/// Numbers the items written before there were numbers (`number` 0), oldest
+/// first within each repository, from 1 and skipping any number in use. The same
+/// items always get the same numbers, since a later item takes one past the
+/// highest, so nothing needs writing for them to stay put.
+fn number_legacy(items: &mut [Item]) {
+    let mut used: std::collections::HashMap<Option<PathBuf>, std::collections::HashSet<u32>> =
+        Default::default();
+    for i in items.iter().filter(|i| i.number != 0) {
+        used.entry(i.project.clone()).or_default().insert(i.number);
+    }
+    let mut next: std::collections::HashMap<Option<PathBuf>, u32> = Default::default();
+    for item in items.iter_mut().filter(|i| i.number == 0) {
+        let taken = used.entry(item.project.clone()).or_default();
+        let n = next.entry(item.project.clone()).or_insert(1);
+        while taken.contains(n) {
+            *n += 1;
+        }
+        item.number = *n;
+        taken.insert(*n);
+    }
+}
+
+/// What people call item `id`: its number, or `id` for one not in `items` (the
+/// one being added, which has none yet).
+fn number(items: &[Item], id: u32) -> u32 {
+    items.iter().find(|i| i.id == id).map_or(id, |i| i.number)
 }
 
 /// Most items one can wait on.
@@ -505,7 +577,7 @@ fn blockers(id: u32, ids: &[u32], had: &[u32], items: &[Item]) -> Result<Vec<u32
             bail!("no item #{b}");
         }
         if b == id {
-            bail!("#{id} can't wait on itself");
+            bail!("#{} can't wait on itself", number(items, id));
         }
         // Follow what b waits on: reaching `id` would make a loop.
         let mut seen = vec![b];
@@ -516,7 +588,12 @@ fn blockers(id: u32, ids: &[u32], had: &[u32], items: &[Item]) -> Result<Vec<u32
             };
             for &up in &i.blocked_by {
                 if up == id {
-                    bail!("#{b} already waits on #{id}, so #{id} can't wait on it");
+                    bail!(
+                        "#{} already waits on #{}, so #{} can't wait on it",
+                        number(items, b),
+                        number(items, id),
+                        number(items, id)
+                    );
                 }
                 if !seen.contains(&up) {
                     seen.push(up);
@@ -664,7 +741,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
         for i in items.iter().filter(|i| waits.contains(&i.id)) {
             text.push_str(&format!(
                 "- #{} {} ({})\n",
-                i.id,
+                i.number,
                 i.title,
                 i.status.as_str()
             ));
@@ -679,7 +756,7 @@ pub fn brief(item: &Item, items: &[Item]) -> String {
         }
     }
     text.push('\n');
-    text.push_str(&footer(item.id));
+    text.push_str(&footer(item.number));
     text
 }
 
@@ -699,10 +776,13 @@ pub fn merged_own(url: &str, item: Option<&Item>) -> String {
         Some(item) => (
             format!(
                 ", and backlog #{} “{}” shipped with it",
-                item.id,
+                item.number,
                 one_line(&item.title)
             ),
-            format!(" with `valk todo note -i {} \"<what's left>\"`", item.id),
+            format!(
+                " with `valk todo note -i {} \"<what's left>\"`",
+                item.number
+            ),
         ),
         None => (String::new(), String::new()),
     };
@@ -718,7 +798,7 @@ pub fn merged_own(url: &str, item: Option<&Item>) -> String {
 /// base isn't news at push time.
 pub fn merged_other(url: &str, base: &str, item: Option<&Item>) -> String {
     let card = item
-        .map(|item| format!(" (#{} “{}”)", item.id, one_line(&item.title)))
+        .map(|item| format!(" (#{} “{}”)", item.number, one_line(&item.title)))
         .unwrap_or_default();
     let base = if base.is_empty() {
         "the default branch"
@@ -736,9 +816,9 @@ pub fn merged_other(url: &str, base: &str, item: Option<&Item>) -> String {
 pub fn adopted(item: &Item) -> String {
     format!(
         "The user just added this session to their Valkyrie backlog as item #{} “{}”: its card follows this session now. `valk todo show` prints it.\n{}",
-        item.id,
+        item.number,
         one_line(&item.title),
-        footer(item.id)
+        footer(item.number)
     )
 }
 
@@ -747,9 +827,9 @@ pub fn adopted(item: &Item) -> String {
 pub fn accepted(item: &Item) -> String {
     format!(
         "The user accepted #{} “{}” you filed; take it with `valk todo take {} --branch <branch>` once your current task is delivered, and fix it on its own branch and pull request.",
-        item.id,
+        item.number,
         one_line(&item.title),
-        item.id
+        item.number
     )
 }
 
@@ -810,6 +890,62 @@ mod tests {
         );
         assert_eq!(all[1].by, "claude");
         assert_eq!(all[0].status, ItemStatus::Open);
+    }
+
+    /// Backlog #221: each repository counts from #1 on its own.
+    #[test]
+    fn numbers_are_per_repository() {
+        let dir = Temp::new();
+        let repo = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            let ok = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(&p)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+            p
+        };
+        let (a, b_repo) = (repo("a"), repo("b"));
+        let b = Backlog::new(dir.path().join("b-store"));
+        let add = |title: &str, cwd: &Path| {
+            let mut n = new(title, "", ItemKind::Bug);
+            n.cwd = Some(cwd.to_path_buf());
+            b.add(&n, "human", 1).unwrap()
+        };
+        let a1 = add("a one", &a);
+        let a2 = add("a two", &a);
+        let b1 = add("b one", &b_repo);
+        assert_eq!((a1.number, a2.number), (1, 2));
+        assert_eq!(b1.number, 1, "the other repository's first item is #1 too");
+        // The id stays the one global key.
+        assert_eq!((a1.id, a2.id, b1.id), (1, 2, 3));
+        assert_eq!(b.get(3).unwrap().number, 1);
+    }
+
+    #[test]
+    fn items_from_before_numbers_get_stable_per_repository_numbers() {
+        let dir = Temp::new();
+        let b = Backlog::new(dir.path().join("b"));
+        // Written by hand as an older build would: no `number`.
+        valkyrie_proto::ensure_private_dir(&dir.path().join("b")).unwrap();
+        for (id, repo) in [(1, "/a"), (2, "/b"), (3, "/a"), (7, "/b")] {
+            let text = format!(
+                r#"{{"id":{id},"title":"t{id}","project":"{repo}","created":1,"updated":1}}"#
+            );
+            std::fs::write(dir.path().join("b").join(format!("{id:04}.json")), text).unwrap();
+        }
+        let numbers = |b: &Backlog| b.load().iter().map(|i| i.number).collect::<Vec<_>>();
+        assert_eq!(numbers(&b), [1, 1, 2, 2]);
+        assert_eq!(b.get(7).unwrap().number, 2);
+        // A new item outside git is in no repository, so it counts from 1; the old ones stay put.
+        let mut n = new("new", "", ItemKind::Bug);
+        n.cwd = Some(dir.path().to_path_buf());
+        let fresh = b.add(&n, "human", 1).unwrap();
+        assert_eq!(fresh.id, 8);
+        assert_eq!(numbers(&b), [1, 1, 2, 2, 1]);
     }
 
     #[test]
@@ -1325,6 +1461,7 @@ mod tests {
             priority: Default::default(),
             blocked_by: Vec::new(),
             id,
+            number: id,
             title: title.into(),
             body: String::new(),
             kind,

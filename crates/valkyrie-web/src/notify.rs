@@ -256,7 +256,7 @@ impl Watch {
         self.launches_new = young;
         for (o, _) in ripe {
             notes.push(Note {
-                title: format!("Ready to start: #{} {}", o.item, o.title),
+                title: format!("Ready to start: #{} {}", o.number, o.title),
                 body: o.why.clone(),
                 session: None,
                 seq: 0,
@@ -616,6 +616,7 @@ mod tests {
             id,
             project: "/r".into(),
             item,
+            number: item,
             title: format!("item {item}"),
             agent: "claude".into(),
             model: String::new(),

@@ -50,7 +50,7 @@ function drawRune(ctx: CanvasRenderingContext2D, x: number, y: number) {
 /**
  * Digital rain behind the page: one drop per column, each leaving a fading trail.
  * It falls under reduced motion too, as in the TUI: picking a look with rain asks
- * for it. Paused while the tab is hidden.
+ * for it, so it keeps falling while cards wait. It stops while the tab is hidden.
  */
 export function Rain() {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -124,17 +124,27 @@ export function Rain() {
     size();
     let last = 0;
     let raf = 0;
+    // The loop ends itself in a hidden tab, rather than spinning on idle frames.
     const loop = (t: number) => {
+      if (document.hidden) {
+        raf = 0;
+        return;
+      }
       raf = requestAnimationFrame(loop);
-      if (document.hidden || t - last < FRAME_MS) return;
+      if (t - last < FRAME_MS) return;
       last = t;
       step();
     };
-    raf = requestAnimationFrame(loop);
+    const start = () => {
+      if (!raf && !document.hidden) raf = requestAnimationFrame(loop);
+    };
+    start();
     window.addEventListener("resize", size);
+    document.addEventListener("visibilitychange", start);
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", size);
+      document.removeEventListener("visibilitychange", start);
     };
   }, []);
 

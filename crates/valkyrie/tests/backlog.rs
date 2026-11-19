@@ -93,23 +93,23 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
             "#!/bin/sh\nfor a; do last=$a; done\n\
              if [ \"$VALK_ITEM\" = 5 ]; then echo on5 > {l5}; exec sleep 60; fi\npwd > {p}\n\
              valk todo note 'fixed the off-by-one; check IME input' > {n}.tmp 2>&1; mv {n}.tmp {n}\n\
-             valk todo note -i 2 'seen while on #1' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
+             valk todo note -i no-folder#1 'seen while on #1' > {x}.tmp 2>&1; mv {x}.tmp {x}\n\
              valk todo edit 1 -t 'Done already' > {e}.tmp 2>&1; mv {e}.tmp {e}\n\
-             valk todo take 3 -b fix/3-clients --pr {pr} > {t}.tmp 2>&1; mv {t}.tmp {t}\n\
-             valk todo take 4 -b fix/4-open > {t4}.tmp 2>&1; mv {t4}.tmp {t4}\n\
-             valk todo take 4 -b fix/3-clients > {r4}.tmp 2>&1; mv {r4}.tmp {r4}\n\
+             valk todo take 2 -b fix/3-clients --pr {pr} > {t}.tmp 2>&1; mv {t}.tmp {t}\n\
+             valk todo take 3 -b fix/4-open > {t4}.tmp 2>&1; mv {t4}.tmp {t4}\n\
+             valk todo take 3 -b fix/3-clients > {r4}.tmp 2>&1; mv {r4}.tmp {r4}\n\
              valk todo take 1 -b fix/3-clients > {r1}.tmp 2>&1; mv {r1}.tmp {r1}\n\
-             valk todo note -i 3 'merged upstream' > {tn}.tmp 2>&1; mv {tn}.tmp {tn}\n\
-             valk todo take 5 > {h5}.tmp 2>&1; mv {h5}.tmp {h5}\n\
-             valk todo take 5 --steal > {s5}.tmp 2>&1; mv {s5}.tmp {s5}\n\
+             valk todo note -i 2 'merged upstream' > {tn}.tmp 2>&1; mv {tn}.tmp {tn}\n\
+             valk todo take 4 > {h5}.tmp 2>&1; mv {h5}.tmp {h5}\n\
+             valk todo take 4 --steal > {s5}.tmp 2>&1; mv {s5}.tmp {s5}\n\
              valk todo add --take -k bug 'Found along the way' --branch fix/found > {af}.tmp 2>&1; mv {af}.tmp {af}\n\
-             valk todo take 6 --pr {pr} > {afp}.tmp 2>&1; mv {afp}.tmp {afp}\n\
-             valk todo note -i 6 'fixed the overflow too' > {afn}.tmp 2>&1; mv {afn}.tmp {afn}\n\
+             valk todo take 5 --pr {pr} > {afp}.tmp 2>&1; mv {afp}.tmp {afp}\n\
+             valk todo note -i 5 'fixed the overflow too' > {afn}.tmp 2>&1; mv {afn}.tmp {afn}\n\
              valk todo add 'For later' > {al}.tmp 2>&1; mv {al}.tmp {al}\n\
-             valk todo take 7 > {alt}.tmp 2>&1; mv {alt}.tmp {alt}\n\
+             valk todo take 6 > {alt}.tmp 2>&1; mv {alt}.tmp {alt}\n\
              valk todo add 'Left for you' > {a8}.tmp 2>&1; mv {a8}.tmp {a8}\n\
              valk todo launch 1 > {al1}.tmp 2>&1; mv {al1}.tmp {al1}\n\
-             valk todo ship 3 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
+             valk todo ship 2 > {s}.tmp 2>&1; mv {s}.tmp {s}\n\
              valk todo ship --merged --yes > {sm}.tmp 2>&1; mv {sm}.tmp {sm}\n\
              printf '%s\\n' \"$last\" > {b}.tmp && mv {b}.tmp {b}\n",
             b = o("brief"),
@@ -181,19 +181,19 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     wait_for(&out.join("add2"));
     // Reworded and made a chore; the body, left out, stays.
     human(
-        "valk todo edit 2 -t 'Someone else, renamed' -k chore -b 'the detail'",
+        "valk todo edit no-folder#1 -t 'Someone else, renamed' -k chore -b 'the detail'",
         "edit",
     );
     assert_eq!(
         wait_for(&out.join("edit")),
-        "#2 Someone else, renamed [p2 · chore] (no folder)\n"
+        "no-folder#1 Someone else, renamed [p2 · chore] (no folder)\n"
     );
-    human("valk todo edit 2 -k bug", "edit2");
+    human("valk todo edit no-folder#1 -k bug", "edit2");
     assert_eq!(
         wait_for(&out.join("edit2")),
-        "#2 Someone else, renamed [p2 · bug] (no folder)\n"
+        "no-folder#1 Someone else, renamed [p2 · bug] (no folder)\n"
     );
-    human("valk todo show 2", "show2");
+    human("valk todo show no-folder#1", "show2");
     assert!(
         wait_for(&out.join("show2")).contains("\nthe detail\n"),
         "the body is kept"
@@ -203,38 +203,38 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     wait_for(&out.join("add3"));
     human("valk todo add 'Still open'", "add4");
     wait_for(&out.join("add4"));
-    // Priority and what comes first decide what's next: #1 waits on #4.
-    human("valk todo edit 1 -p p1 --after 4", "after");
+    // Priority and what comes first decide what's next: #1 waits on #3.
+    human("valk todo edit 1 -p p1 --after 3", "after");
     assert_eq!(
         wait_for(&out.join("after")),
-        "#1 Tab rename eats the last letter [p1 after #4 · bug] (repo)\n"
+        "#1 Tab rename eats the last letter [p1 after #3 · bug] (repo)\n"
     );
-    human("valk todo edit 4 --after 1", "loop");
+    human("valk todo edit 3 --after 1", "loop");
     assert!(
-        wait_for(&out.join("loop")).contains("#1 already waits on #4"),
+        wait_for(&out.join("loop")).contains("#1 already waits on #3"),
         "no loops"
     );
     human("valk todo next -C .", "next");
     assert_eq!(
         wait_for(&out.join("next")),
-        "#3 Clients stay connected [p2 · feature] (repo)\n"
+        "#2 Clients stay connected [p2 · feature] (repo)\n"
     );
     human("valk todo list -C .", "ordered");
     let ordered = wait_for(&out.join("ordered"));
     let at = |id: &str| ordered.find(id).unwrap_or(usize::MAX);
-    assert!(at("#3 ") < at("#4 ") && at("#4 ") < at("#1 "), "{ordered}");
-    assert!(ordered.contains("(after #4)"), "{ordered}");
-    human("valk todo edit 1 -p p2 --not-after 4", "unafter");
+    assert!(at("#2 ") < at("#3 ") && at("#3 ") < at("#1 "), "{ordered}");
+    assert!(ordered.contains("(after #3)"), "{ordered}");
+    human("valk todo edit 1 -p p2 --not-after 3", "unafter");
     assert_eq!(
         wait_for(&out.join("unafter")),
         "#1 Tab rename eats the last letter [p2 · bug] (repo)\n"
     );
-    human("valk todo take 3", "human-take");
+    human("valk todo take 2", "human-take");
     assert!(
         wait_for(&out.join("human-take")).contains("from inside a valk session"),
         "outside every session there's nothing to follow"
     );
-    // One session at a time on an item: the user's own, here, holds #5.
+    // One session at a time on an item: the user's own, here, holds #4.
     human("valk todo add 'Held elsewhere'", "add5");
     wait_for(&out.join("add5"));
     let in_session = |script: &str, name: &str| {
@@ -246,12 +246,12 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     };
     let holder = in_session(
         &format!(
-            "valk todo take 5 > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            "valk todo take 4 > {o}.tmp 2>&1; mv {o}.tmp {o}",
             o = o("take5")
         ),
         "hold5",
     );
-    assert!(wait_for(&out.join("take5")).contains("#5 Held elsewhere taken"));
+    assert!(wait_for(&out.join("take5")).contains("#4 Held elsewhere taken"));
     human("valk todo launch 1", "launch");
     let launched = wait_for(&out.join("launch"));
     assert!(launched.trim().parse::<u32>().is_ok(), "{launched}");
@@ -286,21 +286,21 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     };
     assert!(list.contains("#1") && list.contains("to review"), "{list}");
     // A pull request open waits on review, whatever its session does.
-    let three = list.lines().find(|l| l.starts_with("#3 ")).unwrap_or("");
+    let three = list.lines().find(|l| l.starts_with("#2 ")).unwrap_or("");
     assert!(three.contains("PR open"), "{list}");
 
     // What the agent fixed along the way, filed and taken in one go: proposed, but
     // tracked like any taken item; and never launched before the user accepts it.
     assert_eq!(
         wait_for(&out.join("add-take")),
-        "#6 Found along the way (repo), taken; proposed until the user accepts it\n"
+        "#5 Found along the way (repo), taken; proposed until the user accepts it\n"
     );
     assert!(
         wait_for(&out.join("add-take-pr"))
-            .contains("#6 Found along the way taken (branch fix/found, PR")
+            .contains("#5 Found along the way taken (branch fix/found, PR")
     );
-    assert!(wait_for(&out.join("add-take-note")).starts_with("noted on #6"));
-    let six = list.lines().find(|l| l.starts_with("#6 ")).unwrap_or("");
+    assert!(wait_for(&out.join("add-take-note")).starts_with("noted on #5"));
+    let six = list.lines().find(|l| l.starts_with("#5 ")).unwrap_or("");
     assert!(
         six.contains("PR open") && six.ends_with(" (PR) (agent-filed)"),
         "{list}"
@@ -317,11 +317,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     };
     let in_repo = ids(&wait_for(&out.join("list-repo")));
     assert!(
-        in_repo.contains(&"#1".into()) && !in_repo.contains(&"#2".into()),
+        in_repo.contains(&"#1".into()) && !in_repo.contains(&"no-folder#1".into()),
         "{in_repo:?}"
     );
     human("valk todo list --no-folder", "list-none");
-    assert_eq!(ids(&wait_for(&out.join("list-none"))), ["#2"]);
+    assert_eq!(ids(&wait_for(&out.join("list-none"))), ["no-folder#1"]);
     human(
         &format!("valk todo list -C {}", dir.display()),
         "list-outside",
@@ -332,14 +332,14 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     );
     // Its own find, filed plainly: it may take it once the user says go ahead
     // in that session (ADR-0018), and then the card follows it.
-    assert!(wait_for(&out.join("add-later")).starts_with("#7 For later"));
+    assert!(wait_for(&out.join("add-later")).starts_with("#6 For later"));
     let took = wait_for(&out.join("take-later"));
-    assert!(took.contains("#7 For later taken"), "{took}");
-    let seven = list.lines().find(|l| l.starts_with("#7 ")).unwrap_or("");
+    assert!(took.contains("#6 For later taken"), "{took}");
+    let seven = list.lines().find(|l| l.starts_with("#6 ")).unwrap_or("");
     assert!(seven.ends_with(" (agent-filed)"), "{list}");
     // Filed and not taken, it waits on the user like any proposal.
-    assert!(wait_for(&out.join("add-left")).starts_with("#8 Left for you"));
-    let eight = list.lines().find(|l| l.starts_with("#8 ")).unwrap_or("");
+    assert!(wait_for(&out.join("add-left")).starts_with("#7 Left for you"));
+    let eight = list.lines().find(|l| l.starts_with("#7 ")).unwrap_or("");
     assert!(
         eight.contains("proposed") && !eight.contains("agent-filed"),
         "{list}"
@@ -353,10 +353,10 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         )) && refused.contains("you're already on it"),
         "{refused}"
     );
-    human("valk todo launch 6", "launch6");
+    human("valk todo launch 5", "launch6");
     let refused = wait_for(&out.join("launch6"));
     assert!(
-        refused.contains("#6 is proposed; accept it first"),
+        refused.contains("#5 is proposed; accept it first"),
         "{refused}"
     );
 
@@ -370,8 +370,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     // Its note on an item it isn't on lands too, as an aside that says where
     // it came from and stays out of that item's brief (backlog #153).
     let aside = wait_for(&out.join("not-mine"));
-    assert!(aside.starts_with("noted on #2 Someone else"), "{aside}");
-    human("valk todo show 2", "show2-aside");
+    assert!(
+        aside.starts_with("noted on no-folder#1 Someone else"),
+        "{aside}"
+    );
+    human("valk todo show no-folder#1", "show2-aside");
     let show2 = wait_for(&out.join("show2-aside"));
     assert!(
         show2.contains("note from claude (while on #1):\nseen while on #1"),
@@ -388,14 +391,14 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{show}"
     );
 
-    // The agent took #3 and #4 with their branches, and may note them, but
+    // The agent took #2 and #3 with their branches, and may note them, but
     // shipping stays the user's.
     assert_eq!(
         wait_for(&out.join("take")),
-        format!("#3 Clients stay connected taken (branch fix/3-clients, PR {PR})\n")
+        format!("#2 Clients stay connected taken (branch fix/3-clients, PR {PR})\n")
     );
     assert!(wait_for(&out.join("take4")).contains("taken (branch fix/4-open)"));
-    assert!(wait_for(&out.join("take-note")).starts_with("noted on #3"));
+    assert!(wait_for(&out.join("take-note")).starts_with("noted on #2"));
     let refused = wait_for(&out.join("agent-ship"));
     assert!(refused.contains("is for the user"), "{refused}");
     let refused = wait_for(&out.join("agent-ship-merged"));
@@ -405,11 +408,11 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     assert!(refused.contains("only the user changes that"), "{refused}");
     let refused = wait_for(&out.join("retake1"));
     assert!(refused.contains("its launch's branch"), "{refused}");
-    // Nor take #5 from the session on it, which only the user may.
+    // Nor take #4 from the session on it, which only the user may.
     let refused = wait_for(&out.join("held5"));
     assert!(
         refused.contains(&format!(
-            "#5 is already being worked on in session {holder} (sh, \"hold5\"); leave it to that session"
+            "#4 is already being worked on in session {holder} (sh, \"hold5\"); leave it to that session"
         )) && !refused.contains("--steal"),
         "{refused}"
     );
@@ -418,7 +421,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     // The user, in another session, is refused too, then hands it over with --steal.
     let take = |name: &str, steal: &str| {
         format!(
-            "valk todo take 5{steal} > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            "valk todo take 4{steal} > {o}.tmp 2>&1; mv {o}.tmp {o}",
             o = o(name)
         )
     };
@@ -435,18 +438,18 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         refused.contains("stop it first or take it with --steal"),
         "{refused}"
     );
-    assert!(wait_for(&out.join("steal5")).contains("#5 Held elsewhere taken"));
+    assert!(wait_for(&out.join("steal5")).contains("#4 Held elsewhere taken"));
     // Another session can't take an agent's find before the user accepts it.
     in_session(
         &format!(
-            "valk todo take 8 > {o}.tmp 2>&1; mv {o}.tmp {o}",
+            "valk todo take 7 > {o}.tmp 2>&1; mv {o}.tmp {o}",
             o = o("take8-other")
         ),
         "take8-tab",
     );
     let refused = wait_for(&out.join("take8-other"));
     assert!(
-        refused.contains("#8 is proposed; accept it first"),
+        refused.contains("#7 is proposed; accept it first"),
         "{refused}"
     );
     human("valk todo list --json", "list-json");
@@ -463,7 +466,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     );
     // A take never locks the user out: their launch hands it over, and the old
     // session keeps running. One launched on it does hold it.
-    human("valk todo launch 5", "launch5");
+    human("valk todo launch 4", "launch5");
     let on5 = wait_for(&out.join("launch5")).trim().to_owned();
     assert_eq!(wait_for(&out.join("launched5")), "on5\n");
     human("valk todo list --json", "list-json2");
@@ -484,20 +487,20 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         wait_for(&out.join("ls")).contains("steal5-tab"),
         "still running"
     );
-    human("valk todo launch 5", "relaunch5");
+    human("valk todo launch 4", "relaunch5");
     let refused = wait_for(&out.join("relaunch5"));
     assert!(
-        refused.contains(&format!("#5 is already being worked on in session {on5}"))
+        refused.contains(&format!("#4 is already being worked on in session {on5}"))
             && refused.contains("attach to it, or stop it first"),
         "{refused}"
     );
 
     // Back to the backlog: the launched session is stopped and forgotten, the
     // branch and worktree stay for the next launch, and the lane reads backlog.
-    human("valk todo return 5", "return5");
+    human("valk todo return 4", "return5");
     let said = wait_for(&out.join("return5"));
     assert!(
-        said.contains("#5 Held elsewhere: back in the backlog"),
+        said.contains("#4 Held elsewhere: back in the backlog"),
         "{said}"
     );
     human("valk ls", "ls-after-return");
@@ -519,15 +522,15 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     assert!(five["sessions"].is_null() || five["sessions"] == serde_json::json!([]));
     assert!(five["checkout"].is_string(), "worktree kept: {five}");
     assert_eq!(five["status"], "open");
-    human("valk todo return 5", "return5-again");
+    human("valk todo return 4", "return5-again");
     let refused = wait_for(&out.join("return5-again"));
-    assert!(refused.contains("#5 isn't started"), "{refused}");
+    assert!(refused.contains("#4 isn't started"), "{refused}");
     // One with a pull request is in review, not unstarted.
-    human("valk todo return 3", "return3");
+    human("valk todo return 2", "return3");
     let refused = wait_for(&out.join("return3"));
-    assert!(refused.contains("#3 has a pull request"), "{refused}");
+    assert!(refused.contains("#2 has a pull request"), "{refused}");
 
-    human("valk todo show 3", "show3");
+    human("valk todo show 2", "show3");
     let show = wait_for(&out.join("show3"));
     assert!(show.contains(&format!("\npr: {PR}\n")), "{show}");
     assert!(
@@ -540,7 +543,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         "{show}"
     );
 
-    // #3's branch is merged; #4's has work that isn't; #1's worktree has nothing
+    // #2's branch is merged; #3's has work that isn't; #1's worktree has nothing
     // of its own yet.
     for args in [
         &["checkout", "-q", "-b", "fix/3-clients"][..],
@@ -563,7 +566,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     let would = wait_for(&out.join("would-ship"));
     assert!(
         would.contains(&format!(
-            "#3 Clients stay connected: would ship fix/3-clients (set by a take), merged into main at {}\n",
+            "#2 Clients stay connected: would ship fix/3-clients (set by a take), merged into main at {}\n",
             repo_at.display()
         )),
         "{would}"
@@ -571,7 +574,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     // Shipping the agent's own item is the user's confirm, and its acceptance.
     assert!(
         would.contains(&format!(
-            "#6 Found along the way: would ship fix/found (agent-filed, not yet accepted), merged into main at {}\n",
+            "#5 Found along the way: would ship fix/found (agent-filed, not yet accepted), merged into main at {}\n",
             repo_at.display()
         )),
         "{would}"
@@ -580,24 +583,24 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
         would.contains("2 may ship: `valk todo ship --merged --yes`"),
         "{would}"
     );
-    human("valk todo show 3", "still-open");
+    human("valk todo show 2", "still-open");
     assert!(wait_for(&out.join("still-open")).contains(" · open · "));
     human("valk todo ship --merged --yes", "ship-merged");
     let merged = wait_for(&out.join("ship-merged"));
     assert!(
         merged.contains(&format!(
-            "#3 Clients stay connected: shipped fix/3-clients (set by a take), merged into main at {}\n",
+            "#2 Clients stay connected: shipped fix/3-clients (set by a take), merged into main at {}\n",
             repo_at.display()
         )),
         "{merged}"
     );
     assert!(
         merged
-            .contains("#6 Found along the way: shipped fix/found (agent-filed, not yet accepted)"),
+            .contains("#5 Found along the way: shipped fix/found (agent-filed, not yet accepted)"),
         "{merged}"
     );
     assert!(
-        merged.contains("#4 Still open: kept, not merged\n"),
+        merged.contains("#3 Still open: kept, not merged\n"),
         "{merged}"
     );
     assert!(
@@ -607,13 +610,13 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     human("valk todo list --all", "list-all");
     let list = wait_for(&out.join("list-all"));
     let line = |id: &str| list.lines().find(|l| l.starts_with(id)).unwrap_or("");
-    assert!(line("#3 ").contains("shipped"), "{list}");
-    assert!(line("#3 ").ends_with(" (PR)"), "{list}");
+    assert!(line("#2 ").contains("shipped"), "{list}");
+    assert!(line("#2 ").ends_with(" (PR)"), "{list}");
     assert!(
-        line("#6 ").contains("shipped") && !line("#6 ").contains("agent-filed"),
+        line("#5 ").contains("shipped") && !line("#5 ").contains("agent-filed"),
         "{list}"
     );
-    assert!(!line("#4 ").contains("shipped"), "{list}");
+    assert!(!line("#3 ").contains("shipped"), "{list}");
     assert!(worktree.exists(), "#1 stays as it was");
 
     human("valk todo ship 1", "ship");

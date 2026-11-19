@@ -92,6 +92,9 @@ export function waitingOn(item: Item, items: Item[]): number[] {
   );
 }
 
+/** What people call item `id`: its number in its repository, or `id` for one that's gone. */
+export const itemNo = (items: Item[], id: number): number => items.find((i) => i.id === id)?.number ?? id;
+
 /** The order to work items in, as the daemon's `order`: those waiting on nothing,
  * then by priority, then the oldest. */
 export function order(items: Item[]): (a: Item, b: Item) => number {
@@ -164,7 +167,7 @@ export function kindCounts(items: Item[]): Record<ItemKind, number> {
 /** Where an agent's note came from when that kept it out of the brief, as the
  * CLI and TUI say it (`ItemNote::origin`): ` · while on #9`, or empty. */
 export function noteOrigin(n: ItemNote): string {
-  if (n.aside) return n.from ? ` · while on #${n.from}` : " · from outside the item";
+  if (n.aside) return n.from ? ` · while on #${n.from_number || n.from}` : " · from outside the item";
   if (n.taken) return " · from a take";
   return "";
 }
@@ -184,10 +187,10 @@ export function prLink(pr: string | undefined): string | null {
 
 /** `Shipped #1 #4 · 2 not merged · #9 branch fix/x not found (as of the last fetch)`. */
 export function shippedSummary(shipped: ShippedItem[], kept: KeptItem[]): string {
-  const parts = [shipped.length ? `Shipped ${shipped.map((s) => `#${s.id}`).join(" ")}` : "Nothing merged to ship"];
+  const parts = [shipped.length ? `Shipped ${shipped.map((s) => `#${s.number || s.id}`).join(" ")}` : "Nothing merged to ship"];
   const notMerged = kept.filter((k) => k.why === "not merged").length;
   if (notMerged) parts.push(`${notMerged} not merged`);
-  for (const k of kept) if (k.why !== "not merged") parts.push(`#${k.id} ${k.why}`);
+  for (const k of kept) if (k.why !== "not merged") parts.push(`#${k.number || k.id} ${k.why}`);
   return `${parts.join(" · ")} (as of the last fetch)`;
 }
 
@@ -196,7 +199,7 @@ export function shippedSummary(shipped: ShippedItem[], kept: KeptItem[]): string
 export function wouldShip(shipped: ShippedItem[], kept: KeptItem[]): string {
   const mark = (s: ShippedItem) =>
     s.filed ? " (agent-filed, not yet accepted)" : s.branch_taken ? " (set by a take)" : "";
-  const found = shipped.map((s) => `#${s.id} ${s.branch}${mark(s)}, merged into ${s.against}`);
+  const found = shipped.map((s) => `#${s.number || s.id} ${s.branch}${mark(s)}, merged into ${s.against}`);
   const notMerged = kept.filter((k) => k.why === "not merged").length;
   const rest = notMerged ? ` · ${notMerged} not merged` : "";
   return `Tap again to ship ${found.join(" · ")}${rest} (as of the last fetch)`;
@@ -251,7 +254,7 @@ export function editChange(
   }
   if (clash.length) {
     const what = clash.join(" and ");
-    return { clash: `#${was.id}'s ${what} changed elsewhere since you opened it: save again to replace it`, was: seen };
+    return { clash: `#${was.number}'s ${what} changed elsewhere since you opened it: save again to replace it`, was: seen };
   }
   return Object.keys(change).length > 1 ? change : null;
 }
@@ -287,13 +290,13 @@ export function orderSize(order: OrderProposal): string {
 }
 
 /** What accepting `step` changes on `item`: `p2→p1, after #37`; empty for nothing. */
-export function stepChanges(step: OrderStep, item: Item | undefined): string {
+export function stepChanges(step: OrderStep, item: Item | undefined, items: Item[] = []): string {
   const parts: string[] = [];
   if (step.priority) parts.push(item ? `${priority(item)}→${step.priority}` : step.priority);
   if (step.blocked_by) {
     const had = item?.blocked_by ?? [];
     const added = step.blocked_by.filter((b) => !had.includes(b));
-    if (added.length) parts.push(`after ${added.map((b) => `#${b}`).join(", ")}`);
+    if (added.length) parts.push(`after ${added.map((b) => `#${itemNo(items, b)}`).join(", ")}`);
   }
   return parts.join(", ");
 }
@@ -302,10 +305,10 @@ export function stepChanges(step: OrderStep, item: Item | undefined): string {
 export const changesSomething = (step: OrderStep) => step.priority !== undefined || step.blocked_by !== undefined;
 
 /** The toast after answering a build order. */
-export function appliedSummary(accept: boolean, applied: OrderApplied): string {
+export function appliedSummary(accept: boolean, applied: OrderApplied, items: Item[] = []): string {
   if (!accept) return "Build order declined: nothing changed";
-  const changed = applied.changed.length ? `Changed ${applied.changed.map((i) => `#${i}`).join(" ")}` : "Nothing changed";
-  const left = (applied.skipped ?? []).map(([id, why]) => `#${id} left: ${why}`);
+  const changed = applied.changed.length ? `Changed ${applied.changed.map((i) => `#${itemNo(items, i)}`).join(" ")}` : "Nothing changed";
+  const left = (applied.skipped ?? []).map(([id, why]) => `#${itemNo(items, id)} left: ${why}`);
   return [changed, ...left].join("; ");
 }
 

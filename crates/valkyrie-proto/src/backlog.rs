@@ -112,7 +112,13 @@ impl ItemStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     /// Numbered from 1 across every project, so `valk todo launch 12` needs no folder.
+    /// The key everything stores and sends; what people read and type is `number`.
     pub id: u32,
+    /// The number within its repository, from 1: the `#N` a person sees. Items with
+    /// no repository share one count. 0 only on an item written before there were
+    /// numbers; the backlog fills those in when it loads them.
+    #[serde(default)]
+    pub number: u32,
     pub title: String,
     #[serde(default)]
     pub body: String,
@@ -271,6 +277,10 @@ pub struct ItemNote {
     /// For an aside, the item that agent was on, when it was on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<u32>,
+    /// `from`'s number in its repository, as people know it; 0 on a note from
+    /// before numbers, which then shows the id.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub from_number: u32,
 }
 
 impl ItemNote {
@@ -285,12 +295,23 @@ impl ItemNote {
     /// the CLI and TUI label it.
     pub fn origin(&self) -> Option<String> {
         match (self.aside, self.from, self.taken) {
-            (true, Some(from), _) => Some(format!("while on #{from}")),
+            (true, Some(from), _) => Some(format!(
+                "while on #{}",
+                if self.from_number == 0 {
+                    from
+                } else {
+                    self.from_number
+                }
+            )),
             (true, None, _) => Some("from outside the item".into()),
             (false, _, true) => Some("from a take".into()),
             _ => None,
         }
     }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn is_false(b: &bool) -> bool {
@@ -425,6 +446,9 @@ pub struct LaunchOffer {
     /// The repository's root.
     pub project: PathBuf,
     pub item: u32,
+    /// The item's number in its repository, as people know it.
+    #[serde(default)]
+    pub number: u32,
     /// The item's title, for a push or a banner.
     pub title: String,
     /// The agent and model it starts on: the item's last launch, else claude on
@@ -456,6 +480,9 @@ pub struct OrderApplied {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShippedItem {
     pub id: u32,
+    /// Its number in its repository.
+    #[serde(default)]
+    pub number: u32,
     pub title: String,
     /// The branch judged, and whether a take set it rather than a launch.
     #[serde(default)]
@@ -477,6 +504,9 @@ pub struct ShippedItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptItem {
     pub id: u32,
+    /// Its number in its repository; 0 for an item that's gone.
+    #[serde(default)]
+    pub number: u32,
     pub title: String,
     /// `not merged`, `branch fix/x not found`, `no commits of its own`, …
     pub why: String,
