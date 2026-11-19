@@ -1019,7 +1019,7 @@ fn adopted_branch(cwd: &std::path::Path) -> Option<String> {
 pub(crate) static AGENT_STANDIN: std::sync::Mutex<Option<Vec<String>>> =
     std::sync::Mutex::new(None);
 
-fn agent_command(agent: &str, model: &str, brief: String) -> Vec<String> {
+pub(crate) fn agent_command(agent: &str, model: &str, brief: String) -> Vec<String> {
     #[cfg(test)]
     if let Some(standin) = AGENT_STANDIN.lock().unwrap().clone() {
         return standin;

@@ -946,6 +946,48 @@ impl Store {
         self.base.join(project::key(root)).join("supervisor.jsonl")
     }
 
+    /// Records a prompt the supervisor session typed into a session in `root`
+    /// (ADR-0019 §10). Past [`FAILURES_COMPACT`] bytes, what no longer counts is
+    /// dropped first.
+    pub fn record_prompt(&self, root: &Path, prompt: &steps::Prompt, now: u64) -> Result<()> {
+        use std::io::Write;
+        self.mark_project(root)?;
+        let path = self.prompts_file(root);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > FAILURES_COMPACT) {
+            let kept: String = self
+                .prompts(root, now)
+                .iter()
+                .map(|p| format!("{}\n", p.to_json()))
+                .collect();
+            write_atomic(&path, &kept)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", prompt.to_json())?;
+        Ok(())
+    }
+
+    /// The supervisor session's prompts in `root` over the last
+    /// [`steps::STEP_DAYS`] days, oldest first.
+    pub fn prompts(&self, root: &Path, now: u64) -> Vec<steps::Prompt> {
+        std::fs::read_to_string(self.prompts_file(root))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| steps::Prompt::from_json(&v))
+            .filter(|p| now.saturating_sub(p.at) <= steps::STEP_DAYS * 86_400)
+            .collect()
+    }
+
+    fn prompts_file(&self, root: &Path) -> PathBuf {
+        self.base
+            .join(project::key(root))
+            .join("supervisor-prompts.jsonl")
+    }
+
     /// Records decisions served to a session in `root` (ADR-0014 §5). Written
     /// by the hooks themselves, so appends from two sessions can meet; each
     /// batch is one small write. Once the oldest line is a week past

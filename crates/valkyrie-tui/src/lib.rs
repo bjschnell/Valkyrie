@@ -2796,6 +2796,26 @@ impl App {
                 supervisor::Do::Close => self.supervisor = None,
                 supervisor::Do::Load => self.load_supervisor().await,
                 supervisor::Do::Say(text) => self.say(text),
+                supervisor::Do::OpenSession => {
+                    let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+                    // Another machine's daemon starts it in its own default.
+                    let (cwd, env) = match remote() {
+                        Some(_) => (std::path::PathBuf::new(), Vec::new()),
+                        None => (
+                            std::env::current_dir().unwrap_or_default(),
+                            valkyrie_proto::login_env(),
+                        ),
+                    };
+                    match self.client.supervisor_session(cwd, size, env).await {
+                        Ok(info) => {
+                            self.supervisor = None;
+                            self.refresh().await;
+                            self.attach(info.id).await;
+                            return;
+                        }
+                        Err(e) => self.say(format!("supervisor session: {e:#}")),
+                    }
+                }
                 supervisor::Do::TakeStep {
                     session,
                     seq,
@@ -6884,6 +6904,7 @@ mod tests {
             chat: None,
             overlap: None,
             report: None,
+            supervisor: false,
         }
     }
 

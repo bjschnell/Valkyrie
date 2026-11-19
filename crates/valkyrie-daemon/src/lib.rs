@@ -19,6 +19,7 @@ mod merge_order;
 mod merged;
 mod order;
 mod overlap;
+mod overseer;
 mod pairing;
 mod promote;
 mod pty;
@@ -162,6 +163,9 @@ struct Registry {
     /// a time.
     stale_checked: Mutex<HashMap<PathBuf, (Instant, Option<String>)>>,
     stale_check: tokio::sync::Mutex<()>,
+    /// Held while the supervisor session is looked for and started, so there's
+    /// only ever one (ADR-0019 §10).
+    overseer_start: Mutex<()>,
     /// Sessions whose agent just ended a turn, for `extract` to look at.
     turns: mpsc::UnboundedSender<SessionId>,
     /// Toasts raised with `valk notify`, for the clients watching notices.
@@ -555,6 +559,7 @@ fn new_registry(
         stale: Mutex::default(),
         stale_checked: Mutex::default(),
         stale_check: tokio::sync::Mutex::new(()),
+        overseer_start: Mutex::new(()),
         turns,
         turns_rx: Mutex::new(Some(turns_rx)),
         notes_written,
@@ -1092,6 +1097,10 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     // first time it starts or types into a session: those sessions then count as
     // the agent's doing, so it can't launder a decision through them.
     let mut driver: Option<Option<String>> = None;
+    // The supervisor session, when this connection is its (ADR-0019 §10): what
+    // it types into other sessions is checked and logged. Worked out the first
+    // time it types.
+    let mut overseer: Option<Option<Arc<session::Session>>> = None;
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (out, mut out_rx) = mpsc::channel::<Arc<ServerMsg>>(OUT_CAPACITY);
     let writer = tokio::spawn(async move {
@@ -1155,6 +1164,21 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Clients { req } => (req, Ok(registry.clients())),
             ClientMsg::Input { session, data } => {
                 if let Ok(s) = registry.get(session) {
+                    let from = overseer.get_or_insert_with(|| {
+                        registry.caller(peer).session.filter(|c| c.is_supervisor())
+                    });
+                    if let Some(from) = from
+                        && from.id != s.id
+                    {
+                        match registry.overseer_may_type(from, &s) {
+                            Ok(()) => registry.log_overseer_input(&s, &data),
+                            Err(why) => {
+                                tracing::warn!(session, %why, "supervisor session input dropped");
+                                s.log_refused_supervisor(&why);
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(agent) = driver.get_or_insert_with(|| registry.caller(peer).agent) {
                         // The merge guard's confirm is the user's to answer (ADR-0015 §1).
                         if s.at_guard_confirm() {
@@ -1462,6 +1486,12 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
             ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
             ClientMsg::Supervise { req, on } => (req, registry.supervise(on, peer)),
+            ClientMsg::SupervisorSession {
+                req,
+                cwd,
+                size,
+                env,
+            } => (req, registry.supervisor_session(cwd, size, env, peer)),
             ClientMsg::WriteDoc { req, doc } => (req, registry.write_doc(doc, peer)),
             ClientMsg::ReadDoc { req, which } => (req, registry.read_doc(&which)),
             ClientMsg::EditDoc {

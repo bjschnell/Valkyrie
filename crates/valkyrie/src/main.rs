@@ -379,10 +379,15 @@ enum Cmd {
     },
     /// Whether the supervisor offers and takes steps on flagged sessions
     /// (ADR-0019): on (the default) or off. Off, the PR poll still flags them.
-    /// Without one, shows which.
+    /// Without one, shows which. `session` starts the supervisor session: one
+    /// Claude session that reads every agent session and prompts the idle ones
+    /// (or finds the one already running) and prints its id.
     Supervise {
-        #[arg(value_parser = ["on", "off"])]
+        #[arg(value_parser = ["on", "off", "session"])]
         mode: Option<String>,
+        /// With `session`: open it in the TUI.
+        #[arg(long)]
+        attach: bool,
     },
     /// Raise a toast on every open `valk`, with a sound if you ask for one. With none
     /// open, it is a desktop notification (and the sound) from this process.
@@ -1282,7 +1287,35 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Supervise { mode }) => {
+        Some(Cmd::Supervise { mode, attach }) if mode.as_deref() == Some("session") => {
+            if attach {
+                require_tty()?;
+            }
+            let (client, pushes) = connect(&socket).await?;
+            let size = valkyrie_tui::session_size()
+                .ok()
+                .filter(|s| s.cols >= 20 && s.rows >= 4)
+                .unwrap_or(Size {
+                    cols: 120,
+                    rows: 40,
+                });
+            let (cwd, env) = match is_remote() {
+                // Its daemon's home: this machine's directory means nothing there.
+                true => (PathBuf::new(), Vec::new()),
+                false => (std::env::current_dir()?, valkyrie_proto::login_env()),
+            };
+            let info = client.supervisor_session(cwd, size, env).await?;
+            if attach {
+                valkyrie_tui::run(client, pushes, Some(info.id), socket).await
+            } else {
+                println!("{}", info.id);
+                Ok(())
+            }
+        }
+        Some(Cmd::Supervise { mode, attach }) => {
+            if attach {
+                bail!("--attach goes with `valk supervise session`");
+            }
             let client = connect(&socket).await?.0;
             let on = client.supervise(mode.map(|m| m == "on")).await?;
             println!(
