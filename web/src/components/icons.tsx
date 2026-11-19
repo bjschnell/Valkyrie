@@ -76,6 +76,11 @@ export const Page = () => (
     <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5zM14 3v5h5M9 13h6M9 17h4" />
   </svg>
 );
+export const Book = () => (
+  <svg {...base}>
+    <path d="M4 19.5V5a2 2 0 012-2h14v16H6a2 2 0 00-2 2.5zM4 19.5A2.5 2.5 0 006.5 22H20M9 7h7M9 11h5" />
+  </svg>
+);
 export const Clock = () => (
   <svg {...base}>
     <circle cx="12" cy="12" r="9" />

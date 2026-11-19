@@ -5261,3 +5261,30 @@ html[data-vt="glide"]::view-transition-group(*) {
     margin-block: -11px;
   }
 }
+
+/* The repository wiki (backlog #210): its count, and the buttons that start
+   the agent that writes it. */
+.wiki-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.wiki-actions .digest-about {
+  margin: 0 var(--space-05);
+}
+.wiki-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.kind-chip.wiki-stale {
+  color: var(--needs);
+}
+.wiki-stale-why {
+  margin: 0 var(--space-05) var(--space-3);
+  color: var(--needs);
+  font-size: var(--text-md);
+}

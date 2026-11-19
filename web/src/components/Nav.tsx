@@ -6,9 +6,9 @@ import { prefetch } from "../cache";
 import { allDocs, pastSessions, supervisorLog, useApp } from "../store";
 import { fetchMemory } from "./DecisionList";
 import { HostButton } from "./Hosts";
-import { Clock, Dots, Eye, Gear, List, Page, Pin, Plus, Rewind, Search, Tray } from "./icons";
+import { Book, Clock, Dots, Eye, Gear, List, Page, Pin, Plus, Rewind, Search, Tray } from "./icons";
 
-export type NavKey = "inbox" | "backlog" | "docs" | "memory" | "search" | "digest" | "past" | "supervisor" | "settings";
+export type NavKey = "inbox" | "backlog" | "docs" | "memory" | "wiki" | "search" | "digest" | "past" | "supervisor" | "settings";
 
 interface Dest {
   key: NavKey;
@@ -30,6 +30,7 @@ const DESTS: Record<NavKey, Dest> = {
     icon: Pin,
     warm: () => prefetch("memory", fetchMemory),
   },
+  wiki: { key: "wiki", hash: "#/wiki", label: "Wiki", icon: Book },
   search: { key: "search", hash: "#/search", label: "Search", icon: Search },
   digest: { key: "digest", hash: "#/summary", label: "Summary", icon: Clock },
   past: { key: "past", hash: "#/history", label: "History", icon: Rewind, warm: () => prefetch("past", pastSessions) },
@@ -45,9 +46,9 @@ const DESTS: Record<NavKey, Dest> = {
 
 /** On a phone's bar; the rest live under More. */
 const TABS: NavKey[] = ["inbox", "backlog", "docs", "memory"];
-const MORE: NavKey[] = ["search", "digest", "past", "supervisor", "settings"];
+const MORE: NavKey[] = ["wiki", "search", "digest", "past", "supervisor", "settings"];
 /** Down a desktop's rail, then Settings at its foot. */
-const RAIL: NavKey[] = ["inbox", "backlog", "docs", "memory", "search", "digest", "past", "supervisor"];
+const RAIL: NavKey[] = ["inbox", "backlog", "docs", "memory", "wiki", "search", "digest", "past", "supervisor"];
 
 /** Every page, for the command palette. */
 export const PAGES = [...RAIL, "settings" as const].map((k) => ({ label: DESTS[k].label, hash: DESTS[k].hash }));

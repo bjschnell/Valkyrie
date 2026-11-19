@@ -30,6 +30,7 @@ mod supervise;
 mod sweep;
 mod usage;
 mod watching;
+mod wiki;
 pub mod work;
 mod worktree;
 
@@ -1318,6 +1319,44 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 )
             }
             ClientMsg::NoteRm { req, cwd, id } => (req, registry.note_rm(&cwd, id, peer)),
+            ClientMsg::Wiki { req, cwd } => {
+                // Staleness runs `git`: off the connection's thread.
+                let registry = registry.clone();
+                let listed = tokio::task::spawn_blocking(move || registry.wiki(&cwd)).await;
+                (
+                    req,
+                    listed.map_err(|e| anyhow::anyhow!("listing the wiki: {e}")),
+                )
+            }
+            ClientMsg::WikiPage { req, cwd, page } => {
+                let registry = registry.clone();
+                let read =
+                    tokio::task::spawn_blocking(move || registry.wiki_page(&cwd, &page)).await;
+                (
+                    req,
+                    read.unwrap_or_else(|e| Err(anyhow::anyhow!("reading the wiki: {e}"))),
+                )
+            }
+            ClientMsg::WikiExplore {
+                req,
+                cwd,
+                stale,
+                agent,
+                size,
+                env,
+            } => {
+                let result = match registry.wiki_explore(&cwd, stale, &agent, size, env).await {
+                    Ok((reply, started)) => {
+                        let reply = Ok(reply);
+                        if started {
+                            mark_driven(&registry, &reply, &mut driver, peer);
+                        }
+                        reply
+                    }
+                    Err(e) => Err(e),
+                };
+                (req, result)
+            }
             ClientMsg::Review {
                 req,
                 project,

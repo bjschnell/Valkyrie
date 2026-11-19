@@ -322,6 +322,38 @@ pub fn brief(pages: &[Page], stale: &[&Page], valk: &str) -> String {
     )
 }
 
+/// The brief for exploring `root`, whose wiki is `pages`: all of it, or with
+/// `stale_only` just the stale pages, refused when none is.
+pub fn explore_brief(root: &Path, pages: &[Page], stale_only: bool, valk: &str) -> Result<String> {
+    if !root.join(".git").exists() {
+        bail!("{} isn't a git repository", root.display());
+    }
+    if !stale_only {
+        return Ok(brief(pages, &[], valk));
+    }
+    let why = staleness(root, pages);
+    let stale: Vec<&Page> = pages.iter().filter(|p| why.contains_key(&p.slug)).collect();
+    if stale.is_empty() {
+        bail!("no page is stale");
+    }
+    Ok(brief(pages, &stale, valk))
+}
+
+/// A page as the protocol carries it; `body` false leaves the body out, as a
+/// listing does.
+pub fn wire(p: &Page, stale: Option<&String>, body: bool) -> valkyrie_proto::WikiPage {
+    valkyrie_proto::WikiPage {
+        slug: p.slug.clone(),
+        title: p.title.clone(),
+        summary: p.summary.clone(),
+        scope: p.scope.clone(),
+        commit: p.commit.clone(),
+        updated: p.updated,
+        stale: stale.cloned(),
+        body: if body { p.body.clone() } else { String::new() },
+    }
+}
+
 impl Store {
     fn wiki_dir(&self, root: &Path) -> PathBuf {
         self.base.join(project::key(root)).join("wiki")

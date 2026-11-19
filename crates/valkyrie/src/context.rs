@@ -899,22 +899,9 @@ pub(crate) fn store_base() -> PathBuf {
         .unwrap_or_else(valkyrie_context::Store::default_base)
 }
 
-/// How an agent should run Valkyrie: `valk` when that is this binary on `$PATH`,
-/// else this binary's full path.
+/// How an agent should run Valkyrie (`valkyrie_context::valk_command`).
 pub(crate) fn valk_command() -> String {
-    let Ok(me) = std::env::current_exe().and_then(|me| valkyrie_proto::canonical(&me)) else {
-        return "valk".into();
-    };
-    let name = format!("valk{}", std::env::consts::EXE_SUFFIX);
-    let on_path = std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path)
-            .any(|dir| valkyrie_proto::canonical(&dir.join(&name)).is_ok_and(|p| p == me))
-    });
-    if on_path {
-        "valk".into()
-    } else {
-        me.to_string_lossy().into_owned()
-    }
+    valkyrie_context::valk_command()
 }
 
 /// `valk context-hook <agent>`: Claude Code's and Codex's context hook. At session
