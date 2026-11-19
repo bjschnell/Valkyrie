@@ -122,7 +122,7 @@ const TITLE: Record<PageKey, string> = {
   backlog: "Backlog",
   decisions: "Memory",
   docs: "Docs",
-  digest: "Digest",
+  digest: "Summary",
   past: "Past sessions",
   search: "Search",
   supervisor: "Supervisor",

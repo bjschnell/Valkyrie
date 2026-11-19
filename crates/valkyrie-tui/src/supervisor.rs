@@ -117,6 +117,8 @@ pub(crate) struct Page {
     /// The pull requests it watches, as the poll last read them (backlog #181).
     watch: Option<Result<Watch, String>>,
     cursor: usize,
+    /// Item id to the number its repository calls it, for the watched PRs' lines.
+    pub(crate) numbers: std::collections::HashMap<u32, u32>,
 }
 
 impl Page {
@@ -226,7 +228,13 @@ impl Page {
             lines.push(line);
         }
         lines.push(Line::default());
-        lines.extend(watch_lines(self.watch.as_ref(), inner, now_ms / 1000, t));
+        lines.extend(watch_lines(
+            self.watch.as_ref(),
+            &self.numbers,
+            inner,
+            now_ms / 1000,
+            t,
+        ));
         lines.push(Line::default());
         let on = self.log.as_ref().is_none_or(|(_, on)| *on);
         lines.push(Line::from(vec![
@@ -300,6 +308,7 @@ impl Page {
 /// next.
 fn watch_lines(
     watch: Option<&Result<Watch, String>>,
+    numbers: &std::collections::HashMap<u32, u32>,
     inner: usize,
     now: u64,
     t: &Theme,
@@ -348,7 +357,7 @@ fn watch_lines(
                     PrState::Pending | PrState::Unknown => t.muted,
                 };
                 let whose = match (pr.item, &pr.branch) {
-                    (Some(i), _) => format!("#{i}"),
+                    (Some(i), _) => format!("#{}", numbers.get(&i).copied().unwrap_or(i)),
                     (None, Some(b)) => b.clone(),
                     (None, None) => String::new(),
                 };
@@ -417,7 +426,7 @@ fn describe(w: &Wait) -> (&'static str, String, String) {
         ),
         Wait::Launch(o) => (
             "ready",
-            format!("#{} {} ({})", o.item, o.title, o.why),
+            format!("#{} {} ({})", o.number, o.title, o.why),
             "a start · d leave".into(),
         ),
         Wait::Order { project, steps, .. } => (
@@ -558,9 +567,32 @@ mod tests {
     }
 
     #[test]
+    fn a_watched_pr_says_its_items_repository_number() {
+        let pr: valkyrie_proto::WatchedPr = serde_json::from_value(serde_json::json!({
+            "url": "u", "project": "/r/app", "item": 231, "state": "red",
+            "detail": "CI red on PR #101: lint", "read_at": 880
+        }))
+        .unwrap();
+        let watch = Ok(Watch {
+            prs: vec![pr],
+            polled_at: Some(880),
+            next_at: None,
+            on: true,
+        });
+        let numbers = std::collections::HashMap::from([(231, 7)]);
+        let text = watch_lines(Some(&watch), &numbers, 80, 1_000, &crate::theme::VALKYRIE)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("#7"), "{text}");
+        assert!(!text.contains("#231"), "{text}");
+    }
+
+    #[test]
     fn watching_says_each_pr_and_when_it_reads_them_next() {
         let text = |w: Option<&Result<Watch, String>>| {
-            watch_lines(w, 80, 1_000, &crate::theme::VALKYRIE)
+            watch_lines(w, &Default::default(), 80, 1_000, &crate::theme::VALKYRIE)
                 .iter()
                 .map(|l| l.to_string())
                 .collect::<Vec<_>>()

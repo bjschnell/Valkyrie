@@ -5,6 +5,7 @@ import { markSeen, sendTo, toast, useApp } from "../store";
 import { Back, Chevron, Send } from "./icons";
 import { MicButton } from "./Mic";
 import { usePageKeys } from "../lib/pageKeys";
+import { scrollMotion } from "../lib/motion";
 
 const BADGE: Record<Change, string> = {
   modified: "M",
@@ -104,7 +105,7 @@ export function ReviewView({ id }: { id: number }) {
   const files = review?.files ?? [];
   const move = (by: number) => {
     focus.current = Math.max(0, Math.min(files.length - 1, focus.current + by));
-    cards.current[focus.current]?.scrollIntoView({ block: "start", behavior: "smooth" });
+    cards.current[focus.current]?.scrollIntoView({ block: "start", behavior: scrollMotion() });
   };
   usePageKeys("review", {
     j: () => move(1),

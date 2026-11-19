@@ -12,7 +12,7 @@ valk pings                 # where agents stopped and waited on you, last 30 day
 valk stats                 # is Valkyrie helping? the agents week by week, this repo
 valk notes                 # findings agents left about this repo (unreviewed, never injected)
 valk notes search WORDS    # those notes and past sessions here: what failed, what fixed it
-valk digest                # what every agent did while you were gone, as markdown
+valk summary                # what every agent did while you were gone, as markdown
 valk sessions              # agent sessions that ended, newest first, numbered
 valk sessions resume 1 -a  # pick the newest back up where it left off, and attach
 valk search WORDS          # the session where you (or an agent) said or did something
@@ -86,7 +86,7 @@ Agents learn of it from their session-start context.
 
 ## What happened while you were gone
 
-`valk digest` gives a line for each agent session since you were last away, grouped
+`valk summary` gives a line for each agent session since you were last away, grouped
 by repository: shipped, stuck, abandoned, waiting on PR/CI, still working or
 done, with why ("PR #12 merged", "CI red on PR #9", "ended with uncommitted
 changes") and the agent's own last line. It counts you as gone after 30
@@ -94,9 +94,9 @@ minutes without typing into any session. It's markdown, so you can paste it as
 a standup.
 
 ```sh
-valk digest                       # since you were last gone
-valk digest --since yesterday --by day
-valk digest --since 12h --json
+valk summary                       # since you were last gone
+valk summary --since yesterday --by day
+valk summary --since 12h --json
 ```
 
 The TUI has it too: `w` on the home screen. `w` steps through since you left,
@@ -168,7 +168,7 @@ per session, newest first, with the time and the line that matched. Each hit
 also says how to get back to that session: `valk attach N` while it's running,
 or for a closed one a `valk new … -- claude --resume <id>` that picks its
 conversation up again in a new session where it worked. It looks back up to 31
-days, the same logs the digest reads.
+days, the same logs the summary reads.
 
 ```sh
 valk search zoom pane                 # every session, the last 31 days
