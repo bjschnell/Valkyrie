@@ -297,7 +297,7 @@ impl Registry {
         let id = item.id;
         let mut note = None;
         if item.status == ItemStatus::Shipped && item.checkout.is_some() {
-            let (removed, said) = self.take_checkout(&item).await?;
+            let (removed, said) = self.take_checkout(&item, true).await?;
             if removed {
                 item = self.backlog.lock().unwrap().cleared(id, now_secs())?;
             }
@@ -919,7 +919,9 @@ impl Registry {
         }
         let mut note = None;
         if item.checkout.is_some() {
-            let (removed, said) = self.take_checkout(&item).await?;
+            // Its branch stays if it isn't merged, so unmerged work doesn't keep
+            // the worktree as shipping does: else nothing could delete the item.
+            let (removed, said) = self.take_checkout(&item, false).await?;
             if !removed {
                 bail!("{said}; ship or drop #{} instead", item.number);
             }
@@ -939,7 +941,9 @@ impl Registry {
 
     /// Takes an item's worktree away if nothing runs in it and it's clean, with its
     /// branch if that's merged. Says whether the worktree is gone, and what happened.
-    async fn take_checkout(&self, item: &Item) -> Result<(bool, String)> {
+    /// A worktree on another branch stays; so, with `unmerged`, does one holding
+    /// commits not in the default branch (backlog #238).
+    async fn take_checkout(&self, item: &Item, unmerged: bool) -> Result<(bool, String)> {
         let (Some(project), Some(checkout)) = (item.project.clone(), item.checkout.clone()) else {
             return Ok((true, String::new()));
         };
@@ -968,7 +972,8 @@ impl Registry {
         let branch = item.branch.clone();
         Ok(tokio::task::spawn_blocking(move || {
             if checkout.is_dir()
-                && let Some(why) = worktree::kept_for(&project, &checkout, branch.as_deref())
+                && let Some(why) =
+                    worktree::kept_for(&project, &checkout, branch.as_deref(), unmerged)
             {
                 return (false, format!("kept {}: {why}", checkout.display()));
             }
