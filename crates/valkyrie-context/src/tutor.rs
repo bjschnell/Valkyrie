@@ -15,7 +15,9 @@ const LESSONS: &str = include_str!("tutor.md");
 /// The brief the tutor starts with. `valk` is how its agent runs Valkyrie
 /// (`valk_command`): a path when `valk` isn't on PATH.
 pub fn brief(valk: &str) -> String {
-    LESSONS.replace("{valk}", valk)
+    // A Windows checkout may give the file CRLF line endings; the brief and the
+    // skill written from it keep plain `\n` on every platform.
+    LESSONS.replace("\r\n", "\n").replace("{valk}", valk)
 }
 
 /// The tutor as a Claude Code skill (`SKILL.md`).
@@ -40,6 +42,10 @@ mod tests {
         );
         // What the learner types stays `valk`.
         assert!(b.contains("`valk ls`"));
+        assert!(
+            !b.contains('\r'),
+            "CRLF from the checkout leaked into the brief"
+        );
     }
 
     #[test]
