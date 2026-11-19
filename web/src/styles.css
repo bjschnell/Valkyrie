@@ -3377,6 +3377,14 @@ html.with-tabs .offline-banner {
 .prio-p2,
 .prio-p3 { --kind: var(--soft); }
 .item-after { color: var(--interrupted); }
+.item-live.item-group { color: var(--accent); }
+.item-pieces {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.item-piece-done { color: var(--muted); }
 
 .icon-btn {
   position: relative;

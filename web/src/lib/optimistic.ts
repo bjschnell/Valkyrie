@@ -75,6 +75,7 @@ export function editPatch(change: Extract<ItemChange, { do: "edit" }>): Partial<
   if (change.cwd !== undefined) patch.project = change.cwd ?? undefined;
   if (change.priority !== undefined) patch.priority = change.priority;
   if (change.blocked_by !== undefined) patch.blocked_by = [...new Set(change.blocked_by)].sort((a, b) => a - b);
+  if (change.parent !== undefined) patch.parent = change.parent || undefined;
   return patch;
 }
 

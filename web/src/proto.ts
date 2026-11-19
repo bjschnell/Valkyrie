@@ -489,6 +489,10 @@ export interface Item {
   priority?: Priority;
   /** Items to finish first: advisory, it sorts below the ready ones while one is open. */
   blocked_by?: number[];
+  /** The item it's a piece of (protocol 46): one level deep, same repository. */
+  parent?: number;
+  /** Its pull request merged while some of its pieces were open: it ships with them. */
+  pr_merged?: boolean;
   /** The repository it's for; absent until one is picked. */
   project?: string;
   attachments?: string[];
@@ -580,6 +584,8 @@ export interface NewItem {
   attachments: string[];
   priority?: Priority;
   blocked_by?: number[];
+  /** The item it's a piece of; it goes in that item's repository. */
+  parent?: number;
 }
 
 export type ItemChange =
@@ -592,6 +598,8 @@ export type ItemChange =
       priority?: Priority;
       /** The whole list, replacing the item's; empty clears it. */
       blocked_by?: number[];
+      /** The item it's a piece of; 0 makes it stand alone again. */
+      parent?: number;
     }
   | { do: "status"; status: ItemStatus }
   /** Puts a started item back in the backlog and stops its sessions (protocol 28). */

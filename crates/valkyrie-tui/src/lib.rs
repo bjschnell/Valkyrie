@@ -3470,6 +3470,7 @@ impl App {
                             cwd,
                             priority,
                             blocked_by: None,
+                            parent: None,
                         },
                     )
                     .await?;
@@ -3857,7 +3858,15 @@ impl App {
             if let Some(page) = &self.backlog {
                 let rows = self.backlog_rows();
                 let t = self.settings.theme;
-                page.draw(frame, &rows, &self.sessions, self.boot(), now_ms(), t);
+                page.draw(
+                    frame,
+                    &rows,
+                    &self.items,
+                    &self.sessions,
+                    self.boot(),
+                    now_ms(),
+                    t,
+                );
             }
         })?;
         Ok(())
@@ -7870,6 +7879,8 @@ mod tests {
                             .filter(|m| matches!(m, ClientMsg::AddItem { item, .. } if item.body != "fail"))
                             .count() as u32;
                         let item = Item {
+                            parent: None,
+                            pr_merged: false,
                             priority: Default::default(),
                             blocked_by: Vec::new(),
                             id,
@@ -7921,6 +7932,8 @@ mod tests {
             launches: Vec::new(),
             orders: Vec::new(),
             items: vec![Item {
+                parent: None,
+                pr_merged: false,
                 priority: Default::default(),
                 blocked_by: Vec::new(),
                 id: 9,
@@ -8092,6 +8105,8 @@ mod tests {
         let mut app = App::new(client, PathBuf::new());
         app.settings = Settings::default();
         let item = |id: u32, title: &str, status: valkyrie_proto::ItemStatus| Item {
+            parent: None,
+            pr_merged: false,
             priority: Default::default(),
             blocked_by: Vec::new(),
             id,
@@ -8162,6 +8177,7 @@ mod tests {
                 page.draw(
                     f,
                     &app.backlog_rows(),
+                    &app.items,
                     &app.sessions,
                     0,
                     0,
@@ -8208,6 +8224,7 @@ mod tests {
                 page.draw(
                     f,
                     &app.backlog_rows(),
+                    &app.items,
                     &app.sessions,
                     0,
                     0,
@@ -9856,6 +9873,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-bpanel-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         let waiting = Item {
+            parent: None,
+            pr_merged: false,
             priority: Default::default(),
             blocked_by: Vec::new(),
             id: 2,

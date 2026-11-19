@@ -92,6 +92,15 @@ export function waitingOn(item: Item, items: Item[]): number[] {
   );
 }
 
+/** The items that are pieces of `item`, the oldest first. */
+export const pieces = (item: Item, items: Item[]): Item[] => items.filter((i) => i.parent === item.id);
+
+/** How many of `item`'s pieces are shipped or dropped, of how many it has. */
+export function progress(item: Item, items: Item[]): [number, number] {
+  const all = pieces(item, items);
+  return [all.filter((i) => i.status === "shipped" || i.status === "dropped").length, all.length];
+}
+
 /** What people call item `id`: its number in its repository, or `id` for one that's gone. */
 export const itemNo = (items: Item[], id: number): number => items.find((i) => i.id === id)?.number ?? id;
 
@@ -216,7 +225,7 @@ export function wouldShip(shipped: ShippedItem[], kept: KeptItem[]): string {
 export function editChange(
   was: Item | null,
   now: Item | null,
-  mine: { title: string; body: string; kind: ItemKind; project: string | null; priority?: Priority; blocked_by?: number[] },
+  mine: { title: string; body: string; kind: ItemKind; project: string | null; priority?: Priority; blocked_by?: number[]; parent?: number },
 ): ItemChange | { clash: string; was: Item } | null {
   if (!was) return null;
   const change: Extract<ItemChange, { do: "edit" }> = { do: "edit" };
@@ -251,6 +260,11 @@ export function editChange(
   if (mine.blocked_by && other("order", ids(mine.blocked_by), ids(was.blocked_by), ids((now ?? was).blocked_by))) {
     change.blocked_by = mine.blocked_by;
     if (now) seen = { ...seen, blocked_by: now.blocked_by };
+  }
+  // 0 for none, as the daemon takes it.
+  if (mine.parent !== undefined && other("group", mine.parent, was.parent ?? 0, (now ?? was).parent ?? 0)) {
+    change.parent = mine.parent;
+    if (now) seen = { ...seen, parent: now.parent };
   }
   if (clash.length) {
     const what = clash.join(" and ");

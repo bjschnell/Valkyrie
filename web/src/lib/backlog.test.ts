@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -237,6 +237,14 @@ describe("editChange", () => {
     expect(editChange(was, now, { ...mine, priority: "p2" })).toBeNull();
   });
 
+  it("sends the group only when changed here, 0 for none", () => {
+    expect(editChange(was, was, { ...mine, parent: 0 })).toBeNull();
+    expect(editChange(was, was, { ...mine, parent: 7 })).toEqual({ do: "edit", parent: 7 });
+    const grouped = { ...was, parent: 7 };
+    expect(editChange(grouped, grouped, { ...mine, parent: 0 })).toEqual({ do: "edit", parent: 0 });
+    expect(editChange(was, grouped, { ...mine, parent: 8 })).toMatchObject({ clash: expect.stringMatching(/group/) });
+  });
+
   it("keeps a change made elsewhere to a field not touched here", () => {
     const now = { ...was, body: "rewritten on the phone" };
     expect(editChange(was, now, { ...mine, title: "new" })).toEqual({ do: "edit", title: "new" });
@@ -438,5 +446,21 @@ describe("the kind filter", () => {
 
   it("counts what's still to do of each kind", () => {
     expect(kindCounts(items)).toEqual({ bug: 2, feature: 1, chore: 0, spike: 0, debt: 0 });
+  });
+});
+
+describe("groups", () => {
+  const all = [
+    item({ id: 1, number: 1 }),
+    item({ id: 2, number: 2, parent: 1, status: "shipped" }),
+    item({ id: 3, number: 3, parent: 1 }),
+    item({ id: 4, number: 4, parent: 1, status: "dropped" }),
+    item({ id: 5, number: 5 }),
+  ];
+
+  it("finds a parent's pieces and counts the closed ones", () => {
+    expect(pieces(all[0], all).map((i) => i.id)).toEqual([2, 3, 4]);
+    expect(progress(all[0], all)).toEqual([2, 3]);
+    expect(progress(all[4], all)).toEqual([0, 0]);
   });
 });
