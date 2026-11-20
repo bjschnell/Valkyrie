@@ -4518,7 +4518,8 @@ impl App {
                 if row == self.selected {
                     let mut spans = vec!["▌".fg(t.accent)];
                     spans.extend(line.spans.into_iter().skip(1));
-                    Line::from(spans).style(style::Style::new().bg(t.selection))
+                    t.lift_faint(Line::from(spans))
+                        .style(style::Style::new().bg(t.selection))
                 } else {
                     line
                 }
@@ -6218,12 +6219,13 @@ fn inbox_session_row(
         text.push(report.clone().fg(t.secondary()));
     }
     if s.status.agent != "generic" && !s.status.hooked {
-        text.push("  no hooks yet".fg(t.blocked).italic());
+        text.push("  no hooks yet".fg(t.secondary()).italic());
     }
     // Another live agent changed the same files (ADR-0019 §1).
     if let Some(overlap) = &s.overlap {
-        text.push("  ⚠ ".fg(t.blocked));
-        text.push(overlap.clone().fg(t.blocked));
+        // A warning, not a state: the glyph says so, the stuck color would lie.
+        text.push("  ⚠ ".fg(t.secondary()));
+        text.push(overlap.clone().fg(t.secondary()));
     }
     inbox_row(
         (state, spin),

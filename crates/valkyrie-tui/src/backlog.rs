@@ -1754,7 +1754,9 @@ fn item_line(
     if selected {
         let pad = (width as usize).saturating_sub(line.width());
         line.spans.push(" ".repeat(pad).into());
-        line = line.style(style::Style::new().bg(t.selection));
+        line = t
+            .lift_faint(line)
+            .style(style::Style::new().bg(t.selection));
     }
     line
 }

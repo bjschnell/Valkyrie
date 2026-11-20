@@ -791,6 +791,23 @@ impl Theme {
         mix(self.fg, self.muted, 0.6)
     }
 
+    /// `line` for the selected row: its faint words lifted to the muted level, so
+    /// they stay readable on the selection background in the light themes.
+    pub fn lift_faint(&self, line: ratatui::text::Line<'static>) -> ratatui::text::Line<'static> {
+        let dim = self.dim();
+        let spans = line
+            .spans
+            .into_iter()
+            .map(|mut s| {
+                if s.style.fg == Some(self.muted) {
+                    s.style.fg = Some(dim);
+                }
+                s
+            })
+            .collect::<Vec<_>>();
+        ratatui::text::Line { spans, ..line }
+    }
+
     /// The accent at 70%: the marker of items agents filed.
     pub fn accent_dim(&self) -> Color {
         mix(self.accent, self.bg, 0.3)
@@ -867,6 +884,18 @@ mod tests {
         }
         assert_eq!(Theme::by_name(" Cyberpunk\n").unwrap().name, "cyberpunk");
         assert!(Theme::by_name("nope").is_none());
+    }
+
+    #[test]
+    fn the_selected_row_lifts_faint_words_and_leaves_the_rest() {
+        use ratatui::style::Stylize;
+        for t in THEMES {
+            let line = ratatui::text::Line::from(vec!["api".fg(t.muted), "name".fg(t.fg)]);
+            let lifted = t.lift_faint(line);
+            assert_eq!(lifted.spans[0].style.fg, Some(t.dim()), "{}", t.name);
+            assert_eq!(lifted.spans[1].style.fg, Some(t.fg));
+            assert_ne!(t.dim(), t.muted, "{}: muted sits above faint", t.name);
+        }
     }
 
     #[test]
