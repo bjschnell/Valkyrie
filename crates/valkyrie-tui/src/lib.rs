@@ -16,6 +16,7 @@ mod history;
 mod keys;
 mod links;
 mod markdown;
+mod memory;
 mod mini;
 mod mouse;
 mod panes;
@@ -300,6 +301,8 @@ struct App {
     docs: Option<docs::Page>,
     /// The repository wiki is open (`W` on the home screen).
     wiki: Option<wiki::Page>,
+    /// Memory's Decisions, Skills or Notes tab (`g m`).
+    memory: Option<memory::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
     /// The selected session's screen text, for the preview pane.
@@ -483,6 +486,7 @@ impl App {
             past: None,
             docs: None,
             wiki: None,
+            memory: None,
             editing: None,
             preview: None,
             pinger: Pinger::default(),
@@ -845,6 +849,9 @@ impl App {
         if self.wiki.is_some() {
             return self.wiki_keys(&bytes).await;
         }
+        if self.memory.is_some() && self.view.is_none() {
+            return self.memory_keys(&bytes).await;
+        }
         // Over a session, the Docs page waits: your editor on a doc is one.
         if self.docs_shown() {
             return self.docs_keys(&bytes).await;
@@ -947,6 +954,9 @@ impl App {
         if self.wiki.is_some() {
             return self.wiki_keys(&bytes).await;
         }
+        if self.memory.is_some() {
+            return self.memory_keys(&bytes).await;
+        }
         if self.docs.is_some() {
             return self.docs_keys(&bytes).await;
         }
@@ -991,6 +1001,7 @@ impl App {
             || self.supervisor.is_some()
             || self.past.is_some()
             || self.wiki.is_some()
+            || self.memory.is_some()
             || self.settings_cursor.is_some()
             || self.renaming.is_some()
         {
@@ -2349,7 +2360,7 @@ impl App {
     fn section(&self) -> Section {
         if self.backlog.is_some() {
             Section::Backlog
-        } else if self.docs_shown() || self.wiki.is_some() {
+        } else if self.docs_shown() || self.wiki.is_some() || self.memory.is_some() {
             Section::Memory
         } else if self.digest.is_some() || self.past.is_some() {
             Section::History
@@ -2370,6 +2381,7 @@ impl App {
             && self.backlog.as_ref().is_none_or(backlog::Page::at_list)
             && self.docs.as_ref().is_none_or(docs::Page::at_list)
             && self.wiki.as_ref().is_none_or(wiki::Page::at_list)
+            && self.memory.as_ref().is_none_or(memory::Page::at_list)
             && self.past.as_ref().is_none_or(past::Page::at_list)
     }
 
@@ -2404,7 +2416,7 @@ impl App {
             } else if (key == b"[" || key == b"]")
                 && matches!(self.section(), Section::Memory | Section::History)
             {
-                self.cycle_tab().await;
+                self.cycle_tab(key == b"]").await;
             } else {
                 return Some(rest.to_vec());
             }
@@ -2429,31 +2441,138 @@ impl App {
         self.backlog = None;
         self.docs = None;
         self.wiki = None;
+        self.memory = None;
         self.digest = None;
         self.past = None;
         match section {
             Section::Inbox => {}
             Section::Backlog => self.open_backlog().await,
-            Section::Memory => self.open_docs().await,
+            Section::Memory => self.open_memory(memory::Tab::Decisions).await,
             Section::History => self.open_digest().await,
         }
     }
 
-    /// `[` or `]` in Memory (Docs, Wiki) or History (Summary, Past sessions):
-    /// the section's other tab.
-    async fn cycle_tab(&mut self) {
-        if self.docs.take().is_some() {
-            self.open_wiki(self.selection().0).await;
-            if self.wiki.is_none() {
-                // No repository to show a wiki for: stay on Docs.
-                self.open_docs().await;
+    /// `]` (forward) or `[` in Memory (Decisions, Skills, Docs, Wiki, Notes) or
+    /// History (Summary, Past sessions): the section's next or last tab.
+    async fn cycle_tab(&mut self, forward: bool) {
+        if matches!(self.section(), Section::History) {
+            if self.digest.take().is_some() {
+                self.open_past().await;
+            } else if self.past.take().is_some() {
+                self.open_digest().await;
             }
-        } else if self.wiki.take().is_some() {
-            self.open_docs().await;
-        } else if self.digest.take().is_some() {
-            self.open_past().await;
-        } else if self.past.take().is_some() {
-            self.open_digest().await;
+            return;
+        }
+        let at = MEMORY_TABS
+            .iter()
+            .position(|&tab| tab == self.memory_tab())
+            .unwrap_or(0);
+        let n = MEMORY_TABS.len();
+        let mut next = if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        };
+        // The wiki is a repository's: with none to show, step past it.
+        if MEMORY_TABS[next] == MemoryTab::Wiki && self.wiki_repo().is_none() {
+            next = if forward {
+                (next + 1) % n
+            } else {
+                (next + n - 1) % n
+            };
+        }
+        self.docs = None;
+        self.wiki = None;
+        let kept = self.memory.take();
+        match MEMORY_TABS[next] {
+            MemoryTab::Docs => self.open_docs().await,
+            MemoryTab::Wiki => self.open_wiki(self.selection().0).await,
+            MemoryTab::Page(tab) => match kept {
+                // The same data, another tab: no need to ask again.
+                Some(mut page) => {
+                    page.tab = tab;
+                    self.memory = Some(page);
+                }
+                None => self.open_memory(tab).await,
+            },
+        }
+    }
+
+    /// Which of Memory's tabs is open.
+    fn memory_tab(&self) -> MemoryTab {
+        match &self.memory {
+            Some(page) => MemoryTab::Page(page.tab),
+            None if self.wiki.is_some() => MemoryTab::Wiki,
+            None => MemoryTab::Docs,
+        }
+    }
+
+    async fn open_memory(&mut self, tab: memory::Tab) {
+        self.memory = Some(memory::Page::new(tab));
+        self.load_memory().await;
+    }
+
+    /// Every project's decisions, and the notes of each repository the daemon
+    /// knows or a decision names (notes are asked for one repository at a time).
+    async fn load_memory(&mut self) {
+        let got = async {
+            let decisions = self.client.decisions(None).await?;
+            let mut repos: Vec<PathBuf> = self
+                .repo_list
+                .repos
+                .iter()
+                .map(|r| r.path.clone())
+                .collect();
+            for d in &decisions {
+                if d.project.as_os_str() != USER_SCOPE && !repos.contains(&d.project) {
+                    repos.push(d.project.clone());
+                }
+            }
+            let mut notes = Vec::new();
+            let mut failed = 0;
+            for repo in repos {
+                // One repository's failure leaves the rest's notes, and says so.
+                match self.client.notes(repo).await {
+                    Ok(listing) => notes.extend(listing.notes),
+                    Err(_) => failed += 1,
+                }
+            }
+            anyhow::Ok((decisions, notes, failed))
+        }
+        .await
+        .map_err(|e| format!("{e:#}"));
+        if let Some(page) = &mut self.memory {
+            match got {
+                Ok((decisions, notes, failed)) => {
+                    page.notes_failed = failed;
+                    page.loaded(Ok((decisions, notes)));
+                }
+                Err(e) => page.loaded(Err(e)),
+            }
+        }
+    }
+
+    async fn memory_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.memory else { return };
+        for act in page.keys(bytes, &self.proposals) {
+            match act {
+                memory::Do::Close => self.memory = None,
+                memory::Do::Load => self.load_memory().await,
+                memory::Do::Review { index, accept } => {
+                    if let Some(said) = self.review_at(index, accept).await {
+                        self.status = said;
+                    }
+                    // An accepted one joins its kind's group; the notes stay.
+                    let got = self
+                        .client
+                        .decisions(None)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    if let Some(page) = &mut self.memory {
+                        page.decisions_loaded(got);
+                    }
+                }
+            }
         }
     }
 
@@ -2537,13 +2656,37 @@ impl App {
             places.push((from, to, section));
         }
         // The section's tabs, the one open marked, and the keys between them.
-        let tabs: &[(&str, bool)] = match here {
-            Section::Memory => &[("Docs", self.docs.is_some()), ("Wiki", self.wiki.is_some())],
-            Section::History => &[
-                ("Summary", self.digest.is_some()),
-                ("Past sessions", self.past.is_some()),
+        let open = self.memory_tab();
+        let counted = |tab: memory::Tab, name: &str| match &self.memory {
+            Some(page) => match page.count(tab, &self.proposals) {
+                Some(n) => format!("{name} {n}"),
+                None => name.to_string(),
+            },
+            None => name.to_string(),
+        };
+        let tabs: Vec<(String, bool)> = match here {
+            Section::Memory => MEMORY_TABS
+                .iter()
+                .map(|&tab| {
+                    let name = match tab {
+                        MemoryTab::Page(memory::Tab::Decisions) => {
+                            counted(memory::Tab::Decisions, "Decisions")
+                        }
+                        MemoryTab::Page(memory::Tab::Skills) => {
+                            counted(memory::Tab::Skills, "Skills")
+                        }
+                        MemoryTab::Page(memory::Tab::Notes) => counted(memory::Tab::Notes, "Notes"),
+                        MemoryTab::Docs => "Docs".into(),
+                        MemoryTab::Wiki => "Wiki".into(),
+                    };
+                    (name, tab == open)
+                })
+                .collect(),
+            Section::History => vec![
+                ("Summary".into(), self.digest.is_some()),
+                ("Past sessions".into(), self.past.is_some()),
             ],
-            _ => &[],
+            _ => Vec::new(),
         };
         if !tabs.is_empty() && !narrow {
             spans.push("    ".into());
@@ -3280,13 +3423,23 @@ impl App {
 
     /// Opens the wiki of the selected session's repository, else the one the TUI
     /// started in.
-    async fn open_wiki(&mut self, selected: Option<SessionId>) {
-        let cwd = selected
+    /// The repository a wiki opens for: the selected session's, else the one
+    /// the TUI runs in, if either is one.
+    fn wiki_repo_for(&self, selected: Option<SessionId>) -> Option<PathBuf> {
+        selected
             .and_then(|id| self.sessions.iter().find(|s| s.id == id))
             .map(|s| s.cwd.clone())
             .or_else(|| std::env::current_dir().ok())
-            .filter(|d| remote().is_some() || in_repository(d));
-        let Some(cwd) = cwd else {
+            .filter(|d| remote().is_some() || in_repository(d))
+    }
+
+    /// The repository `]` would open Memory's Wiki tab for.
+    fn wiki_repo(&self) -> Option<PathBuf> {
+        self.wiki_repo_for(self.selection().0)
+    }
+
+    async fn open_wiki(&mut self, selected: Option<SessionId>) {
+        let Some(cwd) = self.wiki_repo_for(selected) else {
             self.say("the wiki is a repository's: select a session in one".into());
             return;
         };
@@ -4361,6 +4514,9 @@ impl App {
             }
             if let Some(page) = &self.wiki {
                 page.draw(frame, self.settings.theme);
+            }
+            if let Some(page) = self.memory.as_ref().filter(|_| self.view.is_none()) {
+                page.draw(frame, &self.proposals, self.settings.theme);
             }
             if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, self.settings.theme);
@@ -7209,6 +7365,24 @@ impl Section {
     }
 }
 
+/// One of Memory's tabs: Decisions, Skills and Notes are the memory page's;
+/// Docs and Wiki are pages of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryTab {
+    Page(memory::Tab),
+    Docs,
+    Wiki,
+}
+
+/// Memory's tabs in the order `]` goes through them (spec: Memory).
+const MEMORY_TABS: [MemoryTab; 5] = [
+    MemoryTab::Page(memory::Tab::Decisions),
+    MemoryTab::Page(memory::Tab::Skills),
+    MemoryTab::Docs,
+    MemoryTab::Wiki,
+    MemoryTab::Page(memory::Tab::Notes),
+];
+
 /// A section page set aside while you're in a session you opened from it.
 enum Parked {
     Backlog(Box<backlog::Page>),
@@ -8033,7 +8207,10 @@ mod tests {
         app.docs = Some(docs::Page::default());
         assert_eq!(app.section(), Section::Memory);
         let wide = strip(&app, 120);
-        assert!(wide.contains("Docs · Wiki  [ ]"), "{wide}");
+        assert!(
+            wide.contains("Decisions · Skills · Docs · Wiki · Notes  [ ]"),
+            "{wide}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
