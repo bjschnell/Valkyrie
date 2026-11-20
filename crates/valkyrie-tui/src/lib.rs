@@ -2287,7 +2287,18 @@ impl App {
     }
 
     fn rows(&self) -> usize {
-        self.proposals.len() + self.queue.len() + self.sessions.len()
+        self.proposals.len() + self.queue.len() + self.others().len()
+    }
+
+    /// The sessions the Inbox lists under Running, then Quiet: each one not
+    /// already in Needs you, so every session is drawn once. Tab order within each.
+    fn others(&self) -> Vec<&SessionInfo> {
+        let (running, quiet): (Vec<&SessionInfo>, Vec<&SessionInfo>) = self
+            .sessions
+            .iter()
+            .filter(|s| !self.queue.iter().any(|q| q.session == s.id))
+            .partition(|s| is_running(s));
+        running.into_iter().chain(quiet).collect()
     }
 
     /// The selection's row in the queue, if it is there.
@@ -2296,7 +2307,7 @@ impl App {
         (row < self.queue.len()).then_some(row)
     }
 
-    /// The selection's row in the sessions, if it is there.
+    /// The selection's row in `others`, if it is there.
     fn session_index(&self) -> Option<usize> {
         self.selected
             .checked_sub(self.proposals.len() + self.queue.len())
@@ -2457,7 +2468,7 @@ impl App {
                 .position(|q| Some(q.session) == id)
                 .map(|i| self.proposals.len() + i),
             Anchor::Session(id) => self
-                .sessions
+                .others()
                 .iter()
                 .position(|s| Some(s.id) == id)
                 .map(|i| self.proposals.len() + self.queue.len() + i),
@@ -2479,8 +2490,10 @@ impl App {
             let item = &self.queue[row];
             return (Some(item.session), Some(item));
         }
-        let session = self.session_index().and_then(|i| self.sessions.get(i));
-        (session.map(|s| s.id), None)
+        let session = self
+            .session_index()
+            .and_then(|i| self.others().get(i).map(|s| s.id));
+        (session, None)
     }
 
     /// Accepts or rejects the proposal under the cursor. The daemon pushes the
@@ -4292,18 +4305,9 @@ impl App {
                 .min(lists.height / 4)
                 .max(3),
         };
-        let queue_height = (self.queue.len().max(2) as u16 + 2)
-            .min(
-                lists
-                    .height
-                    .saturating_sub(proposals_height + backlog_height)
-                    / 2,
-            )
-            .max(4);
-        let [proposals_area, backlog_area, queue_area, sessions_area] = Layout::vertical([
+        let [proposals_area, backlog_area, inbox_area] = Layout::vertical([
             Constraint::Length(proposals_height),
             Constraint::Length(backlog_height),
-            Constraint::Length(queue_height),
             Constraint::Fill(1),
         ])
         .areas(lists);
@@ -4347,86 +4351,7 @@ impl App {
             self.remember_rows(proposals_area, state.offset(), self.proposals.len(), 0);
         }
 
-        let in_queue = self.queue_index().is_some();
-        let queue_title = Line::from(vec![
-            " ● ".fg(t.needs).bold(),
-            "needs you ".fg(t.fg).bold(),
-            format!("{} ", self.queue.len()).fg(t.muted),
-        ]);
-        let queue_block = panel(
-            queue_title,
-            t,
-            in_queue || (self.sessions.is_empty() && !in_proposals),
-        );
-        if self.queue.is_empty() {
-            let inner = queue_block.inner(queue_area);
-            frame.render_widget(queue_block, queue_area);
-            let calm = if t.rain.is_some() {
-                Line::from(vec![
-                    "> ".fg(t.accent).bold(),
-                    "all clear".fg(t.fg).bold(),
-                    " · nothing needs you ".fg(t.muted),
-                    rain::cursor(now).fg(t.accent),
-                ])
-            } else {
-                Line::from(vec![
-                    "✓ ".fg(t.done).bold(),
-                    "all clear".fg(t.fg).bold(),
-                    "  ·  nothing needs you".fg(t.muted),
-                ])
-            }
-            .centered();
-            // Nothing running at all: most likely someone new, so say where to learn.
-            let mut lines = vec![calm];
-            if self.sessions.is_empty() {
-                lines.push(Line::default());
-                lines.push(
-                    Line::from(vec![
-                        "new here? ".fg(t.muted),
-                        " ? ".fg(t.bg).bg(t.accent).bold(),
-                        " starts the tutor".fg(t.muted),
-                    ])
-                    .centered(),
-                );
-            }
-            let [_, mid, _] = Layout::vertical([
-                Constraint::Fill(1),
-                Constraint::Length(lines.len() as u16),
-                Constraint::Fill(1),
-            ])
-            .areas(inner);
-            frame.render_widget(Paragraph::new(lines), mid);
-        } else {
-            let rows = self.queue.iter().map(|q| queue_row(q, now, spin, t));
-            let mut state = TableState::default().with_selected(self.queue_index());
-            frame.render_stateful_widget(table(rows, t).block(queue_block), queue_area, &mut state);
-            self.remember_rows(
-                queue_area,
-                state.offset(),
-                self.queue.len(),
-                self.proposals.len(),
-            );
-        }
-
-        let sessions_title = Line::from(vec![
-            " ◆ ".fg(t.accent).bold(),
-            "sessions ".fg(t.fg).bold(),
-            format!("{} ", self.sessions.len()).fg(t.muted),
-        ]);
-        let rows = self.sessions.iter().map(|s| session_row(s, now, spin, t));
-        let in_sessions = self.session_index().is_some();
-        let mut state = TableState::default().with_selected(self.session_index());
-        frame.render_stateful_widget(
-            table(rows, t).block(panel(sessions_title, t, in_sessions)),
-            sessions_area,
-            &mut state,
-        );
-        self.remember_rows(
-            sessions_area,
-            state.offset(),
-            self.sessions.len(),
-            self.proposals.len() + self.queue.len(),
-        );
+        self.draw_inbox(frame, inbox_area, in_proposals, now, spin);
 
         if let Some(area) = preview {
             self.draw_preview(frame, area);
@@ -4437,8 +4362,7 @@ impl App {
             let regions: Vec<Rect> = [
                 Some(proposals_area),
                 Some(backlog_area),
-                Some(queue_area),
-                Some(sessions_area),
+                Some(inbox_area),
                 preview,
             ]
             .into_iter()
@@ -4488,6 +4412,139 @@ impl App {
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
+    }
+
+    /// The Inbox: Needs you, Running, Quiet, each session once (spec: Inbox). A
+    /// group shows only while it has rows; a muted label and count heads it.
+    fn draw_inbox(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        in_proposals: bool,
+        now: u64,
+        spin: usize,
+    ) {
+        let t = self.settings.theme;
+        let others = self.others();
+        let running = others.iter().take_while(|s| is_running(s)).count();
+        let title = Line::from(vec![
+            " ● ".fg(t.needs).bold(),
+            "inbox ".fg(t.fg).bold(),
+            format!("{} ", self.queue.len()).fg(t.muted),
+        ]);
+        let block = panel(title, t, !in_proposals);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if self.queue.is_empty() && others.is_empty() {
+            let calm = if t.rain.is_some() {
+                Line::from(vec![
+                    "> ".fg(t.accent).bold(),
+                    "all clear".fg(t.fg).bold(),
+                    " · nothing needs you ".fg(t.muted),
+                    rain::cursor(now).fg(t.accent),
+                ])
+            } else {
+                Line::from(vec![
+                    "✓ ".fg(t.done).bold(),
+                    "all clear".fg(t.fg).bold(),
+                    "  ·  nothing needs you".fg(t.muted),
+                ])
+            }
+            .centered();
+            // Nothing running at all: most likely someone new, so say where to learn.
+            let lines = vec![
+                calm,
+                Line::default(),
+                Line::from(vec![
+                    "new here? ".fg(t.muted),
+                    " ? ".fg(t.bg).bg(t.accent).bold(),
+                    " starts the tutor".fg(t.muted),
+                ])
+                .centered(),
+            ];
+            let [_, mid, _] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(lines.len() as u16),
+                Constraint::Fill(1),
+            ])
+            .areas(inner);
+            frame.render_widget(Paragraph::new(lines), mid);
+            return;
+        }
+
+        // Each drawn line, and the selection row it is (none for labels).
+        let width = inner.width as usize;
+        let first = self.proposals.len();
+        let mut lines: Vec<(Option<usize>, Line<'static>)> = Vec::new();
+        let label = |lines: &mut Vec<(Option<usize>, Line<'static>)>, name: &str, n: usize| {
+            if !lines.is_empty() {
+                lines.push((None, Line::default()));
+            }
+            lines.push((
+                None,
+                Line::from(vec![
+                    format!(" {name} ").fg(t.muted).bold(),
+                    n.to_string().fg(t.muted),
+                ]),
+            ));
+        };
+        if self.queue.is_empty() {
+            lines.push((
+                None,
+                Line::from(vec![
+                    " ✓ ".fg(t.done).bold(),
+                    "nothing needs you".fg(t.muted),
+                ]),
+            ));
+        } else {
+            label(&mut lines, "Needs you", self.queue.len());
+            for (i, q) in self.queue.iter().enumerate() {
+                let row = inbox_queue_row(q, now, spin, width, t);
+                lines.push((Some(first + i), row));
+            }
+        }
+        let first = first + self.queue.len();
+        for (name, from, to) in [("Running", 0, running), ("Quiet", running, others.len())] {
+            if from == to {
+                continue;
+            }
+            label(&mut lines, name, to - from);
+            for (i, s) in others[from..to].iter().enumerate() {
+                let row = inbox_session_row(s, now, spin, width, t);
+                lines.push((Some(first + from + i), row));
+            }
+        }
+
+        // Keep the cursor's row in sight, its group's label too when it fits.
+        let height = inner.height as usize;
+        let at = lines
+            .iter()
+            .position(|(row, _)| *row == Some(self.selected) && !in_proposals);
+        let offset = match at {
+            Some(at) if at + 1 > height => at + 1 - height,
+            _ => 0,
+        };
+        let mut hits = self.home_rows.borrow_mut();
+        let shown: Vec<Line> = lines
+            .into_iter()
+            .skip(offset)
+            .take(height)
+            .enumerate()
+            .map(|(y, (row, line))| {
+                let Some(row) = row else { return line };
+                let rect = Rect::new(inner.x, inner.y + y as u16, inner.width, 1);
+                hits.push((rect, Hit::Row(row)));
+                if row == self.selected && !in_proposals {
+                    let mut spans = vec!["▌".fg(t.accent)];
+                    spans.extend(line.spans.into_iter().skip(1));
+                    Line::from(spans).style(style::Style::new().bg(t.selection))
+                } else {
+                    line
+                }
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(shown), inner);
     }
 
     /// Notes where the rows of a home table, shown from `offset`, were drawn inside
@@ -4566,7 +4623,7 @@ impl App {
             format!("{} {}", state_icon(status.state, 0), status.state.label())
                 .fg(color)
                 .bold(),
-            format!("  {}  ·  {}", status.agent, short_path(&session.cwd)).fg(t.muted),
+            format!("  {}  ·  {}", where_from(session), short_path(&session.cwd)).fg(t.muted),
         ])];
         if let Some(summary) = &status.summary {
             head.push(Line::from(summary.clone().fg(t.fg)));
@@ -5850,38 +5907,6 @@ fn panel(title: Line<'static>, t: &Theme, focused: bool) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
-fn table<'a>(rows: impl IntoIterator<Item = TableRow<'a>>, t: &Theme) -> Table<'a> {
-    Table::new(
-        rows,
-        [
-            Constraint::Length(15),
-            Constraint::Length(16),
-            Constraint::Length(5),
-            Constraint::Fill(3),
-            Constraint::Fill(1),
-        ],
-    )
-    .column_spacing(1)
-    .row_highlight_style(style::Style::new().bg(t.selection))
-    .highlight_symbol(Line::from("▌".fg(t.accent)))
-    .highlight_spacing(HighlightSpacing::Always)
-}
-
-fn badge(state: AgentState, label: String, spin: usize, t: &Theme) -> Cell<'static> {
-    let color = t.state(state);
-    Cell::from(Line::from(vec![
-        format!("{} ", state_icon(state, spin)).fg(color),
-        label.fg(color).bold(),
-    ]))
-}
-
-/// The name, italic when it's the agent's topic rather than one the user gave.
-fn name_cell(id: SessionId, name: &str, auto: bool, t: &Theme) -> Cell<'static> {
-    let name = name.to_string().fg(t.fg).bold();
-    let name = if auto { name.italic() } else { name };
-    Cell::from(Line::from(vec![name, format!(" #{id}").fg(t.muted)]))
-}
-
 /// `#id  kind  title`, then who proposed it and in which project, muted.
 /// Who proposed a decision, as the lists say it.
 fn proposer(d: &Decision) -> &str {
@@ -5961,62 +5986,140 @@ fn proposal_text(d: &Decision) -> String {
     text
 }
 
-fn queue_row(q: &QueueItem, now: u64, spin: usize, t: &Theme) -> TableRow<'static> {
-    let s = &q.status;
-    let mut summary = vec![s.summary.clone().unwrap_or_default().fg(t.fg)];
-    // The supervisor's offer on a flag (ADR-0019 §2): `a` takes it.
-    if let Some(step) = q.flag.as_ref().and_then(|f| f.step.as_ref()) {
-        summary.push("  → ".fg(t.muted));
-        summary.push(step.action.label().fg(t.accent2).bold());
+/// The detail's word for what runs there: the agent, and the program when it
+/// isn't the agent (an Inbox row shows neither).
+fn where_from(s: &SessionInfo) -> String {
+    let program = program(s);
+    match s.status.agent.as_str() {
+        agent if agent == program || !is_agent(s) => program,
+        agent => format!("{agent} · {program}"),
     }
-    if let Some(report) = &q.report {
-        summary.push("  ▸ ".fg(t.muted));
-        summary.push(report.clone().fg(t.accent2));
-    }
-    TableRow::new([
-        badge(s.state, s.state.label().into(), spin, t),
-        name_cell(q.session, &q.name, q.auto_name, t),
-        Cell::from(age(s.since_ms, now).fg(t.muted)),
-        Cell::from(Line::from(summary)),
-        Cell::from(short_path(&q.cwd).fg(t.muted)),
-    ])
 }
 
-fn session_row(s: &SessionInfo, now: u64, spin: usize, t: &Theme) -> TableRow<'static> {
-    let (state, label) = match s.exited {
-        None => (s.status.state, s.status.state.label().to_string()),
-        Some(Some(code)) => (AgentState::Exited, format!("exited {code}")),
-        Some(None) => (AgentState::Exited, "exited".into()),
+/// Working and still running: the Inbox's Running group.
+fn is_running(s: &SessionInfo) -> bool {
+    s.exited.is_none() && s.status.state == AgentState::Working
+}
+
+/// Inbox name and repo columns, in cells.
+const INBOX_NAME: usize = 14;
+const INBOX_REPO: usize = 7;
+
+/// An Inbox row: a gutter for the cursor, the marker, the name (bold, italic when
+/// it's the agent's topic), the repo (faint), one line, and the age right-aligned.
+/// The path, command and adapter are the detail's, not the row's.
+fn inbox_row(
+    (state, spin): (AgentState, usize),
+    (name, auto): (&str, bool),
+    cwd: &Path,
+    text: Vec<Span<'static>>,
+    age: String,
+    width: usize,
+    t: &Theme,
+) -> Line<'static> {
+    let name = format!("{:<INBOX_NAME$}", fit(name, INBOX_NAME))
+        .fg(t.fg)
+        .bold();
+    let name = if auto { name.italic() } else { name };
+    let repo = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut spans = vec![
+        " ".into(),
+        format!("{} ", state_icon(state, spin)).fg(t.state(state)),
+        name,
+        " ".into(),
+        format!("{:<INBOX_REPO$}", fit(&repo, INBOX_REPO)).fg(t.muted),
+        " ".into(),
+    ];
+    let used: usize = spans.iter().map(Span::width).sum();
+    let age = format!(" {age:>4} ");
+    let room = width.saturating_sub(used + age.width());
+    let mut left = room;
+    for span in text {
+        if left == 0 {
+            break;
+        }
+        let cut = fit(&span.content, left);
+        left -= cut.width();
+        spans.push(Span::styled(cut, span.style));
+    }
+    spans.push(" ".repeat(left).into());
+    spans.push(age.fg(t.muted));
+    Line::from(spans)
+}
+
+fn inbox_queue_row(q: &QueueItem, now: u64, spin: usize, width: usize, t: &Theme) -> Line<'static> {
+    let s = &q.status;
+    let mut text = vec![s.summary.clone().unwrap_or_default().fg(t.fg)];
+    // The supervisor's offer on a flag (ADR-0019 §2): `a` takes it.
+    if let Some(step) = q.flag.as_ref().and_then(|f| f.step.as_ref()) {
+        text.push("  → ".fg(t.muted));
+        text.push(step.action.label().fg(t.accent2).bold());
+    }
+    if let Some(report) = &q.report {
+        text.push("  ▸ ".fg(t.muted));
+        text.push(report.clone().fg(t.accent2));
+    }
+    inbox_row(
+        (s.state, spin),
+        (&q.name, q.auto_name),
+        &q.cwd,
+        text,
+        age(s.since_ms, now),
+        width,
+        t,
+    )
+}
+
+fn inbox_session_row(
+    s: &SessionInfo,
+    now: u64,
+    spin: usize,
+    width: usize,
+    t: &Theme,
+) -> Line<'static> {
+    let mut text = Vec::new();
+    let state = match s.exited {
+        None => s.status.state,
+        Some(code) => {
+            let word = code.map_or("exited".into(), |c| format!("exited {c}"));
+            text.push(word.fg(t.muted));
+            AgentState::Exited
+        }
     };
-    // What runs there, then what it last said; never the shell's window title.
-    let mut detail = vec![program(s).fg(t.muted)];
+    if s.clients > 0 {
+        text.push("◉ ".fg(t.accent2));
+    }
     if let Some(summary) = &s.status.summary {
-        detail.push("  ".into());
-        detail.push(summary.clone().fg(t.fg));
+        if !text.is_empty() && s.exited.is_some() {
+            text.push("  ".into());
+        }
+        text.push(summary.clone().fg(t.fg));
     }
     // What it published on its tab with `valk status`.
     if let Some(report) = &s.report {
-        detail.push("  ▸ ".fg(t.muted));
-        detail.push(report.clone().fg(t.accent2));
+        text.push("  ▸ ".fg(t.muted));
+        text.push(report.clone().fg(t.accent2));
     }
     if s.status.agent != "generic" && !s.status.hooked {
-        detail.push("  no hooks yet".fg(t.interrupted).italic());
+        text.push("  no hooks yet".fg(t.interrupted).italic());
     }
     // Another live agent changed the same files (ADR-0019 §1).
     if let Some(overlap) = &s.overlap {
-        detail.push("  ⚠ ".fg(t.interrupted));
-        detail.push(overlap.clone().fg(t.interrupted));
+        text.push("  ⚠ ".fg(t.interrupted));
+        text.push(overlap.clone().fg(t.interrupted));
     }
-    if s.clients > 0 {
-        detail.insert(0, "◉ ".fg(t.accent2));
-    }
-    TableRow::new([
-        badge(state, label, spin, t),
-        name_cell(s.id, &s.name, s.auto_name, t),
-        Cell::from(age(s.status.since_ms, now).fg(t.muted)),
-        Cell::from(Line::from(detail)),
-        Cell::from(short_path(&s.cwd).fg(t.muted)),
-    ])
+    inbox_row(
+        (state, spin),
+        (&s.name, s.auto_name),
+        &s.cwd,
+        text,
+        age(s.status.since_ms, now),
+        width,
+        t,
+    )
 }
 
 /// ` ◆ VALKYRIE  agent control` on the left, colored counts on the right.
@@ -7278,8 +7381,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// One selection runs over the proposals, then the queue, then the sessions,
-    /// and stays on the same proposal as the list changes.
+    /// One selection runs over the proposals, then the queue, then the sessions
+    /// not in the queue (each session once), and stays on the same proposal as the
+    /// list changes.
     #[tokio::test]
     async fn selection_runs_over_proposals_queue_and_sessions() {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-prop-{}", std::process::id()));
@@ -7313,7 +7417,6 @@ mod tests {
                 (Some("two".into()), None, None),
                 (None, Some(0), Some(2)),
                 (None, None, Some(1)),
-                (None, None, Some(2)),
             ]
         );
 
@@ -7338,6 +7441,92 @@ mod tests {
         app.selected = 3;
         app.on_push(ServerMsg::Proposals { items: vec![] }).unwrap();
         assert_eq!((app.selected, app.selection().0), (1, Some(1)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The Inbox is one list, Needs you then Running then Quiet, and draws each
+    /// session once: a waiting one isn't listed again below. Rows carry no path,
+    /// command or adapter column.
+    #[tokio::test]
+    async fn inbox_draws_each_session_once_in_three_groups() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-inbox-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let session = |id, name: &str, state, cwd: &str| {
+            let mut s = info(id);
+            s.name = name.into();
+            s.cwd = cwd.into();
+            s.command = vec!["/usr/bin/fish".into()];
+            s.status.state = state;
+            s.status.summary = Some(format!("{name} says hi"));
+            s
+        };
+        // Tab order puts the quiet shell first; Running still comes before Quiet.
+        app.sessions = vec![
+            session(3, "shell", AgentState::Idle, "/home/u/repos/web"),
+            session(1, "builder", AgentState::Working, "/home/u/repos/api"),
+            session(2, "asker", AgentState::NeedsInput, "/home/u/repos/api"),
+        ];
+        let mut q = queued(2);
+        q.name = "asker".into();
+        q.cwd = "/home/u/repos/api".into();
+        q.status.state = AgentState::NeedsInput;
+        q.status.summary = Some("asker says hi".into());
+        app.queue = vec![q];
+
+        let ids: Vec<_> = (0..app.rows())
+            .map(|i| {
+                app.selected = i;
+                app.selection().0
+            })
+            .collect();
+        assert_eq!(ids, [Some(2), Some(1), Some(3)]);
+
+        for (width, height) in [(80, 24), (100, 30), (140, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<String> = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect();
+            let text = rows.join("\n");
+            let find = |what: &str| rows.iter().position(|r| r.contains(what));
+            let (needs, running, quiet) = (
+                find("Needs you 1").expect("Needs you"),
+                find("Running 1").expect("Running"),
+                find("Quiet 1").expect("Quiet"),
+            );
+            assert!(needs < running && running < quiet, "{text}");
+            // The list (left of any preview) names each session once.
+            let list: String = rows
+                .iter()
+                .map(|r| r.chars().take(70).collect::<String>())
+                .collect();
+            for name in ["asker says hi", "builder says hi", "shell says hi"] {
+                assert_eq!(list.matches(name).count(), 1, "{name} at {width}: {text}");
+            }
+            assert!(
+                (needs..running).any(|y| rows[y].contains("asker")),
+                "{text}"
+            );
+            assert!(rows[quiet + 1].contains("shell") && rows[quiet + 1].contains("web"));
+            assert!(
+                !list.contains("fish") && !list.contains("~/repos"),
+                "{text}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7440,7 +7629,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.selection().0, Some(3));
-        assert_eq!(app.selected, 3);
+        // Session 1 moved up into the queue, so it's no longer listed below it.
+        assert_eq!(app.selected, 2);
         app.selected = 0; // queue row for session 1
         app.on_push(ServerMsg::Queue {
             items: vec![queued(2), queued(1)],
