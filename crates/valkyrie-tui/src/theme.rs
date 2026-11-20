@@ -17,17 +17,19 @@ pub struct Theme {
     pub selection: Color,
     pub border: Color,
     pub fg: Color,
+    /// The faint text level: kinds, priorities, repos, ids, ages.
     pub muted: Color,
-    /// Brand color: the logo, focused borders, the selection marker, key chips.
+    // A theme is a skin: these nine tokens (spec: Marks and color) are all that
+    // carry meaning. `needs`, `blocked`, `done` and `working` are the ask, stuck,
+    // finished and working states; `accent` is decisions, selection, keys in hints
+    // and the active section; `fg`, `secondary()`, `dim()` and `muted` (faint) are
+    // the four text levels. Nothing else changes with state.
+    /// Brand color: the logo, the selection marker, keys in hints, decisions.
     pub accent: Color,
-    /// Secondary highlight: names, status messages.
-    pub accent2: Color,
     pub needs: Color,
     pub blocked: Color,
     pub done: Color,
     pub working: Color,
-    pub interrupted: Color,
-    pub idle: Color,
     /// Digital rain in these colors falls through the home screen's empty rows,
     /// and the header glitches: the effects of matrix, violet, cyberpunk, valkyrie and netrunner.
     pub rain: Option<Rain>,
@@ -68,13 +70,10 @@ pub const DRACULA: Theme = Theme {
     fg: hex(0xf8f8f2),
     muted: hex(0x6272a4),
     accent: hex(0xbd93f9),
-    accent2: hex(0xff79c6),
     needs: hex(0xf1fa8c),
     blocked: hex(0xff5555),
     done: hex(0x50fa7b),
     working: hex(0x8be9fd),
-    interrupted: hex(0xffb86c),
-    idle: hex(0x6272a4),
     rain: None,
     ansi: [
         hex(0x21222c),
@@ -108,13 +107,10 @@ pub const CYBERPUNK: Theme = Theme {
     fg: hex(0xe6e9ff),
     muted: hex(0x6a6f9e),
     accent: hex(0xff2a6d),
-    accent2: hex(0x05d9e8),
     needs: hex(0xf9f002),
     blocked: hex(0xff003c),
     done: hex(0x00ff9f),
     working: hex(0x05d9e8),
-    interrupted: hex(0xff9e00),
-    idle: hex(0x5a5f8a),
     rain: Some(Rain {
         glyphs: RUNES,
         head: hex(0xe6fdff),
@@ -152,13 +148,10 @@ pub const BLACKOUT: Theme = Theme {
     fg: hex(0xf0eef5),
     muted: hex(0x6f6a7d),
     accent: hex(0xc9a7ff),
-    accent2: hex(0xff8fd0),
     needs: hex(0xfff3a0),
     blocked: hex(0xff8a9e),
     done: hex(0x8dffbf),
     working: hex(0x9ae6ff),
-    interrupted: hex(0xffc39e),
-    idle: hex(0x5a5666),
     rain: None,
     ansi: [
         hex(0x1a1a1f),
@@ -192,13 +185,10 @@ pub const CATPPUCCIN: Theme = Theme {
     fg: hex(0xcdd6f4),
     muted: hex(0x7f849c),
     accent: hex(0xcba6f7),
-    accent2: hex(0xf5c2e7),
     needs: hex(0xf9e2af),
     blocked: hex(0xf38ba8),
     done: hex(0xa6e3a1),
     working: hex(0x89dceb),
-    interrupted: hex(0xfab387),
-    idle: hex(0x6c7086),
     rain: None,
     ansi: [
         hex(0x45475a),
@@ -232,13 +222,10 @@ pub const NORD: Theme = Theme {
     fg: hex(0xeceff4),
     muted: hex(0x7b88a1),
     accent: hex(0x88c0d0),
-    accent2: hex(0xb48ead),
     needs: hex(0xebcb8b),
     blocked: hex(0xbf616a),
     done: hex(0xa3be8c),
     working: hex(0x81a1c1),
-    interrupted: hex(0xd08770),
-    idle: hex(0x616e88),
     rain: None,
     ansi: [
         hex(0x3b4252),
@@ -272,13 +259,10 @@ pub const GRUVBOX: Theme = Theme {
     fg: hex(0xebdbb2),
     muted: hex(0x928374),
     accent: hex(0xfe8019),
-    accent2: hex(0xd3869b),
     needs: hex(0xfabd2f),
     blocked: hex(0xfb4934),
     done: hex(0xb8bb26),
     working: hex(0x83a598),
-    interrupted: hex(0x8ec07c),
-    idle: hex(0x7c6f64),
     rain: None,
     ansi: [
         hex(0x282828),
@@ -312,13 +296,10 @@ pub const TOKYONIGHT: Theme = Theme {
     fg: hex(0xc0caf5),
     muted: hex(0x737aa2),
     accent: hex(0x7aa2f7),
-    accent2: hex(0xbb9af7),
     needs: hex(0xe0af68),
     blocked: hex(0xf7768e),
     done: hex(0x9ece6a),
     working: hex(0x7dcfff),
-    interrupted: hex(0xff9e64),
-    idle: hex(0x565f89),
     rain: None,
     ansi: [
         hex(0x15161e),
@@ -352,13 +333,10 @@ pub const MATRIX: Theme = Theme {
     fg: hex(0xb4ffc4),
     muted: hex(0x2f8f4c),
     accent: hex(0x00ff41),
-    accent2: hex(0x7dffa0),
     needs: hex(0xd8ff3e),
     blocked: hex(0xff3b3b),
     done: hex(0x00ff41),
     working: hex(0x3dffd2),
-    interrupted: hex(0xffb000),
-    idle: hex(0x1f6e36),
     rain: Some(Rain {
         glyphs: CODE,
         head: hex(0xe8ffec),
@@ -396,13 +374,10 @@ pub const VIOLET: Theme = Theme {
     fg: hex(0xebe4ff),
     muted: hex(0x8a7cb8),
     accent: hex(0xc8b4ff),
-    accent2: hex(0xe6ccff),
     needs: hex(0xffe8a6),
     blocked: hex(0xff7d9c),
     done: hex(0xa9f0d1),
     working: hex(0xa3d4ff),
-    interrupted: hex(0xffc59c),
-    idle: hex(0x5f5388),
     rain: Some(Rain {
         glyphs: CODE,
         head: hex(0xf6f2ff),
@@ -441,13 +416,10 @@ pub const VALKYRIE: Theme = Theme {
     fg: hex(0xece6ff),
     muted: hex(0x8577b3),
     accent: hex(0x9d6bff),
-    accent2: hex(0xff3ed8),
     needs: hex(0xffe36e),
     blocked: hex(0xff4d6d),
     done: hex(0x39ff7a),
     working: hex(0xc77dff),
-    interrupted: hex(0xff9e5e),
-    idle: hex(0x5a4f86),
     rain: Some(Rain {
         glyphs: RUNES,
         head: hex(0x8dffb0),
@@ -487,13 +459,10 @@ pub const NETRUNNER: Theme = Theme {
     fg: hex(0xf4f4fa),
     muted: hex(0x6e6e88),
     accent: hex(0x00f0ff),
-    accent2: hex(0xff2bd6),
     needs: hex(0xfff700),
     blocked: hex(0xff1e3c),
     done: hex(0x39ff14),
     working: hex(0x8a5cff),
-    interrupted: hex(0xff8a00),
-    idle: hex(0x45455a),
     rain: Some(Rain {
         glyphs: HEX,
         head: hex(0xc8fdff),
@@ -531,13 +500,10 @@ pub const SOLARIZED: Theme = Theme {
     fg: hex(0x93a1a1),
     muted: hex(0x657b83),
     accent: hex(0x268bd2),
-    accent2: hex(0x6c71c4),
     needs: hex(0xb58900),
     blocked: hex(0xdc322f),
     done: hex(0x859900),
     working: hex(0x2aa198),
-    interrupted: hex(0xcb4b16),
-    idle: hex(0x586e75),
     rain: None,
     ansi: [
         hex(0x073642),
@@ -571,13 +537,10 @@ pub const ONEDARK: Theme = Theme {
     fg: hex(0xabb2bf),
     muted: hex(0x5c6370),
     accent: hex(0x61afef),
-    accent2: hex(0xc678dd),
     needs: hex(0xe5c07b),
     blocked: hex(0xe06c75),
     done: hex(0x98c379),
     working: hex(0x56b6c2),
-    interrupted: hex(0xd19a66),
-    idle: hex(0x4b5263),
     rain: None,
     ansi: [
         hex(0x282c34),
@@ -611,13 +574,10 @@ pub const ROSEPINE: Theme = Theme {
     fg: hex(0xe0def4),
     muted: hex(0x6e6a86),
     accent: hex(0xc4a7e7),
-    accent2: hex(0xebbcba),
     needs: hex(0xf6c177),
     blocked: hex(0xeb6f92),
     done: hex(0x9ccfd8),
     working: hex(0x3e8fb0),
-    interrupted: hex(0xea9a97),
-    idle: hex(0x6e6a86),
     rain: None,
     ansi: [
         hex(0x26233a),
@@ -651,13 +611,10 @@ pub const MONOKAI: Theme = Theme {
     fg: hex(0xf8f8f2),
     muted: hex(0x75715e),
     accent: hex(0x66d9ef),
-    accent2: hex(0xf92672),
     needs: hex(0xe6db74),
     blocked: hex(0xf92672),
     done: hex(0xa6e22e),
     working: hex(0xae81ff),
-    interrupted: hex(0xfd971f),
-    idle: hex(0x75715e),
     rain: None,
     ansi: [
         hex(0x272822),
@@ -691,13 +648,10 @@ pub const SOLARIZEDLIGHT: Theme = Theme {
     fg: hex(0x586e75),
     muted: hex(0x93a1a1),
     accent: hex(0x268bd2),
-    accent2: hex(0xd33682),
     needs: hex(0xb58900),
     blocked: hex(0xdc322f),
     done: hex(0x859900),
     working: hex(0x2aa198),
-    interrupted: hex(0xcb4b16),
-    idle: hex(0x93a1a1),
     rain: None,
     ansi: [
         hex(0x073642),
@@ -731,13 +685,10 @@ pub const CATPPUCCINLATTE: Theme = Theme {
     fg: hex(0x4c4f69),
     muted: hex(0x7c7f93),
     accent: hex(0x8839ef),
-    accent2: hex(0xea76cb),
     needs: hex(0xdf8e1d),
     blocked: hex(0xd20f39),
     done: hex(0x40a02b),
     working: hex(0x04a5e5),
-    interrupted: hex(0xfe640b),
-    idle: hex(0x9ca0b0),
     rain: None,
     ansi: [
         hex(0x5c5f77),
@@ -771,13 +722,10 @@ pub const GRUVBOXLIGHT: Theme = Theme {
     fg: hex(0x3c3836),
     muted: hex(0x7c6f64),
     accent: hex(0xaf3a03),
-    accent2: hex(0x8f3f71),
     needs: hex(0xb57614),
     blocked: hex(0x9d0006),
     done: hex(0x79740e),
     working: hex(0x076678),
-    interrupted: hex(0x427b58),
-    idle: hex(0x928374),
     rain: None,
     ansi: [
         hex(0xfbf1c7),
@@ -826,10 +774,26 @@ impl Theme {
             AgentState::NeedsInput => self.needs,
             AgentState::Blocked => self.blocked,
             AgentState::ReviewReady => self.done,
-            AgentState::Interrupted | AgentState::Stale => self.interrupted,
+            AgentState::Interrupted | AgentState::Stale => self.blocked,
             AgentState::Working => self.working,
-            AgentState::Idle | AgentState::Exited => self.idle,
+            AgentState::Idle | AgentState::Exited => self.muted,
         }
+    }
+
+    /// The secondary text level: a row's one line, a body.
+    pub fn secondary(&self) -> Color {
+        mix(self.fg, self.muted, 0.3)
+    }
+
+    /// The muted text level, between secondary and faint: group labels, hint
+    /// labels.
+    pub fn dim(&self) -> Color {
+        mix(self.fg, self.muted, 0.6)
+    }
+
+    /// The accent at 70%: the marker of items agents filed.
+    pub fn accent_dim(&self) -> Color {
+        mix(self.accent, self.bg, 0.3)
     }
 
     /// What a session's programs are told their terminal looks like.
@@ -853,8 +817,6 @@ impl Theme {
     }
 }
 
-/// The glyph in front of a state: a spinner frame while working. All are in common
-/// coding fonts (JetBrains Mono lacks ✔ and ✖, for one).
 /// The one word for a state, everywhere the TUI says it (spec: Marks and color).
 pub fn state_word(state: AgentState) -> &'static str {
     match state {
@@ -866,17 +828,31 @@ pub fn state_word(state: AgentState) -> &'static str {
     }
 }
 
+/// `a` blended toward `b` by `t` (0 is `a`, 1 is `b`). Named colors stay `a`.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(
+            (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8,
+            (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8,
+            (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8,
+        ),
+        _ => a,
+    }
+}
+
+/// The mark in front of a state (spec: Marks and color): a dot in the state's
+/// color for what waits on you, a spinner while working, a ring when quiet. All
+/// are in common coding fonts.
 pub fn state_icon(state: AgentState, frame: usize) -> &'static str {
     const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     match state {
-        AgentState::NeedsInput => "●",
-        AgentState::Blocked => "×",
-        AgentState::ReviewReady => "✓",
-        AgentState::Interrupted => "◆",
-        AgentState::Stale => "◇",
+        AgentState::NeedsInput
+        | AgentState::Blocked
+        | AgentState::ReviewReady
+        | AgentState::Interrupted
+        | AgentState::Stale => "●",
         AgentState::Working => SPIN[frame % SPIN.len()],
-        AgentState::Idle => "○",
-        AgentState::Exited => "·",
+        AgentState::Idle | AgentState::Exited => "○",
     }
 }
 

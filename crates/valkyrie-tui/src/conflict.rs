@@ -99,7 +99,7 @@ fn side(frame: &mut ratatui::Frame, area: Rect, title: &str, text: &str, other: 
         .enumerate()
         .map(|(i, l)| {
             if marked.contains(&i) {
-                Line::from(vec!["▌".fg(t.accent2), l.to_string().fg(t.fg)])
+                Line::from(vec!["▌".fg(t.accent), l.to_string().fg(t.fg)])
                     .style(style::Style::new().bg(t.selection))
             } else {
                 Line::from(vec![" ".into(), l.to_string().fg(t.fg)])

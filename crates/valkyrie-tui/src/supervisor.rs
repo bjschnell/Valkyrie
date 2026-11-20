@@ -195,7 +195,7 @@ impl Page {
 
         let mut lines: Vec<Line> = vec![Line::default()];
         lines.push(Line::from(vec![
-            " Waiting on you ".fg(t.accent2).bold(),
+            " Waiting on you ".fg(t.dim()).bold(),
             format!("· {}", waits.len()).fg(t.muted),
         ]));
         if waits.is_empty() {
@@ -217,7 +217,7 @@ impl Page {
             let mut line = Line::from(vec![
                 mark,
                 // One width for every tag, so the titles line up.
-                format!(" {tag:^6} ").fg(t.bg).bg(t.accent2).bold(),
+                format!(" {tag:^6} ").fg(t.accent).bold(),
                 " ".into(),
                 fit(&what, room).fg(t.fg),
                 format!("  {keys}").fg(t.accent),
@@ -238,7 +238,7 @@ impl Page {
         lines.push(Line::default());
         let on = self.log.as_ref().is_none_or(|(_, on)| *on);
         lines.push(Line::from(vec![
-            " What it did ".fg(t.accent2).bold(),
+            " What it did ".fg(t.dim()).bold(),
             if on {
                 "· last 90 days".fg(t.muted)
             } else {
@@ -332,10 +332,7 @@ fn watch_lines(
         ),
         _ => (" Watching ", String::new()),
     };
-    lines.push(Line::from(vec![
-        head.fg(t.accent2).bold(),
-        note.fg(t.muted),
-    ]));
+    lines.push(Line::from(vec![head.fg(t.dim()).bold(), note.fg(t.muted)]));
     match watch {
         None => lines.push("   Loading…".fg(t.muted).into()),
         Some(Err(e)) => lines.push(

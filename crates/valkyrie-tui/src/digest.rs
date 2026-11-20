@@ -195,7 +195,7 @@ impl Page {
         let mut top = vec![Line::default()];
         let chip = |on: bool, text: String| {
             if on {
-                format!(" {text} ").fg(t.bg).bg(t.accent).bold()
+                format!(" {text} ").fg(t.accent).bold().underlined()
             } else {
                 format!(" {text} ").fg(t.muted)
             }
@@ -251,7 +251,7 @@ impl Page {
                     list.push(Line::default());
                     list.push(Line::from(vec![
                         format!(" {}", fit(head, inner.saturating_sub(6)))
-                            .fg(t.accent2)
+                            .fg(t.dim())
                             .bold(),
                         format!(" · {n}").fg(t.muted),
                     ]));
@@ -266,7 +266,7 @@ impl Page {
                     };
                     let mut first = vec![
                         if here { "▌".fg(t.accent) } else { " ".into() },
-                        format!(" {label} ").fg(t.bg).bg(color(e.outcome, t)).bold(),
+                        format!(" {label} ").fg(color(e.outcome, t)).bold(),
                         " ".into(),
                     ];
                     let room = inner.saturating_sub(label.len() + 4);
@@ -342,12 +342,11 @@ fn fit(text: &str, max: usize) -> String {
 /// Each outcome's color, as the session states it matches use them.
 fn color(o: Outcome, t: &Theme) -> Color {
     match o {
-        Outcome::Stuck => t.needs,
-        Outcome::Abandoned => t.interrupted,
-        Outcome::Waiting => t.accent2,
+        Outcome::Stuck => t.blocked,
+        Outcome::Abandoned => t.muted,
+        Outcome::Waiting => t.dim(),
         Outcome::Working => t.working,
-        Outcome::Shipped => t.done,
-        Outcome::Done => t.idle,
+        Outcome::Shipped | Outcome::Done => t.done,
     }
 }
 

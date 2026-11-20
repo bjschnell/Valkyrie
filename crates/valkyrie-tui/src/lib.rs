@@ -2480,7 +2480,7 @@ impl App {
                 1,
             );
             frame.render_widget(
-                Paragraph::new(more.fg(t.accent2).bold()).style(style::Style::new().bg(t.panel)),
+                Paragraph::new(more.fg(t.accent).bold()).style(style::Style::new().bg(t.panel)),
                 row,
             );
         }
@@ -4250,12 +4250,12 @@ const TOAST_SUMMARY_MAX: usize = 60;
 /// ` ● api needs input ` in the ping's color, then what it asks or finished.
 fn toast_spans(ping: &Ping, summary: Option<&str>, t: &Theme) -> Vec<ratatui::text::Span<'static>> {
     let (icon, color) = match (ping.proposal, ping.kind) {
-        // The Proposed lane's color.
-        (Some(_), _) => ("◆", t.accent2),
+        // A filed item, as its Inbox row marks it.
+        (Some(_), _) => ("■", t.accent_dim()),
         (None, Kind::Request) => ("●", t.needs),
-        (None, Kind::Done) => ("✓", t.done),
+        (None, Kind::Done) => ("●", t.done),
     };
-    let mut spans = vec![format!(" {icon} {} ", ping.text).fg(t.bg).bg(color).bold()];
+    let mut spans = vec![format!(" {icon} {} ", ping.text).fg(color).bold()];
     if let Some(summary) = summary.map(one_line).filter(|s| !s.is_empty()) {
         spans.push(format!(" {} ", fit(&summary, TOAST_SUMMARY_MAX)).fg(color));
     }
@@ -4298,7 +4298,7 @@ impl App {
             .filter(|_| self.settings.updates)
             .map(|newer| {
                 vec![
-                    format!(" ↑ {newer} ").fg(t.bg).bg(t.accent2).bold(),
+                    format!(" ↑ {newer} ").fg(t.accent).bold(),
                     " valk upgrade ".fg(t.muted),
                 ]
             });
@@ -4319,8 +4319,15 @@ impl App {
 
         self.home_rows.borrow_mut().clear();
         let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
-            let [lists, preview] =
-                Layout::horizontal([Constraint::Percentage(62), Constraint::Fill(1)]).areas(main);
+            // No boxes: a single rule between the list and the detail.
+            let [lists, rule, preview] = Layout::horizontal([
+                Constraint::Percentage(62),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .areas(main);
+            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
+            frame.render_widget(Paragraph::new(bar), rule);
             (lists, Some(preview))
         } else {
             (main, None)
@@ -4391,14 +4398,12 @@ impl App {
         let t = self.settings.theme;
         let others = self.others();
         let running = others.iter().take_while(|s| is_running(s)).count();
-        let title = Line::from(vec![
-            " ● ".fg(t.needs).bold(),
-            "inbox ".fg(t.fg).bold(),
-            format!("{} ", self.need_you()).fg(t.muted),
-        ]);
-        let block = panel(title, t, true);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        // Groups are labels, not boxes (rule 8); a row above the first one.
+        let inner = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
 
         if self.need_you() == 0 && others.is_empty() {
             let calm = if t.rain.is_some() {
@@ -4422,7 +4427,7 @@ impl App {
                 Line::default(),
                 Line::from(vec![
                     "new here? ".fg(t.muted),
-                    " ? ".fg(t.bg).bg(t.accent).bold(),
+                    " ? ".fg(t.accent).bold(),
                     " starts the tutor".fg(t.muted),
                 ])
                 .centered(),
@@ -4448,8 +4453,8 @@ impl App {
             lines.push((
                 None,
                 Line::from(vec![
-                    format!(" {name} ").fg(t.muted).bold(),
-                    n.to_string().fg(t.muted),
+                    format!(" {name} ").fg(t.dim()).bold(),
+                    n.to_string().fg(t.dim()),
                 ]),
             ));
         };
@@ -4544,7 +4549,7 @@ impl App {
         record_row(
             "■".fg(t.accent),
             &format!("{n} decision{}", if n == 1 { "" } else { "s" }),
-            vec![what.join(" · ").fg(t.fg)],
+            vec![what.join(" · ").fg(t.secondary())],
             age(since * 1000, now),
             width,
             t,
@@ -4570,9 +4575,9 @@ impl App {
             .join(" · ");
         let since = filed.first().map_or(0, |i| i.created);
         record_row(
-            "■".fg(t.accent).add_modifier(Modifier::DIM),
+            "■".fg(t.accent_dim()),
             &format!("{} filed", filed.len()),
-            vec![text.fg(t.fg)],
+            vec![text.fg(t.secondary())],
             age(since * 1000, now),
             width,
             t,
@@ -4584,7 +4589,7 @@ impl App {
         let t = self.settings.theme;
         if let Some(d) = self.proposal() {
             let title = Line::from(vec![
-                " ◇ ".fg(t.accent2).bold(),
+                " ■ ".fg(t.accent).bold(),
                 d.title.clone().fg(t.fg).bold(),
                 format!(" #{} ", d.id).fg(t.muted),
             ]);
@@ -4609,7 +4614,7 @@ impl App {
                     format!("and {offers} for the supervisor: s opens them").fg(t.muted),
                 ));
             }
-            let block = panel(title, t, false);
+            let block = bare(title, t);
             let inner = block.inner(area);
             frame.render_widget(block, area);
             self.draw_proposal_text(frame, inner, d, lines);
@@ -4649,7 +4654,7 @@ impl App {
                         .collect(),
                 ),
             };
-            let block = panel(Line::from(format!(" ■ {title} ").fg(t.fg).bold()), t, false);
+            let block = bare(Line::from(format!(" {title} ").fg(t.fg).bold()), t);
             let inner = block.inner(area);
             frame.render_widget(block, area);
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
@@ -4658,7 +4663,6 @@ impl App {
         let (selected, _) = self.selection();
         let session = selected.and_then(|id| self.sessions.iter().find(|s| s.id == id));
         let Some(session) = session else {
-            frame.render_widget(panel(Line::from(" preview ".fg(t.muted)), t, false), area);
             return;
         };
         self.draw_session_preview(frame, area, session, false);
@@ -4684,7 +4688,12 @@ impl App {
             name,
             format!(" #{} ", session.id).fg(t.muted),
         ]);
-        let block = panel(title, t, focused);
+        // Boxed only over a session, where it's a dialog; at home, a bare column.
+        let block = if focused {
+            panel(title, t, true)
+        } else {
+            bare(title, t)
+        };
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -4703,7 +4712,13 @@ impl App {
         if let Some(summary) = &status.summary {
             head.push(Line::from(summary.clone().fg(t.fg)));
         }
-        head.push(Line::from("─".repeat(inner.width as usize).fg(t.border)));
+        head.push(Line::from(
+            format!(
+                "── screen {}",
+                "─".repeat((inner.width as usize).saturating_sub(10))
+            )
+            .fg(t.border),
+        ));
         let head_height = head.len() as u16 + u16::from(status.summary.is_some()); // room to wrap
         let [top, screen] =
             Layout::vertical([Constraint::Length(head_height), Constraint::Fill(1)]).areas(inner);
@@ -4801,7 +4816,7 @@ impl App {
             height,
         );
         let title = Line::from(vec![
-            " ◇ ".fg(t.accent2).bold(),
+            " ■ ".fg(t.accent).bold(),
             "decisions to review ".fg(t.fg).bold(),
             format!("{} ", self.proposals.len()).fg(t.muted),
         ]);
@@ -4871,7 +4886,7 @@ impl App {
         )];
         if let Some(why) = &d.fresh.review {
             lines.push(Line::from(
-                format!("may be out of date: {why}").fg(t.interrupted),
+                format!("may be out of date: {why}").fg(t.accent),
             ));
         } else if let Some(scope) = scoping(d) {
             lines.push(Line::from(
@@ -4879,7 +4894,7 @@ impl App {
                     "scope it to {}? agents get it when they open these",
                     scope.join(", ")
                 )
-                .fg(t.accent2),
+                .fg(t.accent),
             ));
         } else if !d.scope.is_empty() {
             // Accepting it takes its scope too, so that's shown before you do.
@@ -5331,7 +5346,7 @@ impl App {
                         number.fg(t.muted),
                         icon.fg(color),
                         name,
-                        tail.fg(t.accent2),
+                        tail.fg(t.secondary()),
                         format!(" {panes}").trim_end().to_string().fg(t.muted),
                     ])
                 }
@@ -5565,7 +5580,7 @@ impl App {
                         number,
                         icon.fg(color),
                         name,
-                        tail.fg(t.accent2),
+                        tail.fg(t.secondary()),
                         format!(" {panes}").trim_end().to_string().fg(t.muted),
                     ])
                 }
@@ -5588,7 +5603,7 @@ impl App {
             frame.render_widget(Paragraph::new(lines), rect.intersection(text));
             if self.tab_mode && here {
                 lift(frame, rect);
-                underline(frame, rect, t.accent2);
+                underline(frame, rect, t.accent);
             } else if here {
                 underline(frame, rect, t.accent);
             }
@@ -5937,7 +5952,7 @@ fn detail_spans(
     while !detail.is_char_boundary(split) {
         split -= 1;
     }
-    let lead = if report { t.accent2 } else { t.muted };
+    let lead = if report { t.secondary() } else { t.muted };
     vec![
         detail[..split].to_string().fg(lead),
         detail[split..].to_string().fg(color),
@@ -5974,6 +5989,15 @@ fn fit(text: &str, max: usize) -> String {
     out
 }
 
+/// A column with its title on top and no border: the home detail (rule 8, a box
+/// is a dialog).
+fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
+    Block::new()
+        .style(style::Style::new().bg(t.bg).fg(t.fg))
+        .title(title)
+        .padding(Padding::new(1, 1, 0, 0))
+}
+
 /// A rounded panel; the focused one gets the accent border.
 fn panel(title: Line<'static>, t: &Theme, focused: bool) -> Block<'static> {
     Block::bordered()
@@ -6003,11 +6027,11 @@ fn proposal_row(d: &Decision, t: &Theme) -> TableRow<'static> {
     });
     // An active decision here may be out of date, or have a scope proposed.
     let kind = if d.fresh.review.is_some() {
-        "review?".fg(t.interrupted)
+        "review?".fg(t.accent)
     } else if scoping(d).is_some() {
-        "scope?".fg(t.accent2)
+        "scope?".fg(t.accent)
     } else {
-        d.kind.as_str().fg(t.accent2)
+        d.kind.as_str().fg(t.muted)
     };
     TableRow::new([
         Cell::from(format!("#{}", d.id).fg(t.muted)),
@@ -6142,15 +6166,15 @@ fn inbox_row(
 
 fn inbox_queue_row(q: &QueueItem, now: u64, spin: usize, width: usize, t: &Theme) -> Line<'static> {
     let s = &q.status;
-    let mut text = vec![s.summary.clone().unwrap_or_default().fg(t.fg)];
+    let mut text = vec![s.summary.clone().unwrap_or_default().fg(t.secondary())];
     // The supervisor's offer on a flag (ADR-0019 §2): `a` takes it.
     if let Some(step) = q.flag.as_ref().and_then(|f| f.step.as_ref()) {
         text.push("  → ".fg(t.muted));
-        text.push(step.action.label().fg(t.accent2).bold());
+        text.push(step.action.label().fg(t.accent).bold());
     }
     if let Some(report) = &q.report {
         text.push("  ▸ ".fg(t.muted));
-        text.push(report.clone().fg(t.accent2));
+        text.push(report.clone().fg(t.secondary()));
     }
     inbox_row(
         (s.state, spin),
@@ -6180,26 +6204,26 @@ fn inbox_session_row(
         }
     };
     if s.clients > 0 {
-        text.push("◉ ".fg(t.accent2));
+        text.push("◉ ".fg(t.muted));
     }
     if let Some(summary) = &s.status.summary {
         if !text.is_empty() && s.exited.is_some() {
             text.push("  ".into());
         }
-        text.push(summary.clone().fg(t.fg));
+        text.push(summary.clone().fg(t.secondary()));
     }
     // What it published on its tab with `valk status`.
     if let Some(report) = &s.report {
         text.push("  ▸ ".fg(t.muted));
-        text.push(report.clone().fg(t.accent2));
+        text.push(report.clone().fg(t.secondary()));
     }
     if s.status.agent != "generic" && !s.status.hooked {
-        text.push("  no hooks yet".fg(t.interrupted).italic());
+        text.push("  no hooks yet".fg(t.blocked).italic());
     }
     // Another live agent changed the same files (ADR-0019 §1).
     if let Some(overlap) = &s.overlap {
-        text.push("  ⚠ ".fg(t.interrupted));
-        text.push(overlap.clone().fg(t.interrupted));
+        text.push("  ⚠ ".fg(t.blocked));
+        text.push(overlap.clone().fg(t.blocked));
     }
     inbox_row(
         (state, spin),
@@ -6229,7 +6253,7 @@ fn header_line(need_you: usize, now: u64, t: &Theme) -> Line<'static> {
         ]
     };
     if let Some(host) = remote() {
-        spans.push(format!(" on {host} ").fg(t.bg).bg(t.accent2).bold());
+        spans.push(format!(" on {host} ").fg(t.muted));
     }
     spans.push(" ".into());
     spans.push(match need_you {
@@ -6241,15 +6265,12 @@ fn header_line(need_you: usize, now: u64, t: &Theme) -> Line<'static> {
 
 /// The home screen's rename prompt.
 fn rename_line(id: SessionId, typed: &edit::LineEdit, t: &Theme) -> Line<'static> {
-    let mut spans = vec![
-        format!(" rename #{id} ").fg(t.bg).bg(t.accent).bold(),
-        " ".into(),
-    ];
+    let mut spans = vec![format!(" rename #{id} ").fg(t.accent).bold(), " ".into()];
     spans.extend(typed.spans(NAME_MAX + 1, t));
     for (key, what) in [("↩", "save"), ("esc", "cancel"), ("blank", "folder name")] {
         spans.push(" ".into());
-        spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
-        spans.push(format!(" {what}").fg(t.muted));
+        spans.push(format!(" {key} ").fg(t.accent).bold());
+        spans.push(format!(" {what}").fg(t.dim()));
     }
     Line::from(spans).style(style::Style::new().bg(t.panel))
 }
@@ -6269,7 +6290,7 @@ fn footer_line(
     // Where each chip is on the line: its columns, and the key it presses.
     let mut chips = Vec::new();
     if !status.is_empty() {
-        spans.push(format!(" {status} ").fg(t.accent2).bold());
+        spans.push(format!(" {status} ").fg(t.fg).bold());
         spans.push("│".fg(t.border));
     } else if let Some(step) = step {
         // Why the supervisor picked it, beside the keys that take it.
@@ -6319,8 +6340,8 @@ fn footer_line(
     for &(key, what) in context.iter().chain(&general) {
         spans.push(" ".into());
         let from = spans.iter().map(|s| s.width() as u16).sum::<u16>();
-        spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
-        spans.push(format!(" {what}").fg(t.muted));
+        spans.push(format!(" {key} ").fg(t.accent).bold());
+        spans.push(format!(" {what}").fg(t.dim()));
         let to = spans.iter().map(|s| s.width() as u16).sum::<u16>();
         chips.push((from, to, chip_key(key)));
     }
@@ -6426,12 +6447,7 @@ fn attached_bar(
     // Zoomed, the bar says so, and which pane it is; a click shows the split.
     if let Some(p) = panes.filter(|p| p.zoomed) {
         let from = width(&spans);
-        spans.push(
-            format!(" ⊡ zoomed {}/{} ", p.at, p.of)
-                .fg(t.bg)
-                .bg(t.accent2)
-                .bold(),
-        );
+        spans.push(format!(" ⊡ zoomed {}/{} ", p.at, p.of).fg(t.accent).bold());
         clicks.push((from, width(&spans), BarClick::Action(Action::Zoom)));
         spans.push(" ".into());
     }
@@ -6446,8 +6462,7 @@ fn attached_bar(
         let up = page.history - page.from_top;
         spans.push(
             format!(" ↑ {up}/{} lines back ", page.history)
-                .fg(t.bg)
-                .bg(t.accent2)
+                .fg(t.accent)
                 .bold(),
         );
         spans.push(" q live ".fg(t.muted));
@@ -6494,8 +6509,8 @@ fn attached_bar(
     for (key, what, action) in keys {
         spans.push(" ".into());
         let from = width(&spans);
-        spans.push(format!(" {key} ").fg(t.bg).bg(t.accent).bold());
-        spans.push(format!(" {what}").fg(t.muted));
+        spans.push(format!(" {key} ").fg(t.accent).bold());
+        spans.push(format!(" {what}").fg(t.dim()));
         if let Some(action) = action {
             clicks.push((from, width(&spans), BarClick::Action(action)));
         }
@@ -7404,7 +7419,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(line.contains("◆ claude proposed #3 item 3"), "{line}");
+        assert!(line.contains("■ claude proposed #3 item 3"), "{line}");
         // The home screen's `a` is the decisions': there `b` opens it.
         assert!(line.contains("b open"), "{line}");
 
@@ -7634,6 +7649,73 @@ mod tests {
         );
         let line: String = bar.line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line.contains("● 5 need you"), "{line}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Color is state, in every theme (spec: Marks and color): home draws no box,
+    /// no filled chip (the logo aside, until the strip replaces it), a single rule
+    /// between list and detail, and stuck-ish states share the stuck color.
+    #[tokio::test]
+    async fn home_has_no_boxes_or_chips_in_any_theme() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-skin-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let mut ask = info(1);
+        ask.status.state = AgentState::NeedsInput;
+        let mut working = info(2);
+        working.status.state = AgentState::Working;
+        app.sessions = vec![ask, working, info(3)];
+        let mut q = queued(1);
+        q.status.state = AgentState::NeedsInput;
+        app.queue = vec![q];
+        app.on_push(ServerMsg::Proposals {
+            items: vec![proposed("/r/a", 1, "one")],
+        })
+        .unwrap();
+        for theme in theme::THEMES {
+            app.settings.theme = theme;
+            assert_eq!(
+                theme.state(AgentState::Stale),
+                theme.blocked,
+                "{}",
+                theme.name
+            );
+            assert_eq!(theme.state(AgentState::Interrupted), theme.blocked);
+            assert_eq!(theme.state(AgentState::Idle), theme.muted);
+            for width in [100, 140] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let [body, bar] =
+                            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                                .areas(frame.area());
+                        app.draw_home(frame, body, bar);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                for y in 1..20 {
+                    for x in 0..width {
+                        let cell = &buffer[(x, y)];
+                        assert!(
+                            !"╭╮╰╯┌┐└┘".contains(cell.symbol()),
+                            "{} {width}: a box at {x},{y}",
+                            theme.name
+                        );
+                        assert_ne!(
+                            cell.bg, theme.accent,
+                            "{} {width}: a chip at {x},{y}",
+                            theme.name
+                        );
+                    }
+                }
+                // At 140 the detail sits beside the list, behind one rule.
+                let rules = (0..width)
+                    .filter(|&x| (2..18).all(|y| buffer[(x, y)].symbol() == "│"))
+                    .count();
+                assert_eq!(rules, usize::from(width >= 140), "{} {width}", theme.name);
+            }
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -9653,7 +9735,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(toast, " ✓ proj1 finished  Fixed the login redirect  ");
+        assert_eq!(toast, " ● proj1 finished  Fixed the login redirect  ");
         app.sessions[0].status.summary = Some("x".repeat(200));
         let toast = toast_spans(&ping, app.toast_summary(&ping), app.settings.theme);
         assert_eq!(toast[1].content.width(), TOAST_SUMMARY_MAX + 2);
