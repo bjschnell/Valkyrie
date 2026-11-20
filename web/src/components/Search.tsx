@@ -96,13 +96,13 @@ export function SearchView() {
             autoCapitalize="off"
           />
         </div>
-        <div className="kind-pick" role="radiogroup" aria-label="How far back">
+        <div className="seg" role="radiogroup" aria-label="How far back">
           {WINDOWS.map(([w, label]) => (
             <button
               key={w}
               role="radio"
               aria-checked={win === w}
-              className={`kind-chip ${win === w ? "on" : ""}`}
+              className={`seg-item ${win === w ? "on" : ""}`}
               onClick={() => setWin(w)}
             >
               {label}

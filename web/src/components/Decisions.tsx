@@ -73,7 +73,7 @@ function ProposalCard({ d }: { d: Decision }) {
     <div className="card-slot">
       <article className="card decision-card">
         <div className="card-head">
-          <span className={`kind-chip kind-${d.kind}`}>{d.kind}</span>
+          <span className="tag">{d.kind}</span>
           <span className="card-name">#{d.id}</span>
           <span className="card-prog">{where}</span>
           <span className="card-age">{age(d.created * 1000, now)}</span>
@@ -120,7 +120,7 @@ function StaleCard({ d }: { d: Decision }) {
     <div className="card-slot">
       <article className="card decision-card stale">
         <div className="card-head">
-          <span className="kind-chip kind-gotcha">still true?</span>
+          <span className="tag">still true?</span>
           <span className="card-name">#{d.id}</span>
           <span className="card-prog">{scopeName(d.project)}</span>
         </div>
@@ -156,7 +156,7 @@ function ScopeCard({ d }: { d: Decision }) {
     <div className="card-slot">
       <article className="card decision-card">
         <div className="card-head">
-          <span className="kind-chip kind-pattern">scope?</span>
+          <span className="tag">scope?</span>
           <span className="card-name">#{d.id}</span>
           <span className="card-prog">{scopeName(d.project)}</span>
         </div>
@@ -198,13 +198,13 @@ export function DecisionEditor({ d, busy, onDone }: { d: Decision; busy: boolean
   };
   return (
     <div className="decision-edit">
-      <div className="kind-pick" role="radiogroup" aria-label="Kind">
+      <div className="seg" role="radiogroup" aria-label="Kind">
         {DECISION_KINDS.map((k) => (
           <button
             key={k}
             role="radio"
             aria-checked={kind === k}
-            className={`kind-chip kind-${k} ${kind === k ? "on" : ""}`}
+            className={`seg-item ${kind === k ? "on" : ""}`}
             onClick={() => setKind(k)}
           >
             {k}

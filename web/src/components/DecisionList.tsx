@@ -118,13 +118,13 @@ export function DecisionList() {
 
       <main className="inbox">
         <ToReview />
-        <div className="kind-pick memory-tabs" role="tablist" aria-label="What">
+        <div className="seg memory-tabs" role="tablist" aria-label="What">
           {TABS.map((t) => (
             <button
               key={t}
               role="tab"
               aria-selected={tab === t}
-              className={`kind-chip ${tab === t ? "on" : ""}`}
+              className={`seg-item ${tab === t ? "on" : ""}`}
               onClick={() => {
                 setTab(t);
                 setOnly(null);
@@ -146,13 +146,13 @@ export function DecisionList() {
             onChange={(e) => setWords(e.target.value)}
             spellCheck={false}
           />
-          <div className="kind-pick" role="radiogroup" aria-label="Which">
+          <div className="seg" role="radiogroup" aria-label="Which">
             {[false, true].map((e) => (
               <button
                 key={String(e)}
                 role="radio"
                 aria-checked={showEnded === e}
-                className={`kind-chip ${showEnded === e ? "on" : ""}`}
+                className={`seg-item ${showEnded === e ? "on" : ""}`}
                 onClick={() => setShowEnded(e)}
               >
                 {e ? (tab === "notes" ? "replaced" : "ended") : tab === "notes" ? "live" : "in use"}
@@ -161,13 +161,13 @@ export function DecisionList() {
           </div>
         </div>
         {projects.length > 1 && (
-          <div className="kind-pick" role="radiogroup" aria-label="Project">
+          <div className="seg" role="radiogroup" aria-label="Project">
             {[null, ...projects].map((p) => (
               <button
                 key={p ?? "all"}
                 role="radio"
                 aria-checked={only === p}
-                className={`kind-chip ${only === p ? "on" : ""}`}
+                className={`seg-item ${only === p ? "on" : ""}`}
                 onClick={() => setOnly(p)}
               >
                 {p === null ? "all" : scopeName(p)}
@@ -252,7 +252,7 @@ function DecisionRow({ d, onChange }: { d: Decision; onChange: () => Promise<voi
     <div className="card-slot">
       <article className={`card decision-card ${active && inFull(d) ? "in-full" : ""} ${active ? "" : "ended"}`}>
         <div className="card-head">
-          <span className={`kind-chip kind-${d.kind}`}>{d.kind}</span>
+          <span className="tag">{d.kind}</span>
           <span className="card-name">#{d.id}</span>
           {how && <span className="card-prog">{how}</span>}
         </div>
@@ -339,7 +339,7 @@ function NoteRow({ n, onChange }: { n: Note; onChange: () => Promise<void> }) {
     <div className="card-slot">
       <article className={`card decision-card note-card ${n.stale ? "stale" : ""} ${live(n) ? "" : "ended"}`}>
         <div className="card-head">
-          <span className="kind-chip kind-note">note</span>
+          <span className="tag">note</span>
           <span className="card-name">#{n.id}</span>
           {state && <span className="card-prog">{state}</span>}
           <span className="card-age">{age(n.created * 1000, now)}</span>

@@ -1,24 +1,9 @@
-import type { AgentState } from "../proto";
+import { STATE_LABEL, type AgentState } from "../proto";
 import { useApp } from "../store";
 
-/** The TUI's state glyphs; a spinner while working. */
+/** A session's state as a dot (the word beside it says which). */
 export function StateIcon({ state }: { state: AgentState }) {
-  if (state === "working") return <span className="spin" aria-label="working" />;
-  const glyph: Record<AgentState, string> = {
-    working: "",
-    needs_input: "●",
-    blocked: "×",
-    review_ready: "✓",
-    interrupted: "◆",
-    stale: "◇",
-    idle: "○",
-    exited: "·",
-  };
-  return (
-    <span className={`state-icon state-text-${state}`} aria-label={state}>
-      {glyph[state]}
-    </span>
-  );
+  return <span className={`state-icon state-text-${state}`} role="img" aria-label={STATE_LABEL[state]} />;
 }
 
 const LABEL = {

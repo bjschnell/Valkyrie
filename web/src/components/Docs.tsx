@@ -99,7 +99,7 @@ export function DocsList() {
                   disabled={!d.key}
                   onClick={() => d.key && go(docHash(d.key))}
                 >
-                  <span className={`kind-chip kind-${d.kind}`}>{d.kind}</span>
+                  <span className="tag">{d.kind}</span>
                   <span className="row-main">
                     <span className="row-name">{d.title || d.path}</span>
                     <span className="row-sub">{byline(d)}</span>
@@ -289,7 +289,7 @@ export function DocView({ docKey }: { docKey: string }) {
         {doc && (
           <>
             <div className="doc-meta">
-              <span className={`kind-chip kind-${doc.kind}`}>{doc.kind}</span>
+              <span className="tag">{doc.kind}</span>
               {doc.item ? <span>backlog #{itemNo(items, doc.item)}</span> : null}
               {doc.commit ? <code>{doc.commit.slice(0, 8)}</code> : null}
               <span className="doc-path">{doc.path}</span>

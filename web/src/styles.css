@@ -1,18 +1,26 @@
-/* Valkyrie web: the TUI's Dracula palette, as a phone-first app. */
+/* Valkyrie web: the TUI's Dracula palette, as a phone-first app. Color means
+   state and nothing else (#250): ask (--needs), stuck (--blocked), done,
+   working, and --accent for you (selection, focus, the one primary button). */
 
 :root {
-  --page: #191a21;
-  --surface: #21222c;
-  --card: #282a36;
-  --raised: #343746;
-  --line: #44475a;
-  --fg: #f8f8f2;
-  --muted: #95a0c1;
-  --soft: #b6bdd8;
+  --page: #16171e;
+  --surface: #1e1f28;
+  --card: #1e1f28;
+  --raised: #282a36;
+  --line: #2c2e3d;
+  /* Between rows, quieter than --line. */
+  --divider: #22242f;
+  /* The selected segment of a segmented control. */
+  --seg-on: #3a3d52;
+  --fg: #f2f2ee;
+  --muted: #9aa3c4;
+  --soft: #c3c8de;
+  /* Ids, ages, hints: what you read only when you look for it. */
+  --faint: #6c7393;
   --accent: #bd93f9;
   --accent2: #ff79c6;
   --needs: #f1fa8c;
-  --blocked: #ff5555;
+  --blocked: #ff6e6e;
   --done: #50fa7b;
   --working: #8be9fd;
   --interrupted: #ffb86c;
@@ -75,7 +83,15 @@
   --shadow-2: 0 10px 30px rgb(0 0 0 / 40%);
   --shadow-3: 0 14px 40px rgb(0 0 0 / 45%);
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --sans: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", Inter, Roboto, sans-serif;
+  /* Six steps (#250), sentence case, no uppercase tracked labels. Words a person
+     reads are sans; anything a machine made (ids, branches, ages, paths) is mono. */
+  --type-title: var(--weight-bold) 28px/1.2 var(--font);
+  --type-heading: 650 20px/1.3 var(--font);
+  --type-row: var(--weight-semibold) 15px/1.35 var(--font);
+  --type-body: 400 15px/1.45 var(--font);
+  --type-label: 500 13px/1.4 var(--font);
+  --type-mono: 400 12px/1.4 var(--mono);
+  --sans: Inter, ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   --font: var(--sans);
   --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   color-scheme: dark;
@@ -240,7 +256,7 @@ h1[tabindex="-1"]:focus {
 }
 
 .title-name {
-  font-weight: var(--weight-bold);
+  font: var(--type-heading);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -348,8 +364,7 @@ h1[tabindex="-1"]:focus {
 
 .split-empty-title {
   color: var(--fg);
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
+  font: var(--type-heading);
 }
 
 .split-empty kbd {
@@ -381,30 +396,18 @@ h1[tabindex="-1"]:focus {
 /* A section's pages (Memory: Decisions, Docs, Wiki; History: Sessions, Summary,
    Search, Supervisor), in the page's column under its top bar (#249). */
 .section-tabs {
-  width: 100%;
-  max-width: 720px;
-  margin: 0 auto;
-  padding: var(--space-25) var(--space-35) 0;
+  max-width: calc(100% - 2 * var(--space-35));
+  /* Left-aligned to the page's 720px column, wherever it sits. */
+  margin: var(--space-25) 0 0 max(var(--space-35), calc((100% - 720px) / 2 + var(--space-35)));
 }
 
-.section-tabs .kind-chip {
-  text-decoration: none;
-}
-
-.section-tabs .count {
-  margin-left: var(--space-15);
-  opacity: 0.8;
-}
 
 .section-title {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   margin: var(--space-45) var(--space-1) var(--space-25);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
+  font: var(--type-label);
   color: var(--soft);
 }
 
@@ -413,8 +416,8 @@ h1[tabindex="-1"]:focus {
   padding: 1px var(--space-15);
   border-radius: var(--radius-full);
   background: var(--raised);
-  color: var(--fg);
-  font-size: var(--text-xs);
+  color: var(--soft);
+  font: var(--type-mono);
   text-align: center;
 }
 
@@ -431,8 +434,6 @@ h1[tabindex="-1"]:focus {
 
 .quota-who {
   font-weight: var(--weight-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
   color: var(--soft);
 }
 
@@ -562,8 +563,7 @@ h1[tabindex="-1"]:focus {
 }
 
 .card-name {
-  font-weight: var(--weight-bold);
-  font-size: var(--text-lg);
+  font: var(--type-row);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -572,25 +572,24 @@ h1[tabindex="-1"]:focus {
 
 .card-prog {
   color: var(--muted);
-  font-size: var(--text-sm);
+  font: var(--type-mono);
 }
 
 .card-age {
   margin-left: auto;
   color: var(--muted);
-  font-size: var(--text-sm);
+  font: var(--type-mono);
 }
 
 .card-state {
   margin: var(--space-05) 0 0 var(--space-55);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
+  font: var(--type-label);
   color: var(--state);
 }
 
 .card-summary {
   margin: var(--space-2) 0 var(--space-1);
-  font-size: var(--text-md);
+  font: var(--type-body);
   color: var(--fg);
   word-break: break-word;
 }
@@ -789,9 +788,8 @@ h1[tabindex="-1"]:focus {
 
 .row-n {
   width: 14px;
-  font-family: var(--mono);
-  font-size: var(--text-xs);
-  color: var(--muted);
+  font: var(--type-mono);
+  color: var(--faint);
 }
 
 .row-main {
@@ -803,14 +801,14 @@ h1[tabindex="-1"]:focus {
 
 .row-name {
   color: var(--fg);
-  font-weight: var(--weight-semibold);
+  font: var(--type-row);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .row-sub {
-  font-size: var(--text-sm);
+  font: var(--type-label);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -827,7 +825,7 @@ h1[tabindex="-1"]:focus {
 }
 
 .row-age {
-  font-size: var(--text-sm);
+  font: var(--type-mono);
 }
 
 /* Settings: a section's body, on the same surface as the session list. */
@@ -940,23 +938,37 @@ html.with-tabs .offline-banner {
   bottom: calc(64px + env(safe-area-inset-bottom) + var(--space-3));
 }
 
-/* State glyphs and the working spinner. */
+/* A session's state is a round dot (#250): filled when it waits on you (ask,
+   stuck, done), outlined when it doesn't (running, quiet). Records are squares. */
 .state-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 14px;
+  --state: var(--idle);
   flex: none;
-  font-size: var(--text-sm);
+  width: 9px;
+  height: 9px;
+  margin: 0 var(--space-05);
+  border-radius: 50%;
+  background: var(--state);
 }
 
-.state-text-needs_input { color: var(--needs); }
-.state-text-blocked { color: var(--blocked); }
-.state-text-review_ready { color: var(--done); }
+.state-icon.state-text-working,
+.state-icon.state-text-idle,
+.state-icon.state-text-exited {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px var(--state);
+}
+
+.state-icon.state-text-exited {
+  --state: var(--faint);
+}
+
+.state-text-needs_input { --state: var(--needs); color: var(--needs); }
+.state-text-blocked,
 .state-text-interrupted,
-.state-text-stale { color: var(--interrupted); }
-.state-text-working { color: var(--working); }
+.state-text-stale { --state: var(--blocked); color: var(--blocked); }
+.state-text-review_ready { --state: var(--done); color: var(--done); }
+.state-text-working { --state: var(--working); color: var(--working); }
 .state-text-idle,
-.state-text-exited { color: var(--idle); }
+.state-text-exited { --state: var(--idle); color: var(--idle); }
 
 .spin {
   flex: none;
@@ -1318,8 +1330,6 @@ html.with-tabs .offline-banner {
 .pair-tagline {
   margin: var(--space-2) 0 var(--space-55);
   font-size: var(--text-2xs);
-  letter-spacing: 0.3em;
-  text-transform: uppercase;
   color: color-mix(in srgb, #b06bff 80%, var(--fg));
 }
 
@@ -1487,8 +1497,16 @@ html.with-tabs .offline-banner {
   border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--on-accent);
-  font-weight: var(--weight-bold);
-  font-size: var(--text-md);
+  font: var(--type-row);
+}
+
+/* One primary button per view (#250): the view's own. In an item of a list
+   (a queue card, a proposal, a build order) the main answer is tinted, not
+   filled, so a list of ten doesn't shout ten times. */
+:is(.card, .order-card, .supervisor-card) .primary {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .primary:active {
@@ -2073,11 +2091,8 @@ html.with-tabs .offline-banner {
 }
 
 .field-label {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
+  font: var(--type-label);
   color: var(--soft);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .field-row {
@@ -2503,28 +2518,89 @@ html.with-tabs .offline-banner {
   overflow-wrap: anywhere;
 }
 
+/* A plain Delete or No beside Accept is never red (#250): red is for state and
+   for a destructive confirm (a second tap), not for a button that has Undo. */
 .ghost.no {
-  color: var(--blocked);
+  color: var(--soft);
 }
 
-.kind-chip {
+/* The three kinds of small thing (#250). ---------------------------------- */
+
+/* A tag: a quiet mono word, no box, never clickable ("bug · p1 · api#4"). Kinds
+   and priorities are words, not colors. */
+.tag {
   flex: none;
-  padding: 1px var(--space-2);
-  border-radius: var(--radius-full);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--kind, var(--soft));
-  background: color-mix(in srgb, var(--kind, var(--soft)) 16%, transparent);
+  font: var(--type-mono);
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-.kind-constraint { --kind: var(--blocked); }
-.kind-gotcha { --kind: var(--interrupted); }
-.kind-decision { --kind: var(--accent); }
-.kind-pattern { --kind: var(--working); }
-.kind-fix { --kind: var(--done); }
-.kind-skill { --kind: var(--needs); }
+.tag + .tag::before {
+  content: "· ";
+  color: var(--faint);
+}
+
+/* A state: a dot and a word ("● stuck"). The dot carries the color; the word reads. */
+.state-tag {
+  --state: var(--idle);
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-15);
+  font: var(--type-mono);
+  color: var(--soft);
+  white-space: nowrap;
+}
+
+.state-tag::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--state);
+}
+
+/* A filter: one segmented control. A raised track, the chosen segment lifted. */
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-05);
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--space-05);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+}
+
+.seg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-15);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-xs);
+  font: var(--type-label);
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.seg-item:hover {
+  color: var(--fg);
+}
+
+.seg-item.on {
+  color: var(--fg);
+  background: var(--seg-on);
+}
+
+.seg-item .count {
+  font: var(--type-mono);
+  color: var(--faint);
+}
+
+.seg-item.on .count {
+  color: var(--soft);
+}
 
 .decision-edit {
   display: flex;
@@ -2533,27 +2609,15 @@ html.with-tabs .offline-banner {
   margin-top: var(--space-3);
 }
 
-.kind-pick {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-15);
-}
-
-/* Off is neutral, on is the kind's color: both readable, no dimming (#214). */
-.kind-pick .kind-chip {
-  padding: var(--space-15) var(--space-3);
-  color: var(--soft);
-  background: color-mix(in srgb, var(--soft) 10%, transparent);
-}
-
-.kind-pick .kind-chip.on {
-  color: var(--kind, var(--accent));
-  background: color-mix(in srgb, var(--kind, var(--accent)) 16%, transparent);
-  outline: 1.5px solid var(--kind, var(--accent));
-}
-
 .decision-card.stale {
   --state: var(--interrupted);
+}
+
+/* The tokens #250 added, for every other look: derived from its own palette. */
+:root[data-theme] {
+  --divider: color-mix(in srgb, var(--line) 55%, var(--page));
+  --seg-on: color-mix(in srgb, var(--fg) 12%, var(--raised));
+  --faint: color-mix(in srgb, var(--muted) 70%, var(--page));
 }
 
 /* The TUI's other palettes: the popular editor themes, a few of them light, and
@@ -3434,16 +3498,7 @@ html.with-tabs .offline-banner {
 
 /* Backlog (DESIGN §8.12) --------------------------------------------------- */
 
-.kind-bug { --kind: var(--blocked); }
-.kind-feature { --kind: var(--accent); }
-.kind-chore { --kind: var(--soft); }
-.kind-spike { --kind: var(--needs); }
-.kind-debt { --kind: var(--accent2); }
 /* Priority wears the kind chip's shape: p0 and p1 stand out, the rest stay quiet. */
-.prio-p0 { --kind: var(--needs); }
-.prio-p1 { --kind: var(--accent); }
-.prio-p2,
-.prio-p3 { --kind: var(--soft); }
 /* Past .item-live, which comes later and would give the lane's color. */
 .item-live.item-after { color: var(--interrupted); }
 .item-live.item-group { color: var(--accent); }
@@ -3551,11 +3606,6 @@ html.with-tabs .offline-banner {
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
-}
-
-.backlog-filter .kind-chip .count {
-  margin-left: var(--space-1);
-  opacity: 0.7;
 }
 
 /* A build order waiting on the user (ADR-0019 §2), above the board. */
@@ -3764,8 +3814,6 @@ html.with-tabs .offline-banner {
   background: var(--needs);
   color: var(--page);
   font-size: var(--text-2xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 /* One column of lanes on a phone, skipping the empty ones; a board of four side
@@ -3933,10 +3981,6 @@ button.as-text {
 }
 
 /* Docs (ADR-0021 §5). */
-.kind-plan { --kind: var(--accent); }
-.kind-research { --kind: var(--working); }
-.kind-report { --kind: var(--done); }
-.kind-note { --kind: var(--soft); }
 
 .doc-row:disabled {
   opacity: 0.6;
@@ -4034,7 +4078,7 @@ button.as-text {
 }
 
 .ghost.danger {
-  color: var(--blocked);
+  color: var(--soft);
 }
 
 .ghost:disabled {
@@ -4227,8 +4271,6 @@ button.as-text {
   border-radius: var(--radius-full);
   font-size: var(--text-2xs);
   font-weight: var(--weight-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   color: var(--st, var(--soft));
   background: color-mix(in srgb, var(--st, var(--soft)) 16%, transparent);
 }
@@ -4293,12 +4335,13 @@ button.as-text {
 }
 
 /* The away digest (backlog #105): where each session's work ended up. */
-.outcome-stuck { --kind: var(--needs); }
-.outcome-abandoned { --kind: var(--blocked); }
-.outcome-waiting { --kind: var(--interrupted); }
-.outcome-working { --kind: var(--working); }
-.outcome-shipped { --kind: var(--done); }
-.outcome-done { --kind: var(--soft); }
+/* The digest files a waiting prompt and a blocked turn both as stuck: either way it waits on you. */
+.outcome-stuck { --state: var(--needs); }
+.outcome-abandoned { --state: var(--idle); }
+.outcome-waiting { --state: var(--needs); }
+.outcome-working { --state: var(--working); }
+.outcome-shipped { --state: var(--done); }
+.outcome-done { --state: var(--done); }
 
 .digest-about {
   margin: var(--space-1) var(--space-05) var(--space-3);
@@ -4314,7 +4357,7 @@ button.as-text {
   text-align: left;
 }
 
-.digest-row .kind-chip {
+.digest-row .state-tag {
   align-self: flex-start;
 }
 
@@ -4355,11 +4398,7 @@ button.as-text {
 
 .memory-tabs {
   margin-bottom: var(--space-1);
-}
-
-.memory-tabs .kind-chip .count {
-  margin-left: var(--space-1);
-  opacity: 0.7;
+  text-transform: capitalize;
 }
 
 .memory-filters {
@@ -4547,8 +4586,6 @@ button.as-text {
   color: var(--accent2);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .supervisor-card-title {
@@ -4621,8 +4658,6 @@ button.as-text {
   min-width: 10ch;
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--muted);
 }
 
@@ -5188,10 +5223,7 @@ html[data-vt="glide"]::view-transition-group(*) {
 
 .keys-section h3 {
   margin: var(--space-3) 0 var(--space-1);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font: var(--type-label);
   color: var(--muted);
 }
 
@@ -5292,8 +5324,8 @@ html[data-vt="glide"]::view-transition-group(*) {
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-.kind-chip.wiki-stale {
-  color: var(--needs);
+.state-tag.wiki-stale {
+  --state: var(--needs);
 }
 .wiki-stale-why {
   margin: 0 var(--space-05) var(--space-3);
