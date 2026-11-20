@@ -929,6 +929,10 @@ impl App {
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
         }
+        // The decisions opened from the Inbox take the keys until Esc.
+        if self.reviewing.is_some() {
+            return self.review_keys(&bytes).await;
+        }
         self.option_hint(&bytes);
         self.home_input(&bytes).await;
     }
@@ -957,6 +961,11 @@ impl App {
             || self.renaming.is_some()
         {
             return;
+        }
+        // Over the open decisions: the wheel and links are the dialog's, not the
+        // rows' behind it.
+        if self.reviewing.is_some() {
+            return self.on_proposal_mouse(m);
         }
         let hit = self.home_hit(Position::new(m.x, m.y));
         match m.kind {
@@ -4591,6 +4600,15 @@ impl App {
                 )
                 .fg(t.muted),
             )];
+            let mut lines = lines;
+            // The row counts the supervisor's offers too; Enter opens the
+            // proposals, so say where the rest are.
+            let offers = self.launches.len() + self.orders.len();
+            if offers > 0 {
+                lines.push(Line::from(
+                    format!("and {offers} for the supervisor: s opens them").fg(t.muted),
+                ));
+            }
             let block = panel(title, t, false);
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -10218,6 +10236,17 @@ mod tests {
         screen(&app, &mut terminal);
         app.on_input(click(x, y).into_bytes()).await;
         assert_eq!(app.reviewing, Some(0));
+        // Open over home, it takes the keys: `q` closes it rather than quitting,
+        // and the rows behind don't move.
+        let behind = app.selected;
+        app.on_input(b"k".to_vec()).await;
+        assert_eq!((app.selected, app.reviewing), (behind, Some(0)));
+        app.on_input(b"q".to_vec()).await;
+        assert_eq!((app.reviewing, app.quit), (None, false));
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.reviewing, Some(0));
+        app.on_input(b"\x1b".to_vec()).await;
+        assert_eq!((app.reviewing, app.quit), (None, false));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
