@@ -324,6 +324,11 @@ struct App {
     parked: Option<Parked>,
     /// `g` was pressed: the next key picks a section.
     g_pending: bool,
+    /// `x` pressed once on this session: a second closes it (rule 9: x always
+    /// confirms).
+    kill_armed: Option<SessionId>,
+    /// The `?` sheet of every key is open.
+    help: bool,
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
@@ -497,6 +502,8 @@ impl App {
             previous: None,
             parked: None,
             g_pending: false,
+            kill_armed: None,
+            help: false,
             needing: None,
             renaming: None,
             menu: None,
@@ -936,6 +943,9 @@ impl App {
 
     /// Typed keys while on the home screen, whichever page or prompt is over it.
     async fn home_screen_keys(&mut self, bytes: Vec<u8>) {
+        if self.help {
+            return self.help_keys(&bytes).await;
+        }
         let Some(bytes) = self.section_keys(bytes).await else {
             return;
         };
@@ -1629,17 +1639,6 @@ impl App {
             .iter()
             .find(|&&(from, to, _)| (from..to).contains(&x))
         else {
-            // The toast follows the bar's own spans: a proposal's opens the backlog.
-            let from = bar.line.width() as u16;
-            let to = from
-                + self.toast().map_or(0, |p| {
-                    self.toast_line(p).iter().map(|s| s.width() as u16).sum()
-                });
-            if (from..to).contains(&x)
-                && let Some(id) = self.toast_proposal()
-            {
-                self.open_backlog_at(id).await;
-            }
             return;
         };
         match click {
@@ -2425,6 +2424,78 @@ impl App {
         (!rest.is_empty()).then(|| rest.to_vec())
     }
 
+    /// Keys over the `?` sheet: `t` starts the tutor; Esc, `q` or `?` close it.
+    async fn help_keys(&mut self, bytes: &[u8]) {
+        match next_key(bytes) {
+            b"t" => {
+                self.help = false;
+                self.start_tutor().await;
+            }
+            b"\x1b" | b"q" | b"?" | [0x03] => self.help = false,
+            _ => {}
+        }
+    }
+
+    /// The `?` sheet: every key, by what it does on every screen (spec: One key
+    /// grammar), the old keys that still work, and the tutor at its foot. A
+    /// dialog: what's behind it dims.
+    fn draw_help(&self, frame: &mut ratatui::Frame) {
+        let t = self.settings.theme;
+        let area = frame.area();
+        dim(frame, area, t);
+        let rows: &[(&str, &str)] = &[
+            ("j k · ↩ · esc", "move · open or attach · back"),
+            ("tab", "the next thing that waits on you (alt n attached)"),
+            ("1-9", "answer the selected ask with that choice"),
+            ("a · d", "accept or allow · reject or deny"),
+            ("x", "close, after a second x"),
+            ("r", "rename"),
+            ("n", "new session"),
+            ("/ · [ ]", "search · cycle a section's tabs or filter"),
+            (
+                "g i · g b · g m · g h",
+                "Inbox · Backlog · Memory · History",
+            ),
+            (", · ?", "settings (. there: the keys) · this sheet"),
+            ("alt h · ctrl ]", "home, from a session"),
+            ("q", "quit"),
+        ];
+        let mut lines = vec![Line::default()];
+        for (keys, does) in rows {
+            lines.push(Line::from(vec![
+                format!("  {keys:<22}").fg(t.accent).bold(),
+                does.to_string().fg(t.secondary()),
+            ]));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(
+            "  Still work for now: b backlog · D docs · W wiki · w h history · s supervisor · . keys"
+                .fg(t.muted),
+        ));
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            "  t".fg(t.accent).bold(),
+            " starts the tutor, a walk through all of it".fg(t.secondary()),
+        ]));
+        let width = 78.min(area.width);
+        let height = (lines.len() as u16 + 3).min(area.height);
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                panel(Line::from(" Every key ".fg(t.fg).bold()), t, true).title_bottom(
+                    Line::from(vec![" esc ".fg(t.accent).bold(), "close ".fg(t.dim())]).centered(),
+                ),
+            ),
+            rect,
+        );
+    }
+
     /// Forgets a pending `g`, and the hint it put up.
     fn drop_g(&mut self) {
         if std::mem::take(&mut self.g_pending) {
@@ -3074,6 +3145,10 @@ impl App {
 
     async fn on_home_key(&mut self, key: HomeKey) {
         let (selected, _) = self.selection();
+        // Any other key keeps the session a first `x` asked about.
+        if key != HomeKey::Kill {
+            self.kill_armed = None;
+        }
         match key {
             HomeKey::Up => {
                 self.selected = self.selected.saturating_sub(1);
@@ -3123,13 +3198,43 @@ impl App {
             HomeKey::PageDown => self.scroll_proposal(1),
             HomeKey::PageUp => self.scroll_proposal(-1),
             HomeKey::Kill => {
-                if let Some(id) = selected {
-                    if let Err(e) = self.client.kill(id).await {
-                        self.status = format!("kill failed: {e:#}");
+                let Some(id) = selected else { return };
+                if self.kill_armed != Some(id) {
+                    self.kill_armed = Some(id);
+                    return;
+                }
+                self.kill_armed = None;
+                if let Err(e) = self.client.kill(id).await {
+                    self.status = format!("close failed: {e:#}");
+                }
+                self.refresh().await;
+            }
+            HomeKey::NextWaiting => {
+                // The next waiting row after the cursor, round to the first.
+                let rows = self.inbox_rows();
+                let waits = |r: &InboxRow| !matches!(r, InboxRow::Session(_));
+                let next = (self.selected + 1..rows.len())
+                    .chain(0..=self.selected.min(rows.len().saturating_sub(1)))
+                    .find(|&i| waits(&rows[i]));
+                match next {
+                    Some(i) => {
+                        self.selected = i;
+                        self.update_preview().await;
                     }
-                    self.refresh().await;
+                    None => self.say("nothing waits on you".into()),
                 }
             }
+            HomeKey::Answer(n) => match self.selection() {
+                (Some(id), Some(q)) if q.status.state == AgentState::NeedsInput => {
+                    let name = q.name.clone();
+                    match self.client.input(id, vec![b'0' + n]) {
+                        Ok(()) => self.status = format!("answered {name} with {n}"),
+                        Err(e) => self.status = format!("couldn't answer: {e:#}"),
+                    }
+                }
+                _ => self.say("1-9 answer a session that asks".into()),
+            },
+            HomeKey::Help => self.help = true,
             HomeKey::NewShell => self.new_shell(None).await,
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
@@ -3149,7 +3254,6 @@ impl App {
             HomeKey::Past => self.open_digest().await,
             HomeKey::Docs => self.open_docs().await,
             HomeKey::Wiki => self.open_wiki(selected).await,
-            HomeKey::Tutor => self.start_tutor().await,
             HomeKey::Adopt => self.adopt(selected).await,
         }
     }
@@ -4494,9 +4598,20 @@ impl App {
                     if let Some(cursor) = self.reviewing {
                         self.draw_reviews(frame, main, cursor);
                     }
-                    let mut line = self.bar(view).line;
-                    if let Some(toast) = self.toast() {
-                        line.spans.extend(self.toast_line(toast));
+                    let line = self.bar(view).line;
+                    // A toast takes its own row over the bar for its few seconds,
+                    // never the bar's own line (rule 9, backlog #203).
+                    if let Some(toast) = self.toast()
+                        && bar.y > body.y
+                    {
+                        let row = Rect::new(body.x, bar.y - 1, body.width, 1);
+                        let spans = self.toast_line(toast);
+                        frame.render_widget(ratatui::widgets::Clear, row);
+                        frame.render_widget(
+                            Paragraph::new(Line::from(spans))
+                                .style(style::Style::new().bg(self.settings.theme.panel)),
+                            row,
+                        );
                     }
                     frame.render_widget(
                         Paragraph::new(line)
@@ -4512,6 +4627,9 @@ impl App {
                 }
             }
             self.draw_mini(frame);
+            if self.help && self.view.is_none() {
+                self.draw_help(frame);
+            }
             if let Some(cursor) = self.settings_cursor {
                 self.draw_settings(frame, cursor);
             }
@@ -4729,8 +4847,14 @@ impl App {
             frame.area(),
         );
 
-        let [header, main] =
-            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+        // The notice line sits over the footer: a toast or what a key said, else a
+        // faint rule. Never the hint line (rule 9).
+        let [header, main, notice_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(body);
         self.home_rows.borrow_mut().clear();
         let (left, places) = self.strip_line(header.width, now);
         for (from, to, section) in places {
@@ -4805,44 +4929,142 @@ impl App {
             rain::draw(frame.buffer_mut(), screen, &regions, now, colors);
         }
 
-        let mut chips = Vec::new();
-        let mut footer = match &self.renaming {
-            Some((id, typed)) => rename_line(*id, typed, t),
-            None => {
-                let (line, found) = footer_line(
-                    &self.status,
-                    self.offered().map(|(_, _, step)| step).as_ref(),
-                    in_proposals,
-                    self.proposal().is_some_and(|d| d.fresh.review.is_some()),
-                    self.proposal().and_then(scoping).is_some(),
-                    self.adoptable().is_some(),
-                    t,
-                );
-                chips = found;
-                line
-            }
-        };
-        let mut shift = 0;
-        if let Some(toast) = self.toast() {
-            let spans = self.toast_line(toast);
-            shift = spans.iter().map(|s| s.width() as u16).sum();
-            footer.spans.splice(0..0, spans);
-            if toast.proposal.is_some() {
-                self.home_rows
-                    .borrow_mut()
-                    .push((Rect::new(bar.x, bar.y, shift, 1), Hit::Key(HomeKey::Toast)));
-            }
+        let (notice_line, toast_cols) = self.notice_line(notice_area.width);
+        if let Some(cols) = toast_cols {
+            self.home_rows.borrow_mut().push((
+                Rect::new(notice_area.x, notice_area.y, cols, 1),
+                Hit::Key(HomeKey::Toast),
+            ));
         }
-        self.home_rows
-            .borrow_mut()
-            .extend(chips.into_iter().map(|(from, to, key)| {
-                let (from, to) = (from + shift, to + shift);
-                (Rect::new(from, bar.y, to - from, 1), Hit::Key(key))
-            }));
+        frame.render_widget(Paragraph::new(notice_line), notice_area);
+
+        let (footer, chips) = match &self.renaming {
+            Some((id, typed)) => (rename_line(*id, typed, t), Vec::new()),
+            None => self.footer_line(bar.width, in_proposals),
+        };
+        self.home_rows.borrow_mut().extend(
+            chips.into_iter().map(|(from, to, key)| {
+                (Rect::new(bar.x + from, bar.y, to - from, 1), Hit::Key(key))
+            }),
+        );
         frame.render_widget(
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
+    }
+
+    /// The line over the footer: a toast for a few seconds, else what a key just
+    /// said, else a faint rule. With how wide a toast is, for its click.
+    fn notice_line(&self, width: u16) -> (Line<'static>, Option<u16>) {
+        let t = self.settings.theme;
+        if let Some(toast) = self.toast() {
+            let spans = self.toast_line(toast);
+            let cols = spans.iter().map(|s| s.width() as u16).sum();
+            return (Line::from(spans), toast.proposal.map(|_| cols));
+        }
+        let said = if self.kill_armed.is_some() {
+            let name = self
+                .kill_armed
+                .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+                .map_or(String::new(), |s| s.name.clone());
+            format!("close {name}? x again closes it · any other key keeps it")
+        } else {
+            self.status.clone()
+        };
+        if said.is_empty() {
+            // Why the supervisor offers the selected row's step, beside its keys.
+            if let Some((_, _, step)) = self.offered() {
+                return (
+                    Line::from(format!(" {} ", step.why).fg(t.muted).italic()),
+                    None,
+                );
+            }
+            return (Line::from("─".repeat(width as usize).fg(t.border)), None);
+        }
+        (Line::from(format!(" {said} ").fg(t.fg).bold()), None)
+    }
+
+    /// The footer: at most five keys for what's selected, the first the one
+    /// that does the most, then the ones for getting around, faint, on the
+    /// right (spec: One key grammar). Each key's columns, for a click.
+    fn footer_line(
+        &self,
+        width: u16,
+        on_proposal: bool,
+    ) -> (Line<'static>, Vec<(u16, u16, HomeKey)>) {
+        let t = self.settings.theme;
+        let step = self.offered().map(|(_, _, step)| step);
+        let asks =
+            matches!(self.selection(), (_, Some(q)) if q.status.state == AgentState::NeedsInput);
+        let mut hints: Vec<(String, String, HomeKey)> = Vec::new();
+        let mut hint = |k: &str, w: &str, key: HomeKey| hints.push((k.into(), w.into(), key));
+        if self.kill_armed.is_some() {
+            hint("x", "close it", HomeKey::Kill);
+        } else if let Some(step) = &step {
+            hint("a", step.action.label(), HomeKey::Accept);
+            if let Some(alt) = step.alt {
+                hint("o", alt.label(), HomeKey::Other);
+            }
+            hint("d", "leave it", HomeKey::Reject);
+            hint("↩", "open", HomeKey::Enter);
+        } else if on_proposal {
+            let d = self.proposal();
+            if d.is_some_and(|d| d.fresh.review.is_some()) {
+                hint("a", "still holds", HomeKey::Accept);
+                hint("d", "retire", HomeKey::Reject);
+            } else if d.and_then(scoping).is_some() {
+                hint("a", "scope it", HomeKey::Accept);
+                hint("d", "keep everywhere", HomeKey::Reject);
+            } else {
+                hint("a", "accept", HomeKey::Accept);
+                hint("d", "reject", HomeKey::Reject);
+            }
+            hint("↩", "review all", HomeKey::Enter);
+        } else {
+            match self.row() {
+                Some(InboxRow::Decide) => hint("↩", "open", HomeKey::Enter),
+                Some(InboxRow::Filed) => hint("↩", "triage", HomeKey::Enter),
+                Some(_) => {
+                    hint("↩", "open", HomeKey::Enter);
+                    if asks {
+                        hint("1-9", "answer", HomeKey::Answer(1));
+                    }
+                    hint("x", "close", HomeKey::Kill);
+                    hint("r", "rename", HomeKey::Rename);
+                    if self.adoptable().is_some() {
+                        hint("A", "adopt", HomeKey::Adopt);
+                    }
+                }
+                None => hint("n", "new session", HomeKey::NewShell),
+            }
+        }
+        hints.truncate(5);
+        let mut spans: Vec<Span> = Vec::new();
+        let mut chips = Vec::new();
+        let at = |spans: &[Span]| spans.iter().map(|s| s.width() as u16).sum::<u16>();
+        for (key, what, home) in hints {
+            spans.push(" ".into());
+            let from = at(&spans);
+            spans.push(format!(" {key} ").fg(t.accent).bold());
+            spans.push(format!("{what} ").fg(t.dim()));
+            chips.push((from, at(&spans), home));
+        }
+        // Getting around, faint, as much as there is room for; `? keys` last
+        // to go, since it leads to the rest.
+        let left = at(&spans) as usize;
+        let around = [
+            "n new · j/k move · g sections · ? keys ",
+            "j/k move · ? keys ",
+            "? keys ",
+        ]
+        .into_iter()
+        .find(|a| left + a.chars().count() + 2 <= width as usize);
+        if let Some(around) = around {
+            let pad = (width as usize).saturating_sub(left + around.chars().count());
+            spans.push(" ".repeat(pad).into());
+            spans.push(around.fg(t.muted));
+        }
+        (Line::from(spans), chips)
     }
 
     /// The Inbox: Needs you, Running, Quiet, each session once (spec: Inbox). A
@@ -6452,6 +6674,18 @@ fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
         .padding(Padding::new(1, 1, 0, 0))
 }
 
+/// Dims what's under a dialog (rule 8: a box is a dialog, and what's behind it
+/// steps back).
+fn dim(frame: &mut ratatui::Frame, area: Rect, t: &Theme) {
+    frame.buffer_mut().set_style(
+        area,
+        style::Style::new()
+            .fg(t.muted)
+            .add_modifier(Modifier::DIM)
+            .remove_modifier(Modifier::BOLD),
+    );
+}
+
 /// A rounded panel; the focused one gets the accent border.
 fn panel(title: Line<'static>, t: &Theme, focused: bool) -> Block<'static> {
     Block::bordered()
@@ -6701,108 +6935,6 @@ fn rename_line(id: SessionId, typed: &edit::LineEdit, t: &Theme) -> Line<'static
         spans.push(format!(" {what}").fg(t.dim()));
     }
     Line::from(spans).style(style::Style::new().bg(t.panel))
-}
-
-/// The status message, then key hints as chips: a proposal's own keys while the
-/// cursor is on one.
-fn footer_line(
-    status: &str,
-    step: Option<&valkyrie_proto::Step>,
-    proposal: bool,
-    flagged: bool,
-    scope: bool,
-    adoptable: bool,
-    t: &Theme,
-) -> (Line<'static>, Vec<(u16, u16, HomeKey)>) {
-    let mut spans = Vec::new();
-    // Where each chip is on the line: its columns, and the key it presses.
-    let mut chips = Vec::new();
-    if !status.is_empty() {
-        spans.push(format!(" {status} ").fg(t.fg).bold());
-        spans.push("│".fg(t.border));
-    } else if let Some(step) = step {
-        // Why the supervisor picked it, beside the keys that take it.
-        spans.push(format!(" {} ", step.why).fg(t.muted).italic());
-        spans.push("│".fg(t.border));
-    }
-    let offered: Vec<(&str, &str)>;
-    let context: &[(&str, &str)] = if let Some(step) = step {
-        offered = [Some(("a", step.action.label()))]
-            .into_iter()
-            .chain([step.alt.map(|alt| ("o", alt.label()))])
-            .flatten()
-            .chain([("d", "leave it"), ("↩", "open")])
-            .collect();
-        &offered
-    } else if flagged {
-        &[("a", "still holds"), ("d", "retire"), ("↩", "why")]
-    } else if scope {
-        &[("a", "scope it"), ("d", "keep everywhere"), ("↩", "read")]
-    } else if proposal {
-        &[("a", "accept"), ("d", "reject"), ("↩", "read")]
-    } else if adoptable {
-        &[
-            ("↩", "open"),
-            ("x", "kill"),
-            ("r", "rename"),
-            ("A", "adopt"),
-        ]
-    } else {
-        &[("↩", "open"), ("x", "kill"), ("r", "rename")]
-    };
-    let general = [
-        ("n", "new"),
-        ("b", "backlog"),
-        ("s", "supervisor"),
-        ("w", "summary"),
-        ("h", "history"),
-        ("D", "docs"),
-        (",", "settings"),
-        (".", "keys"),
-        // Past `keys`: a narrow bar cuts its tail, and the ones before it are older.
-        ("W", "wiki"),
-        ("?", "tutor"),
-        ("p", "pair"),
-        ("q", "quit"),
-    ];
-    for &(key, what) in context.iter().chain(&general) {
-        spans.push(" ".into());
-        let from = spans.iter().map(|s| s.width() as u16).sum::<u16>();
-        spans.push(format!(" {key} ").fg(t.accent).bold());
-        spans.push(format!(" {what}").fg(t.dim()));
-        let to = spans.iter().map(|s| s.width() as u16).sum::<u16>();
-        chips.push((from, to, chip_key(key)));
-    }
-    (
-        Line::from(spans).style(style::Style::new().bg(t.panel)),
-        chips,
-    )
-}
-
-/// The key a footer chip is labelled with, as the home screen takes it.
-fn chip_key(label: &str) -> HomeKey {
-    match label {
-        "a" => HomeKey::Accept,
-        "d" => HomeKey::Reject,
-        "↩" => HomeKey::Enter,
-        "x" => HomeKey::Kill,
-        "r" => HomeKey::Rename,
-        "A" => HomeKey::Adopt,
-        "n" => HomeKey::NewShell,
-        "b" => HomeKey::Backlog,
-        "w" => HomeKey::Digest,
-        "s" => HomeKey::Supervisor,
-        "h" => HomeKey::Past,
-        "D" => HomeKey::Docs,
-        "W" => HomeKey::Wiki,
-        "?" => HomeKey::Tutor,
-        "," => HomeKey::Settings,
-        "." => HomeKey::Keys,
-        "p" => HomeKey::AddDevice,
-        "q" => HomeKey::Quit,
-        // `o`, the supervisor's second offer.
-        _ => HomeKey::Other,
-    }
 }
 
 /// What the attached bar's key hints are for.
@@ -7443,12 +7575,16 @@ enum HomeKey {
     Docs,
     /// Open the repository wiki.
     Wiki,
-    /// Start the tutor, or open the one running.
-    Tutor,
     /// Write the selected agent session down as a backlog item.
     Adopt,
     /// Take the other step offered on the selected flagged session.
     Other,
+    /// `tab`: the next row that waits on you.
+    NextWaiting,
+    /// `1`-`9`: answer the selected ask with that choice.
+    Answer(u8),
+    /// `?`: every key, the tutor at its foot.
+    Help,
     Quit,
 }
 
@@ -7512,7 +7648,9 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'h' => Some(HomeKey::Past),
             b'D' => Some(HomeKey::Docs),
             b'W' => Some(HomeKey::Wiki),
-            b'?' => Some(HomeKey::Tutor),
+            b'?' => Some(HomeKey::Help),
+            b'\t' => Some(HomeKey::NextWaiting),
+            d @ b'1'..=b'9' => Some(HomeKey::Answer(d - b'0')),
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
@@ -7730,9 +7868,12 @@ mod tests {
         assert_eq!(home_keys_default(b"p"), [HomeKey::AddDevice]);
         // Shifted: `a` accepts a proposal, `A` adopts a session.
         assert_eq!(home_keys_default(b"aA"), [HomeKey::Accept, HomeKey::Adopt]);
-        // `?` starts the tutor, from the key or its chip.
-        assert_eq!(home_keys_default(b"?"), [HomeKey::Tutor]);
-        assert_eq!(chip_key("?"), HomeKey::Tutor);
+        // `?` is every key; tab the next waiting row; a digit answers an ask.
+        assert_eq!(home_keys_default(b"?"), [HomeKey::Help]);
+        assert_eq!(
+            home_keys_default(b"\t3"),
+            [HomeKey::NextWaiting, HomeKey::Answer(3)]
+        );
     }
 
     /// With `VALK_SNAPSHOT_DIR` set, writes a render's cells (symbol, fg, bg, bold)
@@ -8535,7 +8676,7 @@ mod tests {
                 "backfill",
                 "web-ui",
                 "Do you want to proceed?",
-                "settings",
+                "? keys",
             ] {
                 // The logos of themes with rain glitch a letter now and then.
                 if theme.rain.is_some() && want == "ᛒ" {
@@ -8608,9 +8749,9 @@ mod tests {
             .collect();
         for want in [
             "→ rerun",
-            " a  rerun failed jobs",
-            " o  ask its agent to fix CI",
-            " d  leave it",
+            " a rerun failed jobs",
+            " o ask its agent to fix CI",
+            " d leave it",
             "ci / windows matches #17",
         ] {
             assert!(text.contains(want), "lacks {want:?}");
@@ -11040,7 +11181,55 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The bar's chips click as their keys press.
+    /// `tab` goes to the next row that waits on you, round to the first; a digit
+    /// answers only a session that asks; `?` opens every key over a dimmed home,
+    /// and Esc closes it.
+    #[tokio::test]
+    async fn tab_digits_and_the_key_sheet() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-grammar-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1), info(2), info(3)];
+        app.queue = vec![queued(1), queued(3)];
+        app.selected = 2; // session 2, below the queue
+        app.on_input(b"\t".to_vec()).await;
+        assert_eq!(app.selection().0, Some(1), "round to the first waiting");
+        app.on_input(b"\t".to_vec()).await;
+        assert_eq!(app.selection().0, Some(3));
+
+        // Not an ask (the queue's default state): a digit says so, sends nothing.
+        app.on_input(b"2".to_vec()).await;
+        assert_eq!(app.status, "1-9 answer a session that asks");
+
+        app.on_input(b"?".to_vec()).await;
+        assert!(app.help);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw_help(frame)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        for want in [
+            "Every key",
+            "the next thing that waits on you",
+            "starts the tutor",
+        ] {
+            assert!(text.contains(want), "lacks {want:?}");
+        }
+        // Keys go to the sheet, not home: `j` doesn't move the cursor.
+        let at = app.selected;
+        app.on_input(b"j".to_vec()).await;
+        assert_eq!((app.help, app.selected), (true, at));
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(!app.help);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The footer's keys click as they press; `x` asks before it closes.
     #[tokio::test]
     async fn the_home_bars_chips_click_as_their_keys() {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-chips-{}", std::process::id()));
@@ -11055,23 +11244,31 @@ mod tests {
             // `find` counts bytes; the bar's glyphs before the chips are not all one.
             (rows[bar][..col].chars().count() as u16, bar as u16)
         };
-        let (x, y) = chip(&app, "keys");
+        // At most five keys for the selection, the first the main one; then
+        // getting around, faint.
+        let bar = home_screen(&app, 120).last().cloned().unwrap();
+        assert!(bar.trim_start().starts_with("↩ open"), "{bar}");
+        assert!(bar.contains("? keys"), "{bar}");
+        // Narrow, `? keys` is the last of them to go.
+        let narrow = home_screen(&app, 64).last().cloned().unwrap();
+        assert!(narrow.contains("? keys"), "{narrow}");
+        let (x, y) = chip(&app, "rename");
         app.on_input(press(0, x, y)).await;
-        assert!(
-            app.keys_page.is_some(),
-            "the keys chip opened the keys page"
-        );
-        app.keys_page = None;
-        let (x, y) = chip(&app, "settings");
+        assert!(app.renaming.is_some(), "the rename key renames");
+        app.renaming = None;
+        // `x` asks first, from its key on the bar too.
+        let (x, y) = chip(&app, "close");
         app.on_input(press(0, x, y)).await;
-        assert!(
-            app.settings_cursor.is_some(),
-            "the settings chip opened settings"
-        );
-        app.settings_cursor = None;
-        // Blank space on the bar is no chip.
-        app.on_input(press(0, 119, y)).await;
-        assert!(app.keys_page.is_none() && app.settings_cursor.is_none());
+        assert_eq!(app.kill_armed, Some(1));
+        let notice = home_screen(&app, 120);
+        let notice = &notice[notice.len() - 2];
+        assert!(notice.contains("x again closes it"), "{notice}");
+        // Any other key keeps it.
+        app.on_input(b"j".to_vec()).await;
+        assert_eq!(app.kill_armed, None);
+        // Blank space on the bar is no key.
+        app.on_input(press(0, 60, y)).await;
+        assert!(app.renaming.is_none() && app.kill_armed.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
