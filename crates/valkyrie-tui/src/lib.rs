@@ -793,11 +793,15 @@ impl App {
     /// Attaches to `id`'s tab, every pane of it, with `id` focused.
     async fn attach(&mut self, id: SessionId) {
         self.drop_g();
+        self.help = false;
+        self.kill_armed = None;
         self.attach_tab(id).await;
     }
 
     async fn detach(&mut self) {
         self.drop_g();
+        self.help = false;
+        self.kill_armed = None;
         if let Some(view) = &self.view {
             self.previous = Some(view.id);
         }
@@ -997,6 +1001,13 @@ impl App {
     /// selection, or scrolls a proposal's text over the preview.
     async fn on_home_mouse(&mut self, m: Mouse) {
         self.drop_g();
+        // Over the `?` sheet, a press closes it and goes no further.
+        if self.help {
+            if m.kind == MouseKind::Press {
+                self.help = false;
+            }
+            return;
+        }
         // The strip stays on top of every section page.
         if m.kind == MouseKind::Press
             && let Some(Hit::Section(section)) = self.home_hit(Position::new(m.x, m.y))
@@ -1030,6 +1041,7 @@ impl App {
                 }
                 Some(Hit::Row(row)) => {
                     self.selected = row;
+                    self.kill_armed = None;
                     self.update_preview().await;
                 }
                 Some(Hit::Key(key)) => self.on_home_key(key).await,
@@ -1069,7 +1081,15 @@ impl App {
 
     /// Keys on the home screen.
     async fn home_input(&mut self, bytes: &[u8]) {
+        let mut answered = false;
         for (key, end) in home_keys_at(bytes, &self.settings.keys) {
+            // One answer a read: after it the queue moves, and a second digit
+            // (a paste, a held key) could land on another session.
+            if let HomeKey::Answer(_) = key
+                && std::mem::replace(&mut answered, true)
+            {
+                continue;
+            }
             Box::pin(self.on_home_key(key)).await;
             // The rest of the read is the backlog page's, once a key opened it.
             if self.backlog.is_some() {
@@ -3212,6 +3232,9 @@ impl App {
             HomeKey::NextWaiting => {
                 // The next waiting row after the cursor, round to the first.
                 let rows = self.inbox_rows();
+                if rows.is_empty() {
+                    return self.say("nothing waits on you".into());
+                }
                 let waits = |r: &InboxRow| !matches!(r, InboxRow::Session(_));
                 let next = (self.selected + 1..rows.len())
                     .chain(0..=self.selected.min(rows.len().saturating_sub(1)))
@@ -3225,7 +3248,7 @@ impl App {
                 }
             }
             HomeKey::Answer(n) => match self.selection() {
-                (Some(id), Some(q)) if q.status.state == AgentState::NeedsInput => {
+                (Some(id), Some(q)) if answerable(q) => {
                     let name = q.name.clone();
                     match self.client.input(id, vec![b'0' + n]) {
                         Ok(()) => self.status = format!("answered {name} with {n}"),
@@ -4994,8 +5017,7 @@ impl App {
     ) -> (Line<'static>, Vec<(u16, u16, HomeKey)>) {
         let t = self.settings.theme;
         let step = self.offered().map(|(_, _, step)| step);
-        let asks =
-            matches!(self.selection(), (_, Some(q)) if q.status.state == AgentState::NeedsInput);
+        let asks = matches!(self.selection(), (_, Some(q)) if answerable(q));
         let mut hints: Vec<(String, String, HomeKey)> = Vec::new();
         let mut hint = |k: &str, w: &str, key: HomeKey| hints.push((k.into(), w.into(), key));
         if self.kill_armed.is_some() {
@@ -6762,6 +6784,18 @@ fn where_from(s: &SessionInfo) -> String {
         agent if agent == program || !is_agent(s) => program,
         agent => format!("{agent} · {program}"),
     }
+}
+
+/// Whether a digit answers this queued session: it asks with a menu of choices
+/// (a permission, a question, a prompt seen on screen). Not a bell from a plain
+/// program, nor a prompt waiting for text: a digit there would be typed in.
+fn answerable(q: &QueueItem) -> bool {
+    use valkyrie_proto::AskKind;
+    q.status.state == AgentState::NeedsInput
+        && matches!(
+            q.status.ask,
+            Some(AskKind::Permission | AskKind::Question | AskKind::Screen)
+        )
 }
 
 /// Working and still running: the Inbox's Running group.
@@ -11201,6 +11235,13 @@ mod tests {
         // Not an ask (the queue's default state): a digit says so, sends nothing.
         app.on_input(b"2".to_vec()).await;
         assert_eq!(app.status, "1-9 answer a session that asks");
+        // Nor a bell from a plain program: the digit would be typed into it.
+        let at = app.queue_index().unwrap();
+        app.queue[at].status.state = AgentState::NeedsInput;
+        app.queue[at].status.ask = Some(valkyrie_proto::AskKind::Bell);
+        app.status.clear();
+        app.on_input(b"2".to_vec()).await;
+        assert_eq!(app.status, "1-9 answer a session that asks");
 
         app.on_input(b"?".to_vec()).await;
         assert!(app.help);
@@ -11226,6 +11267,25 @@ mod tests {
         assert_eq!((app.help, app.selected), (true, at));
         app.on_input(b"\x1b".to_vec()).await;
         assert!(!app.help);
+        // A click over the sheet closes it, and selects nothing behind it.
+        app.on_input(b"?".to_vec()).await;
+        let at = app.selected;
+        app.on_home_mouse(Mouse {
+            kind: MouseKind::Press,
+            code: 0,
+            x: 5,
+            y: 3,
+            release: false,
+        })
+        .await;
+        assert_eq!((app.help, app.selected), (false, at));
+
+        // An empty home: tab says so.
+        app.sessions.clear();
+        app.queue.clear();
+        app.selected = 0;
+        app.on_input(b"\t".to_vec()).await;
+        assert_eq!(app.status, "nothing waits on you");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
