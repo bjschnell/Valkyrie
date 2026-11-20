@@ -781,10 +781,12 @@ impl App {
 
     /// Attaches to `id`'s tab, every pane of it, with `id` focused.
     async fn attach(&mut self, id: SessionId) {
+        self.drop_g();
         self.attach_tab(id).await;
     }
 
     async fn detach(&mut self) {
+        self.drop_g();
         if let Some(view) = &self.view {
             self.previous = Some(view.id);
         }
@@ -858,7 +860,11 @@ impl App {
                     return;
                 };
                 if self.backlog.is_none() {
-                    return Box::pin(self.on_input(rest)).await;
+                    // The cut-off report stays after these bytes, not before.
+                    let partial = std::mem::take(&mut self.partial);
+                    Box::pin(self.on_input(rest)).await;
+                    self.partial = partial;
+                    return;
                 }
                 bytes = rest;
             }
@@ -970,6 +976,7 @@ impl App {
     /// does; a chip or the backlog panel does what its key does. The wheel moves the
     /// selection, or scrolls a proposal's text over the preview.
     async fn on_home_mouse(&mut self, m: Mouse) {
+        self.drop_g();
         // The strip stays on top of every section page.
         if m.kind == MouseKind::Press
             && let Some(Hit::Section(section)) = self.home_hit(Position::new(m.x, m.y))
@@ -2370,6 +2377,9 @@ impl App {
     /// the page has the keys; `g g` is the page's own `g` (to the top). Returns
     /// the keys left for the page, from the first one that isn't these.
     async fn section_keys(&mut self, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        if !self.sections_listen() {
+            self.drop_g();
+        }
         let mut rest: &[u8] = &bytes;
         while !rest.is_empty() && self.sections_listen() {
             let key = next_key(rest);
@@ -2401,6 +2411,13 @@ impl App {
             rest = &rest[key.len()..];
         }
         (!rest.is_empty()).then(|| rest.to_vec())
+    }
+
+    /// Forgets a pending `g`, and the hint it put up.
+    fn drop_g(&mut self) {
+        if std::mem::take(&mut self.g_pending) {
+            self.status.clear();
+        }
     }
 
     /// Opens `section`'s page in place of whatever section is open (its first
@@ -2442,7 +2459,14 @@ impl App {
 
     /// Sets the open section page aside for the session it attaches to.
     fn park(&mut self) {
-        self.parked = if let Some(p) = self.backlog.take() {
+        // What was waiting on the daemon is answered by the attach itself.
+        if let Some(p) = &mut self.wiki {
+            p.starting = false;
+        }
+        if let Some(p) = &mut self.past {
+            p.resuming = false;
+        }
+        let page = if let Some(p) = self.backlog.take() {
             Some(Parked::Backlog(p))
         } else if let Some(p) = self.wiki.take() {
             Some(Parked::Wiki(p))
@@ -2451,6 +2475,17 @@ impl App {
         } else {
             self.past.take().map(Parked::Past)
         };
+        if page.is_some() {
+            self.parked = page;
+        }
+    }
+
+    /// After an attach from a page: if it didn't attach after all, the page
+    /// comes straight back rather than waiting to surface on a later detach.
+    fn unpark_unless_attached(&mut self) {
+        if self.view.is_none() {
+            self.unpark();
+        }
     }
 
     /// Back home: the page you attached from, as you left it, unless one is open.
@@ -3058,6 +3093,7 @@ impl App {
                 digest::Do::Open(id) => {
                     self.park();
                     self.attach(id).await;
+                    self.unpark_unless_attached();
                     return;
                 }
                 digest::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
@@ -3222,6 +3258,7 @@ impl App {
                             self.park();
                             self.refresh().await;
                             self.attach(info.id).await;
+                            self.unpark_unless_attached();
                             return;
                         }
                         Err(e) => {
@@ -3315,6 +3352,7 @@ impl App {
                             self.park();
                             self.refresh().await;
                             self.attach(info.id).await;
+                            self.unpark_unless_attached();
                             return;
                         }
                         Err(e) => {
@@ -3872,6 +3910,7 @@ impl App {
             Do::Attach(id) => {
                 self.park();
                 self.switch_to(id).await;
+                self.unpark_unless_attached();
             }
             Do::Launch {
                 id,
@@ -3887,6 +3926,7 @@ impl App {
                 self.park();
                 self.refresh().await;
                 self.switch_to(info.id).await;
+                self.unpark_unless_attached();
             }
             Do::Status(id, status) => {
                 let (item, note) = self
@@ -4019,6 +4059,7 @@ impl App {
                     self.park();
                     self.refresh().await;
                     self.switch_to(info.id).await;
+                    self.unpark_unless_attached();
                 }
                 None => self.say(format!(
                     "left #{}: it's offered again once it changes",
@@ -7955,6 +7996,18 @@ mod tests {
         app.on_input(b"i".to_vec()).await;
         assert_eq!((app.section(), app.g_pending), (Section::Inbox, false));
 
+        // A `g` left pending is dropped by a click, not kept for a later key.
+        app.on_input(b"g".to_vec()).await;
+        app.on_home_mouse(Mouse {
+            kind: MouseKind::Press,
+            code: 0,
+            x: 5,
+            y: 20,
+            release: false,
+        })
+        .await;
+        assert!(!app.g_pending && app.status.is_empty());
+
         // Typing in the backlog, `g` is a letter.
         app.on_input(b"gb".to_vec()).await;
         app.on_input(b"n".to_vec()).await;
@@ -7993,7 +8046,24 @@ mod tests {
         assert_eq!(app.backlog.as_ref().map(|p| p.cursor), Some(2));
         assert!(app.parked.is_none());
 
+        // Nothing open: parking keeps what's parked.
+        app.park();
+        app.backlog = None;
+        app.park();
+        assert!(app.parked.is_some());
+        app.unpark();
+        app.backlog = None;
+        // A resume in flight is over once its session is up: no frozen page.
+        let mut past = past::Page::default();
+        past.resuming = true;
+        app.past = Some(past);
+        app.park();
+        app.unpark();
+        assert!(app.past.as_ref().is_some_and(|p| !p.resuming));
+        app.past = None;
+
         // A section opened meanwhile isn't replaced.
+        app.backlog = Some(backlog::Page::default());
         app.park();
         app.digest = Some(digest::Page::default());
         app.unpark();
