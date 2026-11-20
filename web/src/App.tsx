@@ -17,6 +17,8 @@ import { SessionView } from "./components/SessionView";
 import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
 import { showNeeds } from "./lib/badge";
+import { isRecord, RecordCard, useAttention } from "./components/Attention";
+import { waitingSessions } from "./lib/attention";
 import { follow, typingIn } from "./lib/follow";
 import { HASH, moved, SECTION_KEYS } from "./lib/routes";
 import { paletteKey } from "./lib/palette";
@@ -202,8 +204,13 @@ export function App() {
     seen.current = { open: openId, recent: openId === null ? recent : [...recent, openId] };
   }
   const paired = !!token && status !== "unpaired" && status !== "outdated";
-  // Who needs you, on the app icon and the tab title (#187).
-  const needs = useApp((s) => s.queue.length);
+  // Who needs you, on the app icon and the tab title (#187): the attention
+  // queue's one number, sessions and records alike (#251).
+  const attn = useAttention();
+  const needs = attn.length;
+  // The waiting sessions in the queue's order, for Alt+N's key handler.
+  const waitingNow = useRef<number[]>([]);
+  waitingNow.current = waitingSessions(attn);
   useEffect(() => showNeeds(paired ? needs : 0), [paired, needs]);
   useEffect(() => {
     if (!desktop || !paired) return;
@@ -225,10 +232,10 @@ export function App() {
       if (MAC && (e.target as HTMLElement).closest?.("textarea:not(.typing-field), input, [contenteditable]")) return;
       // The browser has uses for some of these (Alt+1 is its first tab on Linux).
       e.preventDefault();
-      const { sessions, queue } = useApp.getState();
+      const { sessions } = useApp.getState();
       const to = chordTarget(pressed, {
         sessions: sessions.map((s) => s.id),
-        needs: queue.map((q) => q.session),
+        needs: waitingNow.current,
         open: seen.current.open,
         recent: seen.current.recent,
       });
@@ -331,8 +338,10 @@ export function App() {
   const wide = useWide();
 
   // Beside the list, the pane shows the top waiting session rather than
-  // nothing, and moves on to the next once it's answered (#248).
-  const waiting = useApp((s) => s.queue.map((q) => q.session).join(","));
+  // nothing, and moves on to the next once it's answered (#248). With only
+  // records waiting, it shows the top one's card (#251).
+  const waiting = waitingSessions(attn).join(",");
+  const topRecord = attn.find(isRecord);
   useEffect(() => {
     if (!wide || !paired || (at.page !== "inbox" && at.page !== "session")) return;
     const open = at.page === "session" ? at.id : null;
@@ -374,11 +383,16 @@ export function App() {
     return (
       <>
         <div className="split">
-          <Inbox beside={openId} />
+          <Inbox beside={openId} pane={at.page === "inbox" && !waiting ? topRecord?.key : null} />
           <div className="split-pane">
             {at.page === "session" && <SessionView id={at.id} />}
             {at.page === "review" && <ReviewView key={at.id} id={at.id} />}
-            {at.page === "inbox" && !waiting && (
+            {at.page === "inbox" && !waiting && topRecord && (
+              <div className="split-record">
+                <RecordCard key={topRecord.key} a={topRecord} />
+              </div>
+            )}
+            {at.page === "inbox" && !waiting && !topRecord && (
               <div className="split-empty">
                 <div className="split-empty-title">Nothing needs you</div>
                 <div>

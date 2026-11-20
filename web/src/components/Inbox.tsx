@@ -17,8 +17,8 @@ import { Chevron, Gear, Plus } from "./icons";
 import { useDesktop } from "./Terminal";
 import { ConnectionPill, StateIcon } from "./bits";
 import { EmptyState } from "./states";
-import { Proposals } from "./Decisions";
-import { SupervisorStrip } from "./Supervisor";
+import { isRecord, RecordRow, useAttention } from "./Attention";
+import { sessionKind } from "../lib/attention";
 import { NotifyHint } from "./Notify";
 import { QuotaMeter } from "./Quota";
 import { Rain } from "./Rain";
@@ -31,7 +31,7 @@ const go = (id: number) => {
 };
 
 /** Home: who needs you, with the answers right on the card, then every session. */
-export function Inbox({ beside }: { beside?: number | null } = {}) {
+export function Inbox({ beside, pane }: { beside?: number | null; pane?: string | null } = {}) {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
   const status = useApp((s) => s.status);
@@ -47,26 +47,44 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
     (s) => s.exited === null && s.status.state === "working",
   ).length;
   const [sel, setSel] = useState(-1);
+  // The record tapped open in Needs you; a picked one is open too.
+  const [opened, setOpened] = useState<string | null>(null);
   // The one row swiped open to show its Close button.
   const [swiped, setSwiped] = useState<SessionId | null>(null);
-  // Each session is drawn once: a waiting one as its card, the rest as a row
+  // Everything waiting on you, sessions (Ask, Stuck, Done) then records (Decide,
+  // Filed), each drawn once: a waiting session as its card, the rest as a row
   // under Running or Quiet. A row keeps its number, which Alt+digit goes to.
+  const needs = useAttention();
+  const records = needs.filter(isRecord);
+  const waiting = needs.flatMap((a) => (isRecord(a) ? [] : [a.item]));
   const queued = new Set(queue.map((q) => q.session));
   const rows = sessions.map((s, i) => ({ s, n: i + 1 })).filter(({ s }) => !queued.has(s.id));
   const running = rows.filter(({ s }) => s.exited === null && s.status.state === "working");
   const quiet = rows.filter(({ s }) => !(s.exited === null && s.status.state === "working"));
-  // What j/k move through, in the order they're drawn.
-  const order = [...queue.map((q) => q.session), ...running.map(({ s }) => s.id), ...quiet.map(({ s }) => s.id)];
+  // What j/k move through, in the order they're drawn: keys, `s<id>` for a session.
+  const order = [...needs.map((a) => a.key), ...[...running, ...quiet].map(({ s }) => `s${s.id}`)];
   const selected = order[sel] ?? null;
 
-  // n starts a session; j/k pick a card or row, Enter opens it, r reviews its
-  // changes, b opens the backlog, d the decisions, `,` opens settings.
+  // n starts a session; j/k pick a card or row, Enter opens it (or a record's
+  // card), Esc closes that, r reviews a session's changes, b opens the backlog,
+  // d the decisions, `,` opens settings.
   const pick = (i: number) => {
     const next = Math.max(0, Math.min(order.length - 1, i));
     setSel(next);
     document.querySelectorAll<HTMLElement>("[data-pick]")[next]?.scrollIntoView({ block: "nearest" });
   };
-  const open = () => selected !== null && go(selected);
+  const sessionOf = (key: string | null) => (key?.startsWith("s") ? Number(key.slice(1)) : null);
+  const open = () => {
+    const id = sessionOf(selected);
+    if (id !== null) return go(id);
+    const rec = records.find((r) => r.key === selected);
+    if (rec?.kind === "filed") location.hash = HASH.backlog;
+    else if (rec) setOpened(rec.key);
+  };
+  const close = () => {
+    setOpened(null);
+    setSel(-1);
+  };
   const to = (hash: string) => () => (location.hash = hash);
   // Beside an open session, the keys are that session's.
   usePageKeys(
@@ -84,7 +102,8 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
       k: () => pick(sel - 1),
       Enter: open,
       o: open,
-      r: () => selected !== null && (location.hash = `#/s/${selected}/review`),
+      Escape: close,
+      r: () => sessionOf(selected) !== null && (location.hash = `#/s/${sessionOf(selected)}/review`),
     },
     { off: beside != null },
   );
@@ -94,7 +113,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
       key={s.id}
       s={s}
       n={n}
-      picked={order[sel] === s.id}
+      picked={selected === `s${s.id}`}
       current={beside === s.id}
       swiped={swiped === s.id}
       onSwipe={(open) => setSwiped((was) => (open ? s.id : was === s.id ? null : was))}
@@ -129,10 +148,10 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
       <main className="inbox">
         <section>
           <h2 className="section-title">
-            Needs you <span className="count">{queue.length}</span>
+            Needs you <span className="count">{needs.length}</span>
           </h2>
           <AllowAll />
-          {queue.length === 0 ? (
+          {needs.length === 0 ? (
             <div className="calm">
               <div className="calm-mark">✓</div>
               <div className="calm-title">All clear</div>
@@ -148,23 +167,39 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
               )}
             </div>
           ) : (
-            <div className="cards">
-              {queue.map((item, i) => (
-                <QueueCard
-                  key={item.session}
-                  item={item}
-                  info={sessions.find((s) => s.id === item.session)}
-                  picked={sel === i}
-                  current={beside === item.session}
-                />
-              ))}
-            </div>
+            <>
+              {waiting.length > 0 && (
+                <div className="cards">
+                  {waiting.map((item) => (
+                    <QueueCard
+                      key={item.session}
+                      item={item}
+                      info={sessions.find((s) => s.id === item.session)}
+                      picked={selected === `s${item.session}`}
+                      current={beside === item.session}
+                    />
+                  ))}
+                </div>
+              )}
+              {records.length > 0 && (
+                <div className="list attn-records">
+                  {records.map((a) => (
+                    <RecordRow
+                      key={a.key}
+                      a={a}
+                      picked={selected === a.key}
+                      open={opened === a.key}
+                      current={pane === a.key}
+                      onToggle={() => setOpened((was) => (was === a.key ? null : a.key))}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </section>
 
         <div className="quiet">
-          <SupervisorStrip />
-          <Proposals />
           <QuotaMeter quiet />
           <NotifyHint />
         </div>
@@ -307,6 +342,8 @@ function QueueCard({
   const prompt = useApp((s) => s.prompts[item.session]);
   const sent = useApp((s) => answeringLabel(s.answering[item.session], prompt?.choices ?? [], item.status.seq));
   const s = item.status;
+  // A flagged PR is Stuck whatever the turn did: its dot says so.
+  const state = sessionKind(item) === "stuck" && s.state !== "stale" && s.state !== "interrupted" ? "blocked" : s.state;
   const choices = prompt?.choices ?? [];
   return (
     <div
@@ -315,9 +352,9 @@ function QueueCard({
       data-glide
       style={{ "--vtn": `card-${item.session}` } as CSSProperties}
     >
-      <article className={`card state-${s.state} ${current ? "current" : ""}`}>
+      <article className={`card state-${state} ${current ? "current" : ""}`}>
         <button className="card-head" aria-current={current || undefined} onClick={() => go(item.session)}>
-          <StateIcon state={s.state} />
+          <StateIcon state={state} />
           <span className="card-name">{item.name}</span>
           <span className="card-prog">{info ? program(info) : s.agent}</span>
           <span className="card-age">{age(s.since_ms, now)}</span>

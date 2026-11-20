@@ -70,10 +70,11 @@ const ctrlEnter = (mac: boolean, does: string): Shortcut => ({ keys: [[mac ? "‚å
  */
 export const PAGE_KEYS = {
   inbox: {
-    j: "Pick the next, previous card or session",
-    k: "Pick the next, previous card or session",
+    j: "Pick the next, previous item or session",
+    k: "Pick the next, previous item or session",
     Enter: "Open it",
     o: "Open it",
+    Escape: "Close the picked item",
     r: "Review its changes",
     n: "New session",
     b: "Backlog",

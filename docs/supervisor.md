@@ -95,14 +95,16 @@ one, `↩` accepts and `d` declines.
 
 Everything the supervisor waits on you for, and what it did, in one place.
 Press `s` on the TUI's home screen; the header counts what waits ("3 for the
-supervisor: s"). On the web, a strip on the home screen says what waits and the
-latest thing it did, and opens the page (`s` from the keyboard).
+supervisor: s"). On the web, what it waits on you for is in the Inbox's Needs
+you queue with everything else, and the page is History's Supervisor tab (`s`
+from the Inbox's keyboard).
 
-- **Waiting on you:** flagged pull requests with the step offered, ready items
-  it offers to start, build orders to review, and step policies it learned from
-  your answers. Each is answered right there (`a` takes, `o` the other step, `d`
-  leaves or rejects in the TUI; ↩ on a build order opens it). They still show
-  where they always did, on the session and the board, too.
+- **Waiting on you** (TUI): flagged pull requests with the step offered, ready
+  items it offers to start, build orders to review, and step policies it learned
+  from your answers. Each is answered right there (`a` takes, `o` the other
+  step, `d` leaves or rejects; ↩ on a build order opens it). They still show
+  where they always did, on the session and the board, too. On the web a flag is
+  on its session's card, and the rest are Decide rows in the Inbox.
 - **Watching:** each open pull request of yours the poll read on its last
   pass, each repository's in the order to merge them (numbered when there are
   two or more), with why, whom each collides with, and when it reads them next. One

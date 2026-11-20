@@ -127,12 +127,3 @@ export async function clearNotifications(): Promise<void> {
   const reg = await navigator.serviceWorker.getRegistration();
   for (const n of (await reg?.getNotifications()) ?? []) n.close();
 }
-
-export function setBadge(count: number): void {
-  const nav = navigator as Navigator & {
-    setAppBadge?: (n: number) => Promise<void>;
-    clearAppBadge?: () => Promise<void>;
-  };
-  const done = count > 0 ? nav.setAppBadge?.(count) : nav.clearAppBadge?.();
-  done?.catch(() => {});
-}

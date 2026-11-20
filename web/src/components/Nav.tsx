@@ -9,6 +9,7 @@ import { HASH } from "../lib/routes";
 import { allDocs, pastSessions, supervisorLog, useApp } from "../store";
 import { fetchMemory } from "./DecisionList";
 import { HostButton } from "./Hosts";
+import { useAttention } from "./Attention";
 import { Gear, List, Pin, Plus, Rewind, Tray } from "./icons";
 
 export type NavKey = "inbox" | "backlog" | "memory" | "history" | "settings";
@@ -62,10 +63,10 @@ export const PAGES = [
   { label: "Settings", hash: HASH.settings },
 ];
 
+/** The rail's one badge: everything waiting on you, on the Inbox (#251). Nothing
+ * else gets a count of its own. */
 function useBadges(): Partial<Record<NavKey, number>> {
-  const needs = useApp((s) => s.queue.length);
-  const open = useApp((s) => s.items.filter((i) => i.status === "open").length);
-  return { inbox: needs, backlog: open };
+  return { inbox: useAttention().length };
 }
 
 function go(d: Dest) {
