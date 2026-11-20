@@ -20,8 +20,8 @@ mod memory;
 mod mini;
 mod mouse;
 mod panes;
-mod past;
 mod ping;
+mod prs;
 mod quiet;
 mod quota;
 mod rain;
@@ -295,14 +295,14 @@ struct App {
     digest: Option<digest::Page>,
     /// The supervisor page is open (`s` on the home screen).
     supervisor: Option<supervisor::Page>,
-    /// Past sessions, to resume one (`h` on the home screen).
-    past: Option<past::Page>,
     /// The Docs page is open (`D` on the home screen).
     docs: Option<docs::Page>,
     /// The repository wiki is open (`W` on the home screen).
     wiki: Option<wiki::Page>,
     /// Memory's Decisions, Skills or Notes tab (`g m`).
     memory: Option<memory::Page>,
+    /// Backlog's Pull requests tab: the PRs the supervisor's poll watches.
+    prs: Option<prs::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
     /// The selected session's screen text, for the preview pane.
@@ -483,10 +483,10 @@ impl App {
             keys_page: None,
             digest: None,
             supervisor: None,
-            past: None,
             docs: None,
             wiki: None,
             memory: None,
+            prs: None,
             editing: None,
             preview: None,
             pinger: Pinger::default(),
@@ -843,14 +843,14 @@ impl App {
         if self.supervisor.is_some() {
             return self.supervisor_keys(&bytes).await;
         }
-        if self.past.is_some() {
-            return self.past_keys(&bytes).await;
-        }
         if self.wiki.is_some() {
             return self.wiki_keys(&bytes).await;
         }
         if self.memory.is_some() && self.view.is_none() {
             return self.memory_keys(&bytes).await;
+        }
+        if self.prs.is_some() && self.view.is_none() {
+            return self.prs_keys(&bytes).await;
         }
         // Over a session, the Docs page waits: your editor on a doc is one.
         if self.docs_shown() {
@@ -948,14 +948,14 @@ impl App {
         if self.supervisor.is_some() {
             return self.supervisor_keys(&bytes).await;
         }
-        if self.past.is_some() {
-            return self.past_keys(&bytes).await;
-        }
         if self.wiki.is_some() {
             return self.wiki_keys(&bytes).await;
         }
         if self.memory.is_some() {
             return self.memory_keys(&bytes).await;
+        }
+        if self.prs.is_some() {
+            return self.prs_keys(&bytes).await;
         }
         if self.docs.is_some() {
             return self.docs_keys(&bytes).await;
@@ -999,9 +999,9 @@ impl App {
         if self.keys_page.is_some()
             || self.digest.is_some()
             || self.supervisor.is_some()
-            || self.past.is_some()
             || self.wiki.is_some()
             || self.memory.is_some()
+            || self.prs.is_some()
             || self.settings_cursor.is_some()
             || self.renaming.is_some()
         {
@@ -2358,11 +2358,11 @@ impl App {
 
     /// The section on screen: the one whose page is open, else the Inbox.
     fn section(&self) -> Section {
-        if self.backlog.is_some() {
+        if self.backlog.is_some() || self.prs.is_some() {
             Section::Backlog
         } else if self.docs_shown() || self.wiki.is_some() || self.memory.is_some() {
             Section::Memory
-        } else if self.digest.is_some() || self.past.is_some() {
+        } else if self.digest.is_some() {
             Section::History
         } else {
             Section::Inbox
@@ -2382,7 +2382,7 @@ impl App {
             && self.docs.as_ref().is_none_or(docs::Page::at_list)
             && self.wiki.as_ref().is_none_or(wiki::Page::at_list)
             && self.memory.as_ref().is_none_or(memory::Page::at_list)
-            && self.past.as_ref().is_none_or(past::Page::at_list)
+            && self.digest.as_ref().is_none_or(digest::Page::at_list)
     }
 
     /// `g i/b/m/h` go to a section and `[ ]` cycle the section's tabs, before
@@ -2414,7 +2414,7 @@ impl App {
                 self.g_pending = true;
                 self.status = "g: i inbox · b backlog · m memory · h history".into();
             } else if (key == b"[" || key == b"]")
-                && matches!(self.section(), Section::Memory | Section::History)
+                && matches!(self.section(), Section::Memory | Section::Backlog)
             {
                 self.cycle_tab(key == b"]").await;
             } else {
@@ -2439,11 +2439,11 @@ impl App {
             return;
         }
         self.backlog = None;
+        self.prs = None;
         self.docs = None;
         self.wiki = None;
         self.memory = None;
         self.digest = None;
-        self.past = None;
         match section {
             Section::Inbox => {}
             Section::Backlog => self.open_backlog().await,
@@ -2453,13 +2453,14 @@ impl App {
     }
 
     /// `]` (forward) or `[` in Memory (Decisions, Skills, Docs, Wiki, Notes) or
-    /// History (Summary, Past sessions): the section's next or last tab.
+    /// Backlog (Items, Pull requests): the next or last tab. History's are its
+    /// window, which its page keeps.
     async fn cycle_tab(&mut self, forward: bool) {
-        if matches!(self.section(), Section::History) {
-            if self.digest.take().is_some() {
-                self.open_past().await;
-            } else if self.past.take().is_some() {
-                self.open_digest().await;
+        if self.section() == Section::Backlog {
+            if self.backlog.take().is_some() {
+                self.open_prs().await;
+            } else if self.prs.take().is_some() {
+                self.open_backlog().await;
             }
             return;
         }
@@ -2505,6 +2506,38 @@ impl App {
             None if self.wiki.is_some() => MemoryTab::Wiki,
             None => MemoryTab::Docs,
         }
+    }
+
+    async fn open_prs(&mut self) {
+        self.prs = Some(prs::Page::default());
+        self.load_prs().await;
+    }
+
+    async fn load_prs(&mut self) {
+        let got = self
+            .client
+            .supervisor_watch()
+            .await
+            .map_err(|e| format!("{e:#}"));
+        if let Some(page) = &mut self.prs {
+            page.loaded(got);
+        }
+    }
+
+    async fn prs_keys(&mut self, bytes: &[u8]) {
+        let Some(page) = &mut self.prs else { return };
+        for act in page.keys(bytes) {
+            match act {
+                prs::Do::Close => self.prs = None,
+                prs::Do::Load => self.load_prs().await,
+                prs::Do::Open(url) => self.open_url(&url),
+            }
+        }
+    }
+
+    /// Item id to the number its repository calls it, for what shows item ids.
+    fn item_numbers(&self) -> std::collections::HashMap<u32, u32> {
+        self.items.iter().map(|i| (i.id, i.number)).collect()
     }
 
     async fn open_memory(&mut self, tab: memory::Tab) {
@@ -2582,17 +2615,15 @@ impl App {
         if let Some(p) = &mut self.wiki {
             p.starting = false;
         }
-        if let Some(p) = &mut self.past {
+        if let Some(p) = &mut self.digest {
             p.resuming = false;
         }
         let page = if let Some(p) = self.backlog.take() {
             Some(Parked::Backlog(Box::new(p)))
         } else if let Some(p) = self.wiki.take() {
-            Some(Parked::Wiki(p))
-        } else if let Some(p) = self.digest.take() {
-            Some(Parked::Digest(p))
+            Some(Parked::Wiki(Box::new(p)))
         } else {
-            self.past.take().map(Parked::Past)
+            self.digest.take().map(|p| Parked::Digest(Box::new(p)))
         };
         if page.is_some() {
             self.parked = page;
@@ -2609,16 +2640,12 @@ impl App {
 
     /// Back home: the page you attached from, as you left it, unless one is open.
     fn unpark(&mut self) {
-        let open = self.backlog.is_some()
-            || self.wiki.is_some()
-            || self.digest.is_some()
-            || self.past.is_some();
+        let open = self.backlog.is_some() || self.wiki.is_some() || self.digest.is_some();
         match self.parked.take() {
             _ if open => {}
             Some(Parked::Backlog(p)) => self.backlog = Some(*p),
-            Some(Parked::Wiki(p)) => self.wiki = Some(p),
-            Some(Parked::Digest(p)) => self.digest = Some(p),
-            Some(Parked::Past(p)) => self.past = Some(p),
+            Some(Parked::Wiki(p)) => self.wiki = Some(*p),
+            Some(Parked::Digest(p)) => self.digest = Some(*p),
             None => {}
         }
     }
@@ -2665,6 +2692,16 @@ impl App {
             None => name.to_string(),
         };
         let tabs: Vec<(String, bool)> = match here {
+            Section::Backlog => vec![
+                ("Items".into(), self.backlog.is_some()),
+                (
+                    match self.prs.as_ref().and_then(prs::Page::count) {
+                        Some(n) => format!("Pull requests {n}"),
+                        None => "Pull requests".into(),
+                    },
+                    self.prs.is_some(),
+                ),
+            ],
             Section::Memory => MEMORY_TABS
                 .iter()
                 .map(|&tab| {
@@ -2682,10 +2719,6 @@ impl App {
                     (name, tab == open)
                 })
                 .collect(),
-            Section::History => vec![
-                ("Summary".into(), self.digest.is_some()),
-                ("Past sessions".into(), self.past.is_some()),
-            ],
             _ => Vec::new(),
         };
         if !tabs.is_empty() && !narrow {
@@ -3112,7 +3145,8 @@ impl App {
             }
             HomeKey::Digest => self.open_digest().await,
             HomeKey::Supervisor => self.open_supervisor().await,
-            HomeKey::Past => self.open_past().await,
+            // `h`, as it was: History, which now holds the past sessions too.
+            HomeKey::Past => self.open_digest().await,
             HomeKey::Docs => self.open_docs().await,
             HomeKey::Wiki => self.open_wiki(selected).await,
             HomeKey::Tutor => self.start_tutor().await,
@@ -3217,12 +3251,23 @@ impl App {
         page.loading();
         let tz = jiff::tz::TimeZone::system();
         let since = page.win.since(now_ms(), &tz);
-        let by = page.by;
-        let got = self
-            .client
-            .digest(since, by)
-            .await
-            .map_err(|e| e.to_string());
+        // The sessions, what the supervisor did, and what ended (for `R`).
+        let got = async {
+            let digest = self
+                .client
+                .digest(since, valkyrie_proto::DigestGroup::Day)
+                .await?;
+            let steps = self
+                .client
+                .supervisor_log()
+                .await
+                .map(|(log, _)| log)
+                .unwrap_or_default();
+            let past = self.client.history().await.unwrap_or_default();
+            anyhow::Ok((digest, steps, past))
+        }
+        .await
+        .map_err(|e| e.to_string());
         if let Some(page) = &mut self.digest {
             page.loaded(got, &tz);
         }
@@ -3233,7 +3278,7 @@ impl App {
         let Some(page) = &mut self.digest else {
             return;
         };
-        for act in page.keys(bytes) {
+        for act in page.keys(bytes, &jiff::tz::TimeZone::system()) {
             match act {
                 digest::Do::Close => self.digest = None,
                 digest::Do::Load => self.load_digest().await,
@@ -3248,6 +3293,24 @@ impl App {
                     Err(e) => self.say(format!("couldn't copy: {e}")),
                 },
                 digest::Do::Say(text) => self.say(text),
+                digest::Do::Resume(key) => {
+                    let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+                    match self.client.resume(&key, size).await {
+                        Ok(info) => {
+                            self.park();
+                            self.refresh().await;
+                            self.attach(info.id).await;
+                            self.unpark_unless_attached();
+                            return;
+                        }
+                        Err(e) => {
+                            if let Some(page) = &mut self.digest {
+                                page.resuming = false;
+                            }
+                            self.say(format!("resume failed: {e:#}"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -3373,50 +3436,6 @@ impl App {
                     self.say(said);
                     self.refresh().await;
                 }
-            }
-        }
-    }
-
-    async fn open_past(&mut self) {
-        self.past = Some(past::Page::default());
-        self.load_past().await;
-    }
-
-    async fn load_past(&mut self) {
-        let got = self.client.history().await.map_err(|e| e.to_string());
-        if let Some(page) = &mut self.past {
-            page.loaded(got);
-        }
-    }
-
-    /// Keys while past sessions are open: a resume opens the session it started.
-    async fn past_keys(&mut self, bytes: &[u8]) {
-        let Some(page) = &mut self.past else {
-            return;
-        };
-        for act in page.keys(bytes) {
-            match act {
-                past::Do::Close => self.past = None,
-                past::Do::Load => self.load_past().await,
-                past::Do::Resume(key) => {
-                    let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
-                    match self.client.resume(&key, size).await {
-                        Ok(info) => {
-                            self.park();
-                            self.refresh().await;
-                            self.attach(info.id).await;
-                            self.unpark_unless_attached();
-                            return;
-                        }
-                        Err(e) => {
-                            if let Some(page) = &mut self.past {
-                                page.resuming = false;
-                            }
-                            self.say(format!("resume failed: {e:#}"));
-                        }
-                    }
-                }
-                past::Do::Say(text) => self.say(text),
             }
         }
     }
@@ -4460,7 +4479,6 @@ impl App {
                         && self.keys_page.is_none()
                         && self.digest.is_none()
                         && self.supervisor.is_none()
-                        && self.past.is_none()
                         && self.wiki.is_none()
                         && !self.docs_shown()
                         && self.backlog.is_none()
@@ -4509,14 +4527,14 @@ impl App {
             if let Some(page) = &self.supervisor {
                 page.draw(frame, &self.waiting(), now_ms(), self.settings.theme);
             }
-            if let Some(page) = &self.past {
-                page.draw(frame, self.settings.theme, &jiff::tz::TimeZone::system());
-            }
             if let Some(page) = &self.wiki {
                 page.draw(frame, self.settings.theme);
             }
             if let Some(page) = self.memory.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, &self.proposals, self.settings.theme);
+            }
+            if let Some(page) = self.prs.as_ref().filter(|_| self.view.is_none()) {
+                page.draw(frame, &self.item_numbers(), now_ms(), self.settings.theme);
             }
             if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, self.settings.theme);
@@ -7383,12 +7401,12 @@ const MEMORY_TABS: [MemoryTab; 5] = [
     MemoryTab::Page(memory::Tab::Notes),
 ];
 
-/// A section page set aside while you're in a session you opened from it.
+/// A section page set aside while you're in a session you opened from it. Each
+/// is boxed: the pages differ a lot in size, more so on some platforms.
 enum Parked {
     Backlog(Box<backlog::Page>),
-    Wiki(wiki::Page),
-    Digest(digest::Page),
-    Past(past::Page),
+    Wiki(Box<wiki::Page>),
+    Digest(Box<digest::Page>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8237,13 +8255,13 @@ mod tests {
         app.unpark();
         app.backlog = None;
         // A resume in flight is over once its session is up: no frozen page.
-        let mut past = past::Page::default();
-        past.resuming = true;
-        app.past = Some(past);
+        let mut history = digest::Page::default();
+        history.resuming = true;
+        app.digest = Some(history);
         app.park();
         app.unpark();
-        assert!(app.past.as_ref().is_some_and(|p| !p.resuming));
-        app.past = None;
+        assert!(app.digest.as_ref().is_some_and(|p| !p.resuming));
+        app.digest = None;
 
         // A section opened meanwhile isn't replaced.
         app.backlog = Some(backlog::Page::default());
