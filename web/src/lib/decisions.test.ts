@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Decision, DecisionKind } from "../proto";
-import { byProject, inFull, matches, parseScope, pinnable, scoping, served, shelf } from "./decisions";
+import { byProject, inFull, layerWords, matches, parseScope, pinnable, scoping, served, shelf } from "./decisions";
 import { USER_SCOPE } from "./scope";
 
 const d = (id: number, kind: DecisionKind, more: Partial<Decision> = {}): Decision => ({
@@ -107,5 +107,12 @@ describe("served", () => {
   it("says when agents no longer get it", () => {
     expect(served(d(1, "constraint", { status: "retired" }))).toMatchObject({ word: "retired", full: false });
     expect(served(d(2, "gotcha", { status: "superseded" })).word).toBe("replaced");
+  });
+});
+
+describe("layerWords", () => {
+  it("says how each layer reached the session, and passes an unknown one through", () => {
+    expect(layerWords(["title", "file"])).toBe("title at start · a file in its scope");
+    expect(layerWords(["later"])).toBe("later");
   });
 });

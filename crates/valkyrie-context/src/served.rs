@@ -152,6 +152,40 @@ impl FoundServe {
     }
 }
 
+/// The sessions decision `id` reached, from the log: each session once, with
+/// how (each layer once, in the order it first came) and when it first and last
+/// came, the latest first (backlog #256).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reached {
+    pub session: String,
+    pub layers: Vec<Layer>,
+    pub first: u64,
+    pub last: u64,
+}
+
+pub fn reached(serves: &[Serve], id: u32) -> Vec<Reached> {
+    let mut out: Vec<Reached> = Vec::new();
+    for s in serves.iter().filter(|s| s.id == id) {
+        match out.iter_mut().find(|r| r.session == s.session) {
+            Some(r) => {
+                if !r.layers.contains(&s.layer) {
+                    r.layers.push(s.layer);
+                }
+                r.first = r.first.min(s.at);
+                r.last = r.last.max(s.at);
+            }
+            None => out.push(Reached {
+                session: s.session.clone(),
+                layers: vec![s.layer],
+                first: s.at,
+                last: s.at,
+            }),
+        }
+    }
+    out.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.session.cmp(&b.session)));
+    out
+}
+
 /// Active decisions no session got whole for [`UNSERVED_DAYS`] while
 /// [`UNSERVED_SESSIONS`] sessions worked in the project, each with how many
 /// days. Counted from when the log starts, a decision's acceptance or last
@@ -251,6 +285,30 @@ mod tests {
             provenance: Default::default(),
             fresh: Default::default(),
         }
+    }
+
+    #[test]
+    fn reached_is_each_session_once_with_its_layers_latest_first() {
+        let serves = [
+            serve(1, 7, Layer::Title, 10),
+            serve(2, 7, Layer::Block, 20),
+            serve(1, 7, Layer::File, 30),
+            serve(1, 8, Layer::Show, 40),
+            serve(1, 7, Layer::Title, 50),
+        ];
+        let got = reached(&serves, 7);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (
+                got[0].session.as_str(),
+                got[0].layers.clone(),
+                got[0].first,
+                got[0].last
+            ),
+            ("s1", vec![Layer::Title, Layer::File], 10, 50)
+        );
+        assert_eq!((got[1].session.as_str(), got[1].first), ("s2", 20));
+        assert!(reached(&serves, 9).is_empty());
     }
 
     fn serve(session: usize, id: u32, layer: Layer, at: u64) -> Serve {
