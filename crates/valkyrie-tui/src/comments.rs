@@ -252,8 +252,7 @@ impl Comments {
                     let from = lines.len();
                     let mut head = vec![
                         format!(" {} ", state_label(c.state))
-                            .fg(t.bg)
-                            .bg(state_color(c.state, t))
+                            .fg(state_color(c.state, t))
                             .bold(),
                         format!(" {}", when(c.at, &tz)).fg(t.muted),
                     ];
@@ -318,7 +317,7 @@ impl Comments {
                         if here { "▌".fg(t.accent) } else { " ".into() },
                         format!("{kind:<8}").fg(t.muted),
                         fit(&text, room.saturating_sub(9 + count.chars().count())).fg(t.fg),
-                        count.fg(t.accent2),
+                        count.fg(t.accent),
                     ]);
                     if here {
                         row = row.style(style::Style::new().bg(t.selection));
@@ -393,7 +392,7 @@ fn state_label(s: CommentState) -> &'static str {
 fn state_color(s: CommentState, t: &Theme) -> Color {
     match s {
         CommentState::Open => t.needs,
-        CommentState::Sent => t.accent2,
+        CommentState::Sent => t.secondary(),
         CommentState::Answered => t.done,
         CommentState::Resolved => t.muted,
     }

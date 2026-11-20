@@ -198,7 +198,7 @@ impl<'t> Writer<'t> {
                 }
             }
             Event::Code(s) => {
-                let style = self.style().fg(self.t.accent2).bg(self.t.panel);
+                let style = self.style().fg(self.t.accent).bg(self.t.panel);
                 self.push(s.into_string(), style);
             }
             Event::Html(s) | Event::InlineHtml(s) => {
@@ -567,9 +567,8 @@ impl<'t> Writer<'t> {
         match self.heading {
             Some(HeadingLevel::H1) => {
                 let chip = Style::new()
-                    .fg(self.t.bg)
-                    .bg(self.t.accent)
-                    .add_modifier(Modifier::BOLD);
+                    .fg(self.t.accent)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                 for p in &mut pieces {
                     p.style = p.style.patch(chip);
                 }
@@ -591,7 +590,7 @@ impl<'t> Writer<'t> {
                 let color = if level == HeadingLevel::H2 {
                     self.t.accent
                 } else {
-                    self.t.accent2
+                    self.t.fg
                 };
                 for p in &mut pieces {
                     p.style = p.style.fg(color).add_modifier(Modifier::BOLD);

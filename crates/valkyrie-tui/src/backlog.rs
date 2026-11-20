@@ -49,11 +49,11 @@ impl Lane {
 
     fn color(self, t: &Theme) -> style::Color {
         match self {
-            Lane::Proposed => t.accent2,
+            Lane::Proposed => t.accent_dim(),
             Lane::Needs => t.needs,
             Lane::Running => t.working,
             Lane::Review => t.done,
-            Lane::Backlog => t.accent,
+            Lane::Backlog => t.muted,
             Lane::Done => t.muted,
         }
     }
@@ -1223,7 +1223,7 @@ impl Page {
                 }
                 let n = rows.iter().filter(|(l, _)| l == lane).count();
                 lines.push(Line::from(vec![
-                    format!(" {} ", lane.title()).fg(lane.color(t)).bold(),
+                    format!(" {} ", lane.title()).fg(t.dim()).bold(),
                     format!("{n}").fg(t.muted),
                 ]));
                 last = Some(*lane);
@@ -1639,25 +1639,6 @@ pub(crate) fn shipped_summary(
     parts.join("; ")
 }
 
-fn kind_color(kind: ItemKind, t: &Theme) -> style::Color {
-    match kind {
-        ItemKind::Bug => t.blocked,
-        ItemKind::Feature => t.accent,
-        ItemKind::Chore => t.muted,
-        ItemKind::Spike => t.needs,
-        ItemKind::Debt => t.accent2,
-    }
-}
-
-/// P0 and P1 stand out; the rest stay quiet.
-fn priority_color(p: Priority, t: &Theme) -> style::Color {
-    match p {
-        Priority::P0 => t.needs,
-        Priority::P1 => t.accent,
-        Priority::P2 | Priority::P3 => t.muted,
-    }
-}
-
 /// ` ↳#3` for a piece of #3, ` 2/5` for a group's parent with two of its five
 /// pieces shipped or dropped, else nothing.
 fn group_tag(item: &Item, all: &[Item]) -> String {
@@ -1761,31 +1742,29 @@ fn item_line(
     let title_fg = if lane == Lane::Done { t.muted } else { t.fg };
     let mut line = Line::from(vec![
         head.fg(t.muted),
-        prio.fg(priority_color(item.priority, t)),
-        kind.fg(kind_color(item.kind, t)),
+        prio.fg(t.muted),
+        kind.fg(t.muted),
         state.fg(lane.color(t)),
         // Padded, so the folders line up at the right.
         format!("{:<room$}", fit(&item.title, room)).fg(title_fg),
         group.to_owned().fg(t.accent),
-        after.fg(t.accent2),
+        after.fg(t.muted),
         folder.fg(t.muted),
     ]);
     if selected {
         let pad = (width as usize).saturating_sub(line.width());
         line.spans.push(" ".repeat(pad).into());
-        line = line.style(style::Style::new().bg(t.selection));
+        line = t
+            .lift_faint(line)
+            .style(style::Style::new().bg(t.selection));
     }
     line
 }
 
 fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
-    // A new item's label takes its kind's color, as the list shows it.
+    // Kinds are words, not colors: the label is the accent, as any prompt's.
     let (label, color, text) = match typing {
-        Typing::Add { kind, text } => (
-            format!(" new {} ", kind.as_str()),
-            kind_color(*kind, t),
-            text,
-        ),
+        Typing::Add { kind, text } => (format!(" new {} ", kind.as_str()), t.accent, text),
         Typing::Note { number, text, .. } => (format!(" note on #{number} "), t.accent, text),
         Typing::Edit {
             number,
@@ -1806,14 +1785,14 @@ fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
                 ),
                 None => format!(" #{number} {} ", kind.as_str()),
             },
-            kind_color(*kind, t),
+            t.accent,
             text,
         ),
         Typing::Launch(form) => (format!(" #{} model ", form.number), t.accent, &form.model),
         Typing::Repo { text, .. } => (" add repo, path ".to_owned(), t.accent, text),
     };
     let room = width.saturating_sub(label.chars().count() + 1);
-    let mut spans = vec![label.fg(t.bg).bg(color).bold(), " ".into()];
+    let mut spans = vec![label.fg(color).bold(), " ".into()];
     spans.extend(text.spans(room, t));
     Line::from(spans)
 }
@@ -1834,13 +1813,13 @@ fn detail_lines(
             item.title.clone().fg(t.fg).bold(),
         ]),
         Line::from(vec![
-            format!(" {} ", lane.title()).fg(lane.color(t)).bold(),
+            format!(" {} ", lane.title()).fg(t.dim()).bold(),
             match (lane == Lane::Review && item.pr.is_some(), item.pr_closed) {
-                (true, true) => "· PR closed ".fg(t.accent2),
+                (true, true) => "· PR closed ".fg(t.muted),
                 (true, false) => "· PR open ".fg(t.muted),
                 (false, _) => "".into(),
             },
-            format!("· {} ", item.priority.as_str()).fg(priority_color(item.priority, t)),
+            format!("· {} ", item.priority.as_str()).fg(t.muted),
             match live {
                 Some(s) => format!(
                     "· tab {} {} ",
@@ -1857,16 +1836,16 @@ fn detail_lines(
     ];
     if lane == Lane::Proposed {
         out.push(Line::from(
-            format!(" by {}, waiting on you", item.by).fg(t.accent2),
+            format!(" by {}, waiting on you", item.by).fg(t.accent),
         ));
     } else if item.agent_filed() {
         out.push(Line::from(
-            format!(" agent-filed by {}, not accepted yet: a", item.by).fg(t.accent2),
+            format!(" agent-filed by {}, not accepted yet: a", item.by).fg(t.accent),
         ));
     }
     if !item.blocked_by.is_empty() {
         out.push(Line::from(
-            format!(" after {}, not finished yet", blocked.join(", ")).fg(t.accent2),
+            format!(" after {}, not finished yet", blocked.join(", ")).fg(t.muted),
         ));
     }
     if let Some(pr) = &item.pr {
@@ -2856,21 +2835,17 @@ mod tests {
     }
 
     #[test]
-    fn the_new_item_label_takes_its_kinds_color() {
+    fn the_new_item_label_is_the_accent_whatever_its_kind() {
         let t = crate::theme::DRACULA;
         let label = |kind| {
             let typing = Typing::Add {
                 kind,
                 text: LineEdit::default(),
             };
-            typing_line(&typing, 40, &t).spans[0].style.bg
+            typing_line(&typing, 40, &t).spans[0].style.fg
         };
-        assert_eq!(label(ItemKind::Bug), Some(kind_color(ItemKind::Bug, &t)));
-        assert_eq!(
-            label(ItemKind::Feature),
-            Some(kind_color(ItemKind::Feature, &t))
-        );
-        assert_ne!(label(ItemKind::Bug), label(ItemKind::Feature));
+        assert_eq!(label(ItemKind::Bug), Some(t.accent));
+        assert_eq!(label(ItemKind::Feature), Some(t.accent));
     }
 
     #[test]

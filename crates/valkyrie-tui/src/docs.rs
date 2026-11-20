@@ -862,7 +862,7 @@ impl Page {
                 top.push(format!(" {}", fit(&about, inner)).fg(t.fg).into());
                 if let Some((_, title)) = &self.undo {
                     let line = format!(" Deleted “{title}” · u puts it back");
-                    top.push(fit(&line, inner).fg(t.accent2).into());
+                    top.push(fit(&line, inner).fg(t.accent).into());
                 }
                 if l.docs.is_empty() {
                     top.push(Line::default());
@@ -889,7 +889,7 @@ impl Page {
                     list.push(Line::default());
                     list.push(Line::from(vec![
                         format!(" {}", fit(head, inner.saturating_sub(6)))
-                            .fg(t.accent2)
+                            .fg(t.dim())
                             .bold(),
                         format!(" · {n}").fg(t.muted),
                     ]));
@@ -1159,7 +1159,7 @@ impl Page {
             let w = (more.chars().count() as u16).min(text_area.width);
             let row = Rect::new(text_area.right() - w, text_area.bottom() - 1, w, 1);
             frame.render_widget(
-                Paragraph::new(more.fg(t.accent2).bold()).style(style::Style::new().bg(t.panel)),
+                Paragraph::new(more.fg(t.accent).bold()).style(style::Style::new().bg(t.panel)),
                 row,
             );
         }

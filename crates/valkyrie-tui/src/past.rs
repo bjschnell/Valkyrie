@@ -140,7 +140,7 @@ impl Page {
             let room = inner.saturating_sub(label.len() + 4);
             list.push(Line::from(vec![
                 if here { "▌".fg(t.accent) } else { " ".into() },
-                format!(" {label} ").fg(t.bg).bg(t.muted).bold(),
+                format!(" {label} ").fg(t.muted).bold(),
                 " ".into(),
                 fit(&e.what, room).fg(t.fg).bold(),
             ]));
