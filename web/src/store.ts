@@ -262,24 +262,26 @@ type Send = () => Promise<string | null | void>;
 
 /** Sends a change shown already; taken back with a toast if the daemon refuses
  * it, carrying `retry` when there's a way to try again. */
-async function commit(key: number, send: Send, retry?: Action): Promise<void> {
+async function commit(keys: number[], send: Send, retry?: Action): Promise<void> {
   try {
     if (!conn) throw new Error("not connected");
     const said = await send();
-    const p = shownOver.get(key);
-    if (p) p.sent = Date.now();
+    for (const key of keys) {
+      const p = shownOver.get(key);
+      if (p) p.sent = Date.now();
+    }
     window.setTimeout(show, LAND_MS);
     show();
     if (said) toast(said);
   } catch (e) {
-    shownOver.delete(key);
+    for (const key of keys) shownOver.delete(key);
     show();
     toast(`Couldn't: ${(e as Error).message}`, retry);
   }
 }
 
 /** The action waiting out its Undo; one at most, as there's one toast. */
-let held: { key: number; send: Send; retry?: Action; timer: number } | null = null;
+let held: { keys: number[]; send: Send; retry?: Action; timer: number } | null = null;
 
 /** Sends the held action now: its Undo is gone, or the page is going away.
  * What waited for it is shown, unless another hold takes the toast (`next`). */
@@ -288,7 +290,7 @@ function flushHeld(next = false): void {
   if (!h) return;
   held = null;
   window.clearTimeout(h.timer);
-  void commit(h.key, h.send, h.retry);
+  void commit(h.keys, h.send, h.retry);
   if (!next) showDeferred();
 }
 
@@ -296,27 +298,31 @@ function flushHeld(next = false): void {
  * Shows `change` at once and offers Undo in the toast; `send` goes to the
  * daemon only when the Undo does (the toast times out or another replaces it,
  * the tab is hidden). Undo before then and the daemon never hears of it, which
- * is what lets this cover actions with no inverse: an accept, a delete.
+ * is what lets this cover actions with no inverse: an accept, a delete. Several
+ * changes share the one toast and Undo: a batch is answered as one.
  */
-function hold(text: string, change: Change, send: Send, retry?: Action): void {
+function hold(text: string, change: Change | Change[], send: Send, retry?: Action): void {
   // Another Undo takes this one's place, so what it would have undone goes now.
   flushHeld(true);
-  const key = ++pendingKey;
-  shownOver.set(key, { change, sent: null });
+  const keys = [change].flat().map((c) => {
+    const key = ++pendingKey;
+    shownOver.set(key, { change: c, sent: null });
+    return key;
+  });
   show();
   toast(text, {
     label: "Undo",
     run: () => {
-      if (held?.key !== key) return toast("Too late: it was sent");
+      if (held?.keys !== keys) return toast("Too late: it was sent");
       window.clearTimeout(held.timer);
       held = null;
-      shownOver.delete(key);
+      for (const key of keys) shownOver.delete(key);
       show();
       showDeferred();
     },
   });
   navigator.vibrate?.(10);
-  held = { key, send, retry, timer: window.setTimeout(flushHeld, HOLD_MS) };
+  held = { keys, send, retry, timer: window.setTimeout(flushHeld, HOLD_MS) };
 }
 
 /** Tries the daemon again now, rather than after the backoff. */
@@ -1231,6 +1237,22 @@ async function sendChange(id: number, change: ItemChange): Promise<string | null
   if (!conn) throw new Error("not connected");
   const reply = await conn.request({ t: "change_item", id, change });
   return reply.t === "item" ? (reply.note ?? null) : null;
+}
+
+/** Sets several backlog items' status at once, under one Undo (the filed tray's
+ * Keep and Drop, #252): `Kept 6` or `Dropped 6`. */
+export function setStatuses(ids: number[], status: "open" | "dropped"): void {
+  if (ids.length === 1) return setStatus(ids[0], status);
+  const items = get().items;
+  const changes: Change[] = ids.map((id) => {
+    const item = items.find((i) => i.id === id);
+    return { t: "item", id, patch: { status: status === "open" && item?.unaccepted ? "proposed" : status } };
+  });
+  hold(`${status === "open" ? "Kept" : "Dropped"} ${ids.length}`, changes, async () => {
+    const notes = [];
+    for (const id of ids) notes.push(await sendChange(id, { do: "status", status }));
+    return notes.filter(Boolean).join(" · ") || null;
+  });
 }
 
 /** Sets a backlog item's status at once, with Undo; the daemon hears when that's gone. */

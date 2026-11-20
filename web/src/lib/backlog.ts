@@ -6,16 +6,16 @@ import type { Item, ItemChange, ItemFacts, ItemKind, ItemNote, KeptItem, LaunchO
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
-export type Column = "backlog" | "progress" | "review" | "done";
+export type Group = "progress" | "review" | "next" | "done";
 
-/** The board's columns, left to right. One that needs you is in progress, at its
- * top, so a stuck agent is the first thing in the column you watch; one an agent
- * proposed is at the top of the backlog, waiting on you to accept it. */
-export const COLUMNS: { column: Column; title: string; lanes: Lane[] }[] = [
-  { column: "backlog", title: "Backlog", lanes: ["proposed", "backlog"] },
-  { column: "progress", title: "In progress", lanes: ["needs", "running"] },
-  { column: "review", title: "Review", lanes: ["review"] },
-  { column: "done", title: "Done", lanes: ["done"] },
+/** The list's groups, top to bottom (#252). One that needs you is at the top of In
+ * progress, so a stuck agent is the first thing you see. What an agent filed and
+ * nobody has kept yet isn't in a group: it waits in the tray above them. */
+export const GROUPS: { group: Group; title: string; lanes: Lane[] }[] = [
+  { group: "progress", title: "In progress", lanes: ["needs", "running"] },
+  { group: "review", title: "In review", lanes: ["review"] },
+  { group: "next", title: "Up next", lanes: ["backlog"] },
+  { group: "done", title: "Done", lanes: ["done"] },
 ];
 
 /** The newest of an item's sessions still running on this daemon, if any. */
@@ -123,17 +123,60 @@ export function byLane(items: Item[], sessions: SessionInfo[], boot: number, all
   return out;
 }
 
-/** Items by column, each with the lane it's in. */
-export function byColumn(
+/** Items by group, each with the lane it's in, and the tray's: what agents filed
+ * that nobody has kept or dropped. */
+export function byGroup(
   items: Item[],
   sessions: SessionInfo[],
   boot: number,
   all: Item[] = items,
-): Record<Column, { item: Item; lane: Lane }[]> {
+): { filed: Item[]; groups: Record<Group, { item: Item; lane: Lane }[]> } {
   const lanes = byLane(items, sessions, boot, all);
-  const out = {} as Record<Column, { item: Item; lane: Lane }[]>;
-  for (const { column, lanes: of } of COLUMNS) out[column] = of.flatMap((lane) => lanes[lane].map((item) => ({ item, lane })));
+  const groups = {} as Record<Group, { item: Item; lane: Lane }[]>;
+  for (const { group, lanes: of } of GROUPS) groups[group] = of.flatMap((lane) => lanes[lane].map((item) => ({ item, lane })));
+  return { filed: lanes.proposed, groups };
+}
+
+/** A group's rows as a tree: each piece right under the item it's a piece of, one
+ * step in, when both are in the group; otherwise where its order puts it. */
+export function tree<T extends { item: Item }>(rows: T[]): (T & { depth: number })[] {
+  const here = new Set(rows.map((r) => r.item.id));
+  const out: (T & { depth: number })[] = [];
+  const visit = (r: T, depth: number) => {
+    out.push({ ...r, depth });
+    for (const c of rows) if (c.item.parent === r.item.id && c.item.id !== r.item.id) visit(c, depth + 1);
+  };
+  for (const r of rows) if (r.item.parent === undefined || !here.has(r.item.parent)) visit(r, 0);
   return out;
+}
+
+/** What an item is called in a list of several repositories: `api#2`, or `#2`. */
+export const itemRef = (item: Item) => `${item.project ? base(item.project) : ""}#${item.number}`;
+
+/** A row's state as a dot and a word (#252): the dot is a session state's color.
+ * `flag` is the supervisor's reason on its live session (`CI red on PR #41: …`). */
+export function rowState(
+  item: Item,
+  lane: Lane,
+  items: Item[],
+  flag?: string,
+): { state: "needs_input" | "blocked" | "working" | "review_ready" | "idle" | "exited"; word: string } {
+  if (flag) return { state: "blocked", word: flag.split(":")[0] };
+  switch (lane) {
+    case "needs":
+      return { state: "needs_input", word: "needs you" };
+    case "running":
+      return { state: "working", word: agentFiled(item) ? "running · not accepted" : "running" };
+    case "review":
+      if (item.pr_closed) return { state: "idle", word: "PR closed" };
+      return { state: "review_ready", word: item.pr ? `PR #${item.pr.split("/").pop()} open` : "to review" };
+    case "done":
+      return { state: "exited", word: item.status };
+    default: {
+      const waits = waitingOn(item, items);
+      return { state: "idle", word: waits.length ? `after ${waits.map((id) => `#${itemNo(items, id)}`).join(", ")}` : "ready" };
+    }
+  }
 }
 
 /** The last part of a path: a repository's name. */
