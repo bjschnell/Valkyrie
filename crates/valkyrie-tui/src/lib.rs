@@ -316,6 +316,11 @@ struct App {
     tab_mode: bool,
     /// The tab attached before this one, for Alt-p.
     previous: Option<SessionId>,
+    /// The section page you attached from, set aside until you come home, so
+    /// home is the section and row you left (spec: Two layers).
+    parked: Option<Parked>,
+    /// `g` was pressed: the next key picks a section.
+    g_pending: bool,
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
@@ -486,6 +491,8 @@ impl App {
             partial: Vec::new(),
             tab_mode: false,
             previous: None,
+            parked: None,
+            g_pending: false,
             needing: None,
             renaming: None,
             menu: None,
@@ -774,10 +781,12 @@ impl App {
 
     /// Attaches to `id`'s tab, every pane of it, with `id` focused.
     async fn attach(&mut self, id: SessionId) {
+        self.drop_g();
         self.attach_tab(id).await;
     }
 
     async fn detach(&mut self) {
+        self.drop_g();
         if let Some(view) = &self.view {
             self.previous = Some(view.id);
         }
@@ -796,6 +805,7 @@ impl App {
         }
         self.reset_outer_modes();
         let _ = self.client.detach().await;
+        self.unpark();
         self.refresh().await;
         // The preview showed a peeked tab, or nothing, while attached.
         self.update_preview().await;
@@ -843,6 +853,20 @@ impl App {
             // A mouse report cut off by the read isn't typed into a prompt.
             if let Some(cut) = mouse::unfinished(&bytes) {
                 self.partial = bytes.split_off(cut);
+            }
+            // At home, the backlog is a section: `g` and the strip's keys first.
+            if self.view.is_none() {
+                let Some(rest) = self.section_keys(bytes).await else {
+                    return;
+                };
+                if self.backlog.is_none() {
+                    // The cut-off report stays after these bytes, not before.
+                    let partial = std::mem::take(&mut self.partial);
+                    Box::pin(self.on_input(rest)).await;
+                    self.partial = partial;
+                    return;
+                }
+                bytes = rest;
             }
             return self.backlog_keys(&bytes).await;
         }
@@ -905,6 +929,9 @@ impl App {
 
     /// Typed keys while on the home screen, whichever page or prompt is over it.
     async fn home_screen_keys(&mut self, bytes: Vec<u8>) {
+        let Some(bytes) = self.section_keys(bytes).await else {
+            return;
+        };
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
@@ -949,6 +976,13 @@ impl App {
     /// does; a chip or the backlog panel does what its key does. The wheel moves the
     /// selection, or scrolls a proposal's text over the preview.
     async fn on_home_mouse(&mut self, m: Mouse) {
+        self.drop_g();
+        // The strip stays on top of every section page.
+        if m.kind == MouseKind::Press
+            && let Some(Hit::Section(section)) = self.home_hit(Position::new(m.x, m.y))
+        {
+            return self.go_section(section).await;
+        }
         if self.docs.is_some() {
             return self.on_docs_mouse(m).await;
         }
@@ -978,6 +1012,7 @@ impl App {
                     self.update_preview().await;
                 }
                 Some(Hit::Key(key)) => self.on_home_key(key).await,
+                Some(Hit::Section(section)) => self.go_section(section).await,
                 // Links are a proposal's: after one, the preview holds a session.
                 Some(Hit::Preview) if self.proposal().is_some() => {
                     if let Some(url) = self.proposal_link_at(m.x, m.y) {
@@ -2310,6 +2345,236 @@ impl App {
         rows
     }
 
+    /// The section on screen: the one whose page is open, else the Inbox.
+    fn section(&self) -> Section {
+        if self.backlog.is_some() {
+            Section::Backlog
+        } else if self.docs_shown() || self.wiki.is_some() {
+            Section::Memory
+        } else if self.digest.is_some() || self.past.is_some() {
+            Section::History
+        } else {
+            Section::Inbox
+        }
+    }
+
+    /// Whether `g` and `[ ]` are the sections' now: no dialog or prompt over home,
+    /// and the section's page on its list, not typing or reading.
+    fn sections_listen(&self) -> bool {
+        self.view.is_none()
+            && self.keys_page.is_none()
+            && self.settings_cursor.is_none()
+            && self.renaming.is_none()
+            && self.reviewing.is_none()
+            && self.supervisor.is_none()
+            && self.backlog.as_ref().is_none_or(backlog::Page::at_list)
+            && self.docs.as_ref().is_none_or(docs::Page::at_list)
+            && self.wiki.as_ref().is_none_or(wiki::Page::at_list)
+            && self.past.as_ref().is_none_or(past::Page::at_list)
+    }
+
+    /// `g i/b/m/h` go to a section and `[ ]` cycle the section's tabs, before
+    /// the page has the keys; `g g` is the page's own `g` (to the top). Returns
+    /// the keys left for the page, from the first one that isn't these.
+    async fn section_keys(&mut self, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        if !self.sections_listen() {
+            self.drop_g();
+        }
+        let mut rest: &[u8] = &bytes;
+        while !rest.is_empty() && self.sections_listen() {
+            let key = next_key(rest);
+            if std::mem::take(&mut self.g_pending) {
+                self.status.clear();
+                match Section::ALL.iter().find(|s| s.key() == key) {
+                    Some(&section) => self.go_section(section).await,
+                    // `g g`, or `g` then anything: the page's `g`, then the key.
+                    None => {
+                        let mut out = b"g".to_vec();
+                        if key != b"g" {
+                            out.extend_from_slice(rest);
+                        } else {
+                            out.extend_from_slice(&rest[key.len()..]);
+                        }
+                        return Some(out);
+                    }
+                }
+            } else if key == b"g" {
+                self.g_pending = true;
+                self.status = "g: i inbox · b backlog · m memory · h history".into();
+            } else if (key == b"[" || key == b"]")
+                && matches!(self.section(), Section::Memory | Section::History)
+            {
+                self.cycle_tab().await;
+            } else {
+                return Some(rest.to_vec());
+            }
+            rest = &rest[key.len()..];
+        }
+        (!rest.is_empty()).then(|| rest.to_vec())
+    }
+
+    /// Forgets a pending `g`, and the hint it put up.
+    fn drop_g(&mut self) {
+        if std::mem::take(&mut self.g_pending) {
+            self.status.clear();
+        }
+    }
+
+    /// Opens `section`'s page in place of whatever section is open (its first
+    /// tab), or closes them all for the Inbox.
+    async fn go_section(&mut self, section: Section) {
+        if section == self.section() {
+            return;
+        }
+        self.backlog = None;
+        self.docs = None;
+        self.wiki = None;
+        self.digest = None;
+        self.past = None;
+        match section {
+            Section::Inbox => {}
+            Section::Backlog => self.open_backlog().await,
+            Section::Memory => self.open_docs().await,
+            Section::History => self.open_digest().await,
+        }
+    }
+
+    /// `[` or `]` in Memory (Docs, Wiki) or History (Summary, Past sessions):
+    /// the section's other tab.
+    async fn cycle_tab(&mut self) {
+        if self.docs.take().is_some() {
+            self.open_wiki(self.selection().0).await;
+            if self.wiki.is_none() {
+                // No repository to show a wiki for: stay on Docs.
+                self.open_docs().await;
+            }
+        } else if self.wiki.take().is_some() {
+            self.open_docs().await;
+        } else if self.digest.take().is_some() {
+            self.open_past().await;
+        } else if self.past.take().is_some() {
+            self.open_digest().await;
+        }
+    }
+
+    /// Sets the open section page aside for the session it attaches to.
+    fn park(&mut self) {
+        // What was waiting on the daemon is answered by the attach itself.
+        if let Some(p) = &mut self.wiki {
+            p.starting = false;
+        }
+        if let Some(p) = &mut self.past {
+            p.resuming = false;
+        }
+        let page = if let Some(p) = self.backlog.take() {
+            Some(Parked::Backlog(Box::new(p)))
+        } else if let Some(p) = self.wiki.take() {
+            Some(Parked::Wiki(p))
+        } else if let Some(p) = self.digest.take() {
+            Some(Parked::Digest(p))
+        } else {
+            self.past.take().map(Parked::Past)
+        };
+        if page.is_some() {
+            self.parked = page;
+        }
+    }
+
+    /// After an attach from a page: if it didn't attach after all, the page
+    /// comes straight back rather than waiting to surface on a later detach.
+    fn unpark_unless_attached(&mut self) {
+        if self.view.is_none() {
+            self.unpark();
+        }
+    }
+
+    /// Back home: the page you attached from, as you left it, unless one is open.
+    fn unpark(&mut self) {
+        let open = self.backlog.is_some()
+            || self.wiki.is_some()
+            || self.digest.is_some()
+            || self.past.is_some();
+        match self.parked.take() {
+            _ if open => {}
+            Some(Parked::Backlog(p)) => self.backlog = Some(*p),
+            Some(Parked::Wiki(p)) => self.wiki = Some(p),
+            Some(Parked::Digest(p)) => self.digest = Some(p),
+            Some(Parked::Past(p)) => self.past = Some(p),
+            None => {}
+        }
+    }
+
+    /// The strip on top of home: `ᛒ  Inbox 5   Backlog   Memory   History`, the
+    /// one on screen bold and underlined, the Inbox count in the ask color.
+    /// Under 100 columns the others are a letter. Also where each name is.
+    fn strip_line(&self, width: u16, now: u64) -> (Line<'static>, Vec<(u16, u16, Section)>) {
+        let t = self.settings.theme;
+        let mut spans = vec![match &t.rain {
+            Some(colors) => rain::glitch(" ᛒ ", now, colors.glyphs).fg(t.accent).bold(),
+            None => " ᛒ ".fg(t.accent).bold(),
+        }];
+        let narrow = width < 100;
+        let here = self.section();
+        let mut places = Vec::new();
+        for section in Section::ALL {
+            spans.push(if narrow { "  " } else { "   " }.into());
+            let from = Line::from(spans.clone()).width() as u16;
+            let on = section == here;
+            let name = match (narrow && !on, section) {
+                (true, Section::Inbox) => "Inbox".to_string(),
+                (true, s) => s.name()[..1].to_string(),
+                (false, s) => s.name().to_string(),
+            };
+            spans.push(if on {
+                name.fg(t.fg).bold().underlined()
+            } else {
+                name.fg(t.dim())
+            });
+            if section == Section::Inbox && self.need_you() > 0 {
+                spans.push(format!(" {}", self.need_you()).fg(t.needs).bold());
+            }
+            let to = Line::from(spans.clone()).width() as u16;
+            places.push((from, to, section));
+        }
+        // The section's tabs, the one open marked, and the keys between them.
+        let tabs: &[(&str, bool)] = match here {
+            Section::Memory => &[("Docs", self.docs.is_some()), ("Wiki", self.wiki.is_some())],
+            Section::History => &[
+                ("Summary", self.digest.is_some()),
+                ("Past sessions", self.past.is_some()),
+            ],
+            _ => &[],
+        };
+        if !tabs.is_empty() && !narrow {
+            spans.push("    ".into());
+            for (i, (name, on)) in tabs.iter().enumerate() {
+                if i > 0 {
+                    spans.push(" · ".fg(t.muted));
+                }
+                spans.push(if *on {
+                    name.to_string().fg(t.fg).bold()
+                } else {
+                    name.to_string().fg(t.dim())
+                });
+            }
+            spans.push("  [ ]".fg(t.accent).bold());
+        }
+        (Line::from(spans), places)
+    }
+
+    /// The strip's right end, longest first: the host, how many are running and
+    /// the time; then without the host, which can be long (a CI runner's is).
+    fn strip_places(&self) -> [Vec<Span<'static>>; 2] {
+        let t = self.settings.theme;
+        let host = remote().map_or_else(valkyrie_proto::hostname, str::to_string);
+        let running = self.sessions.iter().filter(|s| is_running(s)).count();
+        let clock = jiff::Zoned::now().strftime("%H:%M").to_string();
+        [
+            vec![format!(" {host} · {running} running · {clock} ").fg(t.muted)],
+            vec![format!(" {running} running · {clock} ").fg(t.muted)],
+        ]
+    }
+
     /// The row under the cursor.
     fn row(&self) -> Option<InboxRow> {
         self.inbox_rows().get(self.selected).copied()
@@ -2830,8 +3095,9 @@ impl App {
                 digest::Do::Close => self.digest = None,
                 digest::Do::Load => self.load_digest().await,
                 digest::Do::Open(id) => {
-                    self.digest = None;
+                    self.park();
                     self.attach(id).await;
+                    self.unpark_unless_attached();
                     return;
                 }
                 digest::Do::Copy(text) => match mouse::copy_to_clipboard(&text) {
@@ -2993,9 +3259,10 @@ impl App {
                     let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
                     match self.client.resume(&key, size).await {
                         Ok(info) => {
-                            self.past = None;
+                            self.park();
                             self.refresh().await;
                             self.attach(info.id).await;
+                            self.unpark_unless_attached();
                             return;
                         }
                         Err(e) => {
@@ -3086,9 +3353,10 @@ impl App {
                         .await
                     {
                         Ok(info) => {
-                            self.wiki = None;
+                            self.park();
                             self.refresh().await;
                             self.attach(info.id).await;
+                            self.unpark_unless_attached();
                             return;
                         }
                         Err(e) => {
@@ -3644,8 +3912,9 @@ impl App {
                 }
             }
             Do::Attach(id) => {
-                self.backlog = None;
+                self.park();
                 self.switch_to(id).await;
+                self.unpark_unless_attached();
             }
             Do::Launch {
                 id,
@@ -3658,9 +3927,10 @@ impl App {
                     .client
                     .launch_item(id, agent, worktree, size, model)
                     .await?;
-                self.backlog = None;
+                self.park();
                 self.refresh().await;
                 self.switch_to(info.id).await;
+                self.unpark_unless_attached();
             }
             Do::Status(id, status) => {
                 let (item, note) = self
@@ -3790,9 +4060,10 @@ impl App {
                 launch,
             } => match self.client.answer_launch(project, id, launch).await? {
                 Some(info) => {
-                    self.backlog = None;
+                    self.park();
                     self.refresh().await;
                     self.switch_to(info.id).await;
+                    self.unpark_unless_attached();
                 }
                 None => self.say(format!(
                     "left #{}: it's offered again once it changes",
@@ -4289,7 +4560,15 @@ impl App {
 
         let [header, main] =
             Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
-        frame.render_widget(Paragraph::new(header_line(self.need_you(), now, t)), header);
+        self.home_rows.borrow_mut().clear();
+        let (left, places) = self.strip_line(header.width, now);
+        for (from, to, section) in places {
+            self.home_rows.borrow_mut().push((
+                Rect::new(header.x + from, header.y, to - from, 1),
+                Hit::Section(section),
+            ));
+        }
+        frame.render_widget(Paragraph::new(left.clone()), header);
         // On the right, the plan's quota and a newer release, each only where it
         // clears the counts on the left; the quota first, it's the one to act on.
         let notice = self
@@ -4307,17 +4586,20 @@ impl App {
             .clone()
             .zip(quota.clone())
             .map(|(notice, quota)| [quota, notice].concat());
-        let left = header_line(self.need_you(), now, t);
-        if let Some(right) = [both, quota, notice]
-            .into_iter()
-            .flatten()
+        // Then the host, what's running and the time, as far as there is room.
+        let places = self.strip_places();
+        let notices: Vec<Vec<Span>> = [both, quota, notice].into_iter().flatten().collect();
+        if let Some(right) = notices
+            .iter()
+            .flat_map(|n| places.iter().map(move |p| [n.clone(), p.clone()].concat()))
+            .chain(places.iter().cloned())
+            .chain([Vec::new()])
             .map(Line::from)
             .find(|right| left.width() + right.width() < header.width as usize)
         {
             frame.render_widget(Paragraph::new(right).right_aligned(), header);
         }
 
-        self.home_rows.borrow_mut().clear();
         let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
             // No boxes: a single rule between the list and the detail.
             let [lists, rule, preview] = Layout::horizontal([
@@ -6238,33 +6520,6 @@ fn inbox_session_row(
     )
 }
 
-/// ` ◆ VALKYRIE  agent control`, then the one count of what needs you.
-fn header_line(need_you: usize, now: u64, t: &Theme) -> Line<'static> {
-    let mut spans = if let Some(colors) = &t.rain {
-        vec![
-            rain::glitch(" ◆ VALKYRIE ", now, colors.glyphs)
-                .fg(t.bg)
-                .bg(t.accent)
-                .bold(),
-            " agent control ".fg(t.muted),
-        ]
-    } else {
-        vec![
-            " ◆ VALKYRIE ".fg(t.bg).bg(t.accent).bold(),
-            " agent control ".fg(t.muted),
-        ]
-    };
-    if let Some(host) = remote() {
-        spans.push(format!(" on {host} ").fg(t.muted));
-    }
-    spans.push(" ".into());
-    spans.push(match need_you {
-        0 => "✓ all quiet ".fg(t.done),
-        n => format!("● {n} need you ").fg(t.needs).bold(),
-    });
-    Line::from(spans)
-}
-
 /// The home screen's rename prompt.
 fn rename_line(id: SessionId, typed: &edit::LineEdit, t: &Theme) -> Line<'static> {
     let mut spans = vec![format!(" rename #{id} ").fg(t.accent).bold(), " ".into()];
@@ -6912,6 +7167,54 @@ enum Hit {
     Key(HomeKey),
     /// The preview panel: the wheel scrolls a proposal's text there.
     Preview,
+    /// A section's name on the strip.
+    Section(Section),
+}
+
+/// The four sections of home (spec: Four sections), each a page; the Inbox is
+/// home itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Inbox,
+    Backlog,
+    Memory,
+    History,
+}
+
+impl Section {
+    const ALL: [Section; 4] = [
+        Section::Inbox,
+        Section::Backlog,
+        Section::Memory,
+        Section::History,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Section::Inbox => "Inbox",
+            Section::Backlog => "Backlog",
+            Section::Memory => "Memory",
+            Section::History => "History",
+        }
+    }
+
+    /// The key after `g` that goes there, as on the web.
+    fn key(self) -> &'static [u8] {
+        match self {
+            Section::Inbox => b"i",
+            Section::Backlog => b"b",
+            Section::Memory => b"m",
+            Section::History => b"h",
+        }
+    }
+}
+
+/// A section page set aside while you're in a session you opened from it.
+enum Parked {
+    Backlog(Box<backlog::Page>),
+    Wiki(wiki::Page),
+    Digest(digest::Page),
+    Past(past::Page),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7629,7 +7932,7 @@ mod tests {
 
         let home = home_screen(&app, 100).join("\n");
         for want in [
-            "● 5 need you",
+            "Inbox 5",
             "Needs you 5",
             "2 decisions",
             "2 filed",
@@ -7651,6 +7954,126 @@ mod tests {
         );
         let line: String = bar.line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line.contains("● 5 need you"), "{line}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The strip names the four sections, the one on screen marked, and `g` then
+    /// a letter goes to one from home or any section's list; `g g` is still the
+    /// page's own top, and a page taking text keeps `g` as a letter.
+    #[tokio::test]
+    async fn g_goes_to_a_section_and_the_strip_says_which() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-sect-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.queue = vec![queued(1)];
+        app.sessions = vec![info(1)];
+        let strip = |app: &App, width: u16| home_screen(app, width)[0].clone();
+
+        assert_eq!(app.section(), Section::Inbox);
+        let wide = strip(&app, 120);
+        assert!(wide.contains("ᛒ") && wide.contains("Inbox 1"), "{wide}");
+        assert!(
+            wide.contains("Inbox 1   Backlog   Memory   History"),
+            "{wide}"
+        );
+        assert!(
+            // The host may not fit (a CI runner's name is long); the rest does.
+            wide.contains(" running · "),
+            "{wide}"
+        );
+        // Narrow, the others are a letter; the one on screen keeps its name.
+        let narrow = strip(&app, 80);
+        assert!(narrow.contains("Inbox 1  B  M  H"), "{narrow}");
+
+        // `g b` from home: the backlog, which the strip now names in full.
+        app.on_input(b"gb".to_vec()).await;
+        assert_eq!(app.section(), Section::Backlog);
+        assert!(strip(&app, 80).contains("I") && strip(&app, 80).contains("Backlog"));
+        // `g g` is the list's top, not a section, with an item's facts loaded.
+        app.backlog.as_mut().unwrap().cursor = 3;
+        app.backlog.as_mut().unwrap().facts = Some((1, 0, None));
+        app.on_input(b"gg".to_vec()).await;
+        assert_eq!(
+            (app.section(), app.backlog.as_ref().unwrap().cursor),
+            (Section::Backlog, 0)
+        );
+        // Across reads: `g`, then `i`, goes home.
+        app.on_input(b"g".to_vec()).await;
+        assert!(app.g_pending);
+        app.on_input(b"i".to_vec()).await;
+        assert_eq!((app.section(), app.g_pending), (Section::Inbox, false));
+
+        // A `g` left pending is dropped by a click, not kept for a later key.
+        app.on_input(b"g".to_vec()).await;
+        app.on_home_mouse(Mouse {
+            kind: MouseKind::Press,
+            code: 0,
+            x: 5,
+            y: 20,
+            release: false,
+        })
+        .await;
+        assert!(!app.g_pending && app.status.is_empty());
+
+        // Typing in the backlog, `g` is a letter.
+        app.on_input(b"gb".to_vec()).await;
+        app.on_input(b"n".to_vec()).await;
+        assert!(
+            app.backlog.as_ref().unwrap().typing.is_some(),
+            "n adds an item"
+        );
+        app.on_input(b"gi".to_vec()).await;
+        assert_eq!(app.section(), Section::Backlog, "typed, not a section");
+
+        // History and Memory are their pages' sections.
+        app.backlog = None;
+        app.digest = Some(digest::Page::default());
+        assert_eq!(app.section(), Section::History);
+        app.on_input(b"gi".to_vec()).await;
+        assert!(app.digest.is_none());
+        app.docs = Some(docs::Page::default());
+        assert_eq!(app.section(), Section::Memory);
+        let wide = strip(&app, 120);
+        assert!(wide.contains("Docs · Wiki  [ ]"), "{wide}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Attaching from a section's page sets it aside; coming home puts it back
+    /// as it was, so home is the section and row you left.
+    #[tokio::test]
+    async fn home_is_the_section_and_row_you_attached_from() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-park-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let mut page = backlog::Page::default();
+        page.cursor = 2;
+        app.backlog = Some(page);
+        app.park();
+        assert!(app.backlog.is_none(), "the session has the screen");
+        app.unpark();
+        assert_eq!(app.backlog.as_ref().map(|p| p.cursor), Some(2));
+        assert!(app.parked.is_none());
+
+        // Nothing open: parking keeps what's parked.
+        app.park();
+        app.backlog = None;
+        app.park();
+        assert!(app.parked.is_some());
+        app.unpark();
+        app.backlog = None;
+        // A resume in flight is over once its session is up: no frozen page.
+        let mut past = past::Page::default();
+        past.resuming = true;
+        app.past = Some(past);
+        app.park();
+        app.unpark();
+        assert!(app.past.as_ref().is_some_and(|p| !p.resuming));
+        app.past = None;
+
+        // A section opened meanwhile isn't replaced.
+        app.backlog = Some(backlog::Page::default());
+        app.park();
+        app.digest = Some(digest::Page::default());
+        app.unpark();
+        assert!(app.backlog.is_none() && app.digest.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7762,13 +8185,7 @@ mod tests {
         // answer.
         app.selected = 0;
         let text = render(&app);
-        for want in [
-            "10 need you",
-            "10 decisions",
-            "#10",
-            "claude · /r/x",
-            "accept",
-        ] {
+        for want in ["Inbox 10", "10 decisions", "#10", "claude · /r/x", "accept"] {
             assert!(text.contains(want), "lacks {want:?}");
         }
         assert!(!text.contains("decisions to review"), "no box of its own");
@@ -7920,8 +8337,8 @@ mod tests {
             let buffer = terminal.backend().buffer();
             let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
             for want in [
-                "VALKYRIE",
-                " need you",
+                "Backlog",
+                "Inbox ",
                 "cargo test -p auth",
                 "backfill",
                 "web-ui",
@@ -7929,7 +8346,7 @@ mod tests {
                 "settings",
             ] {
                 // The logos of themes with rain glitch a letter now and then.
-                if theme.rain.is_some() && want == "VALKYRIE" {
+                if theme.rain.is_some() && want == "ᛒ" {
                     continue;
                 }
                 assert!(text.contains(want), "{} theme lacks {want:?}", theme.name);
@@ -8102,7 +8519,7 @@ mod tests {
         app.preview = Some((3, docs.into()));
         let text = render(&app, "demo-1");
         assert!(text.contains("docs-pass") && text.contains("fixed 4 typos"));
-        assert!(text.contains("1 need you") && !text.contains("asks"));
+        assert!(text.contains("Inbox 1") && !text.contains("asks"));
 
         // 2. fix-login stops on a permission prompt and goes to the top.
         set(
@@ -8121,7 +8538,7 @@ mod tests {
             ),
         ));
         let text = render(&app, "demo-2");
-        assert!(text.contains("2 need you") && text.contains("npm test"));
+        assert!(text.contains("Inbox 2") && text.contains("npm test"));
         assert!(text.contains("Do you want to proceed?"));
 
         // 3. Answered: back to work, out of the queue.
@@ -8130,7 +8547,7 @@ mod tests {
         app.selected = 0;
         app.preview = Some((3, docs.into()));
         let text = render(&app, "demo-3");
-        assert!(text.contains("1 need you") && !text.contains("Permission"));
+        assert!(text.contains("Inbox 1") && !text.contains("Permission"));
 
         // 4. checkout-ui finishes and joins the queue.
         set(
@@ -8147,7 +8564,7 @@ mod tests {
             "● Cart totals now update as items change\n  ⎿  2 files changed, 64 insertions, 9 deletions".into(),
         ));
         let text = render(&app, "demo-4");
-        assert!(text.contains("cart totals update live") && text.contains("2 need you"));
+        assert!(text.contains("cart totals update live") && text.contains("Inbox 2"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8754,7 +9171,7 @@ mod tests {
             .unwrap();
         let home = text(&terminal);
         assert!(
-            home.contains("1 need you") && home.contains("1 filed"),
+            home.contains("Inbox 1") && home.contains("1 filed"),
             "{home}"
         );
         assert!(!home.contains("Tab rename"), "{home}");

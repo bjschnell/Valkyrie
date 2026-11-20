@@ -435,6 +435,14 @@ pub(crate) struct Page {
     pub(crate) roots: Vec<PathBuf>,
 }
 
+impl Page {
+    /// On the list itself, nothing typed or open over it: where section keys
+    /// (`g b`, `[ ]`) are the app's, not the page's.
+    pub(crate) fn at_list(&self) -> bool {
+        self.typing.is_none() && self.order.is_none()
+    }
+}
+
 /// A build order open over the page: which, where the cursor is, and the items
 /// whose changes the user unticked.
 #[derive(Debug, Clone, PartialEq, Eq)]

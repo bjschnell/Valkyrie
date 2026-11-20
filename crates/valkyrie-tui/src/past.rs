@@ -36,6 +36,11 @@ pub(crate) struct Page {
 }
 
 impl Page {
+    /// On the list, no resume in flight: where section keys are the app's.
+    pub(crate) fn at_list(&self) -> bool {
+        !self.resuming
+    }
+
     pub(crate) fn loaded(&mut self, got: Result<Vec<PastSession>, String>) {
         match got {
             Ok(list) => {

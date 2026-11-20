@@ -47,6 +47,12 @@ pub(crate) struct Page {
 }
 
 impl Page {
+    /// On the list, no page read and nothing asked: where section keys are the
+    /// app's.
+    pub(crate) fn at_list(&self) -> bool {
+        self.reading.is_none() && self.confirm.is_none() && !self.starting
+    }
+
     pub(crate) fn new(repo: PathBuf) -> Self {
         Page {
             repo,
