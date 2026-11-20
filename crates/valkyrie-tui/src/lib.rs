@@ -2467,7 +2467,7 @@ impl App {
             p.resuming = false;
         }
         let page = if let Some(p) = self.backlog.take() {
-            Some(Parked::Backlog(p))
+            Some(Parked::Backlog(Box::new(p)))
         } else if let Some(p) = self.wiki.take() {
             Some(Parked::Wiki(p))
         } else if let Some(p) = self.digest.take() {
@@ -2496,7 +2496,7 @@ impl App {
             || self.past.is_some();
         match self.parked.take() {
             _ if open => {}
-            Some(Parked::Backlog(p)) => self.backlog = Some(p),
+            Some(Parked::Backlog(p)) => self.backlog = Some(*p),
             Some(Parked::Wiki(p)) => self.wiki = Some(p),
             Some(Parked::Digest(p)) => self.digest = Some(p),
             Some(Parked::Past(p)) => self.past = Some(p),
@@ -2562,13 +2562,17 @@ impl App {
         (Line::from(spans), places)
     }
 
-    /// The strip's right end: the host, how many are running, and the time.
-    fn strip_place(&self, _now: u64) -> Vec<Span<'static>> {
+    /// The strip's right end, longest first: the host, how many are running and
+    /// the time; then without the host, which can be long (a CI runner's is).
+    fn strip_places(&self) -> [Vec<Span<'static>>; 2] {
         let t = self.settings.theme;
         let host = remote().map_or_else(valkyrie_proto::hostname, str::to_string);
         let running = self.sessions.iter().filter(|s| is_running(s)).count();
         let clock = jiff::Zoned::now().strftime("%H:%M").to_string();
-        vec![format!(" {host} · {running} running · {clock} ").fg(t.muted)]
+        [
+            vec![format!(" {host} · {running} running · {clock} ").fg(t.muted)],
+            vec![format!(" {running} running · {clock} ").fg(t.muted)],
+        ]
     }
 
     /// The row under the cursor.
@@ -4583,12 +4587,13 @@ impl App {
             .zip(quota.clone())
             .map(|(notice, quota)| [quota, notice].concat());
         // Then the host, what's running and the time, as far as there is room.
-        let place = self.strip_place(now);
-        if let Some(right) = [both, quota, notice]
-            .into_iter()
-            .flatten()
-            .map(|notice| [notice, place.clone()].concat())
-            .chain([place.clone(), Vec::new()])
+        let places = self.strip_places();
+        let notices: Vec<Vec<Span>> = [both, quota, notice].into_iter().flatten().collect();
+        if let Some(right) = notices
+            .iter()
+            .flat_map(|n| places.iter().map(move |p| [n.clone(), p.clone()].concat()))
+            .chain(places.iter().cloned())
+            .chain([Vec::new()])
             .map(Line::from)
             .find(|right| left.width() + right.width() < header.width as usize)
         {
@@ -7206,7 +7211,7 @@ impl Section {
 
 /// A section page set aside while you're in a session you opened from it.
 enum Parked {
-    Backlog(backlog::Page),
+    Backlog(Box<backlog::Page>),
     Wiki(wiki::Page),
     Digest(digest::Page),
     Past(past::Page),
@@ -7971,7 +7976,8 @@ mod tests {
             "{wide}"
         );
         assert!(
-            wide.contains("1 running") || wide.contains("0 running"),
+            // The host may not fit (a CI runner's name is long); the rest does.
+            wide.contains(" running · "),
             "{wide}"
         );
         // Narrow, the others are a letter; the one on screen keeps its name.
