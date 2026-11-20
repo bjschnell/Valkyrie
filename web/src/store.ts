@@ -62,7 +62,6 @@ import {
   disablePush,
   enablePush,
   pushState,
-  setBadge,
   testPush,
   type PushState,
 } from "./lib/push";
@@ -256,9 +255,6 @@ function show(): void {
     if (p.sent !== null && (landed(raw, p.change) || now - p.sent >= LAND_MS)) shownOver.delete(key);
   }
   const shown = overlay(raw, [...shownOver.values()].map((p) => p.change));
-  // Only a change to the queue moves the badge: an items push before the first
-  // queue one would clear it.
-  if (shown.queue !== get().queue) setBadge(shown.queue.length);
   set({ proposals: shown.proposals, items: shown.items, queue: shown.queue });
 }
 
@@ -408,7 +404,6 @@ function onPush(msg: ServerMsg): void {
   switch (msg.t) {
     case "queue":
       raw = { ...raw, queue: msg.items };
-      // show() sets the badge from the queue as drawn.
       glide(show, moved(get().queue.map((q) => q.session), msg.items.map((q) => q.session)));
       void refreshPrompts(msg.items);
       void refresh();

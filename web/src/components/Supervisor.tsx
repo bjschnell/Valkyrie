@@ -1,16 +1,14 @@
-import { HASH } from "../lib/routes";
 import { useEffect, useRef, useState } from "react";
 import { HistoryTabs } from "./Nav";
 import type { WatchedPr } from "../proto";
-import { base, itemNo, launchesOn, orderHref, orderSize } from "../lib/backlog";
-import { stepChoices } from "../lib/step";
-import { stripLine, waitingOnYou, watchLine, type Wait } from "../lib/supervisor";
+import { base, itemNo } from "../lib/backlog";
+import { watchLine } from "../lib/supervisor";
 import { age } from "../lib/time";
-import { answerLaunch, decide, supervisorLog, supervisorSession, supervisorWatch, takeStep, toast, useApp } from "../store";
+import { supervisorLog, supervisorSession, supervisorWatch, toast, useApp } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
 import { EmptyState, ErrorState } from "./states";
-import { Back, Chevron } from "./icons";
+import { Back } from "./icons";
 import { usePageKeys } from "../lib/pageKeys";
 
 const home = () => {
@@ -28,44 +26,16 @@ function useLog(key: unknown) {
   return { log, failed, reload };
 }
 
-/** What waits on you, from what the app already holds. */
-function useWaiting(): Wait[] {
-  const queue = useApp((s) => s.queue);
-  const launches = useApp((s) => s.launches);
-  const orders = useApp((s) => s.orders);
-  const proposals = useApp((s) => s.proposals);
-  return waitingOnYou(queue, launches, orders, proposals);
-}
-
 /**
- * The home screen's strip (backlog #180): what waits on you and the latest thing
- * the supervisor did, a tap from the whole page. Nothing when there's nothing.
- */
-export function SupervisorStrip() {
-  const waits = useWaiting();
-  const { log } = useLog(waits.length);
-  const line = stripLine(waits.length, log?.entries[0]);
-  if (!line) return null;
-  return (
-    <button className="quiet-line" onClick={() => (location.hash = HASH.supervisor)}>
-      <span className="quiet-line-name">Supervisor</span>
-      <span className="quiet-line-text">{line}</span>
-      <Chevron />
-    </button>
-  );
-}
-
-/**
- * The supervisor page (backlog #180): what it waits on you for, each answered in
- * place, and what it did: steps you answered, steps policies took without
- * asking, build orders you answered.
+ * The supervisor page (backlog #180): what it watches and what it did: steps you
+ * answered, steps policies took without asking, build orders you answered. What
+ * it waits on you for is in the Inbox's queue (#251).
  */
 export function SupervisorView() {
-  const waits = useWaiting();
   const now = useApp((s) => s.now);
-  const [answered, setAnswered] = useState(0);
-  const { log, failed, reload } = useLog(`${waits.length}:${answered}`);
-  const done = () => setAnswered((n) => n + 1);
+  // An answer in the Inbox changes what it did: read it again when one lands.
+  const pending = useApp((s) => s.launches.length + s.orders.length + s.queue.filter((q) => q.flag?.step).length);
+  const { log, failed, reload } = useLog(pending);
   const [opening, setOpening] = useState(false);
   const openSession = async () => {
     if (opening) return;
@@ -98,24 +68,7 @@ export function SupervisorView() {
       </header>
       <HistoryTabs />
       <main className="inbox supervisor">
-        <section>
-          <h2 className="section-title">
-            Waiting on you <span className="count">{waits.length}</span>
-          </h2>
-          {waits.length === 0 ? (
-            <div className="calm">
-              <div className="calm-title">Nothing waits on you</div>
-              <div className="calm-sub">No flagged PR, ready item, build order or policy to answer.</div>
-            </div>
-          ) : (
-            <div className="cards">
-              {waits.map((w) => (
-                <WaitCard key={waitKey(w)} w={w} onDone={done} />
-              ))}
-            </div>
-          )}
-        </section>
-        <Watching refresh={answered} />
+        <Watching refresh={pending} />
         <section>
           <h2 className="section-title">
             What it did <span className="count">{log?.entries.length ?? ""}</span>
@@ -152,83 +105,6 @@ export function SupervisorView() {
       </main>
     </div>
   );
-}
-
-const waitKey = (w: Wait) =>
-  w.kind === "flag"
-    ? `f${w.item.session}`
-    : w.kind === "launch"
-      ? `l${w.offer.project}:${w.offer.id}`
-      : w.kind === "order"
-        ? `o${w.order.project}:${w.order.id}`
-        : `p${w.decision.project}#${w.decision.id}`;
-
-/** One thing waiting, with what answers it. */
-function WaitCard({ w, onDone }: { w: Wait; onDone: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const act = async (f: () => Promise<unknown>) => {
-    setBusy(true);
-    try {
-      await f();
-      onDone();
-    } finally {
-      setBusy(false);
-    }
-  };
-  const card = (tag: string, title: string, sub: string, buttons: React.ReactNode) => (
-    <section className="supervisor-card">
-      <div className="supervisor-card-head">
-        <span className="supervisor-tag">{tag}</span>
-        <span className="supervisor-card-title">{title}</span>
-      </div>
-      {sub && <div className="supervisor-card-sub">{sub}</div>}
-      <div className="order-actions">{buttons}</div>
-    </section>
-  );
-  switch (w.kind) {
-    case "flag": {
-      const flag = w.item.flag!;
-      return card(
-        "PR",
-        `${w.item.name}: ${flag.reason}`,
-        flag.step?.why ?? "",
-        stepChoices(flag).map((c) => (
-          <button
-            key={c.action}
-            className={c.primary ? "primary" : "ghost"}
-            disabled={busy}
-            onClick={() => void act(() => takeStep(w.item.session, flag.seq, c.action))}
-          >
-            {c.label}
-          </button>
-        )),
-      );
-    }
-    case "launch":
-      return card("ready", `#${w.offer.number} ${w.offer.title}`, `${w.offer.why} · on ${launchesOn(w.offer)} · ${base(w.offer.project)}`, [
-        <button key="leave" className="ghost" disabled={busy} onClick={() => void act(() => answerLaunch(w.offer, false))}>
-          Leave
-        </button>,
-        <button key="start" className="primary" disabled={busy} onClick={() => void act(() => answerLaunch(w.offer, true))}>
-          Start
-        </button>,
-      ]);
-    case "order":
-      return card("order", `Build order for ${base(w.order.project)}`, `${orderSize(w.order)} · ${w.order.trigger}`, [
-        <button key="review" className="primary" onClick={() => (location.hash = orderHref(w.order.project))}>
-          Review
-        </button>,
-      ]);
-    case "policy":
-      return card("policy", `#${w.decision.id} ${w.decision.title}`, `A policy for ${base(w.decision.project)}: once accepted, it runs without asking.`, [
-        <button key="reject" className="ghost" disabled={busy} onClick={() => decide(w.decision, "reject", onDone)}>
-          Reject
-        </button>,
-        <button key="accept" className="primary" disabled={busy} onClick={() => decide(w.decision, "accept", onDone)}>
-          Accept
-        </button>,
-      ]);
-  }
 }
 
 const STATE_LABEL: Record<WatchedPr["state"], string> = {

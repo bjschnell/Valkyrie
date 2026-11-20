@@ -5,38 +5,8 @@ import { USER_SCOPE, scopeName } from "../lib/scope";
 import { decide, review, useApp } from "../store";
 import { parseScope, scoping } from "../lib/decisions";
 import { Markdown } from "./Markdown";
-import { Chevron } from "./icons";
 
 /** The last part of a path: the project's name. */
-
-/**
- * Decisions agents proposed (ADR-0007): nothing reaches another agent until it's
- * accepted here, in the TUI, or with `valk decisions accept`.
- */
-export function Proposals() {
-  const proposals = useApp((s) => s.proposals);
-  const [open, setOpen] = useState(false);
-  if (proposals.length === 0) return null;
-  const n = proposals.length;
-  return (
-    <section className="quiet-group" aria-label="Decisions to review">
-      <button className="quiet-line" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        <span className="quiet-line-name">Decisions</span>
-        <span className="quiet-line-text">
-          {n} to review{open ? "" : ": " + proposals.map((d) => d.title).join(" · ")}
-        </span>
-        <Chevron />
-      </button>
-      {open && (
-        <div className="cards">
-          {proposals.map((d) => (
-            <ProposalCard key={`${d.project}#${d.id}`} d={d} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
 
 /**
  * The same proposals at the top of the Memory page (#247), open: it's where you'd
@@ -59,7 +29,7 @@ export function ToReview() {
   );
 }
 
-function ProposalCard({ d }: { d: Decision }) {
+export function ProposalCard({ d }: { d: Decision }) {
   const now = useApp((s) => s.now);
   const [editing, setEditing] = useState(false);
   const who = { human: "you", valkyrie: "Valkyrie, from your correction" }[d.provenance.by] ?? d.provenance.by;

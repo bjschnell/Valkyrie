@@ -970,6 +970,62 @@ html.with-tabs .offline-banner {
 .state-text-idle,
 .state-text-exited { --state: var(--idle); color: var(--idle); }
 
+/* A record in the attention queue (#251): a square, violet for Decide and dim
+   violet for Filed, beside the sessions' round dots. */
+.attn-mark {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin: 0 var(--space-05);
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.attn-mark.attn-filed {
+  opacity: 0.55;
+}
+
+.attn-records {
+  margin-top: var(--space-3);
+}
+
+.attn-slot + .attn-slot {
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.attn-row[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+
+.attn-where {
+  font: var(--type-mono);
+  color: var(--faint);
+}
+
+.attn-go {
+  flex: none;
+  font: var(--type-label);
+  color: var(--accent);
+}
+
+.attn-slot > :is(.card-slot, .supervisor-card) {
+  margin: 0 var(--space-3) var(--space-3);
+}
+
+.attn-filed-list {
+  margin: var(--space-2) 0;
+  padding: 0;
+  list-style: none;
+  font: var(--type-body);
+  color: var(--soft);
+}
+
+/* The desktop pane with only records waiting: the top one's card. */
+.split-record {
+  max-width: 720px;
+  padding: var(--space-5);
+}
+
 .spin {
   flex: none;
   width: 12px;
@@ -4473,10 +4529,8 @@ button.as-text {
   align-self: flex-start;
 }
 
-/* The supervisor (backlog #180): a line on home, a page of its own. */
-
-/* Home's quiet lines (backlog #204): below Needs you, one line each, no chrome,
- * so the cards above stay the only loud thing on the page. */
+/* Home's quiet lines (backlog #204): below Needs you, no chrome, so the queue
+ * above stays the only loud thing on the page. */
 .quiet {
   display: flex;
   flex-direction: column;
@@ -4486,56 +4540,6 @@ button.as-text {
 
 .quiet:empty {
   display: none;
-}
-
-.quiet-group > .cards {
-  margin-top: var(--space-2);
-}
-
-.quiet-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-25);
-  width: 100%;
-  padding: var(--space-15) var(--space-1);
-  border: 0;
-  border-radius: var(--radius-md);
-  background: none;
-  color: inherit;
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-@media (hover: hover) {
-  .quiet-line:hover {
-    background: var(--card);
-  }
-}
-
-.quiet-line > svg {
-  flex: none;
-  color: var(--muted);
-}
-
-.quiet-line[aria-expanded="true"] > svg {
-  transform: rotate(90deg);
-}
-
-.quiet-line-name {
-  flex: none;
-  font-weight: var(--weight-semibold);
-  color: var(--soft);
-}
-
-.quiet-line-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
 }
 
 /* The quota as text, no bars: a warning still takes its colour. */
