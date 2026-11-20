@@ -52,9 +52,7 @@ export const MEMORY_TABS: Tab[] = [
 ];
 
 export const HISTORY_TABS: Tab[] = [
-  { label: "Sessions", hash: HASH.history, warm: DESTS.history.warm },
-  { label: "Summary", hash: HASH.summary },
-  { label: "Search", hash: HASH.search },
+  { label: "Timeline", hash: HASH.history, warm: DESTS.history.warm },
   { label: "Supervisor", hash: HASH.supervisor, warm: () => prefetch("supervisor-log", supervisorLog) },
 ];
 
@@ -63,7 +61,8 @@ export const PAGES = [
   { label: "Inbox", hash: HASH.inbox },
   { label: "Backlog", hash: HASH.backlog },
   ...MEMORY_TABS.map((t) => ({ label: t.label === "Decisions" ? "Memory" : `Memory: ${t.label}`, hash: t.hash })),
-  ...HISTORY_TABS.map((t) => ({ label: t.label === "Sessions" ? "History" : `History: ${t.label}`, hash: t.hash })),
+  ...HISTORY_TABS.map((t) => ({ label: t.label === "Timeline" ? "History" : `History: ${t.label}`, hash: t.hash })),
+  { label: "History: Search", hash: HASH.search },
   { label: "Settings", hash: HASH.settings },
 ];
 
@@ -175,7 +174,7 @@ export function MemoryTabs() {
   return <SectionTabs tabs={MEMORY_TABS} label="Memory" counts={{ Docs: unread }} />;
 }
 
-/** History's tabs: past sessions, the away summary, search, the supervisor. */
+/** History's tabs: the timeline (#254) and what the supervisor watches. */
 export function HistoryTabs() {
   return <SectionTabs tabs={HISTORY_TABS} label="History" />;
 }

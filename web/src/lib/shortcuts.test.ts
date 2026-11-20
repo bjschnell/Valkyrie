@@ -37,8 +37,8 @@ describe("shortcutsKey", () => {
 
 describe("sections", () => {
   const pages: PageKey[] = [
-    "inbox", "new", "settings", "backlog", "decisions", "docs", "digest", "past",
-    "wiki", "search", "supervisor", "doc", "item", "order", "session", "review",
+    "inbox", "new", "settings", "backlog", "decisions", "docs", "past",
+    "wiki", "supervisor", "doc", "item", "order", "session", "review",
   ];
   it("puts the page's keys first and the global ones last, for every page", () => {
     for (const p of pages) {

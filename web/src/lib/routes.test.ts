@@ -6,8 +6,9 @@ describe("moved", () => {
     expect(moved("#/decisions")).toBe(HASH.memory);
     expect(moved("#/docs")).toBe(HASH.docs);
     expect(moved("#/wiki")).toBe(HASH.wiki);
-    expect(moved("#/summary")).toBe(HASH.summary);
-    expect(moved("#/digest")).toBe(HASH.summary);
+    expect(moved("#/summary")).toBe(HASH.history);
+    expect(moved("#/digest")).toBe(HASH.history);
+    expect(moved("#/history/summary")).toBe(HASH.history);
     expect(moved("#/search")).toBe(HASH.search);
     expect(moved("#/supervisor")).toBe(HASH.supervisor);
   });

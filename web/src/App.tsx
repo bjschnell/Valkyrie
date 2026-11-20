@@ -2,10 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Backlog, ItemEditor, OrderPage } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
-import { DigestView } from "./components/Digest";
-import { PastView } from "./components/Past";
+import { HistoryView } from "./components/History";
 import { WikiView } from "./components/Wiki";
-import { SearchView } from "./components/Search";
 import { SupervisorView } from "./components/Supervisor";
 import { DocView, DocsList } from "./components/Docs";
 import { Inbox } from "./components/Inbox";
@@ -41,10 +39,8 @@ type Route =
   | { page: "backlog" }
   | { page: "decisions"; shelf: MemoryShelf | null }
   | { page: "docs" }
-  | { page: "digest" }
-  | { page: "past" }
+  | { page: "past"; find: boolean }
   | { page: "wiki" }
-  | { page: "search" }
   | { page: "supervisor" }
   | { page: "doc"; key: string }
   | { page: "item"; id: number | null }
@@ -75,9 +71,8 @@ function route(): Route {
   if (shelf !== undefined) return { page: "decisions", shelf };
   if (hash === HASH.docs) return { page: "docs" };
   if (hash === HASH.wiki) return { page: "wiki" };
-  if (hash === HASH.history) return { page: "past" };
-  if (hash === HASH.summary) return { page: "digest" };
-  if (hash === HASH.search) return { page: "search" };
+  if (hash === HASH.history) return { page: "past", find: false };
+  if (hash === HASH.search) return { page: "past", find: true };
   if (hash === HASH.supervisor) return { page: "supervisor" };
   const d = /^#\/memory\/docs\/([^/]+)$/.exec(hash);
   // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
@@ -112,8 +107,6 @@ function navKey(r: Route): NavKey | null {
     case "wiki":
       return "memory";
     case "past":
-    case "digest":
-    case "search":
     case "supervisor":
       return "history";
     case "settings":
@@ -125,7 +118,7 @@ function navKey(r: Route): NavKey | null {
 
 /** Pages reached from the nav, where a phone shows its tab bar. Deeper pages
  * (a session, a doc, an item) keep their back arrow and the whole screen. */
-const TOP = new Set<Route["page"]>(["inbox", "backlog", "docs", "decisions", "digest", "past", "wiki", "search", "supervisor", "settings"]);
+const TOP = new Set<Route["page"]>(["inbox", "backlog", "docs", "decisions", "past", "wiki", "supervisor", "settings"]);
 
 /** How deep a page is, so a transition knows forward from back. */
 const depth = (r: Route) => (TOP.has(r.page) ? 0 : r.page === "review" ? 2 : 1);
@@ -430,10 +423,8 @@ export function App() {
       {at.page === "backlog" && <Backlog />}
       {at.page === "decisions" && <DecisionList shelf={at.shelf} />}
       {at.page === "docs" && <DocsList />}
-      {at.page === "digest" && <DigestView />}
-      {at.page === "past" && <PastView />}
+      {at.page === "past" && <HistoryView find={at.find} />}
       {at.page === "wiki" && <WikiView />}
-      {at.page === "search" && <SearchView />}
       {at.page === "supervisor" && <SupervisorView />}
       {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}
       {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}

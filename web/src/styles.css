@@ -4440,8 +4440,10 @@ button.as-text {
 }
 
 /* The away digest (backlog #105): where each session's work ended up. */
-/* The digest files a waiting prompt and a blocked turn both as stuck: either way it waits on you. */
-.outcome-stuck { --state: var(--needs); }
+/* Stuck is red: blocked, stale, interrupted, CI red. A live session that only
+   waits on your answer the timeline calls `asks` (#254), yellow as the Inbox. */
+.outcome-stuck { --state: var(--blocked); }
+.outcome-asks { --state: var(--needs); }
 .outcome-abandoned { --state: var(--idle); }
 .outcome-waiting { --state: var(--needs); }
 .outcome-working { --state: var(--working); }
@@ -4485,14 +4487,6 @@ button.as-text {
   font-size: var(--text-sm);
   color: var(--soft);
   overflow-wrap: anywhere;
-}
-
-/* Past sessions (backlog #150): one that can't come back says why, its name quieter. */
-.past-cannot .row-name {
-  color: var(--muted);
-}
-.past-cannot .digest-detail {
-  color: var(--needs);
 }
 
 /* The Memory page (#144): tabs, filters, ended entries and notes. */
@@ -4655,8 +4649,57 @@ button.as-text {
   color: var(--muted);
 }
 
-.search-resume {
+.search-resume,
+.hist-resume {
   align-self: flex-start;
+}
+
+/* History as one timeline (#254): outcome tiles over it that count and filter
+   it, and the supervisor's steps in it, named by who took them. */
+.hist-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-1);
+}
+
+.hist-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-05);
+  padding: var(--space-25) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  text-align: left;
+}
+
+.hist-tile:disabled {
+  opacity: 0.55;
+}
+
+.hist-tile.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+.hist-tile-n {
+  font: var(--type-heading);
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-finished .state-tag { --state: var(--done); }
+.tile-stuck .state-tag { --state: var(--blocked); }
+.tile-shipped .state-tag { --state: var(--done); }
+
+.state-tag.hist-by {
+  --state: var(--accent);
+}
+
+.hist-row .row-name a {
+  color: inherit;
 }
 
 /* Home's quiet lines (backlog #204): below Needs you, no chrome, so the queue
@@ -4751,14 +4794,6 @@ button.as-text {
   font-size: var(--text-md);
 }
 
-.supervisor-when {
-  flex: none;
-  width: 4ch;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
 .supervisor-said {
   flex: 1;
   min-width: 0;
@@ -4767,11 +4802,6 @@ button.as-text {
 
 .supervisor-said a {
   color: inherit;
-}
-
-/* What a policy did without asking stands out from what you answered. */
-.supervisor-log li.by-policy .supervisor-said {
-  color: var(--accent);
 }
 
 .supervisor-repo {

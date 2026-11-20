@@ -14,13 +14,14 @@ agents:
   files and screenshots to an agent.
 - Push notifications tell you when an agent needs you, finishes or stops while
   you're away, and the away summary sums up what every agent did meanwhile.
-- Past sessions lists the agent sessions that ended; tap one to pick it up
-  where it left off.
+- **History** is one timeline of what every agent and the supervisor did, by
+  day, with counts of what finished, got stuck or shipped; Resume picks an
+  ended session up where it left off.
 - **Memory** (the pin, or `d`) lists what Valkyrie keeps for agents: decisions,
   skills, policies, your habits and agent notes. Read one in full with where it
   came from, then edit, pin, retire or restore it, or correct or delete a note.
-- Search every session's history for something you or an agent said, and
-  resume the session it was in.
+- Search every session's history (the field on top of History) for something
+  you or an agent said, and resume the session it was in.
 
 <p align="center">
   <img src="images/phone.png" alt="The phone app: the inbox with a prompt's answers as buttons, and the chat view of a session" width="640">

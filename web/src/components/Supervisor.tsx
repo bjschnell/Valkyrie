@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { HistoryTabs } from "./Nav";
 import type { WatchedPr } from "../proto";
 import { base, itemNo } from "../lib/backlog";
 import { watchLine } from "../lib/supervisor";
-import { age } from "../lib/time";
 import { supervisorLog, supervisorSession, supervisorWatch, toast, useApp } from "../store";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
@@ -15,27 +14,15 @@ const home = () => {
   location.hash = "#/";
 };
 
-/** The log as last fetched, refetched while `key` changes (an answer lands). */
-function useLog(key: unknown) {
-  const { data: log, failed, reload } = useCached("supervisor-log", supervisorLog);
-  const first = useRef(true);
-  useEffect(() => {
-    if (first.current) first.current = false;
-    else void reload();
-  }, [key, reload]);
-  return { log, failed, reload };
-}
-
 /**
- * The supervisor page (backlog #180): what it watches and what it did: steps you
- * answered, steps policies took without asking, build orders you answered. What
- * it waits on you for is in the Inbox's queue (#251).
+ * The supervisor page (backlog #180): what it watches, and its session. What it
+ * did is in History's timeline (#254); what it waits on you for is in the
+ * Inbox's queue (#251).
  */
 export function SupervisorView() {
-  const now = useApp((s) => s.now);
-  // An answer in the Inbox changes what it did: read it again when one lands.
+  // An answer in the Inbox changes what it watches: read it again when one lands.
   const pending = useApp((s) => s.launches.length + s.orders.length + s.queue.filter((q) => q.flag?.step).length);
-  const { log, failed, reload } = useLog(pending);
+  const { data: log } = useCached("supervisor-log", supervisorLog);
   const [opening, setOpening] = useState(false);
   const openSession = async () => {
     if (opening) return;
@@ -69,39 +56,6 @@ export function SupervisorView() {
       <HistoryTabs />
       <main className="inbox supervisor">
         <Watching refresh={pending} />
-        <section>
-          <h2 className="section-title">
-            What it did <span className="count">{log?.entries.length ?? ""}</span>
-          </h2>
-          {failed && !log && <ErrorState what="what it did" why={failed} onRetry={reload} />}
-          {!failed && !log && <Loading rows={3} />}
-          {log && log.entries.length === 0 && (
-            <EmptyState
-              title="Nothing in the last 90 days"
-              hint="Steps it takes after an agent stops show up here."
-              action={{ label: "Open the backlog", run: () => (location.hash = "#/backlog") }}
-            />
-          )}
-          {log && log.entries.length > 0 && (
-            <ol className="supervisor-log">
-              {log.entries.map((e, i) => (
-                <li key={`${e.at}:${i}`} className={e.policy !== undefined ? "by-policy" : ""}>
-                  <span className="supervisor-when">{age(e.at * 1000, now)}</span>
-                  <span className="supervisor-said">
-                    {e.pr ? (
-                      <a href={e.pr} target="_blank" rel="noreferrer">
-                        {e.said}
-                      </a>
-                    ) : (
-                      e.said
-                    )}
-                  </span>
-                  <span className="supervisor-repo">{base(e.project)}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
       </main>
     </div>
   );
