@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { HistoryTabs } from "./Nav";
 import type { PastSession } from "../proto";
 import { clockOf, dayLabel, outcomeLabel } from "../lib/digest";
 import { pastSessions, resume, toast } from "../store";
@@ -50,6 +51,7 @@ export function PastView() {
           <h1 className="title-name">Past sessions</h1>
         </div>
       </header>
+      <HistoryTabs />
 
       <main className="inbox">
         {list === null && (failed ? <ErrorState what="past sessions" why={failed} onRetry={reload} /> : <Loading rows={6} />)}

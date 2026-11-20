@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { MemoryTabs } from "./Nav";
 import type { WikiListing, WikiPage } from "../proto";
 import { toast, wikiExplore, wikiListing, wikiPage } from "../store";
 import { useCached } from "../cache";
@@ -66,6 +67,7 @@ export function WikiView() {
           {reading?.summary && <div className="title-sub">{reading.summary}</div>}
         </div>
       </header>
+      <MemoryTabs />
       <main className={`inbox ${reading ? "doc-page" : ""}`}>
         {repo === null && list !== null && (
           <>

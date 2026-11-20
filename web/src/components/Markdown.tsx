@@ -1,3 +1,4 @@
+import { docHash } from "../lib/routes";
 import { useMemo, type HTMLAttributes, type ReactNode } from "react";
 import { parseInline, parseMarkdown } from "../lib/chat";
 import { quoteOf } from "../lib/docs";
@@ -150,7 +151,7 @@ function inlines(text: string, wiki?: WikiResolver): ReactNode[] {
         const key = wiki?.(part.target) ?? null;
         if (key === null) return wiki ? <span key={i} className="md-wiki missing" title="No doc goes by that name">{part.v}</span> : `[[${part.v}]]`;
         return (
-          <a key={i} className="md-wiki" href={`#/docs/${encodeURIComponent(key)}`}>
+          <a key={i} className="md-wiki" href={docHash(key)}>
             {part.v}
           </a>
         );

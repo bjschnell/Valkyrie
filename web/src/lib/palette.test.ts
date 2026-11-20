@@ -88,7 +88,7 @@ describe("entries", () => {
   it("links docs by key and skips those without one", () => {
     const docs = [{ title: "Plan", kind: "plan", key: "p1a", path: "x.md" }, { title: "Old", kind: "note", path: "y.md" }] as Doc[];
     const list = entries(sources({ docs })).filter((e) => e.group === "Docs");
-    expect(list.map((e) => e.do)).toEqual([{ go: "#/docs/p1a" }]);
+    expect(list.map((e) => e.do)).toEqual([{ go: "#/memory/docs/p1a" }]);
   });
   it("marks the look in use", () => {
     const looks = entries(sources({ look: "matrix" })).filter((e) => e.group === "Themes");
