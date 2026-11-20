@@ -4688,8 +4688,13 @@ impl App {
             // home (rule 9: never the hint line).
             let t = self.settings.theme;
             let area = frame.area();
+            // Not over the backlog's own dialogs (the launch form, a build order).
+            let dialog = self.backlog.as_ref().is_some_and(|p| {
+                p.order.is_some() || matches!(p.typing, Some(backlog::Typing::Launch(_)))
+            });
             if self.view.is_none()
                 && self.section() != Section::Inbox
+                && !dialog
                 && area.height > 2
                 && let Some(toast) = self.toast()
             {
@@ -6733,8 +6738,10 @@ pub(crate) fn section_rect(area: Rect) -> Rect {
 /// A section page's frame: no border, its title on its first row and its keys
 /// on its last, where the footer is (they're the page's footer).
 pub(crate) fn section_block(t: &Theme) -> Block<'static> {
+    // A quiet row over the keys, as home has: where a toast goes, never over
+    // the page's own text.
     Block::new()
-        .padding(Padding::horizontal(1))
+        .padding(Padding::new(1, 1, 0, 1))
         .style(style::Style::new().bg(t.bg).fg(t.fg))
 }
 

@@ -1174,7 +1174,8 @@ impl Page {
 
 /// Recently deleted, over the list: each with where it was and when it went.
 fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) {
-    let width = area.width.saturating_sub(6).min(96);
+    // A view of the Docs page, as full as the page: no centred box (rule 8).
+    let width = area.width;
     let room = width.saturating_sub(4) as usize;
     let tz = TimeZone::system();
     let mut lines: Vec<Line> = vec![Line::default()];
@@ -1224,18 +1225,7 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
         hint(" esc ", "back ", t),
     ]
     .concat();
-    let height = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(3)
-        .min(area.height.saturating_sub(2))
-        .max(5);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-    .intersection(area);
+    let rect = area;
     let rows = rect.height.saturating_sub(2) as usize;
     let skip = (trash.cursor * 2 + 3).saturating_sub(rows);
     let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
