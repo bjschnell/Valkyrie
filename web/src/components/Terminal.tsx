@@ -26,7 +26,7 @@ const DESKTOP = "(min-width: 760px) and (pointer: fine)";
 /** Room for the session list beside a grid of that width. */
 const WIDE = "(min-width: 1120px) and (pointer: fine)";
 
-function useMedia(media: string): boolean {
+export function useMedia(media: string): boolean {
   return useSyncExternalStore(
     (changed) => {
       const query = window.matchMedia(media);

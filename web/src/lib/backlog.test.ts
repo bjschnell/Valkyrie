@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byGroup, itemRef, rowState, tree, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { GROUPS, agentFiled, appliedSummary, boardStep, byGroup, firstLane, itemRef, rowState, tree, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -167,6 +167,51 @@ describe("byGroup", () => {
     const { filed, groups } = byGroup([item({ id: 1, updated: 9 }), item({ id: 2, status: "proposed", by: "claude", updated: 1 })], [], 7);
     expect(filed.map((i) => i.id)).toEqual([2]);
     expect(groups.next.map(({ item }) => item.id)).toEqual([1]);
+  });
+});
+
+describe("GROUPS", () => {
+  it("runs the board's lanes left to right, as work flows (#266)", () => {
+    expect(GROUPS.map((g) => g.title)).toEqual(["Up next", "In progress", "In review", "Done"]);
+  });
+});
+
+describe("boardStep", () => {
+  // Lanes of 2, 0 and 3 cards.
+  const sizes = [2, 0, 3];
+  it("starts on the first card", () => {
+    expect(boardStep(sizes, null, "j")).toEqual([0, 0]);
+    expect(boardStep([0, 0], null, "j")).toBeNull();
+  });
+
+  it("moves down a lane with j and k, rolling over empty lanes into the next", () => {
+    expect(boardStep(sizes, [0, 0], "j")).toEqual([0, 1]);
+    expect(boardStep(sizes, [0, 1], "j")).toEqual([2, 0]);
+    expect(boardStep(sizes, [2, 2], "j")).toEqual([2, 2]);
+    expect(boardStep(sizes, [2, 0], "k")).toEqual([0, 1]);
+    expect(boardStep(sizes, [0, 0], "k")).toEqual([0, 0]);
+  });
+
+  it("jumps lanes with h and l, keeping the row where it can", () => {
+    expect(boardStep(sizes, [0, 1], "l")).toEqual([2, 1]);
+    expect(boardStep(sizes, [2, 2], "h")).toEqual([0, 1]);
+    expect(boardStep(sizes, [2, 0], "l")).toEqual([2, 0]);
+  });
+
+  it("finds its feet when the lane it was in shrank", () => {
+    expect(boardStep(sizes, [2, 9], "j")).toEqual([2, 2]);
+    expect(boardStep([0, 4], [0, 0], "j")).toEqual([1, 0]);
+  });
+});
+
+describe("firstLane", () => {
+  it("opens a phone on In progress, else whatever has cards", () => {
+    const g = (n: Record<string, number>) =>
+      Object.fromEntries(GROUPS.map(({ group }) => [group, Array.from({ length: n[group] ?? 0 }, () => ({ item: item(), lane: "backlog" as const }))])) as never;
+    expect(firstLane(g({ next: 3, progress: 1 }))).toBe("progress");
+    expect(firstLane(g({ next: 3, review: 1 }))).toBe("next");
+    expect(firstLane(g({ review: 1 }))).toBe("review");
+    expect(firstLane(g({}))).toBe("next");
   });
 });
 

@@ -8,15 +8,48 @@ export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "do
 
 export type Group = "progress" | "review" | "next" | "done";
 
-/** The list's groups, top to bottom (#252). One that needs you is at the top of In
- * progress, so a stuck agent is the first thing you see. What an agent filed and
- * nobody has kept yet isn't in a group: it waits in the tray above them. */
-export const GROUPS: { group: Group; title: string; lanes: Lane[] }[] = [
-  { group: "progress", title: "In progress", lanes: ["needs", "running"] },
-  { group: "review", title: "In review", lanes: ["review"] },
-  { group: "next", title: "Up next", lanes: ["backlog"] },
-  { group: "done", title: "Done", lanes: ["done"] },
+/** The board's lanes, left to right as work flows (#266): Up next, In progress,
+ * In review, Done. One that needs you is at the top of In progress, so a stuck
+ * agent is the first thing in the lane you watch. What an agent filed and nobody
+ * has kept yet isn't in a lane: it waits in the tray above them. */
+export const GROUPS: { group: Group; title: string; short: string; lanes: Lane[] }[] = [
+  { group: "next", title: "Up next", short: "Next", lanes: ["backlog"] },
+  { group: "progress", title: "In progress", short: "Doing", lanes: ["needs", "running"] },
+  { group: "review", title: "In review", short: "Review", lanes: ["review"] },
+  { group: "done", title: "Done", short: "Done", lanes: ["done"] },
 ];
+
+/** Where j, k, h or l moves the board's cursor, `[lane, row]`, given each lane's
+ * card count. j and k go down and up a lane and roll into the next or previous
+ * lane with cards at its end; h and l jump lanes, keeping the row where they can.
+ * A cursor left past a lane that shrank lands on its last card first. */
+export function boardStep(sizes: number[], at: [number, number] | null, key: "j" | "k" | "h" | "l"): [number, number] | null {
+  const filled = sizes.flatMap((n, i) => (n > 0 ? [i] : []));
+  if (filled.length === 0) return null;
+  if (!at) return [filled[0], 0];
+  const [l, r] = at;
+  if (!sizes[l]) return [filled.find((i) => i > l) ?? filled[filled.length - 1], 0];
+  if (r >= sizes[l]) return [l, sizes[l] - 1];
+  const next = filled.find((i) => i > l);
+  const prev = [...filled].reverse().find((i) => i < l);
+  switch (key) {
+    case "j":
+      return r + 1 < sizes[l] ? [l, r + 1] : next !== undefined ? [next, 0] : [l, r];
+    case "k":
+      return r > 0 ? [l, r - 1] : prev !== undefined ? [prev, sizes[prev] - 1] : [l, r];
+    case "l":
+      return next !== undefined ? [next, Math.min(r, sizes[next] - 1)] : [l, r];
+    case "h":
+      return prev !== undefined ? [prev, Math.min(r, sizes[prev] - 1)] : [l, r];
+  }
+}
+
+/** The lane a phone opens on, showing one at a time: In progress when anything
+ * is, else the first lane with cards, else Up next. */
+export function firstLane(groups: Record<Group, unknown[]>): Group {
+  if (groups.progress.length) return "progress";
+  return GROUPS.find(({ group }) => groups[group].length)?.group ?? "next";
+}
 
 /** The newest of an item's sessions still running on this daemon, if any. */
 export function liveSession(item: Item, sessions: SessionInfo[], boot: number): SessionInfo | null {
