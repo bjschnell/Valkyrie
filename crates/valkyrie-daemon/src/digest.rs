@@ -12,7 +12,7 @@ use std::time::UNIX_EPOCH;
 use valkyrie_context::digest::{self, Known, Presence};
 use valkyrie_context::project;
 use valkyrie_context::search;
-use valkyrie_proto::{Digest, DigestGroup, Item, Reply, SearchResults};
+use valkyrie_proto::{Digest, DigestGroup, Item, Reply, SearchResults, ServedTo};
 
 pub(crate) fn file(state_dir: &Path) -> PathBuf {
     state_dir.join("presence.json")
@@ -182,6 +182,90 @@ impl Registry {
     }
 }
 
+/// The most sessions one decision's detail lists.
+const MAX_SERVED_TO: usize = 30;
+
+impl Registry {
+    /// The sessions decision `id` of `project` reached lately (backlog #256): its
+    /// serving log, each session named from its run's event log as History names
+    /// it, and linked while it runs. Serves older than the digest reads keep the
+    /// log's own session string.
+    pub(crate) async fn served_to(&self, project: PathBuf, id: u32) -> anyhow::Result<Reply> {
+        let now = now_ms();
+        let root = project::root(&project);
+        let mut reached = {
+            let store = self.context.lock().unwrap();
+            valkyrie_context::served::reached(&store.served(&root, now / 1000), id)
+        };
+        reached.truncate(MAX_SERVED_TO);
+        if reached.is_empty() {
+            return Ok(Reply::ServedTo {
+                sessions: Vec::new(),
+            });
+        }
+        let since = reached
+            .iter()
+            .map(|r| r.first.saturating_mul(1000))
+            .min()
+            .unwrap_or(now)
+            .max(now.saturating_sub(digest::LONGEST_MS));
+        let around = self.around();
+        let dir = self.host.transcript_dir.clone();
+        let sessions = tokio::task::spawn_blocking(move || {
+            let runs = read_runs(&dir, since, now, digest::read_run);
+            let by_key: BTreeMap<&str, &digest::Run> =
+                runs.iter().map(|r| (r.key.as_str(), r)).collect();
+            // A read from inside a session logs `valk:<id>`: only a live one can
+            // be found again, since ids start over with the daemon.
+            let live_keys: BTreeMap<String, &str> = around
+                .live
+                .iter()
+                .map(|(key, id)| (format!("valk:{id}"), key.as_str()))
+                .collect();
+            reached
+                .into_iter()
+                .map(|r| {
+                    let run = match live_keys.get(&r.session) {
+                        Some(key) => by_key.get(key).copied(),
+                        None => runs
+                            .iter()
+                            .find(|run| run.conversation.as_deref() == Some(r.session.as_str())),
+                    };
+                    let agent = run.and_then(|run| run.agent.clone());
+                    let what = match (run, agent.as_deref()) {
+                        (Some(run), Some(agent)) => {
+                            digest::what(run, digest::item_for(run, &around.items), agent)
+                        }
+                        _ => unnamed(&r.session),
+                    };
+                    ServedTo {
+                        what,
+                        agent,
+                        session: run.and_then(|run| around.live.get(&run.key).copied()),
+                        layers: r.layers.iter().map(|l| l.as_str().to_owned()).collect(),
+                        first: r.first,
+                        last: r.last,
+                    }
+                })
+                .collect()
+        })
+        .await?;
+        Ok(Reply::ServedTo { sessions })
+    }
+}
+
+/// A served session whose run isn't known: `session 4`, or the start of an
+/// agent's conversation id.
+fn unnamed(session: &str) -> String {
+    match session.strip_prefix("valk:") {
+        Some(id) => format!("session {id}, since closed"),
+        None => format!(
+            "conversation {}",
+            session.chars().take(8).collect::<String>()
+        ),
+    }
+}
+
 /// The command that resumes a closed run's conversation, by its agent's own
 /// rule for bringing a session back after a restart. An agent started from a
 /// shell in it resumes as the agent alone, its options unknown. `None` while a
@@ -253,6 +337,15 @@ pub(crate) fn read_runs(
 #[cfg(all(test, unix))]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn a_served_session_without_a_run_keeps_a_name_from_the_log() {
+        assert_eq!(super::unnamed("valk:4"), "session 4, since closed");
+        assert_eq!(
+            super::unnamed("0f3c9a1e-77aa-4c1d"),
+            "conversation 0f3c9a1e"
+        );
+    }
     use std::path::Path;
     use valkyrie_proto::{DigestGroup, Outcome, Reply};
 

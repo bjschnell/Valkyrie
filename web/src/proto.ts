@@ -349,6 +349,20 @@ export const DECISION_KINDS: DecisionKind[] = [
 export type DecisionStatus =
   "proposed" | "active" | "rejected" | "superseded" | "retired";
 
+/** One session a decision reached (backlog #256, protocol 50): each session once. */
+export interface ServedTo {
+  /** What the session was about, as History names it. */
+  what: string;
+  agent?: string;
+  /** Still running: open it. */
+  session?: SessionId;
+  /** How it reached it: `block`, `title`, `prompt`, `file`, `search`, `show`. */
+  layers: string[];
+  /** Seconds since the epoch. */
+  first: number;
+  last: number;
+}
+
 export interface Decision {
   id: number;
   /** The project's root directory. */
@@ -758,6 +772,7 @@ export type Request =
   | { t: "note_rm"; cwd: string; id: number }
   /** The repositories pickers offer (backlog #240, protocol 49); replies `repos`. */
   | { t: "repos" }
+  | { t: "served_to"; project: string; id: number }
   /** Changes which repositories pickers offer; replies `repos`. */
   | { t: "repo_edit"; edit: RepoEdit }
   /** The wiki of `cwd`'s repository, without bodies (protocol 47); replies `wiki`. */
@@ -876,6 +891,7 @@ export type Reply =
   | { t: "tombstone"; tombstone: { id: number } }
   | { t: "wiki"; listing: WikiListing }
   | { t: "repos"; list: RepoList }
+  | { t: "served_to"; sessions: ServedTo[] }
   | { t: "wiki_page"; page: WikiPage }
   | { t: "doc"; doc: Doc }
   /** `to`: on a new comment, the running session that hears it at its next prompt. */

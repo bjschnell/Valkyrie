@@ -4601,6 +4601,68 @@ button.as-text {
   font: var(--type-mono);
 }
 
+/* Which sessions a decision reached (#256), from the serving log. */
+.mem-reached {
+  margin: var(--space-3) 0;
+}
+
+.mem-reached-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-15);
+  font: var(--type-label);
+  color: var(--soft);
+}
+
+.mem-reached-none {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.mem-reached-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mem-reached-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--space-2);
+  padding: var(--space-15) 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+  font-size: var(--text-md);
+}
+
+.mem-reached-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+a.mem-reached-what {
+  text-decoration: none;
+}
+
+a.mem-reached-what:hover {
+  text-decoration: underline;
+}
+
+.mem-reached-how {
+  grid-column: 1;
+  color: var(--muted);
+  font: var(--type-label);
+}
+
+.mem-reached-list .row-age {
+  grid-column: 2;
+  grid-row: 1;
+}
+
 /* A phone's Memory: the shelves as two lists of links. */
 .mem-link {
   text-decoration: none;

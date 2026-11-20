@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { MemoryTabs } from "./Nav";
 import type { Decision, Note } from "../proto";
-import { byProject, inFull, matches, pinnable, served, shelf as shelfOf } from "../lib/decisions";
+import { byProject, inFull, layerWords, matches, pinnable, served, shelf as shelfOf } from "../lib/decisions";
 import { live, notesByProject } from "../lib/notes";
 import { HASH, SHELF_HASH, type MemoryShelf } from "../lib/routes";
-import { scopeName } from "../lib/scope";
+import { USER_SCOPE, scopeName } from "../lib/scope";
 import { age } from "../lib/time";
-import { allDecisions, allNotes, correctNote, deleteNote, review, useApp } from "../store";
+import { allDecisions, allNotes, correctNote, deleteNote, review, servedTo, useApp } from "../store";
 import { DecisionEditor, ToReview } from "./Decisions";
 import { useCached } from "../cache";
 import { Loading } from "./bits";
@@ -435,6 +435,7 @@ function DecisionDetail({ d, onChange, inline }: { d: Decision; onChange: () => 
               </>
             )}
           </dl>
+          {d.project !== USER_SCOPE && <Reached d={d} />}
           <Provenance d={d} />
           {active && (
             <div className="card-actions">
@@ -465,6 +466,46 @@ function DecisionDetail({ d, onChange, inline }: { d: Decision; onChange: () => 
         </>
       )}
     </article>
+  );
+}
+
+/** The sessions it reached lately, from the serving log (backlog #256): each
+ * once, how, and when last; a running one opens. Habits hold in every project,
+ * so no one project's log has them. */
+function Reached({ d }: { d: Decision }) {
+  const now = useApp((s) => s.now);
+  const { data: list, failed, reload } = useCached(`served:${d.project}#${d.id}`, () => servedTo(d));
+  return (
+    <section className="mem-reached" aria-label="Sessions it reached">
+      <h3 className="mem-reached-head">
+        Reached {list && list.length > 0 && <span className="count">{list.length}</span>}
+      </h3>
+      {!list && (failed ? <ErrorState what="where it was served" why={failed} onRetry={reload} /> : <Loading rows={2} />)}
+      {list && list.length === 0 && (
+        <p className="mem-reached-none">
+          {d.status === "active" ? "No session got it in the last 90 days." : "No session got it in the last 90 days it was in use."}
+        </p>
+      )}
+      {list && list.length > 0 && (
+        <ul className="mem-reached-list">
+          {list.map((r, i) => (
+            <li key={`${r.what}:${r.first}:${i}`}>
+              {r.session !== undefined ? (
+                <a className="mem-reached-what" href={`#/s/${r.session}`}>
+                  {r.what}
+                </a>
+              ) : (
+                <span className="mem-reached-what">{r.what}</span>
+              )}
+              <span className="mem-reached-how">
+                {[r.agent, layerWords(r.layers), r.session !== undefined ? "running" : null].filter(Boolean).join(" · ")}
+              </span>
+              <span className="row-age">{age(r.last * 1000, now)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

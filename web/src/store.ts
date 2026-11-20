@@ -8,6 +8,7 @@ import { termColors } from "./lib/theme";
 import { glide, moved } from "./lib/glide";
 import type {
   Decision,
+  ServedTo,
   Note,
   Digest,
   DigestGroup,
@@ -884,6 +885,15 @@ export async function review(
 
 /** Every project's decisions and your habits, as the daemon has them now; null
  * when it can't be asked. Not pushed: a page asks again after it changes one. */
+/** The sessions decision `d` reached lately, the latest first (backlog #256).
+ * Throws with the daemon's reason. */
+export async function servedTo(d: Decision): Promise<ServedTo[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "served_to", project: d.project, id: d.id });
+  if (reply.t !== "served_to") throw new Error("unexpected reply");
+  return reply.sessions;
+}
+
 export async function allDecisions(): Promise<Decision[] | null> {
   try {
     if (!conn) throw new Error("not connected");

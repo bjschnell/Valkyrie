@@ -91,3 +91,16 @@ export function served(d: Decision): { word: string; line: string; full: boolean
   if (d.kind === "skill") return { word: "on demand", line: "Its title is in every session's block; agents read the steps when they do what it covers.", full: false };
   return { word: "title", line: "Its title is in every session's block; agents read the rest when they need it.", full: false };
 }
+
+/** How a decision reached a session, from the serving log's layers (ADR-0014). */
+const LAYER: Record<string, string> = {
+  block: "in full at start",
+  title: "title at start",
+  prompt: "matched a prompt",
+  file: "a file in its scope",
+  search: "found by a search",
+  show: "read whole",
+};
+
+/** `in full at start · read whole`; a layer this build doesn't know, as the daemon says it. */
+export const layerWords = (layers: string[]) => layers.map((l) => LAYER[l] ?? l).join(" · ");

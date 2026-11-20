@@ -33,7 +33,7 @@ pub use backlog::{
 };
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
-    ReviewAction,
+    ReviewAction, ServedTo,
 };
 pub use digest::{Digest, DigestEntry, DigestGroup, Outcome, PastSession};
 pub use docs::{
@@ -49,7 +49,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 49;
+pub const PROTOCOL: u32 = 50;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -845,6 +845,13 @@ pub enum ClientMsg {
         #[serde(default)]
         env: Vec<(String, Option<String>)>,
     },
+    /// The sessions decision `id` of `project` reached in the last 90 days, the
+    /// latest first (backlog #256, protocol 50). Read-only. Replies `ServedTo`.
+    ServedTo {
+        req: ReqId,
+        project: PathBuf,
+        id: u32,
+    },
     /// The repositories pickers offer (backlog #240, protocol 49). Replies `Repos`.
     Repos {
         req: ReqId,
@@ -1120,6 +1127,9 @@ pub enum Reply {
     },
     Repos {
         list: RepoList,
+    },
+    ServedTo {
+        sessions: Vec<ServedTo>,
     },
     WikiPage {
         page: Box<WikiPage>,

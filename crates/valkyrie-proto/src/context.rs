@@ -107,6 +107,28 @@ pub struct Provenance {
     pub cwd: Option<PathBuf>,
 }
 
+/// One session a decision reached (ADR-0014 §5), from the project's serving log,
+/// for the decision's detail (backlog #256, protocol 50). Every serve to one
+/// session is one of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServedTo {
+    /// What the session was about, as History names it; the log's own session
+    /// string when its run is too old or not a known conversation.
+    pub what: String,
+    /// The agent that ran it, when its run is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The session still running it, to open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::SessionId>,
+    /// How it reached it, each layer once, first served first: `block`, `title`,
+    /// `prompt`, `file`, `search`, `show`.
+    pub layers: Vec<String>,
+    /// Seconds since the epoch: the first and the latest serve.
+    pub first: u64,
+    pub last: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
     /// Numbered from 1 within its project.

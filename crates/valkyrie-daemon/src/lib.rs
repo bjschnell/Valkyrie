@@ -1330,6 +1330,9 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                     listed.map_err(|e| anyhow::anyhow!("listing the wiki: {e}")),
                 )
             }
+            ClientMsg::ServedTo { req, project, id } => {
+                (req, registry.served_to(project, id).await)
+            }
             ClientMsg::Repos { req } => {
                 // Scans folders and resolves checkouts: off the connection's thread.
                 let registry = registry.clone();

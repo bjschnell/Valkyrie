@@ -48,6 +48,7 @@ pub(crate) fn feature(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::Search { .. } => "search",
         ClientMsg::Note { .. } => "note",
         ClientMsg::NoteRm { .. } => "note_rm",
+        ClientMsg::ServedTo { .. } => "served_to",
         ClientMsg::Repos { .. } => "repos",
         ClientMsg::RepoEdit { .. } => "repo_edit",
         ClientMsg::Wiki { .. } => "wiki",
