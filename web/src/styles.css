@@ -402,10 +402,9 @@ h1[tabindex="-1"]:focus {
   padding: var(--space-2) var(--space-35) 32px;
 }
 
-/* A section's pages (Memory: Decisions, Docs, Wiki; History: Sessions, Summary,
+/* A section's pages (Memory: Decisions … Wiki, Docs; History: Sessions, Summary,
    Search, Supervisor), in the page's column under its top bar (#249). */
 .section-tabs {
-  max-width: calc(100% - 2 * var(--space-35));
   /* Left-aligned to the page's 720px column, wherever it sits. */
   margin: var(--space-25) 0 0 max(var(--space-35), calc((100% - 720px) / 2 + var(--space-35)));
 }
@@ -1210,6 +1209,19 @@ html.with-tabs .offline-banner {
   gap: var(--space-15);
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+/* One line that scrolls sideways (Memory has seven) rather than two; `.seg`
+   wraps and caps its width at 100%, so this outranks it. */
+.seg.section-tabs {
+  max-width: calc(100% - 2 * var(--space-35));
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.section-tabs .seg-item {
+  flex: none;
 }
 
 .keybar::-webkit-scrollbar {
@@ -4489,11 +4501,6 @@ button.as-text {
   margin-bottom: var(--space-6);
 }
 
-.memory-tabs {
-  margin-bottom: var(--space-1);
-  text-transform: capitalize;
-}
-
 .memory-filters {
   display: flex;
   flex-wrap: wrap;
@@ -4521,6 +4528,92 @@ button.as-text {
 
 .decision-card.ended {
   opacity: 0.75;
+}
+
+/* Memory's shelves as lists (#253): a row per decision or note, its detail
+   under it on a phone and in a column beside the list when there's room. */
+.mem-group .list {
+  margin-bottom: var(--space-2);
+}
+
+.mem-slot + .mem-slot {
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.mem-row .row-sub {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.mem-slot > .card {
+  margin: 0 var(--space-3) var(--space-3);
+}
+
+/* Open under its row, the row says it all: the title wraps instead of cutting off. */
+.mem-row[aria-expanded="true"]:not(.current) .row-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* In full in every session: the accent, as a pin is. Ended: faint. */
+.state-tag.served-full {
+  --state: var(--accent);
+}
+
+.state-tag.served-ended {
+  --state: var(--faint);
+  color: var(--faint);
+}
+
+.mem-pane {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  max-width: 720px;
+  padding: var(--space-5);
+}
+
+.mem-pane > .card {
+  align-self: stretch;
+}
+
+.mem-detail h2.decision-title {
+  font: var(--type-heading);
+}
+
+.mem-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-3) 0;
+  font-size: var(--text-md);
+}
+
+.mem-facts dt {
+  color: var(--soft);
+  font: var(--type-label);
+  padding-top: 2px;
+}
+
+.mem-facts dd {
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.mem-mono {
+  font: var(--type-mono);
+}
+
+/* A phone's Memory: the shelves as two lists of links. */
+.mem-link {
+  text-decoration: none;
+}
+
+.mem-link + .mem-link {
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
 }
 
 .note-text {

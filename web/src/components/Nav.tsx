@@ -43,8 +43,12 @@ export interface Tab {
 
 export const MEMORY_TABS: Tab[] = [
   { label: "Decisions", hash: HASH.memory, warm: DESTS.memory.warm },
-  { label: "Docs", hash: HASH.docs, warm: () => prefetch("docs", allDocs) },
+  { label: "Skills", hash: HASH.skills, warm: DESTS.memory.warm },
+  { label: "Policies", hash: HASH.policies, warm: DESTS.memory.warm },
+  { label: "Your habits", hash: HASH.habits, warm: DESTS.memory.warm },
+  { label: "Notes", hash: HASH.notes, warm: DESTS.memory.warm },
   { label: "Wiki", hash: HASH.wiki },
+  { label: "Docs", hash: HASH.docs, warm: () => prefetch("docs", allDocs) },
 ];
 
 export const HISTORY_TABS: Tab[] = [
@@ -164,7 +168,7 @@ export function SectionTabs({ tabs, label, counts }: { tabs: Tab[]; label: strin
   );
 }
 
-/** Memory's tabs: Decisions (and skills, policies, habits, notes), Docs, Wiki. */
+/** Memory's tabs (#253): Decisions, Skills, Policies, Your habits, Notes, Wiki, Docs. */
 export function MemoryTabs() {
   // Docs agents wrote since you last looked: a count on the tab (ADR-0021 §5).
   const unread = useApp((s) => s.unreadDocs);

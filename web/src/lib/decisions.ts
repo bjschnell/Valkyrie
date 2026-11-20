@@ -76,3 +76,18 @@ export function byProject(list: Decision[], showEnded = false): [string, Decisio
     a === USER_SCOPE ? 1 : b === USER_SCOPE ? -1 : scopeName(a).localeCompare(scopeName(b)),
   );
 }
+
+/** How a decision reaches agents (#253): a word for its row and a line for its
+ * detail. `full` when its body is in every session's block. */
+export function served(d: Decision): { word: string; line: string; full: boolean } {
+  if (d.status === "superseded") return { word: "replaced", line: "Replaced by another; agents no longer get it.", full: false };
+  if (d.status !== "active") return { word: d.status, line: "Agents no longer get it.", full: false };
+  if (d.project === USER_SCOPE) return { word: "every project", line: "Its title is in every session's block, in every project.", full: false };
+  if (d.kind === "constraint") return { word: "in full", line: "Its body is in every session's block: constraints always are.", full: true };
+  if (d.pinned) return { word: "pinned", line: "Its body is in every session's block: you pinned it.", full: true };
+  if (d.kind === "policy") return { word: "Valkyrie", line: "Valkyrie follows it in this repository; agents aren't told it.", full: false };
+  if (d.scope?.length)
+    return { word: "scoped", line: `Its title is in every session's block; its body comes the first time an agent opens a file in ${d.scope.join(", ")}.`, full: false };
+  if (d.kind === "skill") return { word: "on demand", line: "Its title is in every session's block; agents read the steps when they do what it covers.", full: false };
+  return { word: "title", line: "Its title is in every session's block; agents read the rest when they need it.", full: false };
+}

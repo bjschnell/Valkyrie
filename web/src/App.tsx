@@ -20,7 +20,7 @@ import { showNeeds } from "./lib/badge";
 import { isRecord, RecordCard, useAttention } from "./components/Attention";
 import { waitingSessions } from "./lib/attention";
 import { follow, typingIn } from "./lib/follow";
-import { HASH, moved, SECTION_KEYS } from "./lib/routes";
+import { HASH, memoryShelf, moved, SECTION_KEYS, type MemoryShelf } from "./lib/routes";
 import { paletteKey } from "./lib/palette";
 import { shortcutsKey } from "./lib/shortcuts";
 import { Palette } from "./components/Palette";
@@ -39,7 +39,7 @@ type Route =
   | { page: "new" }
   | { page: "settings" }
   | { page: "backlog" }
-  | { page: "decisions" }
+  | { page: "decisions"; shelf: MemoryShelf | null }
   | { page: "docs" }
   | { page: "digest" }
   | { page: "past" }
@@ -56,7 +56,7 @@ type Route =
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
  * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order.
- * Memory (`#/memory`: decisions, skills, policies, habits, notes) has the tabs `#/memory/docs`
+ * Memory (`#/memory`: decisions) has the tabs `#/memory/skills`, `/policies`, `/habits`, `/notes`, `#/memory/docs`
  * (and `#/memory/docs/12`, one doc by its key, never a path) and `#/memory/wiki`. History
  * (`#/history`: past sessions to resume) has `#/history/summary`, `#/history/search` and
  * `#/history/supervisor`. The pages those used to be (`#/docs`, `#/summary`…) redirect (lib/routes.ts).
@@ -71,7 +71,8 @@ function route(): Route {
   if (hash === "#/new") return { page: "new" };
   if (hash === HASH.settings) return { page: "settings" };
   if (hash === HASH.backlog) return { page: "backlog" };
-  if (hash === HASH.memory) return { page: "decisions" };
+  const shelf = memoryShelf(hash);
+  if (shelf !== undefined) return { page: "decisions", shelf };
   if (hash === HASH.docs) return { page: "docs" };
   if (hash === HASH.wiki) return { page: "wiki" };
   if (hash === HASH.history) return { page: "past" };
@@ -427,7 +428,7 @@ export function App() {
       {at.page === "new" && <Launcher />}
       {at.page === "settings" && <Settings />}
       {at.page === "backlog" && <Backlog />}
-      {at.page === "decisions" && <DecisionList />}
+      {at.page === "decisions" && <DecisionList shelf={at.shelf} />}
       {at.page === "docs" && <DocsList />}
       {at.page === "digest" && <DigestView />}
       {at.page === "past" && <PastView />}
