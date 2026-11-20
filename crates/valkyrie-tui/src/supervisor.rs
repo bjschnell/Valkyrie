@@ -6,10 +6,9 @@
 use crate::backlog::fit_hints;
 use crate::theme::Theme;
 use crate::{fit, next_key};
-use ratatui::layout::Rect;
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use std::path::PathBuf;
 use valkyrie_proto::PrState;
 use valkyrie_proto::supervisor::Watch;
@@ -182,13 +181,7 @@ impl Page {
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, waits: &[Wait], now_ms: u64, t: &Theme) {
         let area = frame.area();
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let inner = rect.width.saturating_sub(4) as usize;
         let cursor = self.cursor.min(waits.len().saturating_sub(1));
@@ -293,12 +286,9 @@ impl Page {
         ]
         .concat();
         let hints = fit_hints(hints, rect.width.saturating_sub(4) as usize);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(" Supervisor ".fg(t.fg).bold())
-            .title_bottom(Line::from(hints).centered())
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+            .title_bottom(Line::from(hints).left_aligned());
         frame.render_widget(Paragraph::new(lines).block(block), rect);
     }
 }

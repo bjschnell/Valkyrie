@@ -4616,9 +4616,11 @@ impl App {
                         self.draw_peek(frame, main, tabs, session);
                     }
                     if let Some(menu) = &self.menu {
+                        dim(frame, main, self.settings.theme);
                         self.draw_menu(frame, menu);
                     }
                     if let Some(cursor) = self.reviewing {
+                        dim(frame, main, self.settings.theme);
                         self.draw_reviews(frame, main, cursor);
                     }
                     let line = self.bar(view).line;
@@ -4645,20 +4647,12 @@ impl App {
                 None => {
                     self.draw_home(frame, body, bar);
                     if let Some(cursor) = self.reviewing {
+                        dim(frame, body, self.settings.theme);
                         self.draw_reviews(frame, body, cursor);
                     }
                 }
             }
             self.draw_mini(frame);
-            if self.help && self.view.is_none() {
-                self.draw_help(frame);
-            }
-            if let Some(cursor) = self.settings_cursor {
-                self.draw_settings(frame, cursor);
-            }
-            if let Some(page) = &self.keys_page {
-                self.draw_keys_page(frame, page);
-            }
             if let Some(page) = &self.digest {
                 page.draw(frame, self.settings.theme);
             }
@@ -4689,6 +4683,35 @@ impl App {
                     now_ms(),
                     t,
                 );
+            }
+            // Over a section's page, a toast takes the row above its keys, as at
+            // home (rule 9: never the hint line).
+            let t = self.settings.theme;
+            let area = frame.area();
+            if self.view.is_none()
+                && self.section() != Section::Inbox
+                && area.height > 2
+                && let Some(toast) = self.toast()
+            {
+                let row = Rect::new(area.x, area.bottom() - 2, area.width, 1);
+                frame.render_widget(ratatui::widgets::Clear, row);
+                frame.render_widget(
+                    Paragraph::new(Line::from(self.toast_line(toast)))
+                        .style(style::Style::new().bg(t.panel)),
+                    row,
+                );
+            }
+            // Dialogs last, over a dimmed screen (rule 8: a box is a dialog).
+            if self.help && self.view.is_none() {
+                self.draw_help(frame);
+            }
+            if let Some(cursor) = self.settings_cursor {
+                dim(frame, area, t);
+                self.draw_settings(frame, cursor);
+            }
+            if let Some(page) = &self.keys_page {
+                dim(frame, area, t);
+                self.draw_keys_page(frame, page);
             }
         })?;
         Ok(())
@@ -6696,9 +6719,28 @@ fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
         .padding(Padding::new(1, 1, 0, 0))
 }
 
+/// A section's page: the whole screen under the strip, down to the footer's
+/// row (spec: sections are full screens; rule 8, no box for grouping).
+pub(crate) fn section_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    )
+}
+
+/// A section page's frame: no border, its title on its first row and its keys
+/// on its last, where the footer is (they're the page's footer).
+pub(crate) fn section_block(t: &Theme) -> Block<'static> {
+    Block::new()
+        .padding(Padding::horizontal(1))
+        .style(style::Style::new().bg(t.bg).fg(t.fg))
+}
+
 /// Dims what's under a dialog (rule 8: a box is a dialog, and what's behind it
 /// steps back).
-fn dim(frame: &mut ratatui::Frame, area: Rect, t: &Theme) {
+pub(crate) fn dim(frame: &mut ratatui::Frame, area: Rect, t: &Theme) {
     frame.buffer_mut().set_style(
         area,
         style::Style::new()
@@ -8442,6 +8484,50 @@ mod tests {
         app.unpark();
         assert!(app.backlog.is_none() && app.digest.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Sections are full screens (spec: rule 8): a section's page draws no box
+    /// and runs edge to edge under the strip, its keys on the screen's last row,
+    /// where the footer is.
+    #[test]
+    fn section_pages_fill_the_screen_with_their_keys_at_the_foot() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let t = &theme::DRACULA;
+        let screens: Vec<(&str, Box<dyn Fn(&mut ratatui::Frame)>)> = vec![
+            (
+                "backlog",
+                Box::new(|f| backlog::Page::default().draw(f, &[], &[], &[], 0, 0, t)),
+            ),
+            ("history", Box::new(|f| digest::Page::default().draw(f, t))),
+            (
+                "memory",
+                Box::new(|f| memory::Page::new(memory::Tab::Decisions).draw(f, &[], t)),
+            ),
+            (
+                "pull requests",
+                Box::new(|f| prs::Page::default().draw(f, &Default::default(), 0, t)),
+            ),
+        ];
+        for (name, draw) in screens {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal.draw(|f| draw(f)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<String> = (0..20)
+                .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            let text = rows.join("\n");
+            assert!(
+                !text
+                    .chars()
+                    .any(|c| "╭╮╰╯│".contains(c) && !rows[0].contains(c)),
+                "{name} draws a box:\n{text}"
+            );
+            assert!(
+                rows[19].contains("esc"),
+                "{name}'s keys at the foot:\n{text}"
+            );
+        }
     }
 
     /// Color is state, in every theme (spec: Marks and color): home draws no box,
