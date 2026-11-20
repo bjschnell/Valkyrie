@@ -324,6 +324,10 @@ struct App {
     parked: Option<Parked>,
     /// `g` was pressed: the next key picks a section.
     g_pending: bool,
+    /// The cursor was put somewhere, by a key, a click or an attach. Until then
+    /// it stays on the top row while the first pushes arrive, rather than
+    /// following whichever row loaded first (backlog #267).
+    cursor_moved: bool,
     /// `x` pressed once on this session: a second closes it (rule 9: x always
     /// confirms).
     kill_armed: Option<SessionId>,
@@ -502,6 +506,7 @@ impl App {
             previous: None,
             parked: None,
             g_pending: false,
+            cursor_moved: false,
             kill_armed: None,
             help: false,
             needing: None,
@@ -1041,6 +1046,7 @@ impl App {
                 }
                 Some(Hit::Row(row)) => {
                     self.selected = row;
+                    self.cursor_moved = true;
                     self.kill_armed = None;
                     self.update_preview().await;
                 }
@@ -3038,6 +3044,10 @@ impl App {
     }
 
     fn restore(&mut self, anchor: Anchor) {
+        if !self.cursor_moved {
+            self.selected = 0;
+            return;
+        }
         let rows = self.inbox_rows();
         // A session can move between Needs you and the rows below it (it asks,
         // or it's seen): the cursor goes with it, wherever it is now.
@@ -3165,6 +3175,12 @@ impl App {
 
     async fn on_home_key(&mut self, key: HomeKey) {
         let (selected, _) = self.selection();
+        if matches!(
+            key,
+            HomeKey::Up | HomeKey::Down | HomeKey::NextWaiting | HomeKey::Enter
+        ) {
+            self.cursor_moved = true;
+        }
         // Any other key keeps the session a first `x` asked about.
         if key != HomeKey::Kill {
             self.kill_armed = None;
@@ -8120,6 +8136,7 @@ mod tests {
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1), info(2)];
         app.queue = vec![queued(2)];
+        app.cursor_moved = true;
         app.selected = 1; // session 1, under the queue's row
         assert!(
             app.on_push(ServerMsg::Proposals {
@@ -8578,6 +8595,16 @@ mod tests {
         // Not whatever this machine's settings.toml says.
         app.settings = Settings::default();
         app.sessions = vec![info(1), info(2), info(3)];
+        // Before the cursor is put anywhere, pushes leave it on the top row.
+        app.selected = 2;
+        app.on_push(ServerMsg::Queue {
+            items: vec![queued(1)],
+        })
+        .unwrap();
+        assert_eq!(app.selected, 0, "the TUI opens on the top row");
+        app.on_push(ServerMsg::Queue { items: vec![] }).unwrap();
+        // Once it's been put somewhere, it follows its session.
+        app.cursor_moved = true;
         app.selected = 2; // session 3
         app.on_push(ServerMsg::Queue {
             items: vec![queued(1)],
