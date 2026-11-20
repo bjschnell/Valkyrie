@@ -210,8 +210,8 @@ impl Pinger {
             self.last_sound = Some((now, best.kind));
         }
         let what = match best.item.status.state {
-            AgentState::NeedsInput => "needs input",
-            AgentState::Blocked => "is blocked",
+            AgentState::NeedsInput => "asks",
+            AgentState::Blocked => "is stuck",
             _ => "finished",
         };
         Some(Ping {
@@ -739,7 +739,7 @@ mod tests {
         // Session 1 escalates to blocked right after: a request still sounds.
         let ping = settle(&mut p, &[item(1, AgentState::Blocked, 5)], None, t0).unwrap();
         assert_eq!((ping.kind, ping.sound), (Kind::Request, true));
-        assert_eq!(ping.text, "s1 is blocked");
+        assert_eq!(ping.text, "s1 is stuck");
         // Another finish inside the gap: toast only.
         let ping = settle(&mut p, &[item(9, AgentState::ReviewReady, 1)], None, t0).unwrap();
         assert!(!ping.sound);
