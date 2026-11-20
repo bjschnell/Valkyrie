@@ -8494,7 +8494,8 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let t = &theme::DRACULA;
-        let screens: Vec<(&str, Box<dyn Fn(&mut ratatui::Frame)>)> = vec![
+        type Draw<'a> = Box<dyn Fn(&mut ratatui::Frame) + 'a>;
+        let screens: Vec<(&str, Draw)> = vec![
             (
                 "backlog",
                 Box::new(|f| backlog::Page::default().draw(f, &[], &[], &[], 0, 0, t)),
