@@ -331,6 +331,15 @@ h1[tabindex="-1"]:focus {
   height: var(--app-height, 100dvh);
 }
 
+/* The backlog's list with the item editor beside it (#252). */
+.split.split-side {
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 40%);
+}
+
+.split-side > .split-pane {
+  border-left: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
 .split > .page {
   min-height: 0;
   overflow-y: auto;
@@ -3555,9 +3564,6 @@ html.with-tabs .offline-banner {
 /* Backlog (DESIGN §8.12) --------------------------------------------------- */
 
 /* Priority wears the kind chip's shape: p0 and p1 stand out, the rest stay quiet. */
-/* Past .item-live, which comes later and would give the lane's color. */
-.item-live.item-after { color: var(--interrupted); }
-.item-live.item-group { color: var(--accent); }
 .item-pieces {
   margin: var(--space-1) 0 0;
   padding-left: var(--space-3);
@@ -3610,17 +3616,6 @@ html.with-tabs .offline-banner {
   max-width: 420px;
 }
 
-.item-card .item-title {
-  cursor: pointer;
-}
-
-.item-folder {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .item-done {
   opacity: 0.7;
 }
@@ -3655,13 +3650,141 @@ html.with-tabs .offline-banner {
   gap: var(--space-15);
 }
 
-/* The backlog's repository picker, above the board. */
+/* The backlog's repository control and kind dropdown, above the list (#252). */
 .backlog-filter {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
+}
+
+/* The backlog as a list (#252): In progress, In review, Up next, Done, each a
+   list of rows; a piece one step in under its item, on a guide line. */
+.item-group + .item-group {
+  margin-top: var(--space-4);
+}
+
+.item-slot + .item-slot {
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.item-slot[style] > .item-row {
+  padding-left: calc(var(--space-35) + var(--depth) * var(--space-5));
+  background-image: linear-gradient(var(--divider), var(--divider));
+  background-size: 1px 100%;
+  background-position: calc(var(--space-35) + var(--depth) * var(--space-5) - var(--space-25)) 0;
+  background-repeat: no-repeat;
+}
+
+.item-ref {
+  flex: none;
+  min-width: 52px;
+  font: var(--type-mono);
+  color: var(--faint);
+}
+
+.item-row .row-sub {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.item-row .row-sub .tag {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-slot > .card {
+  margin: 0 var(--space-3) var(--space-3);
+}
+
+/* What agents filed, kept or dropped in one go (#252). */
+.filed-tray {
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.filed-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-25);
+  width: 100%;
+  padding: var(--space-3) var(--space-35);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.filed-head > svg {
+  flex: none;
+  color: var(--muted);
+}
+
+.filed-head[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+
+.filed-title {
+  font: var(--type-row);
+}
+
+.filed-sub {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-label);
+  color: var(--muted);
+}
+
+.filed-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--divider);
+}
+
+.filed-list > li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) 0 var(--space-35);
+}
+
+.filed-list > li + li {
+  border-top: 1px solid var(--divider);
+}
+
+.filed-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-25);
+  padding: var(--space-25) 0;
+  cursor: pointer;
+}
+
+.filed-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-body);
+}
+
+.filed-tray > .order-actions {
+  padding: var(--space-25) var(--space-35) var(--space-3);
+  border-top: 1px solid var(--divider);
 }
 
 /* A build order waiting on the user (ADR-0019 §2), above the board. */
@@ -3872,99 +3995,13 @@ html.with-tabs .offline-banner {
   font-size: var(--text-2xs);
 }
 
-/* One column of lanes on a phone, skipping the empty ones; a board of four side
-   by side when there's room for it. */
-.column-empty,
-.column-none,
-.column-shut .cards {
-  display: none;
-}
-
-@media (min-width: 960px) {
-  .inbox.backlog {
-    max-width: 1440px;
-  }
-
-  .board {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: var(--space-35);
-    align-items: start;
-  }
-
-  .column,
-  .column-empty {
-    display: block;
-    min-height: 160px;
-    padding: 0 var(--space-25) var(--space-25);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-  }
-
-  .column .section-title {
-    margin-left: 0;
-  }
-
-  .column-shut .cards {
-    display: grid;
-  }
-
-  .column .section-toggle {
-    pointer-events: none;
-  }
-
-  .column .section-toggle::after {
-    content: none;
-  }
-
-  /* A column is narrow: actions wrap onto a new row, not into a word each. */
-  .column .card-actions {
-    flex-wrap: wrap;
-  }
-
-  .column .card-actions button {
-    white-space: nowrap;
-  }
-
-  .column-none {
-    display: block;
-    padding: var(--space-45) var(--space-1);
-    color: var(--soft);
-    font-size: var(--text-sm);
-    text-align: center;
-  }
-}
-
 .ghost.no.item-sure {
   background: var(--blocked);
   border-color: var(--blocked);
   color: var(--page);
 }
 
-.item-proposed {
-  --state: var(--accent2);
-  border-style: dashed;
-}
-
-.item-needs.item-proposed-pill {
-  background: var(--accent2);
-}
-
-/* Handoffs (DESIGN §8.12): the agent's word on a card waiting for review, and the
-   checkout's facts beside it. */
-.item-handoff {
-  display: -webkit-box;
-  margin: var(--space-15) 0 0;
-  overflow: hidden;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  color: var(--soft);
-  font-size: var(--text-sm);
-  white-space: pre-line;
-  cursor: pointer;
-}
-
-.item-handoff-by,
+/* Handoffs (DESIGN §8.12): the notes on an item and its checkout's facts. */
 .item-note-by {
   color: var(--muted);
   font-weight: var(--weight-semibold);

@@ -1,11 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { editPatch } from "../lib/optimistic";
-import { COLUMNS, agentFiled, base, byColumn, cardActions, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, launchesOn, itemNo, launchesShown, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, waitingOn, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
+import { GROUPS, agentFiled, base, byGroup, cardActions, itemRef, rowState, tree, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, itemNo, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
-import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type LaunchOffer, type OrderProposal, type Priority } from "../proto";
-import { addItem, answerLaunch, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
+import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type OrderProposal, type Priority } from "../proto";
+import { addItem, setStatuses, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
 import { RepoSelect } from "./Repos";
-import { Back, Clip, Plus } from "./icons";
+import { Back, Chevron, Clip } from "./icons";
+import { useDesktop } from "./Terminal";
 import { MicButton } from "./Mic";
 import { usePageKeys } from "../lib/pageKeys";
 
@@ -41,7 +42,7 @@ const back = () => (history.length > 1 ? history.back() : (location.hash = "#/ba
 
 /** The edge color of a card, as the inbox's cards show a session's state. */
 const EDGE: Record<Lane, string> = {
-  proposed: "item-proposed",
+  proposed: "",
   needs: "state-needs_input",
   running: "state-working",
   review: "state-review_ready",
@@ -54,10 +55,9 @@ const EDGE: Record<Lane, string> = {
  * Each one starts an agent on itself in a worktree of its own, and its lane
  * follows that session, so nothing here is moved by hand.
  */
-export function Backlog() {
+export function Backlog({ beside = false }: { beside?: boolean } = {}) {
   const all = useApp((s) => s.items);
   const orders = useApp((s) => s.orders);
-  const launches = useApp((s) => s.launches);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [showDone, setShowDone] = useState(false);
@@ -91,8 +91,8 @@ export function Backlog() {
   const inThisRepo = all.filter((i) => inRepo(i, repo));
   const counts = kindCounts(inThisRepo);
   const items = inThisRepo.filter((i) => ofKind(i, kind));
-  const columns = byColumn(items, sessions, boot, all);
-  const open = items.length - columns.done.length;
+  const { filed, groups } = byGroup(items, sessions, boot, all);
+  const open = items.length - groups.done.length;
   // A build order covers a repository's every open item, whatever kind is shown.
   const repoOpen = inThisRepo.filter((i) => i.status === "open" || i.status === "proposed").length;
   // Only items with a branch can be found merged.
@@ -136,10 +136,31 @@ export function Backlog() {
     }
   };
   const shownOrders = ordersShown(orders, repo);
-  const shownLaunches = launchesShown(launches, repo);
 
+  // j/k pick a row, Enter opens or closes its card, Esc closes it.
+  const rows = GROUPS.flatMap(({ group }) => (group === "done" && !showDone ? [] : tree(groups[group]).slice(0, group === "done" ? 30 : undefined)));
+  const [sel, setSel] = useState(-1);
+  const [opened, setOpened] = useState<number | null>(null);
+  const selected = rows[sel]?.item.id ?? null;
+  const pickRow = (i: number) => {
+    const next = Math.max(0, Math.min(rows.length - 1, i));
+    setSel(next);
+    document.querySelectorAll<HTMLElement>(".item-slot")[next]?.scrollIntoView({ block: "nearest" });
+  };
+  const toggle = (id: number) => setOpened((was) => (was === id ? null : id));
   const newItem = () => (location.hash = "#/backlog/new");
-  usePageKeys("backlog", { n: newItem, a: newItem, q: () => (location.hash = "#/") });
+  usePageKeys("backlog", {
+    n: newItem,
+    a: newItem,
+    q: () => (location.hash = "#/"),
+    j: () => pickRow(sel + 1),
+    k: () => pickRow(sel - 1),
+    Enter: () => selected !== null && toggle(selected),
+    Escape: () => {
+      setOpened(null);
+      setSel(-1);
+    },
+  }, { off: beside });
 
   return (
     <div className="page">
@@ -162,7 +183,7 @@ export function Backlog() {
         )}
         {mergeable && (
           <button
-            className={ready ? "primary" : "ghost"}
+            className={`ghost ${ready ? "item-sure" : ""}`}
             disabled={shipping}
             title="As of the last fetch; valk todo ship --merged fetches first"
             onClick={() => void ship()}
@@ -170,52 +191,47 @@ export function Backlog() {
             {shipLabel}
           </button>
         )}
-        <button className="icon-btn" aria-label="Write something down" onClick={() => (location.hash = "#/backlog/new")}>
-          <Plus />
+        {/* Beside the editor, its Save is the one primary. */}
+        <button className={beside ? "ghost" : "primary"} title="Write something down (n)" onClick={newItem}>
+          New item
         </button>
       </header>
       <main className="inbox backlog">
         {(choices.length > 1 || repo !== null || inThisRepo.length > 0) && (
           <div className="backlog-filter">
             {(choices.length > 1 || repo !== null) && (
-              <select
-                aria-label="Repository"
-                value={repo ?? ALL}
-                onChange={(e) => pick(e.target.value === ALL ? null : e.target.value)}
-              >
-                <option value={ALL}>Every repository</option>
-                {choices.map((c) => (
-                  <option key={c.repo} value={c.repo} title={c.repo || undefined}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            )}
-            <div className="seg" role="radiogroup" aria-label="Kind">
-              <button role="radio" aria-checked={kind === null} className={`seg-item ${kind === null ? "on" : ""}`} onClick={() => pickKind(null)}>
-                all
-              </button>
-              {ITEM_KINDS.map((k) => (
-                <button
-                  key={k}
-                  role="radio"
-                  aria-checked={kind === k}
-                  className={`seg-item ${kind === k ? "on" : ""}`}
-                  // Tapping the one shown again shows every kind.
-                  onClick={() => pickKind(kind === k ? null : k)}
-                >
-                  {k} <span className="count">{counts[k]}</span>
+              <div className="seg" role="radiogroup" aria-label="Repository">
+                <button role="radio" aria-checked={repo === null} className={`seg-item ${repo === null ? "on" : ""}`} onClick={() => pick(null)}>
+                  All
                 </button>
+                {choices.map((c) => (
+                  <button
+                    key={c.repo}
+                    role="radio"
+                    aria-checked={repo === c.repo}
+                    className={`seg-item ${repo === c.repo ? "on" : ""}`}
+                    title={c.repo || undefined}
+                    onClick={() => pick(c.repo)}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <select aria-label="Kind" value={kind ?? ALL} onChange={(e) => pickKind(e.target.value === ALL ? null : (e.target.value as ItemKind))}>
+              <option value={ALL}>Every kind</option>
+              {ITEM_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k} ({counts[k]})
+                </option>
               ))}
-            </div>
+            </select>
           </div>
         )}
-        {shownLaunches.map((o) => (
-          <LaunchCard key={`${o.project}:${o.id}`} offer={o} />
-        ))}
         {shownOrders.map((o) => (
           <OrderBanner key={`${o.project}:${o.id}`} order={o} />
         ))}
+        {filed.length > 0 && <FiledTray items={filed} />}
         {open === 0 && kind !== null && (
           <div className="calm backlog-calm">
             <div className="calm-title">
@@ -241,79 +257,121 @@ export function Backlog() {
               Note a bug or an idea when it comes to you, with a screenshot if you have one. When you're ready, one tap starts an
               agent on it in a worktree of its own.
             </div>
-            <button className="primary" onClick={() => (location.hash = "#/backlog/new")}>
-              Write something down
-            </button>
           </div>
         )}
-        {items.length > 0 && (
-          <div className="board">
-            {COLUMNS.map(({ column, title }) => {
-              const cards = columns[column];
-              const shut = column === "done" && !showDone;
-              return (
-                <section key={column} className={`column ${cards.length === 0 ? "column-empty" : ""} ${shut ? "column-shut" : ""}`}>
-                  {column === "done" ? (
-                    <button className="section-title section-toggle" aria-expanded={showDone} onClick={() => setShowDone(!showDone)}>
-                      {title} <span className="count">{cards.length}</span>
-                    </button>
-                  ) : (
-                    <h2 className="section-title">
-                      {title} <span className="count">{cards.length}</span>
-                    </h2>
-                  )}
-                  <div className="cards">
-                    {cards.slice(0, column === "done" ? 30 : undefined).map(({ item, lane }) => (
-                      <ItemCard key={item.id} item={item} lane={lane} />
+        {GROUPS.map(({ group, title }) => {
+          const list = groups[group];
+          if (list.length === 0) return null;
+          const shut = group === "done" && !showDone;
+          return (
+            <section key={group} className="item-group">
+              {group === "done" ? (
+                <button className="section-title section-toggle" aria-expanded={showDone} onClick={() => setShowDone(!showDone)}>
+                  {title} <span className="count">{list.length}</span>
+                </button>
+              ) : (
+                <h2 className="section-title">
+                  {title} <span className="count">{list.length}</span>
+                </h2>
+              )}
+              {!shut && (
+                <div className="list item-list">
+                  {tree(list)
+                    .slice(0, group === "done" ? 30 : undefined)
+                    .map(({ item, lane, depth }) => (
+                      <ItemCard
+                        key={item.id}
+                        item={item}
+                        lane={lane}
+                        depth={depth}
+                        picked={selected === item.id}
+                        open={opened === item.id}
+                        onToggle={() => toggle(item.id)}
+                      />
                     ))}
-                    {cards.length === 0 && <div className="column-none">Nothing here</div>}
-                  </div>
-                </section>
-              );
-            })}
-          </div>
-        )}
+                </div>
+              )}
+            </section>
+          );
+        })}
       </main>
     </div>
   );
 }
 
 /**
- * A ready item the supervisor offers to start (ADR-0019 §2): Start launches it as
- * the card's Launch would, on its last agent and model; Leave offers the next one.
+ * What agents filed that nobody has kept or dropped (#252): one tray above the
+ * list, every one ticked; Keep or Drop the ticked ones. On a phone it's one line
+ * until opened. A proposal's toast opens it.
  */
-function LaunchCard({ offer }: { offer: LaunchOffer }) {
-  const [busy, setBusy] = useState(false);
-  const answer = async (launch: boolean) => {
-    setBusy(true);
-    try {
-      const id = await answerLaunch(offer, launch);
-      if (id !== null) {
-        navigator.vibrate?.(10);
-        location.hash = `#/s/${id}`;
-      }
-    } finally {
-      setBusy(false);
-    }
+function FiledTray({ items }: { items: Item[] }) {
+  const desktop = useDesktop();
+  const focus = useApp((s) => s.focusItem);
+  const [open, setOpen] = useState(desktop);
+  const [skip, setSkip] = useState<Set<number>>(new Set());
+  const ticked = items.filter((i) => !skip.has(i.id));
+  const trayRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    if (focus === null || !items.some((i) => i.id === focus)) return;
+    setOpen(true);
+    trayRef.current?.scrollIntoView({ block: "nearest" });
+    useApp.setState({ focusItem: null });
+  }, [focus, items]);
+  const answer = (status: "open" | "dropped") => {
+    setStatuses(
+      ticked.map((i) => i.id),
+      status,
+    );
+    setSkip(new Set());
   };
   return (
-    <section className="order-card" aria-label={`Ready to start: #${offer.number}`}>
-      <div className="order-head">
-        <div className="order-title">
-          Ready to start in {base(offer.project)}: <span className="order-id">#{offer.number}</span> {offer.title}
-        </div>
-        <div className="order-why">
-          {offer.why} · on {launchesOn(offer)}
-        </div>
-      </div>
-      <div className="order-actions">
-        <button className="ghost" disabled={busy} onClick={() => void answer(false)}>
-          Leave
-        </button>
-        <button className="primary" disabled={busy} onClick={() => void answer(true)}>
-          Start
-        </button>
-      </div>
+    <section ref={trayRef} className="filed-tray" aria-label="Filed by agents">
+      <button className="filed-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="attn-mark attn-filed" aria-hidden />
+        <span className="filed-title">{items.length} filed by agents</span>
+        <span className="filed-sub">keep what's worth doing, drop the rest</span>
+        <Chevron />
+      </button>
+      {open && (
+        <>
+          <ul className="filed-list">
+            {items.map((i) => (
+              <li key={i.id}>
+                <label className="filed-row">
+                  <input
+                    type="checkbox"
+                    checked={!skip.has(i.id)}
+                    onChange={() =>
+                      setSkip((was) => {
+                        const next = new Set(was);
+                        if (next.has(i.id)) next.delete(i.id);
+                        else next.add(i.id);
+                        return next;
+                      })
+                    }
+                  />
+                  <span className="item-ref">{itemRef(i)}</span>
+                  <span className="filed-name">{i.title}</span>
+                  <span className="tag">
+                    {i.kind} · {i.by}
+                  </span>
+                </label>
+                <button className="ghost filed-edit" aria-label={`Read or edit ${itemRef(i)}`} onClick={() => (location.hash = `#/backlog/${i.id}`)}>
+                  Edit
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="order-actions">
+            <button className="ghost" disabled={ticked.length === 0} onClick={() => answer("dropped")}>
+              Drop {ticked.length}
+            </button>
+            <button className="ghost" disabled={ticked.length === 0} onClick={() => answer("open")}>
+              Keep {ticked.length}
+            </button>
+          </div>
+        </>
+      )}
     </section>
   );
 }
@@ -331,7 +389,7 @@ function OrderBanner({ order }: { order: OrderProposal }) {
           {orderSize(order)} · {order.trigger}
         </div>
       </div>
-      <button className="primary" onClick={() => (location.hash = orderHref(order.project))}>
+      <button className="ghost" onClick={() => (location.hash = orderHref(order.project))}>
         Review
       </button>
     </section>
@@ -442,10 +500,28 @@ function OrderReview({ order, items, onDone }: { order: OrderProposal; items: It
   );
 }
 
-function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
+/**
+ * An item in the list (#252): a row with its `api#2`, title, where it stands as a
+ * dot and a word, and its tags; a piece sits one step in under its item. Opened,
+ * the row's card has the rest and the answers.
+ */
+function ItemCard({
+  item,
+  lane,
+  depth,
+  picked,
+  open,
+  onToggle,
+}: {
+  item: Item;
+  lane: Lane;
+  depth: number;
+  picked: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
   const now = useApp((s) => s.now);
   const items = useApp((s) => s.items);
-  const waits = lane === "done" ? [] : waitingOn(item, items);
   // Its group: the item it's a piece of, or how far its own pieces are.
   const mine = pieces(item, items);
   const [done, of] = progress(item, items);
@@ -453,7 +529,8 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const group = up ? `piece of #${up.number} ${up.title}` : of > 0 ? `${done}/${of} pieces done` : null;
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
-  const [expanded, setExpanded] = useState(false);
+  const expanded = open;
+  const setExpanded = (to: boolean) => to !== open && onToggle();
   // Opened from a proposal's toast: this card, open and in view, once.
   const focused = useApp((s) => s.focusItem === item.id);
   const cardRef = useRef<HTMLElement>(null);
@@ -469,10 +546,12 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const [typed, setTyped] = useState<string | null>(null);
   const model = typed ?? startModel(item, agent);
   const live = liveSession(item, sessions, boot);
+  // The supervisor's flag on its session: a red or conflicting PR.
+  const flag = useApp((s) => (live ? s.queue.find((q) => q.session === live.id)?.flag?.reason : undefined));
+  const where = rowState(item, lane, items, flag);
   // Accept, Open, Launch: Launch beside Open while only takes are live (it hands
   // the item over), Accept beside it for an agent's own filed work.
   const actions = cardActions(item, sessions, boot);
-  const folder = item.project ? base(item.project) : null;
   const pr = prLink(item.pr);
 
   const act = async (f: () => Promise<unknown>) => {
@@ -520,7 +599,6 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
       stale = true;
     };
   }, [expanded, item.id, item.checkout, item.updated]);
-  const latest = item.notes?.at(-1);
   const [draft, setDraft] = useState("");
   const leave = () =>
     act(async () => {
@@ -529,25 +607,25 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
   const who = (by: string) => (by === "human" ? "you" : by);
 
   return (
-    <div className="card-slot">
+    <div className={`item-slot ${picked ? "picked" : ""}`} style={depth ? ({ "--depth": depth } as CSSProperties) : undefined}>
+      <button className={`row item-row ${picked ? "picked" : ""}`} aria-expanded={expanded} onClick={onToggle}>
+        <span className="item-ref">{itemRef(item)}</span>
+        <span className="row-main">
+          <span className="row-name">{item.title}</span>
+          <span className="row-sub">
+            <span className={`state-tag state-text-${where.state}`}>{where.word}</span>
+            <span className="tag">
+              {item.kind}
+              {lane !== "done" && <> · {priority(item)}</>}
+              {group && !(depth > 0 && up) && <> · {group}</>}
+            </span>
+          </span>
+        </span>
+        <span className="row-age">{age(item.updated * 1000, now)}</span>
+      </button>
+      {expanded && (
       <article ref={cardRef} className={`card item-card ${EDGE[lane]} ${lane === "done" ? "item-done" : ""}`}>
-        <button className="card-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
-          <span className="tag">{item.kind}</span>
-          {lane !== "done" && <span className="tag">{priority(item)}</span>}
-          <span className="card-prog">#{item.number}</span>
-          <span className="card-prog item-folder">{folder ?? "no folder"}</span>
-          <span className="card-age">{lane === "done" ? item.status : age(item.updated * 1000, now)}</span>
-        </button>
-        <p className="decision-title item-title" onClick={() => setExpanded(!expanded)}>
-          {item.title}
-        </p>
-        {waits.length > 0 && (
-          <div className="item-live item-after">
-            after {waits.map((id) => `#${itemNo(items, id)}`).join(", ")}, not finished yet
-          </div>
-        )}
-        {group && <div className="item-live item-group">{group}</div>}
-        {expanded && mine.length > 0 && (
+        {mine.length > 0 && (
           <ul className="item-pieces">
             {mine.map((p) => (
               <li key={p.id} className={p.status === "shipped" || p.status === "dropped" ? "item-piece-done" : undefined}>
@@ -556,16 +634,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
             ))}
           </ul>
         )}
-        {lane === "proposed" && (
-          <div className="item-live">
-            <strong className="item-needs item-proposed-pill">Proposed</strong>by {item.by}, waiting on you
-          </div>
-        )}
-        {agentFiled(item) && (
-          <div className="item-live">
-            <strong className="item-needs item-proposed-pill">Agent-filed</strong>by {item.by}, not accepted yet
-          </div>
-        )}
+        {agentFiled(item) && <div className="item-live">Filed and taken by {item.by}, not accepted yet</div>}
         {live && (
           <div className="item-live">
             {lane === "needs" && <strong className="item-needs">Needs you</strong>}
@@ -575,16 +644,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
         {lane === "review" && pr && (
           <div className="item-live">{item.pr_closed ? "PR closed without merging" : "PR open"}</div>
         )}
-        {!expanded && lane === "review" && latest && (
-          <p className="item-handoff" onClick={() => setExpanded(true)}>
-            <span className="item-handoff-by">
-              {who(latest.by)}
-              {noteOrigin(latest)}:
-            </span>{" "}
-            {latest.text}
-          </p>
-        )}
-        {expanded && (
+        {(
           <>
             {item.body && item.body !== item.title && <p className="decision-body">{item.body}</p>}
             {(item.attachments ?? []).map((a) => (
@@ -646,7 +706,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
           </>
         )}
         <div className="card-actions">
-          {(expanded || lane === "proposed") && !live && (
+          {!live && (
             <button className="ghost no" disabled={busy} onClick={remove}>
               Delete
             </button>
@@ -755,6 +815,7 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
           )}
         </div>
       </article>
+      )}
     </div>
   );
 }

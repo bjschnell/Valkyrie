@@ -23,10 +23,13 @@ valk todo return 5         # back to the backlog: stops its sessions, keeps the 
 valk todo accept 5         # also: show, drop, reopen, rm
 ```
 
-On the phone, the list icon in the inbox opens the board: Backlog, In progress,
-Review, Done. Cards move on their own as their agent works, waits on you or
-finishes; one with a pull request open waits in Review unless its agent needs
-you. Edit a card there, with `e` on the TUI's backlog page (`b`), or with
+In the web app, Backlog is a list grouped In progress, In review, Up next and
+Done, each item a row with where it stands (`needs you`, `PR #41 open`,
+`after #3`) and its pieces indented under it. Items move on their own as their
+agent works, waits on you or finishes; one with a pull request open waits in In
+review unless its agent needs you. What agents filed waits in a tray at the top:
+tick them and Keep or Drop. Tap a row for its card, then Edit (a panel beside the
+list on a desktop), or use `e` on the TUI's backlog page (`b`), or
 `valk todo edit`. A bug's brief tells the agent to reproduce it first; a feature's, to plan
 and ask before writing code. Agents can add items too, as proposals you accept
 before anything can start them. An agent that fixes something along the way files

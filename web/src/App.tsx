@@ -407,6 +407,20 @@ export function App() {
       </>
     );
   }
+  // The item editor is a panel beside the backlog's list when there's room (#252).
+  if (wide && at.page === "item") {
+    return (
+      <>
+        <div className="split split-side">
+          <Backlog beside />
+          <div className="split-pane">
+            <ItemEditor key={at.id ?? "new"} id={at.id} />
+          </div>
+        </div>
+        {chrome}
+      </>
+    );
+  }
   return (
     <>
       {at.page === "inbox" && <Inbox />}

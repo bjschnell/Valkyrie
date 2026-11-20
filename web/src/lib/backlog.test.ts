@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFiled, appliedSummary, byColumn, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
+import { agentFiled, appliedSummary, byGroup, itemRef, rowState, tree, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
 import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
@@ -150,25 +150,53 @@ describe("byLane", () => {
   });
 });
 
-describe("byColumn", () => {
+describe("byGroup", () => {
   it("puts one that needs you at the top of in progress", () => {
     const working = item({ id: 1, sessions: [3], updated: 9 });
     const stuck = item({ id: 2, sessions: [4], updated: 1 });
-    const cols = byColumn([working, stuck, item({ id: 5 })], [session(3, "working"), session(4, "needs_input")], 7);
-    expect(cols.progress.map(({ item, lane }) => [item.id, lane])).toEqual([
+    const { groups } = byGroup([working, stuck, item({ id: 5 })], [session(3, "working"), session(4, "needs_input")], 7);
+    expect(groups.progress.map(({ item, lane }) => [item.id, lane])).toEqual([
       [2, "needs"],
       [1, "running"],
     ]);
-    expect(cols.backlog.map(({ item }) => item.id)).toEqual([5]);
-    expect(cols.review).toEqual([]);
+    expect(groups.next.map(({ item }) => item.id)).toEqual([5]);
+    expect(groups.review).toEqual([]);
   });
 
-  it("puts what an agent proposed at the top of the backlog", () => {
-    const cols = byColumn([item({ id: 1, updated: 9 }), item({ id: 2, status: "proposed", by: "claude", updated: 1 })], [], 7);
-    expect(cols.backlog.map(({ item, lane }) => [item.id, lane])).toEqual([
-      [2, "proposed"],
-      [1, "backlog"],
+  it("puts what an agent proposed in the tray, not a group", () => {
+    const { filed, groups } = byGroup([item({ id: 1, updated: 9 }), item({ id: 2, status: "proposed", by: "claude", updated: 1 })], [], 7);
+    expect(filed.map((i) => i.id)).toEqual([2]);
+    expect(groups.next.map(({ item }) => item.id)).toEqual([1]);
+  });
+});
+
+describe("tree", () => {
+  it("puts each piece under its item, one step in", () => {
+    const rows = [item({ id: 3, parent: 1 }), item({ id: 1 }), item({ id: 2 }), item({ id: 4, parent: 9 })].map((i) => ({ item: i }));
+    expect(tree(rows).map((r) => [r.item.id, r.depth])).toEqual([
+      [1, 0],
+      [3, 1],
+      [2, 0],
+      [4, 0],
     ]);
+  });
+});
+
+describe("rowState", () => {
+  it("says where an item stands in a word", () => {
+    const all = [item({ id: 1, blocked_by: [2] }), item({ id: 2, number: 7 })];
+    expect(rowState(all[0], "backlog", all)).toEqual({ state: "idle", word: "after #7" });
+    expect(rowState(all[1], "backlog", all)).toEqual({ state: "idle", word: "ready" });
+    expect(rowState(item({ pr: "https://github.com/o/r/pull/41" }), "review", all).word).toBe("PR #41 open");
+    expect(rowState(item(), "review", all, "CI red on PR #41: test")).toEqual({ state: "blocked", word: "CI red on PR #41" });
+    expect(rowState(item(), "needs", all).state).toBe("needs_input");
+  });
+});
+
+describe("itemRef", () => {
+  it("names the repository when it has one", () => {
+    expect(itemRef(item({ project: "/r/api", number: 2 }))).toBe("api#2");
+    expect(itemRef(item({ number: 2 }))).toBe("#2");
   });
 });
 
