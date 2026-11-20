@@ -26,10 +26,8 @@ export type PageKey =
   | "backlog"
   | "decisions"
   | "docs"
-  | "digest"
   | "past"
   | "wiki"
-  | "search"
   | "supervisor"
   | "doc"
   | "item"
@@ -80,7 +78,7 @@ export const PAGE_KEYS = {
     b: "Backlog",
     d: "Memory (decisions, skills, policies)",
     a: "What agents did while you were gone",
-    h: "History (past sessions)",
+    h: "History (what happened, to search and resume)",
     s: "Supervisor",
     "/": "Search session history",
     ",": "Settings",
@@ -121,12 +119,17 @@ export const PAGE_KEYS = {
     "/": "Filter",
     q: "Go back",
   },
-  search: { q: "Go back (Esc in the box just leaves it)", Escape: "Go back (Esc in the box just leaves it)", "/": "Focus the search box" },
   docs: { q: "Back to the inbox", Escape: "Back to the inbox" },
   doc: { q: "Back to the list", Escape: "Back to the list" },
   settings: { q: "Go back", Escape: "Go back" },
-  digest: { q: "Go back", Escape: "Go back" },
-  past: { q: "Go back", Escape: "Go back" },
+  past: {
+    j: "Pick the next, previous one",
+    k: "Pick the next, previous one",
+    Enter: "Open it, resume it, or its PR",
+    "/": "Search",
+    Escape: "Clear the search, or go back (Esc in the box clears it)",
+    q: "Go back",
+  },
   wiki: { q: "Go back (from a page, to the list)", Escape: "Go back (from a page, to the list)" },
   supervisor: { q: "Go back", Escape: "Go back", c: "Open the supervisor session" },
 } as const satisfies Partial<Record<PageKey, Record<string, string>>>;
@@ -141,10 +144,8 @@ const TITLE: Record<PageKey, string> = {
   backlog: "Backlog",
   decisions: "Memory",
   docs: "Docs",
-  digest: "Summary",
-  past: "Past sessions",
+  past: "History",
   wiki: "Wiki",
-  search: "Search",
   supervisor: "Supervisor",
   doc: "Docs",
   item: "Item",

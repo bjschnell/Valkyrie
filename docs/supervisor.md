@@ -96,8 +96,9 @@ one, `↩` accepts and `d` declines.
 Everything the supervisor waits on you for, and what it did, in one place.
 Press `s` on the TUI's home screen; the header counts what waits ("3 for the
 supervisor: s"). On the web, what it waits on you for is in the Inbox's Needs
-you queue with everything else, and the page is History's Supervisor tab (`s`
-from the Inbox's keyboard).
+you queue with everything else, what it did is in History's timeline, and
+History's Supervisor tab (`s` from the Inbox's keyboard) shows the pull
+requests it watches and opens its session.
 
 - **Waiting on you** (TUI): flagged pull requests with the step offered, ready
   items it offers to start, build orders to review, and step policies it learned

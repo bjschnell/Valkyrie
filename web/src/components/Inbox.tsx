@@ -93,7 +93,7 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
       n: to("#/new"),
       b: to("#/backlog"),
       d: to(HASH.memory),
-      a: to(HASH.summary),
+      a: to(HASH.history),
       h: to(HASH.history),
       s: to(HASH.supervisor),
       "/": to(HASH.search),
