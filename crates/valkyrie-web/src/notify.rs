@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use valkyrie_proto::client::{Client, DaemonInfo};
 use valkyrie_proto::{
-    AgentState, AskKind, ClientBuild, Decision, LaunchOffer, NoticeSound, QueueItem, ServerMsg,
-    SessionId,
+    AgentState, AskKind, ClientBuild, Decision, Item, ItemStatus, LaunchOffer, NoticeSound,
+    QueueItem, ServerMsg, SessionId,
 };
 
 /// How long without a keypress before you count as away.
@@ -45,7 +45,8 @@ pub struct Note {
     pub seq: u64,
     /// Notifications with one tag replace each other: one per session.
     pub tag: String,
-    /// The queue's length, for the app icon's badge.
+    /// Everything waiting on you, as the open app counts it (#251), for the app
+    /// icon's badge.
     pub badge: usize,
     #[serde(skip)]
     pub urgency: Urgency,
@@ -80,6 +81,10 @@ pub struct Watch {
     handled: HashMap<SessionId, u64>,
     pending: HashMap<SessionId, Pending>,
     queue_len: usize,
+    /// The rest of what waits on you, as the app's attention queue counts it
+    /// (#251): decisions to review, and the backlog's records (see `records`).
+    proposals_len: usize,
+    records_len: usize,
     started: bool,
     /// Decisions waiting on review, by (project, id, updated): each is news once.
     decisions_known: std::collections::HashSet<(std::path::PathBuf, u32, u64)>,
@@ -107,7 +112,7 @@ impl Watch {
             session: None,
             seq: 0,
             tag: format!("notice-{now_ms}"),
-            badge: self.queue_len,
+            badge: self.badge(),
             urgency: if sound == Some(NoticeSound::Request) {
                 Urgency::High
             } else {
@@ -182,6 +187,7 @@ impl Watch {
             }
             self.decisions_new.push((key, d.title.clone()));
         }
+        self.proposals_len = items.len();
         self.decisions_known = keys;
         self.decisions_started = true;
     }
@@ -200,6 +206,23 @@ impl Watch {
         }
         self.launches_known = ids;
         self.launches_started = true;
+    }
+
+    /// The backlog's share of what waits on you, as the app counts it (#251): each
+    /// build order, each ready item offered to start, and the items agents filed
+    /// that nobody kept or dropped, one per repository.
+    pub fn records(&mut self, items: &[Item], orders: usize, launches: usize) {
+        let filed: std::collections::HashSet<_> = items
+            .iter()
+            .filter(|i| i.status == ItemStatus::Proposed && !i.agent_filed())
+            .map(|i| i.project.clone())
+            .collect();
+        self.records_len = orders + launches + filed.len();
+    }
+
+    /// The app icon's badge: the attention queue's length, as the open app shows it.
+    fn badge(&self) -> usize {
+        self.queue_len + self.proposals_len + self.records_len
     }
 
     pub fn has_pending(&self) -> bool {
@@ -227,13 +250,14 @@ impl Watch {
             .filter(|(_, p)| now_ms.saturating_sub(p.since_ms) >= GRACE_MS)
             .map(|(id, _)| *id)
             .collect();
+        let badge = self.badge();
         let mut notes: Vec<Note> = Vec::new();
         for p in ready.iter().filter_map(|id| self.pending.remove(id)) {
             if p.item.flag.is_some() {
                 self.reminders
                     .insert(p.item.session, (p.item.clone(), now_ms + REMIND_MS));
             }
-            notes.push(note(&p.item, self.queue_len));
+            notes.push(note(&p.item, badge));
         }
         // Flags pushed an hour ago and still unseen: once more, then not again.
         let again: Vec<SessionId> = self
@@ -244,7 +268,7 @@ impl Watch {
             .collect();
         for id in again {
             if let Some((item, _)) = self.reminders.remove(&id) {
-                let mut n = note(&item, self.queue_len);
+                let mut n = note(&item, badge);
                 n.title = format!("Still waiting: {}", n.title);
                 notes.push(n);
             }
@@ -261,7 +285,7 @@ impl Watch {
                 session: None,
                 seq: 0,
                 tag: format!("launch-{}", o.item),
-                badge: self.queue_len,
+                badge: self.badge(),
                 urgency: Urgency::Normal,
                 from_screen: false,
             });
@@ -281,7 +305,7 @@ impl Watch {
                 session: None,
                 seq: 0,
                 tag: "decisions".into(),
-                badge: self.queue_len,
+                badge: self.badge(),
                 urgency: Urgency::Normal,
                 from_screen: false,
             });
@@ -413,7 +437,12 @@ async fn watch_daemon(
                 Some(ServerMsg::Proposals { items }) => {
                     watch.proposals(&items, app.visible(), now_ms())
                 }
-                Some(ServerMsg::Items { launches, .. }) => {
+                Some(ServerMsg::Items {
+                    items,
+                    orders,
+                    launches,
+                }) => {
+                    watch.records(&items, orders.len(), launches.len());
                     watch.launches(&launches, app.visible(), now_ms())
                 }
                 Some(ServerMsg::Notice { text, sound }) => {
@@ -608,6 +637,38 @@ mod tests {
         w.proposals(&[decision(6, "Gone")], false, AWAY);
         w.proposals(&[], false, AWAY + 1);
         assert!(w.due(AWAY + GRACE_MS * 3, 0, false).is_empty());
+    }
+
+    #[test]
+    fn the_badge_counts_everything_the_app_counts() {
+        let backlog = |id: u32, project: &str, status: ItemStatus| -> Item {
+            let mut i: Item = serde_json::from_str(&format!(
+                r#"{{"id":{id},"title":"t","created":0,"updated":0}}"#
+            ))
+            .unwrap();
+            (i.project, i.status) = (Some(project.into()), status);
+            i
+        };
+        let mut w = Watch::default();
+        w.queue(&[item(1, AgentState::NeedsInput, 1, false)], false, 0);
+        w.proposals(&[decision(1, "a"), decision(2, "b")], false, 0);
+        // Filed by agents: one row per repository. One an agent took for its own
+        // work isn't waiting on you, nor is one you kept.
+        let mut taken = backlog(4, "/r/api", ItemStatus::Proposed);
+        (taken.filed_by, taken.taken) = (Some((1, 9)), vec![9]);
+        let items = [
+            backlog(1, "/r/api", ItemStatus::Proposed),
+            backlog(2, "/r/api", ItemStatus::Proposed),
+            backlog(3, "/r/web", ItemStatus::Proposed),
+            taken,
+            backlog(5, "/r/web", ItemStatus::Open),
+        ];
+        w.records(&items, 1, 1);
+        // 1 session + 2 decisions + 2 filed rows + 1 order + 1 launch.
+        assert_eq!(w.notice("x", None, 1).badge, 7);
+        w.records(&[], 0, 0);
+        w.proposals(&[], false, 0);
+        assert_eq!(w.notice("x", None, 1).badge, 1);
     }
 
     #[test]
