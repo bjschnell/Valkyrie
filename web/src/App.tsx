@@ -17,6 +17,7 @@ import { SessionView } from "./components/SessionView";
 import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
 import { showNeeds } from "./lib/badge";
+import { follow, typingIn } from "./lib/follow";
 import { paletteKey } from "./lib/palette";
 import { shortcutsKey } from "./lib/shortcuts";
 import { Palette } from "./components/Palette";
@@ -122,10 +123,17 @@ export function App() {
   const atRef = useRef(at);
   atRef.current = at;
 
+  // The session the right pane opened by itself (#248), while it's followed.
+  const followed = useRef<{ pending: number | null; id: number | null }>({ pending: null, id: null });
+
   useEffect(() => {
     const onHash = () => {
       const next = route();
       const from = atRef.current;
+      // Any other move (a click, a chord, Back) is yours, and ends the following.
+      const f = followed.current;
+      f.id = next.page === "session" && next.id === f.pending ? f.pending : null;
+      f.pending = null;
       const swap = () => flushSync(() => setAt(next));
       // A transition between pages. Stepping between sessions
       // (Alt+J/K) stays instant; so does a device asking for less motion.
@@ -287,6 +295,24 @@ export function App() {
   // With the room for it, the session list stays beside the open session.
   const wide = useWide();
 
+  // Beside the list, the pane shows the top waiting session rather than
+  // nothing, and moves on to the next once it's answered (#248).
+  const waiting = useApp((s) => s.queue.map((q) => q.session).join(","));
+  useEffect(() => {
+    if (!wide || !paired || (at.page !== "inbox" && at.page !== "session")) return;
+    const open = at.page === "session" ? at.id : null;
+    const queue = waiting ? waiting.split(",").map(Number) : [];
+    const to = follow({
+      open,
+      followed: followed.current.id,
+      queue,
+      typing: open !== null && typingIn(open, document.querySelector(".split-pane")),
+    });
+    if (!to || to.open === open) return;
+    followed.current.pending = to.open;
+    location.replace(`#/s/${to.open}`);
+  }, [wide, paired, at, waiting]);
+
   // A rail on a desktop, a tab bar on a phone's top pages.
   const rail = desktop && paired;
   const tabs = !desktop && paired && TOP.has(at.page);
@@ -317,11 +343,11 @@ export function App() {
           <div className="split-pane">
             {at.page === "session" && <SessionView id={at.id} />}
             {at.page === "review" && <ReviewView key={at.id} id={at.id} />}
-            {at.page === "inbox" && (
+            {at.page === "inbox" && !waiting && (
               <div className="split-empty">
-                <div className="split-empty-title">No session open</div>
+                <div className="split-empty-title">Nothing needs you</div>
                 <div>
-                  Pick one from the list. <kbd>{ALT}</kbd>+<kbd>J</kbd> and <kbd>{ALT}</kbd>+<kbd>K</kbd> step through
+                  Pick a session from the list. <kbd>{ALT}</kbd>+<kbd>J</kbd> and <kbd>{ALT}</kbd>+<kbd>K</kbd> step through
                   them, <kbd>{ALT}</kbd>+<kbd>N</kbd> goes to whoever needs you, <kbd>{MAC ? "⌘" : "Ctrl"}</kbd>+<kbd>K</kbd> to anything.
                 </div>
               </div>

@@ -46,8 +46,14 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
   const [sel, setSel] = useState(-1);
   // The one row swiped open to show its Close button.
   const [swiped, setSwiped] = useState<SessionId | null>(null);
-  // What j/k move through: the cards, then the session rows.
-  const order = [...queue.map((q) => q.session), ...sessions.map((s) => s.id)];
+  // Each session is drawn once: a waiting one as its card, the rest as a row
+  // under Running or Quiet. A row keeps its number, which Alt+digit goes to.
+  const queued = new Set(queue.map((q) => q.session));
+  const rows = sessions.map((s, i) => ({ s, n: i + 1 })).filter(({ s }) => !queued.has(s.id));
+  const running = rows.filter(({ s }) => s.exited === null && s.status.state === "working");
+  const quiet = rows.filter(({ s }) => !(s.exited === null && s.status.state === "working"));
+  // What j/k move through, in the order they're drawn.
+  const order = [...queue.map((q) => q.session), ...running.map(({ s }) => s.id), ...quiet.map(({ s }) => s.id)];
   const selected = order[sel] ?? null;
 
   // n starts a session; j/k pick a card or row, Enter opens it, r reviews its
@@ -78,6 +84,18 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
       r: () => selected !== null && (location.hash = `#/s/${selected}/review`),
     },
     { off: beside != null },
+  );
+
+  const row = ({ s, n }: { s: SessionInfo; n: number }) => (
+    <SessionRow
+      key={s.id}
+      s={s}
+      n={n}
+      picked={order[sel] === s.id}
+      current={beside === s.id}
+      swiped={swiped === s.id}
+      onSwipe={(open) => setSwiped((was) => (open ? s.id : was === s.id ? null : was))}
+    />
   );
 
   return (
@@ -128,6 +146,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
                   item={item}
                   info={sessions.find((s) => s.id === item.session)}
                   picked={sel === i}
+                  current={beside === item.session}
                 />
               ))}
             </div>
@@ -141,33 +160,32 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
           <NotifyHint />
         </div>
 
-        <section>
-          <h2 className="section-title">
-            Sessions <span className="count">{sessions.length}</span>
-          </h2>
-          <div className="list">
-            {sessions.map((s, i) => (
-              <SessionRow
-                key={s.id}
-                s={s}
-                n={i + 1}
-                picked={sel === queue.length + i}
-                current={beside === s.id}
-                swiped={swiped === s.id}
-                onSwipe={(open) =>
-                  setSwiped((was) => (open ? s.id : was === s.id ? null : was))
-                }
-              />
-            ))}
-            {sessions.length === 0 && (
-              <EmptyState
-                title="No sessions yet"
-                hint="Start an agent in a repository and it shows up here."
-                action={{ label: "New session", run: () => (location.hash = "#/new") }}
-              />
-            )}
-          </div>
-        </section>
+        {running.length > 0 && (
+          <section>
+            <h2 className="section-title">
+              Running <span className="count">{running.length}</span>
+            </h2>
+            <div className="list">{running.map(row)}</div>
+          </section>
+        )}
+
+        {(quiet.length > 0 || sessions.length === 0) && (
+          <section>
+            <h2 className="section-title">
+              Quiet <span className="count">{quiet.length}</span>
+            </h2>
+            <div className="list">
+              {quiet.map(row)}
+              {sessions.length === 0 && (
+                <EmptyState
+                  title="No sessions yet"
+                  hint="Start an agent in a repository and it shows up here."
+                  action={{ label: "New session", run: () => (location.hash = "#/new") }}
+                />
+              )}
+            </div>
+          </section>
+        )}
       </main>
     </div>
   );
@@ -268,10 +286,13 @@ function QueueCard({
   item,
   info,
   picked,
+  current,
 }: {
   item: QueueItem;
   info?: SessionInfo;
   picked: boolean;
+  /** Open in the pane beside the list. */
+  current: boolean;
 }) {
   const now = useApp((s) => s.now);
   const prompt = useApp((s) => s.prompts[item.session]);
@@ -285,8 +306,8 @@ function QueueCard({
       data-glide
       style={{ "--vtn": `card-${item.session}` } as CSSProperties}
     >
-      <article className={`card state-${s.state}`}>
-        <button className="card-head" onClick={() => go(item.session)}>
+      <article className={`card state-${s.state} ${current ? "current" : ""}`}>
+        <button className="card-head" aria-current={current || undefined} onClick={() => go(item.session)}>
           <StateIcon state={s.state} />
           <span className="card-name">{item.name}</span>
           <span className="card-prog">{info ? program(info) : s.agent}</span>
