@@ -86,7 +86,12 @@ impl Page {
                 b"g" | b"\x1b[H" | b"\x1b[1~" => self.cursor = 0,
                 b"G" | b"\x1b[F" | b"\x1b[4~" => self.cursor = n.saturating_sub(1),
                 b"\r" | b"\n" => {
-                    if let Some(url) = prs.get(self.cursor) {
+                    // Only a web address goes to the browser opener, never
+                    // something it could read as an option.
+                    if let Some(url) = prs
+                        .get(self.cursor)
+                        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+                    {
                         out.push(Do::Open(url.clone()));
                     }
                 }

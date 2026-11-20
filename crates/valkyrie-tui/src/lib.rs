@@ -3252,24 +3252,21 @@ impl App {
         let tz = jiff::tz::TimeZone::system();
         let since = page.win.since(now_ms(), &tz);
         // The sessions, what the supervisor did, and what ended (for `R`).
-        let got = async {
-            let digest = self
-                .client
-                .digest(since, valkyrie_proto::DigestGroup::Day)
-                .await?;
-            let steps = self
-                .client
-                .supervisor_log()
-                .await
-                .map(|(log, _)| log)
-                .unwrap_or_default();
-            let past = self.client.history().await.unwrap_or_default();
-            anyhow::Ok((digest, steps, past))
-        }
-        .await
-        .map_err(|e| e.to_string());
+        let text = |e: anyhow::Error| format!("{e:#}");
+        let digest = self
+            .client
+            .digest(since, valkyrie_proto::DigestGroup::Day)
+            .await
+            .map_err(text);
+        let steps = self
+            .client
+            .supervisor_log()
+            .await
+            .map(|(log, _)| log)
+            .map_err(text);
+        let past = self.client.history().await.map_err(text);
         if let Some(page) = &mut self.digest {
-            page.loaded(got, &tz);
+            page.loaded(digest, steps, past, &tz);
         }
     }
 

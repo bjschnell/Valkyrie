@@ -122,6 +122,14 @@ pub(crate) struct Page {
     steps: Vec<SupervisorEntry>,
     past: Vec<PastSession>,
     failed: Option<String>,
+    /// Why the supervisor's log or the ended sessions couldn't be read.
+    steps_failed: Option<String>,
+    past_failed: Option<String>,
+    /// An answer is in (Ended doesn't need the digest's).
+    answered: bool,
+    /// Inside a bracketed paste while typing the search: its line breaks are
+    /// spaces, not the end of typing.
+    pasting: bool,
     rows: Vec<Row>,
     /// Index among the sessions and steps (not the days).
     cursor: usize,
@@ -140,25 +148,29 @@ impl Page {
     }
 
     /// The daemon's answers for the page's window: the digest, the supervisor's
-    /// log, and the sessions that ended (which `R` resumes).
+    /// log, and the sessions that ended (which `R` resumes), each on its own:
+    /// one failing says so and leaves the others.
     pub(crate) fn loaded(
         &mut self,
-        got: Result<(Digest, Vec<SupervisorEntry>, Vec<PastSession>), String>,
+        digest: Result<Digest, String>,
+        steps: Result<Vec<SupervisorEntry>, String>,
+        past: Result<Vec<PastSession>, String>,
         tz: &TimeZone,
     ) {
         self.cursor = 0;
-        match got {
-            Ok((digest, steps, past)) => {
-                self.digest = Some(digest);
-                self.steps = steps;
-                self.past = past;
-                self.failed = None;
-            }
-            Err(e) => {
-                self.digest = None;
-                self.failed = Some(e);
-            }
-        }
+        self.answered = true;
+        (self.digest, self.failed) = match digest {
+            Ok(d) => (Some(d), None),
+            Err(e) => (None, Some(e)),
+        };
+        (self.steps, self.steps_failed) = match steps {
+            Ok(s) => (s, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
+        (self.past, self.past_failed) = match past {
+            Ok(p) => (p, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
         self.build(tz);
     }
 
@@ -166,6 +178,7 @@ impl Page {
     pub(crate) fn loading(&mut self) {
         self.digest = None;
         self.failed = None;
+        self.answered = false;
         self.rows.clear();
         self.cursor = 0;
     }
@@ -174,13 +187,13 @@ impl Page {
     /// day, newest first.
     fn build(&mut self, tz: &TimeZone) {
         self.rows.clear();
-        let Some(d) = &self.digest else { return };
         let mut items: Vec<Row> = if self.win == Window::Ended {
             self.past
                 .iter()
                 .map(|p| Row::Entry(Box::new(p.entry.clone())))
                 .collect()
         } else {
+            let Some(d) = &self.digest else { return };
             d.entries
                 .iter()
                 .map(|e| Row::Entry(Box::new(e.clone())))
@@ -230,6 +243,15 @@ impl Page {
         self.items().nth(self.cursor)
     }
 
+    /// The branch a resume adds the worktree back on, when it's gone.
+    fn regrow(&self, key: &str) -> Option<&str> {
+        self.past
+            .iter()
+            .find(|p| p.entry.key == key)?
+            .regrow
+            .as_deref()
+    }
+
     /// Whether `key` (a past session's) can be resumed, and why not.
     fn resumable(&self, key: &str) -> Option<Result<(), String>> {
         let p = self.past.iter().find(|p| p.entry.key == key)?;
@@ -245,11 +267,26 @@ impl Page {
     pub(crate) fn keys(&mut self, mut bytes: &[u8], tz: &TimeZone) -> Vec<Do> {
         let mut out = Vec::new();
         while !bytes.is_empty() {
-            let key = next_key(bytes);
+            let mut key = next_key(bytes);
+            // A character of more than one byte comes a byte at a time: whole.
+            if self.typing && key.len() == 1 && key[0] >= 0xC0 {
+                let len = match key[0] {
+                    0xF0.. => 4,
+                    0xE0.. => 3,
+                    _ => 2,
+                };
+                key = &bytes[..len.min(bytes.len())];
+            }
             let whole = key.len() == bytes.len();
             bytes = &bytes[key.len()..];
             if self.typing {
                 match key {
+                    b"\x1b[200~" => self.pasting = true,
+                    b"\x1b[201~" => self.pasting = false,
+                    b"\r" | b"\n" if self.pasting => {
+                        self.query.push(' ');
+                        self.build(tz);
+                    }
                     b"\r" | b"\n" => self.typing = false,
                     b"\x1b" if whole => {
                         self.typing = false;
@@ -276,6 +313,8 @@ impl Page {
             }
             let n = self.items().count();
             match key {
+                b"q" | [0x03] => out.push(Do::Close),
+                b"\x1b" if whole && self.resuming => out.push(Do::Close),
                 _ if self.resuming => {}
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
                 b"j" | b"\x1b[B" | b"\x1bOB" => {
@@ -322,8 +361,14 @@ impl Page {
                 }
                 b"/" => self.typing = true,
                 b"r" => out.push(Do::Load),
-                b"y" => match &self.digest {
-                    Some(d) if !d.entries.is_empty() => out.push(Do::Copy(d.markdown.clone())),
+                b"y" => match (&self.digest, self.win) {
+                    // What's on screen: the ended sessions, as a list.
+                    (_, Window::Ended) if !self.past.is_empty() => {
+                        out.push(Do::Copy(ended_markdown(&self.past)))
+                    }
+                    (Some(d), w) if w != Window::Ended && !d.entries.is_empty() => {
+                        out.push(Do::Copy(d.markdown.clone()))
+                    }
                     _ => out.push(Do::Say("nothing to copy".into())),
                 },
                 b"\x1b" if whole && !self.query.is_empty() => {
@@ -332,7 +377,6 @@ impl Page {
                     self.build(tz);
                 }
                 b"\x1b" if whole => out.push(Do::Close),
-                b"q" | [0x03] => out.push(Do::Close),
                 _ => {}
             }
         }
@@ -343,12 +387,6 @@ impl Page {
     /// its state's word and color.
     fn summary(&self, d: &Digest, t: &Theme) -> Line<'static> {
         let mut spans: Vec<Span> = vec![" ".into()];
-        if self.win == Window::Ended {
-            let n = self.past.len();
-            let plural = if n == 1 { "" } else { "s" };
-            spans.push(format!("{n} session{plural} ended, newest first").fg(t.fg));
-            return Line::from(spans);
-        }
         // Short, as the spec has it: `9 h away:`, `Today:`, `3 days:`.
         let lead = match self.win {
             Window::Away => format!("{} away:", span(d.until_ms.saturating_sub(d.since_ms))),
@@ -374,6 +412,9 @@ impl Page {
                 )
                 .fg(t.muted),
             );
+        }
+        if self.steps_failed.is_some() {
+            spans.push(" · the supervisor's log couldn't be read".fg(t.blocked));
         }
         Line::from(spans)
     }
@@ -472,7 +513,13 @@ impl Page {
                     ])),
                     (None, Some(Ok(()))) => Some(Line::from(vec![
                         "R".fg(t.accent).bold(),
-                        " resume it".fg(t.dim()),
+                        match self.regrow(&e.key) {
+                            Some(branch) => {
+                                format!(" resume it, adding its worktree back on {branch}")
+                            }
+                            None => " resume it".into(),
+                        }
+                        .fg(t.dim()),
                     ])),
                     (None, Some(Err(why))) => {
                         Some(Line::from(format!("can't resume: {why}").fg(t.muted)))
@@ -566,6 +613,23 @@ impl Page {
         }
         top.push(Line::from(row));
         match (&self.digest, &self.failed) {
+            _ if self.win == Window::Ended => match &self.past_failed {
+                Some(e) => top.push(
+                    format!(" Couldn't read the ended sessions: {e} · r tries again")
+                        .fg(t.blocked)
+                        .into(),
+                ),
+                None if !self.answered => top.push(" Loading…".fg(t.muted).into()),
+                None => {
+                    let n = self.past.len();
+                    let plural = if n == 1 { "" } else { "s" };
+                    top.push(
+                        format!(" {n} session{plural} ended, newest first")
+                            .fg(t.fg)
+                            .into(),
+                    );
+                }
+            },
             (_, Some(e)) => top.push(
                 format!(" Couldn't load History: {e} · r tries again")
                     .fg(t.blocked)
@@ -651,6 +715,20 @@ impl Page {
             );
         }
     }
+}
+
+/// The ended sessions as a markdown list, for `y` on Ended.
+fn ended_markdown(past: &[PastSession]) -> String {
+    let mut out = String::from("Sessions that ended:\n\n");
+    for p in past {
+        let e = &p.entry;
+        out.push_str(&format!("- {} ({}): {}", e.what, e.repo, word(e.outcome)));
+        if !e.detail.is_empty() {
+            out.push_str(&format!(", {}", e.detail));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// The one word for an outcome: a finished turn is "finished" (spec: one state
@@ -764,7 +842,7 @@ mod tests {
             .unwrap(),
         ];
         let mut p = Page::default();
-        p.loaded(Ok((digest, steps, past)), &tz);
+        p.loaded(Ok(digest), Ok(steps), Ok(past), &tz);
         p
     }
 
@@ -794,11 +872,32 @@ mod tests {
         assert_eq!(p.items().count(), 3);
         assert_eq!(p.keys(b"\x1b", &tz), [Do::Close]);
 
+        // A character of several bytes, and a pasted line, go in whole.
+        p.keys("/é".as_bytes(), &tz);
+        p.keys(b"\x1b[200~a\nb\x1b[201~", &tz);
+        assert_eq!(p.query, "éa b");
+        assert!(p.typing);
+        p.keys(b"\x1b", &tz);
+
+        // Waiting on a resume, Esc and q still close.
+        p.resuming = true;
+        assert_eq!(p.keys(b"q", &tz), [Do::Close]);
+        p.resuming = false;
+
         // `[ ]` move the window and ask again.
         assert_eq!(p.keys(b"]", &tz), [Do::Load]);
         assert_eq!(p.win, Window::Today);
         p.keys(b"[[", &tz);
         assert_eq!(p.win, Window::Ended);
+        // Ended stands without the digest, and y copies what it shows.
+        let tz = TimeZone::UTC;
+        let past = std::mem::take(&mut p.past);
+        p.loaded(Err("no digest".into()), Ok(Vec::new()), Ok(past), &tz);
+        assert_eq!(p.items().count(), 1);
+        match p.keys(b"y", &tz).as_slice() {
+            [Do::Copy(md)] => assert!(md.contains("- bump vite (api)"), "{md}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
