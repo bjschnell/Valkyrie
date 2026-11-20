@@ -2462,16 +2462,21 @@ impl App {
                 .proposals
                 .iter()
                 .position(|d| d.project == project && d.id == id),
-            Anchor::Queue(id) => self
-                .queue
-                .iter()
-                .position(|q| Some(q.session) == id)
-                .map(|i| self.proposals.len() + i),
-            Anchor::Session(id) => self
-                .others()
-                .iter()
-                .position(|s| Some(s.id) == id)
-                .map(|i| self.proposals.len() + self.queue.len() + i),
+            // A session can move between Needs you and the rows below it (it asks,
+            // or it's seen): the cursor goes with it, wherever it is now.
+            Anchor::Queue(id) | Anchor::Session(id) => {
+                let queued = self
+                    .queue
+                    .iter()
+                    .position(|q| Some(q.session) == id)
+                    .map(|i| self.proposals.len() + i);
+                queued.or_else(|| {
+                    self.others()
+                        .iter()
+                        .position(|s| Some(s.id) == id)
+                        .map(|i| self.proposals.len() + self.queue.len() + i)
+                })
+            }
         };
         if let Some(i) = found {
             self.selected = i;
@@ -4516,7 +4521,7 @@ impl App {
             }
         }
 
-        // Keep the cursor's row in sight, its group's label too when it fits.
+        // Keep the cursor's row in sight.
         let height = inner.height as usize;
         let at = lines
             .iter()
@@ -6001,6 +6006,11 @@ fn is_running(s: &SessionInfo) -> bool {
     s.exited.is_none() && s.status.state == AgentState::Working
 }
 
+/// `text` padded with spaces to `cells` columns wide (wide characters count two).
+fn pad(text: &str, cells: usize) -> String {
+    format!("{text}{}", " ".repeat(cells.saturating_sub(text.width())))
+}
+
 /// Inbox name and repo columns, in cells.
 const INBOX_NAME: usize = 14;
 const INBOX_REPO: usize = 7;
@@ -6017,9 +6027,7 @@ fn inbox_row(
     width: usize,
     t: &Theme,
 ) -> Line<'static> {
-    let name = format!("{:<INBOX_NAME$}", fit(name, INBOX_NAME))
-        .fg(t.fg)
-        .bold();
+    let name = pad(&fit(name, INBOX_NAME), INBOX_NAME).fg(t.fg).bold();
     let name = if auto { name.italic() } else { name };
     let repo = cwd
         .file_name()
@@ -6030,7 +6038,7 @@ fn inbox_row(
         format!("{} ", state_icon(state, spin)).fg(t.state(state)),
         name,
         " ".into(),
-        format!("{:<INBOX_REPO$}", fit(&repo, INBOX_REPO)).fg(t.muted),
+        pad(&fit(&repo, INBOX_REPO), INBOX_REPO).fg(t.muted),
         " ".into(),
     ];
     let used: usize = spans.iter().map(Span::width).sum();
@@ -6085,7 +6093,7 @@ fn inbox_session_row(
         None => s.status.state,
         Some(code) => {
             let word = code.map_or("exited".into(), |c| format!("exited {c}"));
-            text.push(word.fg(t.muted));
+            text.push(format!("{word} ").fg(t.muted));
             AgentState::Exited
         }
     };
@@ -7637,6 +7645,20 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.selection(), (Some(1), app.queue.get(1)));
+        // A session below that starts asking moves up into the queue; the cursor
+        // goes with it, and back down when it's answered.
+        app.selected = 2; // session 3, under the queue's two rows
+        assert_eq!(app.selection(), (Some(3), None));
+        app.on_push(ServerMsg::Queue {
+            items: vec![queued(3), queued(2), queued(1)],
+        })
+        .unwrap();
+        assert_eq!((app.selected, app.selection().0), (0, Some(3)));
+        app.on_push(ServerMsg::Queue {
+            items: vec![queued(2), queued(1)],
+        })
+        .unwrap();
+        assert_eq!((app.selected, app.selection()), (2, (Some(3), None)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
