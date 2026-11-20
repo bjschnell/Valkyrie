@@ -90,7 +90,7 @@ function PastRow({ p, busy, onResume }: { p: PastSession; busy: boolean; onResum
       disabled={busy}
       onClick={onResume}
     >
-      <span className={`kind-chip outcome-${p.outcome}`}>{busy ? "resuming…" : outcomeLabel(p.outcome)}</span>
+      <span className={`state-tag outcome-${p.outcome}`}>{busy ? "resuming…" : outcomeLabel(p.outcome)}</span>
       <span className="row-main">
         <span className="row-name">{p.what}</span>
         <span className="row-sub">{sub}</span>

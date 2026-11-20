@@ -137,7 +137,7 @@ export function SectionTabs({ tabs, label, counts }: { tabs: Tab[]; label: strin
     .filter((t) => here === t.hash || here.startsWith(`${t.hash}/`))
     .sort((a, b) => b.hash.length - a.hash.length)[0];
   return (
-    <nav className="kind-pick section-tabs" aria-label={label}>
+    <nav className="seg section-tabs" aria-label={label}>
       {tabs.map((t) => {
         const on = t === current;
         const n = counts?.[t.label];
@@ -145,7 +145,7 @@ export function SectionTabs({ tabs, label, counts }: { tabs: Tab[]; label: strin
           <a
             key={t.hash}
             href={t.hash}
-            className={`kind-chip ${on ? "on" : ""}`}
+            className={`seg-item ${on ? "on" : ""}`}
             aria-current={on ? "page" : undefined}
             onPointerEnter={t.warm}
             onPointerDown={t.warm}

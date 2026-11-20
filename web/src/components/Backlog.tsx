@@ -191,8 +191,8 @@ export function Backlog() {
                 ))}
               </select>
             )}
-            <div className="kind-pick" role="radiogroup" aria-label="Kind">
-              <button role="radio" aria-checked={kind === null} className={`kind-chip ${kind === null ? "on" : ""}`} onClick={() => pickKind(null)}>
+            <div className="seg" role="radiogroup" aria-label="Kind">
+              <button role="radio" aria-checked={kind === null} className={`seg-item ${kind === null ? "on" : ""}`} onClick={() => pickKind(null)}>
                 all
               </button>
               {ITEM_KINDS.map((k) => (
@@ -200,7 +200,7 @@ export function Backlog() {
                   key={k}
                   role="radio"
                   aria-checked={kind === k}
-                  className={`kind-chip kind-${k} ${kind === k ? "on" : ""}`}
+                  className={`seg-item ${kind === k ? "on" : ""}`}
                   // Tapping the one shown again shows every kind.
                   onClick={() => pickKind(kind === k ? null : k)}
                 >
@@ -532,8 +532,8 @@ function ItemCard({ item, lane }: { item: Item; lane: Lane }) {
     <div className="card-slot">
       <article ref={cardRef} className={`card item-card ${EDGE[lane]} ${lane === "done" ? "item-done" : ""}`}>
         <button className="card-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
-          <span className={`kind-chip kind-${item.kind}`}>{item.kind}</span>
-          {lane !== "done" && <span className={`kind-chip prio-${priority(item)}`}>{priority(item)}</span>}
+          <span className="tag">{item.kind}</span>
+          {lane !== "done" && <span className="tag">{priority(item)}</span>}
           <span className="card-prog">#{item.number}</span>
           <span className="card-prog item-folder">{folder ?? "no folder"}</span>
           <span className="card-age">{lane === "done" ? item.status : age(item.updated * 1000, now)}</span>
@@ -922,13 +922,13 @@ export function ItemEditor({ id }: { id: number | null }) {
       </header>
 
       <main className="launcher">
-        <div className="kind-pick" role="radiogroup" aria-label="Kind">
+        <div className="seg" role="radiogroup" aria-label="Kind">
           {ITEM_KINDS.map((k) => (
             <button
               key={k}
               role="radio"
               aria-checked={kind === k}
-              className={`kind-chip kind-${k} ${kind === k ? "on" : ""}`}
+              className={`seg-item ${kind === k ? "on" : ""}`}
               onClick={() => setKind(k)}
             >
               {k}
@@ -936,13 +936,13 @@ export function ItemEditor({ id }: { id: number | null }) {
           ))}
         </div>
 
-        <div className="kind-pick" role="radiogroup" aria-label="Priority">
+        <div className="seg" role="radiogroup" aria-label="Priority">
           {PRIORITIES.map((p) => (
             <button
               key={p}
               role="radio"
               aria-checked={prio === p}
-              className={`kind-chip prio-${p} ${prio === p ? "on" : ""}`}
+              className={`seg-item ${prio === p ? "on" : ""}`}
               onClick={() => setPrio(p)}
             >
               {p}

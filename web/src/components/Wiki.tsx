@@ -132,7 +132,7 @@ function Listing({
         <div className="list">
           {listing.pages.map((p) => (
             <button key={p.slug} className="row doc-row" disabled={opening !== null} onClick={() => void read(p.slug)}>
-              <span className={`kind-chip ${p.stale ? "wiki-stale" : ""}`}>{opening === p.slug ? "opening…" : p.stale ? "stale" : p.slug}</span>
+              <span className={p.stale ? "state-tag wiki-stale" : "tag"}>{opening === p.slug ? "opening…" : p.stale ? "stale" : p.slug}</span>
               <span className="row-main">
                 <span className="row-name">{p.title}</span>
                 <span className="row-sub">{p.stale ? `Stale: ${p.stale}` : p.summary || p.scope.join(", ")}</span>
@@ -205,7 +205,7 @@ function Reader({ page }: { page: WikiPage }) {
   return (
     <>
       <div className="doc-meta">
-        <span className={`kind-chip ${page.stale ? "wiki-stale" : ""}`}>{page.stale ? "stale" : page.slug}</span>
+        <span className={page.stale ? "state-tag wiki-stale" : "tag"}>{page.stale ? "stale" : page.slug}</span>
         {page.commit ? <code>{page.commit}</code> : null}
         <span className="doc-path">covers {covers}</span>
       </div>

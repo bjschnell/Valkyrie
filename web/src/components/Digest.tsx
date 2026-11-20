@@ -82,26 +82,26 @@ export function DigestView() {
       <HistoryTabs />
 
       <main className="inbox">
-        <div className="kind-pick" role="radiogroup" aria-label="Since">
+        <div className="seg" role="radiogroup" aria-label="Since">
           {WINDOWS.map(([w, label]) => (
             <button
               key={w}
               role="radio"
               aria-checked={win === w}
-              className={`kind-chip ${win === w ? "on" : ""}`}
+              className={`seg-item ${win === w ? "on" : ""}`}
               onClick={() => setWin(w)}
             >
               {label}
             </button>
           ))}
         </div>
-        <div className="kind-pick" role="radiogroup" aria-label="Group by">
+        <div className="seg" role="radiogroup" aria-label="Group by">
           {(["repo", "day"] as const).map((g) => (
             <button
               key={g}
               role="radio"
               aria-checked={by === g}
-              className={`kind-chip ${by === g ? "on" : ""}`}
+              className={`seg-item ${by === g ? "on" : ""}`}
               onClick={() => setBy(g)}
             >
               by {g}
@@ -145,7 +145,7 @@ function DigestRow({ e, by }: { e: DigestEntry; by: DigestGroup }) {
   const sub = [where, spanOf(e), e.session !== undefined ? "running" : null].filter(Boolean).join(" · ");
   const body = (
     <>
-      <span className={`kind-chip outcome-${e.outcome}`}>{outcomeLabel(e.outcome)}</span>
+      <span className={`state-tag outcome-${e.outcome}`}>{outcomeLabel(e.outcome)}</span>
       <span className="row-main">
         <span className="row-name">{e.what}</span>
         <span className="digest-detail">{e.detail}</span>

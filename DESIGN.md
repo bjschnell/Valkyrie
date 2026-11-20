@@ -649,6 +649,13 @@ Backlog #104. It was tried first behind switches in Settings, one per part, agai
 - **Motion.** Page changes use the View Transitions API: a slide by depth on a phone, a fade beside the session list. Stepping between sessions stays instant. It also adds hover, press and focus-visible states. Reduced motion turns it off.
 - **Tokens.** `styles.css` used 16 font sizes, 20 radii and odd spacing steps. Every size, weight, corner, gap and shadow now comes from a scale in `:root`: `--text-*`, `--weight-*`, `--radius-*`, the 2 px `--space-*` grid, `--shadow-1..3` and `--ease-out`. Values snapped to the nearest step; laid out against the old build, nothing moved more than 11 px down a page.
 
+- **Visual system** (#250, the redesign's step 3; spec in docs #6). The default look takes the redesign's tokens (`--page #16171e`, `--surface`, `--raised`, `--line`, `--divider`, `--seg-on`, text `--fg`/`--soft`/`--muted`/`--faint`, stuck `#ff6e6e`). The other looks derive the new tokens from their own palettes, and the contrast test still holds every look to AA.
+  - **Type:** six steps (`--type-title` 28/700, `--type-heading` 20/650, `--type-row` 15/600, `--type-body` 15/400, `--type-label` 13/500, `--type-mono` 12 mono). Everything is sentence case; no uppercase tracked labels, except as a look's own skin (netrunner).
+  - **Three kinds of small thing:** a `.tag` is a quiet mono word with no box and no color, never clickable (kinds, priorities, slugs). A `.state-tag` is a dot plus a word (an outcome, stale). A `.seg` is the one segmented control every filter and section tab uses.
+  - **State dots:** a session's state is a round dot. It's filled when the session waits on you (ask yellow, stuck red, done green) and outlined when it doesn't (running cyan, quiet grey). Interrupted and stale read as stuck.
+  - **Color means state:** kinds lost their colors, and a plain Delete or No beside Accept is neutral. Red is for state and for a destructive confirm (the second tap).
+  - **One primary button per view:** the view's own button is filled violet. Inside an item of a list (a queue card, a proposal, a build order) the main answer is tinted, not filled.
+
 ## 9. Tech choices (proposed, challengeable)
 - Rust, tokio, axum (HTTP/WS), ratatui + crossterm, rusqlite (WAL) or sqlx, portable-pty, alacritty_terminal/vte, serde, tracing.
 - Web: Rust-compiled WASM vs TypeScript (Svelte/Solid) is an open choice. Lean TS for PWA speed of iteration unless a shared protocol crate to WASM gives real wins.
