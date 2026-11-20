@@ -378,6 +378,24 @@ h1[tabindex="-1"]:focus {
   padding: var(--space-2) var(--space-35) 32px;
 }
 
+/* A section's pages (Memory: Decisions, Docs, Wiki; History: Sessions, Summary,
+   Search, Supervisor), in the page's column under its top bar (#249). */
+.section-tabs {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-25) var(--space-35) 0;
+}
+
+.section-tabs .kind-chip {
+  text-decoration: none;
+}
+
+.section-tabs .count {
+  margin-left: var(--space-15);
+  opacity: 0.8;
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -4706,7 +4724,7 @@ button.as-text {
 }
 
 /* The pages the nav reaches don't need a way back to the inbox. */
-html.with-rail:is([data-page="backlog"], [data-page="docs"], [data-page="decisions"], [data-page="digest"], [data-page="past"], [data-page="search"], [data-page="supervisor"], [data-page="settings"])
+html.with-rail:is([data-page="backlog"], [data-page="docs"], [data-page="decisions"], [data-page="digest"], [data-page="past"], [data-page="search"], [data-page="supervisor"], [data-page="wiki"], [data-page="settings"])
   .topbar
   > .icon-btn[aria-label="Back"]:first-child,
 html.with-tabs .topbar > .icon-btn[aria-label="Back"]:first-child {
@@ -4853,67 +4871,6 @@ html.with-tabs .page {
 .tab .nav-label {
   font-size: var(--text-2xs);
   font-weight: var(--weight-medium);
-}
-
-/* The More sheet (#188): a native modal dialog in the top layer, over the tab bar. */
-.sheet {
-  position: fixed;
-  inset: auto 0 0 0;
-  width: 100%;
-  max-width: none;
-  max-height: calc(100dvh - 48px);
-  margin: 0;
-  padding: var(--space-2) var(--space-3) calc(env(safe-area-inset-bottom) + var(--space-3));
-  border: 0;
-  border-top: 1px solid var(--line);
-  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-  background: var(--page);
-  color: var(--fg);
-  overflow-y: auto;
-  animation: sheet-up 0.24s var(--ease-out);
-}
-
-.sheet::backdrop {
-  background: rgb(0 0 0 / 45%);
-  animation: fade-in 0.16s ease-out;
-}
-
-.sheet-grip {
-  width: 36px;
-  height: 4px;
-  margin: var(--space-05) auto var(--space-25);
-  border-radius: var(--radius-full);
-  background: var(--line);
-}
-
-.sheet-row {
-  color: var(--fg);
-}
-
-.sheet-row[aria-current="page"] {
-  color: var(--accent);
-}
-
-.sheet-icon {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-md);
-  background: var(--raised);
-  color: var(--soft);
-}
-
-@keyframes fade-in {
-  from {
-    opacity: 0;
-  }
-}
-
-@keyframes sheet-up {
-  from {
-    transform: translateY(100%);
-  }
 }
 
 /* The toast clears the tab bar. */

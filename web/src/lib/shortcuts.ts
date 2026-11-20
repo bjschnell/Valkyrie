@@ -57,6 +57,7 @@ function everywhere(mac: boolean): Section {
       { keys: [[alt, "P"]], does: "Back to the last session" },
       { keys: [[alt, "H"]], does: "Home" },
       { keys: [[alt, "1…9"]], does: "Jump to that session" },
+      { keys: [["g", "i"], ["g", "b"], ["g", "m"], ["g", "h"]], does: "Inbox, Backlog, Memory, History (not in a session)" },
     ],
   };
 }
@@ -78,7 +79,7 @@ export const PAGE_KEYS = {
     b: "Backlog",
     d: "Memory (decisions, skills, policies)",
     a: "What agents did while you were gone",
-    h: "Past sessions",
+    h: "History (past sessions)",
     s: "Supervisor",
     "/": "Search session history",
     ",": "Settings",

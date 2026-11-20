@@ -1,4 +1,6 @@
+import { HASH } from "../lib/routes";
 import { useEffect, useRef, useState } from "react";
+import { HistoryTabs } from "./Nav";
 import type { WatchedPr } from "../proto";
 import { base, itemNo, launchesOn, orderHref, orderSize } from "../lib/backlog";
 import { stepChoices } from "../lib/step";
@@ -45,7 +47,7 @@ export function SupervisorStrip() {
   const line = stripLine(waits.length, log?.entries[0]);
   if (!line) return null;
   return (
-    <button className="quiet-line" onClick={() => (location.hash = "#/supervisor")}>
+    <button className="quiet-line" onClick={() => (location.hash = HASH.supervisor)}>
       <span className="quiet-line-name">Supervisor</span>
       <span className="quiet-line-text">{line}</span>
       <Chevron />
@@ -94,6 +96,7 @@ export function SupervisorView() {
           Session
         </button>
       </header>
+      <HistoryTabs />
       <main className="inbox supervisor">
         <section>
           <h2 className="section-title">

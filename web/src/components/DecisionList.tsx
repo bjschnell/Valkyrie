@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { MemoryTabs } from "./Nav";
 import type { Decision, Note } from "../proto";
 import { SHELVES, type Shelf, byProject, ended, inFull, matches, pinnable, shelf } from "../lib/decisions";
 import { live, notesByProject } from "../lib/notes";
@@ -113,6 +114,7 @@ export function DecisionList() {
           <h1 className="title-name">Memory</h1>
         </div>
       </header>
+      <MemoryTabs />
 
       <main className="inbox">
         <ToReview />

@@ -1,4 +1,6 @@
+import { docHash, HASH } from "../lib/routes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MemoryTabs } from "./Nav";
 import type { CommentState, DeletedDoc, Doc, DocComment, DocVersion } from "../proto";
 import { body, countByQuote, grouped, onlyIn, resolver, validKey } from "../lib/docs";
 import { clock } from "../lib/chat";
@@ -74,6 +76,7 @@ export function DocsList() {
           <h1 className="title-name">Docs</h1>
         </div>
       </header>
+      <MemoryTabs />
       <main className="inbox">
         {docs === null && (failed ? <ErrorState what="the docs" why={failed} onRetry={reload} /> : <Loading />)}
         {docs !== null && docs.length === 0 && (
@@ -94,7 +97,7 @@ export function DocsList() {
                   key={d.key || d.path}
                   className="row doc-row"
                   disabled={!d.key}
-                  onClick={() => d.key && go(`#/docs/${encodeURIComponent(d.key)}`)}
+                  onClick={() => d.key && go(docHash(d.key))}
                 >
                   <span className={`kind-chip kind-${d.kind}`}>{d.kind}</span>
                   <span className="row-main">
@@ -124,7 +127,7 @@ function Deleted({ gone }: { gone: DeletedDoc[] }) {
     try {
       const back = await undeleteDoc(d.token);
       toast(back.path === d.path ? `Put back “${d.title}”.` : `Put back as ${back.path}: a file took its name.`);
-      go(`#/docs/${encodeURIComponent(back.key || "")}`);
+      go(docHash(back.key || ""));
     } catch (e) {
       toast(`Couldn't put it back: ${(e as Error).message}`);
       setBusy(null);
@@ -193,7 +196,7 @@ export function DocView({ docKey }: { docKey: string }) {
   const [mode, setMode] = useState<Mode>("read");
   // In the editor or history, back is the doc itself: the hash stays the same.
   const toRead = useCallback(() => setMode("read"), []);
-  useBack("doc", mode === "read" ? "#/docs" : toRead);
+  useBack("doc", mode === "read" ? HASH.docs : toRead);
 
   useEffect(() => {
     if (status !== "open") return;
@@ -241,7 +244,7 @@ export function DocView({ docKey }: { docKey: string }) {
   const written = (d: Doc) => {
     setDoc(d);
     setMode("read");
-    if (d.key && d.key !== docKey) location.replace(`#/docs/${encodeURIComponent(d.key)}`);
+    if (d.key && d.key !== docKey) location.replace(docHash(d.key));
   };
 
   const remove = async () => {
@@ -254,12 +257,12 @@ export function DocView({ docKey }: { docKey: string }) {
         return;
       }
       const title = doc.title || doc.path;
-      go("#/docs");
+      go(HASH.docs);
       toast(`Deleted “${title}”.`, {
         label: "Undo",
         run: () =>
           void undeleteDoc(got.token).then(
-            (d) => go(`#/docs/${encodeURIComponent(d.key || "")}`),
+            (d) => go(docHash(d.key || "")),
             (e: Error) => toast(`Couldn't put it back: ${e.message}`),
           ),
       });
@@ -268,7 +271,7 @@ export function DocView({ docKey }: { docKey: string }) {
     }
   };
 
-  const back = () => (mode === "read" ? go("#/docs") : setMode("read"));
+  const back = () => (mode === "read" ? go(HASH.docs) : setMode("read"));
   return (
     <div className="page">
       <header className="topbar">
@@ -281,7 +284,7 @@ export function DocView({ docKey }: { docKey: string }) {
         </div>
       </header>
       <main className="inbox doc-page">
-        {error && (validKey(docKey) ? <ErrorState what="the doc" why={error} onRetry={() => setRetry((n) => n + 1)} /> : <EmptyState title={error} action={{ label: "Back to docs", run: () => go("#/docs") }} />)}
+        {error && (validKey(docKey) ? <ErrorState what="the doc" why={error} onRetry={() => setRetry((n) => n + 1)} /> : <EmptyState title={error} action={{ label: "Back to docs", run: () => go(HASH.docs) }} />)}
         {!doc && !error && <Loading rows={6} />}
         {doc && (
           <>

@@ -18,6 +18,7 @@ import { MAC, useDesktop, useWide } from "./components/Terminal";
 import { chord, chordTarget } from "./lib/chords";
 import { showNeeds } from "./lib/badge";
 import { follow, typingIn } from "./lib/follow";
+import { HASH, moved, SECTION_KEYS } from "./lib/routes";
 import { paletteKey } from "./lib/palette";
 import { shortcutsKey } from "./lib/shortcuts";
 import { Palette } from "./components/Palette";
@@ -52,26 +53,33 @@ type Route =
 /**
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the launcher,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
- * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order, `#/decisions` the Memory page (decisions, skills, policies, habits, notes),
- * `#/summary` (`#/digest` still works) what every agent did while you were gone, `#/history` past sessions to resume, `#/wiki` a repository's wiki, `#/search` session history, `#/supervisor` what the supervisor waits on and did, `#/docs` the docs agents wrote and `#/docs/12` one of them (by its key, never a path).
+ * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order.
+ * Memory (`#/memory`: decisions, skills, policies, habits, notes) has the tabs `#/memory/docs`
+ * (and `#/memory/docs/12`, one doc by its key, never a path) and `#/memory/wiki`. History
+ * (`#/history`: past sessions to resume) has `#/history/summary`, `#/history/search` and
+ * `#/history/supervisor`. The pages those used to be (`#/docs`, `#/summary`…) redirect (lib/routes.ts).
  */
 function route(): Route {
-  const m = /^#\/s\/(\d+)(\/review)?$/.exec(location.hash);
+  const to = moved(location.hash);
+  // In place, so Back doesn't land on the old address and bounce.
+  if (to) history.replaceState(history.state, "", to);
+  const hash = location.hash;
+  const m = /^#\/s\/(\d+)(\/review)?$/.exec(hash);
   if (m) return { page: m[2] ? "review" : "session", id: Number(m[1]) };
-  if (location.hash === "#/new") return { page: "new" };
-  if (location.hash === "#/settings") return { page: "settings" };
-  if (location.hash === "#/backlog") return { page: "backlog" };
-  if (location.hash === "#/decisions") return { page: "decisions" };
-  if (location.hash === "#/docs") return { page: "docs" };
-  if (location.hash === "#/summary" || location.hash === "#/digest") return { page: "digest" };
-  if (location.hash === "#/history") return { page: "past" };
-  if (location.hash === "#/wiki") return { page: "wiki" };
-  if (location.hash === "#/search") return { page: "search" };
-  if (location.hash === "#/supervisor") return { page: "supervisor" };
-  const d = /^#\/docs\/([^/]+)$/.exec(location.hash);
+  if (hash === "#/new") return { page: "new" };
+  if (hash === HASH.settings) return { page: "settings" };
+  if (hash === HASH.backlog) return { page: "backlog" };
+  if (hash === HASH.memory) return { page: "decisions" };
+  if (hash === HASH.docs) return { page: "docs" };
+  if (hash === HASH.wiki) return { page: "wiki" };
+  if (hash === HASH.history) return { page: "past" };
+  if (hash === HASH.summary) return { page: "digest" };
+  if (hash === HASH.search) return { page: "search" };
+  if (hash === HASH.supervisor) return { page: "supervisor" };
+  const d = /^#\/memory\/docs\/([^/]+)$/.exec(hash);
   // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
   if (d) return { page: "doc", key: d[1] };
-  const o = /^#\/backlog\/order\/(.+)$/.exec(location.hash);
+  const o = /^#\/backlog\/order\/(.+)$/.exec(hash);
   if (o) {
     try {
       return { page: "order", project: decodeURIComponent(o[1]) };
@@ -79,12 +87,12 @@ function route(): Route {
       return { page: "backlog" };
     }
   }
-  const b = /^#\/backlog\/(new|\d+)$/.exec(location.hash);
+  const b = /^#\/backlog\/(new|\d+)$/.exec(hash);
   if (b) return { page: "item", id: b[1] === "new" ? null : Number(b[1]) };
   return { page: "inbox" };
 }
 
-/** Where a page sits among the nav's pages. */
+/** Which of the four sections a page is in. */
 function navKey(r: Route): NavKey | null {
   switch (r.page) {
     case "inbox":
@@ -95,17 +103,20 @@ function navKey(r: Route): NavKey | null {
     case "item":
     case "order":
       return "backlog";
+    case "decisions":
     case "docs":
     case "doc":
-      return "docs";
-    case "decisions":
+    case "wiki":
       return "memory";
     case "past":
-      return "past";
+    case "digest":
+    case "search":
+    case "supervisor":
+      return "history";
+    case "settings":
+      return "settings";
     case "new":
       return null;
-    default:
-      return r.page;
   }
 }
 
@@ -259,6 +270,30 @@ export function App() {
   useEffect(() => {
     if (!desktop || !paired) setPalette(false);
   }, [desktop, paired]);
+
+  // g then i, b, m or h goes to a section (#249), when you aren't typing. Not on
+  // a session or its review, where g is the page's own (top of the screen).
+  const page = at.page;
+  useEffect(() => {
+    if (!desktop || !paired || page === "session" || page === "review") return;
+    let armed = 0;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+      if ((e.target as Element | null)?.closest?.("textarea, input, select, [contenteditable], dialog")) return;
+      const to = SECTION_KEYS[e.key];
+      if (armed && Date.now() - armed < 1500 && to) {
+        armed = 0;
+        e.preventDefault();
+        // The second key is the chord's, not the page's (Inbox has its own b and h).
+        e.stopImmediatePropagation();
+        if (location.hash !== to) location.hash = to;
+        return;
+      }
+      armed = e.key === "g" ? Date.now() : 0;
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [desktop, paired, page]);
 
   // The '?' sheet (#189): the keys of the page you're on, from anywhere you
   // aren't typing (a terminal that has the keyboard is typing: the palette's

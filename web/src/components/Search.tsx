@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { HistoryTabs } from "./Nav";
 import type { SearchHit, SearchResults } from "../proto";
 import { fieldLabel, marks, terms, windowStart, WINDOWS, type SearchWindow } from "../lib/search";
 import { clockOf, dayLabel } from "../lib/digest";
@@ -79,6 +80,7 @@ export function SearchView() {
           <h1 className="title-name">Search sessions</h1>
         </div>
       </header>
+      <HistoryTabs />
 
       <main className="inbox">
         <div className="field search-box">

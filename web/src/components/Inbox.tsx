@@ -1,3 +1,4 @@
+import { HASH } from "../lib/routes";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   STATE_LABEL,
@@ -12,7 +13,8 @@ import { age } from "../lib/time";
 import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
 import { hasRain, useLook } from "../lib/theme";
-import { Chevron, Plus } from "./icons";
+import { Chevron, Gear, Plus } from "./icons";
+import { useDesktop } from "./Terminal";
 import { ConnectionPill, StateIcon } from "./bits";
 import { EmptyState } from "./states";
 import { Proposals } from "./Decisions";
@@ -40,6 +42,7 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
     return () => clearInterval(every);
   }, [status]);
   const look = useLook();
+  const desktop = useDesktop();
   const working = sessions.filter(
     (s) => s.exited === null && s.status.state === "working",
   ).length;
@@ -71,11 +74,11 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
     {
       n: to("#/new"),
       b: to("#/backlog"),
-      d: to("#/decisions"),
-      a: to("#/summary"),
-      h: to("#/history"),
-      s: to("#/supervisor"),
-      "/": to("#/search"),
+      d: to(HASH.memory),
+      a: to(HASH.summary),
+      h: to(HASH.history),
+      s: to(HASH.supervisor),
+      "/": to(HASH.search),
       ",": to("#/settings"),
       j: () => pick(sel + 1),
       k: () => pick(sel - 1),
@@ -115,6 +118,12 @@ export function Inbox({ beside }: { beside?: number | null } = {}) {
         >
           <Plus />
         </button>
+        {/* A desktop has Settings at the foot of its rail; a phone's tab bar is the four sections. */}
+        {!desktop && (
+          <button className="icon-btn" aria-label="Settings" onClick={() => (location.hash = HASH.settings)}>
+            <Gear />
+          </button>
+        )}
       </header>
 
       <main className="inbox">

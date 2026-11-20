@@ -3,6 +3,7 @@
 // Mac); in a session's terminal Ctrl+K is the program's (readline's kill-line),
 // so there it takes Ctrl+Shift+K, which works everywhere.
 
+import { docHash } from "./routes";
 import type { Decision, Doc, Item, OrderProposal, SessionInfo } from "../proto";
 import { byPosition, isAscii, type KeyLike } from "./termkeys";
 
@@ -137,7 +138,7 @@ export function entries(s: Sources): Entry[] {
       label: d.title,
       sub: [d.kind, d.repo && base(d.repo)].filter(Boolean).join(" · "),
       also: d.path,
-      do: { go: `#/docs/${encodeURIComponent(d.key)}` },
+      do: { go: docHash(d.key) },
     });
   }
   for (const l of s.looks) {

@@ -1,4 +1,6 @@
+import { HASH } from "../lib/routes";
 import { useState } from "react";
+import { HistoryTabs } from "./Nav";
 import type { DigestEntry, DigestGroup } from "../proto";
 import { counts, dayLabel, clockOf, groupDigest, outcomeLabel, spanOf, windowStart, type Window } from "../lib/digest";
 import { age } from "../lib/time";
@@ -77,6 +79,7 @@ export function DigestView() {
           Copy
         </button>
       </header>
+      <HistoryTabs />
 
       <main className="inbox">
         <div className="kind-pick" role="radiogroup" aria-label="Since">
@@ -117,7 +120,7 @@ export function DigestView() {
           <EmptyState
             title="No agent did anything in that time"
             hint={win === "3d" ? "Nothing in the last three days." : undefined}
-            action={win === "3d" ? { label: "See past sessions", run: () => (location.hash = "#/history") } : { label: "Look back 3 days", run: () => setWin("3d") }}
+            action={win === "3d" ? { label: "See past sessions", run: () => (location.hash = HASH.history) } : { label: "Look back 3 days", run: () => setWin("3d") }}
           />
         )}
         {groups.map(([group, es]) => (

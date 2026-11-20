@@ -1,14 +1,17 @@
-// One place to move between the app's pages (#104). A phone gets a tab bar at
-// the thumb with the rest under More; a desktop gets a rail.
+// One place to move between the app's four sections (#104, #249): Inbox,
+// Backlog, Memory and History. A phone gets them as a tab bar at the thumb, a
+// desktop as a rail with New at its head and Settings at its foot. The pages
+// inside a section are tabs at the top of it (SectionTabs).
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { prefetch } from "../cache";
+import { HASH } from "../lib/routes";
 import { allDocs, pastSessions, supervisorLog, useApp } from "../store";
 import { fetchMemory } from "./DecisionList";
 import { HostButton } from "./Hosts";
-import { Book, Clock, Dots, Eye, Gear, List, Page, Pin, Plus, Rewind, Search, Tray } from "./icons";
+import { Gear, List, Pin, Plus, Rewind, Tray } from "./icons";
 
-export type NavKey = "inbox" | "backlog" | "docs" | "memory" | "wiki" | "search" | "digest" | "past" | "supervisor" | "settings";
+export type NavKey = "inbox" | "backlog" | "memory" | "history" | "settings";
 
 interface Dest {
   key: NavKey;
@@ -20,45 +23,49 @@ interface Dest {
 }
 
 const DESTS: Record<NavKey, Dest> = {
-  inbox: { key: "inbox", hash: "#/", label: "Inbox", icon: Tray },
-  backlog: { key: "backlog", hash: "#/backlog", label: "Backlog", icon: List },
-  docs: { key: "docs", hash: "#/docs", label: "Docs", icon: Page, warm: () => prefetch("docs", allDocs) },
-  memory: {
-    key: "memory",
-    hash: "#/decisions",
-    label: "Memory",
-    icon: Pin,
-    warm: () => prefetch("memory", fetchMemory),
-  },
-  wiki: { key: "wiki", hash: "#/wiki", label: "Wiki", icon: Book },
-  search: { key: "search", hash: "#/search", label: "Search", icon: Search },
-  digest: { key: "digest", hash: "#/summary", label: "Summary", icon: Clock },
-  past: { key: "past", hash: "#/history", label: "History", icon: Rewind, warm: () => prefetch("past", pastSessions) },
-  supervisor: {
-    key: "supervisor",
-    hash: "#/supervisor",
-    label: "Supervisor",
-    icon: Eye,
-    warm: () => prefetch("supervisor-log", supervisorLog),
-  },
-  settings: { key: "settings", hash: "#/settings", label: "Settings", icon: Gear },
+  inbox: { key: "inbox", hash: HASH.inbox, label: "Inbox", icon: Tray },
+  backlog: { key: "backlog", hash: HASH.backlog, label: "Backlog", icon: List },
+  memory: { key: "memory", hash: HASH.memory, label: "Memory", icon: Pin, warm: () => prefetch("memory", fetchMemory) },
+  history: { key: "history", hash: HASH.history, label: "History", icon: Rewind, warm: () => prefetch("past", pastSessions) },
+  settings: { key: "settings", hash: HASH.settings, label: "Settings", icon: Gear },
 };
 
-/** On a phone's bar; the rest live under More. */
-const TABS: NavKey[] = ["inbox", "backlog", "docs", "memory"];
-const MORE: NavKey[] = ["wiki", "search", "digest", "past", "supervisor", "settings"];
-/** Down a desktop's rail, then Settings at its foot. */
-const RAIL: NavKey[] = ["inbox", "backlog", "docs", "memory", "wiki", "search", "digest", "past", "supervisor"];
+/** The four sections, down the rail and along the phone's tab bar. */
+const SECTIONS: NavKey[] = ["inbox", "backlog", "memory", "history"];
+
+/** A section's tabs: what each one is called and where it lives. */
+export interface Tab {
+  label: string;
+  hash: string;
+  warm?: () => void;
+}
+
+export const MEMORY_TABS: Tab[] = [
+  { label: "Decisions", hash: HASH.memory, warm: DESTS.memory.warm },
+  { label: "Docs", hash: HASH.docs, warm: () => prefetch("docs", allDocs) },
+  { label: "Wiki", hash: HASH.wiki },
+];
+
+export const HISTORY_TABS: Tab[] = [
+  { label: "Sessions", hash: HASH.history, warm: DESTS.history.warm },
+  { label: "Summary", hash: HASH.summary },
+  { label: "Search", hash: HASH.search },
+  { label: "Supervisor", hash: HASH.supervisor, warm: () => prefetch("supervisor-log", supervisorLog) },
+];
 
 /** Every page, for the command palette. */
-export const PAGES = [...RAIL, "settings" as const].map((k) => ({ label: DESTS[k].label, hash: DESTS[k].hash }));
+export const PAGES = [
+  { label: "Inbox", hash: HASH.inbox },
+  { label: "Backlog", hash: HASH.backlog },
+  ...MEMORY_TABS.map((t) => ({ label: t.label === "Decisions" ? "Memory" : `Memory: ${t.label}`, hash: t.hash })),
+  ...HISTORY_TABS.map((t) => ({ label: t.label === "Sessions" ? "History" : `History: ${t.label}`, hash: t.hash })),
+  { label: "Settings", hash: HASH.settings },
+];
 
 function useBadges(): Partial<Record<NavKey, number>> {
   const needs = useApp((s) => s.queue.length);
   const open = useApp((s) => s.items.filter((i) => i.status === "open").length);
-  // Docs agents wrote since you last looked: a count, never a card (ADR-0021 §5).
-  const docs = useApp((s) => s.unreadDocs);
-  return { inbox: needs, backlog: open, docs };
+  return { inbox: needs, backlog: open };
 }
 
 function go(d: Dest) {
@@ -89,15 +96,15 @@ function NavButton({ d, at, badge, className }: { d: Dest; at: NavKey | null; ba
   );
 }
 
-/** The desktop's rail: every page, New at the top, Settings at the foot. */
+/** The desktop's rail: the four sections, New at the top, Settings at the foot. */
 export function Rail({ at }: { at: NavKey | null }) {
   const badges = useBadges();
   return (
-    <nav className="rail" aria-label="Pages">
+    <nav className="rail" aria-label="Sections">
       <button className="rail-new" aria-label="New session" title="New session" onClick={() => (location.hash = "#/new")}>
         <Plus />
       </button>
-      {RAIL.map((k) => (
+      {SECTIONS.map((k) => (
         <NavButton key={k} d={DESTS[k]} at={at} badge={badges[k]} className="rail-item" />
       ))}
       <div className="rail-gap" />
@@ -107,88 +114,63 @@ export function Rail({ at }: { at: NavKey | null }) {
   );
 }
 
-/** The phone's tab bar, with More opening a sheet of the other pages. */
+/** The phone's tab bar: exactly the four sections. Settings is a gear on the Inbox. */
 export function TabBar({ at }: { at: NavKey | null }) {
   const badges = useBadges();
-  const [more, setMore] = useState(false);
-  const inMore = at !== null && MORE.includes(at);
-  useEffect(() => setMore(false), [at]);
   return (
-    <>
-      {more && <MoreSheet at={at} onClose={() => setMore(false)} />}
-      <nav className="tabbar" aria-label="Pages">
-        {TABS.map((k) => (
-          <NavButton key={k} d={DESTS[k]} at={at} badge={badges[k]} className="tab" />
-        ))}
-        <button
-          className="tab"
-          aria-current={inMore ? "page" : undefined}
-          aria-expanded={more}
-          aria-label="More pages"
-          onClick={() => setMore((m) => !m)}
-        >
-          <span className="nav-icon">
-            <Dots />
-          </span>
-          <span className="nav-label">More</span>
-        </button>
-      </nav>
-    </>
+    <nav className="tabbar" aria-label="Sections">
+      {SECTIONS.map((k) => (
+        <NavButton key={k} d={DESTS[k]} at={at} badge={badges[k]} className="tab" />
+      ))}
+    </nav>
   );
 }
 
 /**
- * The pages that don't fit the tab bar, as a native modal dialog (#188): the
- * page under it is inert, so the keyboard and a screen reader stay in the sheet,
- * Escape closes it, and closing gives the keyboard back to More.
+ * The pages inside a section, as tabs under its top bar. `counts` puts a number
+ * on a tab (unread docs), never a badge on the nav.
  */
-function MoreSheet({ at, onClose }: { at: NavKey | null; onClose: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const back = useRef<HTMLElement | null | undefined>(undefined);
-  if (back.current === undefined) back.current = document.activeElement as HTMLElement | null;
-  useEffect(() => {
-    if (!dialog.current?.open) dialog.current?.showModal();
-    return () => back.current?.focus?.({ preventScroll: true });
-  }, []);
-  // A press that started in the sheet (a scroll, a drag) isn't one on the backdrop.
-  const downOn = useRef<EventTarget | null>(null);
+export function SectionTabs({ tabs, label, counts }: { tabs: Tab[]; label: string; counts?: Record<string, number> }) {
+  const here = location.hash || "#/";
+  // The longest tab the address is in: `#/memory/docs/12` is Docs, not Decisions.
+  const current = tabs
+    .filter((t) => here === t.hash || here.startsWith(`${t.hash}/`))
+    .sort((a, b) => b.hash.length - a.hash.length)[0];
   return (
-    <dialog
-      ref={dialog}
-      className="sheet"
-      aria-label="More pages"
-      onClose={onClose}
-      onPointerDown={(e) => (downOn.current = e.target)}
-      onClick={(e) => e.target === dialog.current && downOn.current === dialog.current && onClose()}
-    >
-      <div className="sheet-box">
-        <div className="sheet-grip" />
-        <div className="list">
-          {MORE.map((k) => {
-            const d = DESTS[k];
-            const Icon = d.icon;
-            return (
-              <button
-                key={k}
-                className="row sheet-row"
-                aria-current={at === k ? "page" : undefined}
-                onPointerDown={d.warm}
-                onClick={() => {
-                  onClose();
-                  go(d);
-                }}
-              >
-                <span className="sheet-icon">
-                  <Icon />
-                </span>
-                <span className="row-main">
-                  <span className="row-name">{d.label}</span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </dialog>
+    <nav className="kind-pick section-tabs" aria-label={label}>
+      {tabs.map((t) => {
+        const on = t === current;
+        const n = counts?.[t.label];
+        return (
+          <a
+            key={t.hash}
+            href={t.hash}
+            className={`kind-chip ${on ? "on" : ""}`}
+            aria-current={on ? "page" : undefined}
+            onPointerEnter={t.warm}
+            onPointerDown={t.warm}
+            onClick={(e) => {
+              // The section's page already; no history entry for staying put.
+              if (on && here === t.hash) e.preventDefault();
+            }}
+          >
+            {t.label}
+            {!!n && <span className="count">{n}</span>}
+          </a>
+        );
+      })}
+    </nav>
   );
+}
+
+/** Memory's tabs: Decisions (and skills, policies, habits, notes), Docs, Wiki. */
+export function MemoryTabs() {
+  // Docs agents wrote since you last looked: a count on the tab (ADR-0021 §5).
+  const unread = useApp((s) => s.unreadDocs);
+  return <SectionTabs tabs={MEMORY_TABS} label="Memory" counts={{ Docs: unread }} />;
+}
+
+/** History's tabs: past sessions, the away summary, search, the supervisor. */
+export function HistoryTabs() {
+  return <SectionTabs tabs={HISTORY_TABS} label="History" />;
 }
