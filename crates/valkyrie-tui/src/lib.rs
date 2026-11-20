@@ -7925,7 +7925,10 @@ mod tests {
         assert_eq!(app.section(), Section::Inbox);
         let wide = strip(&app, 120);
         assert!(wide.contains("ᛒ") && wide.contains("Inbox 1"), "{wide}");
-        assert!(wide.contains("Inbox 1   Backlog   Memory   History"), "{wide}");
+        assert!(
+            wide.contains("Inbox 1   Backlog   Memory   History"),
+            "{wide}"
+        );
         assert!(
             wide.contains("1 running") || wide.contains("0 running"),
             "{wide}"
