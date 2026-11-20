@@ -51,7 +51,7 @@ pub use settings::{context_enabled, on_context_change};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use theme::{Theme, state_icon};
+use theme::{Theme, state_icon, state_word};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use valkyrie_proto::client::{Client, DaemonInfo, Pushes};
@@ -929,6 +929,10 @@ impl App {
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
         }
+        // The decisions opened from the Inbox take the keys until Esc.
+        if self.reviewing.is_some() {
+            return self.review_keys(&bytes).await;
+        }
         self.option_hint(&bytes);
         self.home_input(&bytes).await;
     }
@@ -957,6 +961,11 @@ impl App {
             || self.renaming.is_some()
         {
             return;
+        }
+        // Over the open decisions: the wheel and links are the dialog's, not the
+        // rows' behind it.
+        if self.reviewing.is_some() {
+            return self.on_proposal_mouse(m);
         }
         let hit = self.home_hit(Position::new(m.x, m.y));
         match m.kind {
@@ -1545,7 +1554,7 @@ impl App {
             view,
             self.bar_panes(view.id),
             mode,
-            self.proposals.len(),
+            self.need_you(),
             self.settings.hints,
             self.settings.theme,
             &self.settings.keys,
@@ -1588,10 +1597,6 @@ impl App {
             return;
         };
         match click {
-            BarClick::Review => {
-                self.tab_mode = false;
-                self.reviewing = Some(0);
-            }
             BarClick::Action(Action::Tabs) => {
                 self.tab_mode = true;
             }
@@ -2287,7 +2292,51 @@ impl App {
     }
 
     fn rows(&self) -> usize {
-        self.proposals.len() + self.queue.len() + self.others().len()
+        self.inbox_rows().len()
+    }
+
+    /// The Inbox's rows in the order they're drawn: the sessions waiting on you,
+    /// one row for what's up for a decision, one for the items agents filed, then
+    /// the rest of the sessions, Running before Quiet (spec: Inbox).
+    fn inbox_rows(&self) -> Vec<InboxRow> {
+        let mut rows: Vec<InboxRow> = (0..self.queue.len()).map(InboxRow::Queue).collect();
+        if self.to_decide() > 0 {
+            rows.push(InboxRow::Decide);
+        }
+        if !self.filed().is_empty() {
+            rows.push(InboxRow::Filed);
+        }
+        rows.extend(self.others().iter().map(|s| InboxRow::Session(s.id)));
+        rows
+    }
+
+    /// The row under the cursor.
+    fn row(&self) -> Option<InboxRow> {
+        self.inbox_rows().get(self.selected).copied()
+    }
+
+    /// What waits on a decision: proposals, ready items the supervisor offers to
+    /// start, and build orders. One Needs-you row, counting each.
+    fn to_decide(&self) -> usize {
+        self.proposals.len() + self.launches.len() + self.orders.len()
+    }
+
+    /// Backlog items agents filed that nobody has kept or dropped yet, oldest
+    /// first. One an agent filed and took itself is its own work, under way.
+    fn filed(&self) -> Vec<&Item> {
+        let mut filed: Vec<&Item> = self
+            .items
+            .iter()
+            .filter(|i| i.status == valkyrie_proto::ItemStatus::Proposed && !i.agent_filed())
+            .collect();
+        filed.sort_by_key(|i| i.created);
+        filed
+    }
+
+    /// The one count of what waits on you: every Needs-you row, a batched row
+    /// counting its items. The header, the ⌂ and the status line all show it.
+    fn need_you(&self) -> usize {
+        self.queue.len() + self.to_decide() + self.filed().len()
     }
 
     /// The sessions the Inbox lists under Running, then Quiet: each one not
@@ -2303,14 +2352,10 @@ impl App {
 
     /// The selection's row in the queue, if it is there.
     fn queue_index(&self) -> Option<usize> {
-        let row = self.selected.checked_sub(self.proposals.len())?;
-        (row < self.queue.len()).then_some(row)
-    }
-
-    /// The selection's row in `others`, if it is there.
-    fn session_index(&self) -> Option<usize> {
-        self.selected
-            .checked_sub(self.proposals.len() + self.queue.len())
+        match self.row()? {
+            InboxRow::Queue(i) => Some(i),
+            _ => None,
+        }
     }
 
     /// Scrolls the shown proposal's text by `pages` (a page less a row, so the
@@ -2441,42 +2486,36 @@ impl App {
         }
     }
 
-    /// The proposal under the cursor.
+    /// The proposal the cursor answers: the oldest, on the Decide row.
     fn proposal(&self) -> Option<&Decision> {
-        self.proposals.get(self.selected)
+        match self.row()? {
+            InboxRow::Decide => self.proposals.first(),
+            _ => None,
+        }
     }
 
     /// What the cursor is on, so it can follow that item when rows above it come or
     /// go (else `x` would kill the wrong session, `a` accept the wrong decision).
     fn anchor(&self) -> Anchor {
-        match (self.proposal(), self.queue_index()) {
-            (Some(d), _) => Anchor::Proposal(d.project.clone(), d.id),
-            (None, Some(_)) => Anchor::Queue(self.selection().0),
-            (None, None) => Anchor::Session(self.selection().0),
+        match self.row() {
+            Some(InboxRow::Queue(i)) => Anchor::Session(Some(self.queue[i].session)),
+            Some(InboxRow::Session(id)) => Anchor::Session(Some(id)),
+            Some(row) => Anchor::Record(row),
+            None => Anchor::Session(None),
         }
     }
 
     fn restore(&mut self, anchor: Anchor) {
+        let rows = self.inbox_rows();
+        // A session can move between Needs you and the rows below it (it asks,
+        // or it's seen): the cursor goes with it, wherever it is now.
         let found = match anchor {
-            Anchor::Proposal(project, id) => self
-                .proposals
-                .iter()
-                .position(|d| d.project == project && d.id == id),
-            // A session can move between Needs you and the rows below it (it asks,
-            // or it's seen): the cursor goes with it, wherever it is now.
-            Anchor::Queue(id) | Anchor::Session(id) => {
-                let queued = self
-                    .queue
-                    .iter()
-                    .position(|q| Some(q.session) == id)
-                    .map(|i| self.proposals.len() + i);
-                queued.or_else(|| {
-                    self.others()
-                        .iter()
-                        .position(|s| Some(s.id) == id)
-                        .map(|i| self.proposals.len() + self.queue.len() + i)
-                })
-            }
+            Anchor::Record(row) => rows.iter().position(|r| *r == row),
+            Anchor::Session(id) => rows.iter().position(|r| match *r {
+                InboxRow::Queue(i) => Some(self.queue[i].session) == id,
+                InboxRow::Session(s) => Some(s) == id,
+                _ => false,
+            }),
         };
         if let Some(i) = found {
             self.selected = i;
@@ -2491,14 +2530,11 @@ impl App {
     /// The session under the cursor, and the queue item if the cursor is in the queue.
     /// Neither on a proposal.
     fn selection(&self) -> (Option<SessionId>, Option<&QueueItem>) {
-        if let Some(row) = self.queue_index() {
-            let item = &self.queue[row];
-            return (Some(item.session), Some(item));
+        match self.row() {
+            Some(InboxRow::Queue(i)) => (Some(self.queue[i].session), Some(&self.queue[i])),
+            Some(InboxRow::Session(id)) => (Some(id), None),
+            _ => (None, None),
         }
-        let session = self
-            .session_index()
-            .and_then(|i| self.others().get(i).map(|s| s.id));
-        (session, None)
     }
 
     /// Accepts or rejects the proposal under the cursor. The daemon pushes the
@@ -2506,7 +2542,10 @@ impl App {
     /// `a`/`d` on the selected row: accept or reject a proposal, or say an active
     /// decision flagged as maybe out of date still holds, or retire it.
     async fn review(&mut self, yes: bool) {
-        if let Some(said) = self.review_at(self.selected, yes).await {
+        if self.proposal().is_none() {
+            return;
+        }
+        if let Some(said) = self.review_at(0, yes).await {
             self.status = said;
         }
     }
@@ -2576,8 +2615,10 @@ impl App {
                 b"\x1b[5~" => self.scroll_proposal(-1),
                 b"a" | b"d" => {
                     let said = self.review_at(cursor, key == b"a").await;
-                    if let (Some(said), Some(view)) = (said, &mut self.view) {
-                        view.notice(said);
+                    match (said, &mut self.view) {
+                        (Some(said), Some(view)) => view.notice(said),
+                        (Some(said), None) => self.status = said,
+                        _ => {}
                     }
                 }
                 [DETACH_KEY] | b"q" => self.reviewing = None,
@@ -2615,11 +2656,21 @@ impl App {
             }
             HomeKey::Quit => self.quit = true,
             HomeKey::Enter => {
-                if let Some(id) = selected {
-                    self.attach(id).await;
-                } else if let Some(d) = self.proposal() {
-                    // The whole of it is in the preview, when there is room for one.
-                    self.status = proposal_text(d);
+                match self.row() {
+                    _ if selected.is_some() => self.attach(selected.unwrap()).await,
+                    // The proposals one at a time, a/d on each; the supervisor's
+                    // page when only its offers wait.
+                    Some(InboxRow::Decide) if !self.proposals.is_empty() => {
+                        self.reviewing = Some(0)
+                    }
+                    Some(InboxRow::Decide) => self.open_supervisor().await,
+                    // Triage in the backlog, from the oldest.
+                    Some(InboxRow::Filed) => {
+                        if let Some(id) = self.filed().first().map(|i| i.id) {
+                            self.open_backlog_at(id).await;
+                        }
+                    }
+                    _ => {}
                 }
             }
             HomeKey::Accept | HomeKey::Reject | HomeKey::Other if self.offered().is_some() => {
@@ -4014,7 +4065,12 @@ impl App {
                         bar,
                     );
                 }
-                None => self.draw_home(frame, body, bar),
+                None => {
+                    self.draw_home(frame, body, bar);
+                    if let Some(cursor) = self.reviewing {
+                        self.draw_reviews(frame, body, cursor);
+                    }
+                }
             }
             self.draw_mini(frame);
             if let Some(cursor) = self.settings_cursor {
@@ -4220,8 +4276,6 @@ const WHEEL_ROWS: i32 = 3;
 const PREVIEW_MIN_WIDTH: u16 = 130;
 /// The most proposals shown at once; more scroll.
 const PROPOSAL_ROWS: usize = 6;
-/// Backlog items the home screen shows at most.
-const BACKLOG_ROWS: usize = 4;
 
 impl App {
     fn draw_home(&self, frame: &mut ratatui::Frame, body: Rect, bar: Rect) {
@@ -4235,17 +4289,7 @@ impl App {
 
         let [header, main] =
             Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
-        frame.render_widget(
-            Paragraph::new(header_line(
-                &self.queue,
-                &self.sessions,
-                self.proposals.len(),
-                self.waiting().len(),
-                now,
-                t,
-            )),
-            header,
-        );
+        frame.render_widget(Paragraph::new(header_line(self.need_you(), now, t)), header);
         // On the right, the plan's quota and a newer release, each only where it
         // clears the counts on the left; the quota first, it's the one to act on.
         let notice = self
@@ -4263,14 +4307,7 @@ impl App {
             .clone()
             .zip(quota.clone())
             .map(|(notice, quota)| [quota, notice].concat());
-        let left = header_line(
-            &self.queue,
-            &self.sessions,
-            self.proposals.len(),
-            self.waiting().len(),
-            now,
-            t,
-        );
+        let left = header_line(self.need_you(), now, t);
         if let Some(right) = [both, quota, notice]
             .into_iter()
             .flatten()
@@ -4288,75 +4325,9 @@ impl App {
         } else {
             (main, None)
         };
-        // Only while there is something to review, and never more than a few rows:
-        // past those it scrolls with the cursor. Always one row at least, so `a`
-        // never accepts a proposal that isn't on screen.
-        let proposals_height = match self.proposals.len() {
-            0 => 0,
-            n => (n.min(PROPOSAL_ROWS) as u16 + 2)
-                .min(lists.height / 3)
-                .max(3),
-        };
-        // Backlog items waiting on the user (to review, stuck, proposed), only while
-        // there are some; `b` opens the whole backlog.
-        let waiting: Vec<(backlog::Lane, Item)> =
-            backlog::rows(&self.items, &self.sessions, self.boot())
-                .into_iter()
-                .filter(|(lane, _)| lane.waits())
-                .collect();
-        let backlog_height = match waiting.len() {
-            0 => 0,
-            n => (n.min(BACKLOG_ROWS) as u16 + 2)
-                .min(lists.height / 4)
-                .max(3),
-        };
-        let [proposals_area, backlog_area, inbox_area] = Layout::vertical([
-            Constraint::Length(proposals_height),
-            Constraint::Length(backlog_height),
-            Constraint::Fill(1),
-        ])
-        .areas(lists);
-        if backlog_height > 0 {
-            let title = Line::from(vec![
-                " ▤ ".fg(t.done).bold(),
-                "backlog ".fg(t.fg).bold(),
-                format!("{} waiting ", waiting.len()).fg(t.muted),
-                "· b opens it ".fg(t.muted),
-            ]);
-            let width = backlog_area.width.saturating_sub(2) as usize;
-            let lines: Vec<Line> = waiting
-                .iter()
-                .take(BACKLOG_ROWS)
-                .map(|(lane, item)| backlog::home_line(item, *lane, width, t))
-                .collect();
-            frame.render_widget(
-                Paragraph::new(lines).block(panel(title, t, false)),
-                backlog_area,
-            );
-            self.home_rows
-                .borrow_mut()
-                .push((backlog_area, Hit::Key(HomeKey::Backlog)));
-        }
-
+        let inbox_area = lists;
         let in_proposals = self.proposal().is_some();
-        if proposals_height > 0 {
-            let title = Line::from(vec![
-                " ◇ ".fg(t.accent2).bold(),
-                "decisions to review ".fg(t.fg).bold(),
-                format!("{} ", self.proposals.len()).fg(t.muted),
-            ]);
-            let rows = self.proposals.iter().map(|d| proposal_row(d, t));
-            let mut state =
-                TableState::default().with_selected(in_proposals.then_some(self.selected));
-            frame.render_stateful_widget(
-                proposal_table(rows, t).block(panel(title, t, in_proposals)),
-                proposals_area,
-                &mut state,
-            );
-            self.remember_rows(proposals_area, state.offset(), self.proposals.len(), 0);
-        }
-
-        self.draw_inbox(frame, inbox_area, in_proposals, now, spin);
+        self.draw_inbox(frame, inbox_area, now, spin);
 
         if let Some(area) = preview {
             self.draw_preview(frame, area);
@@ -4364,17 +4335,12 @@ impl App {
         }
         if let Some(colors) = &t.rain {
             let inside = Margin::new(1, 1);
-            let regions: Vec<Rect> = [
-                Some(proposals_area),
-                Some(backlog_area),
-                Some(inbox_area),
-                preview,
-            ]
-            .into_iter()
-            .flatten()
-            .filter(|r| r.height > 2)
-            .map(|r| r.inner(inside))
-            .collect();
+            let regions: Vec<Rect> = [Some(inbox_area), preview]
+                .into_iter()
+                .flatten()
+                .filter(|r| r.height > 2)
+                .map(|r| r.inner(inside))
+                .collect();
             let screen = frame.area();
             rain::draw(frame.buffer_mut(), screen, &regions, now, colors);
         }
@@ -4421,27 +4387,20 @@ impl App {
 
     /// The Inbox: Needs you, Running, Quiet, each session once (spec: Inbox). A
     /// group shows only while it has rows; a muted label and count heads it.
-    fn draw_inbox(
-        &self,
-        frame: &mut ratatui::Frame,
-        area: Rect,
-        in_proposals: bool,
-        now: u64,
-        spin: usize,
-    ) {
+    fn draw_inbox(&self, frame: &mut ratatui::Frame, area: Rect, now: u64, spin: usize) {
         let t = self.settings.theme;
         let others = self.others();
         let running = others.iter().take_while(|s| is_running(s)).count();
         let title = Line::from(vec![
             " ● ".fg(t.needs).bold(),
             "inbox ".fg(t.fg).bold(),
-            format!("{} ", self.queue.len()).fg(t.muted),
+            format!("{} ", self.need_you()).fg(t.muted),
         ]);
-        let block = panel(title, t, !in_proposals);
+        let block = panel(title, t, true);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.queue.is_empty() && others.is_empty() {
+        if self.need_you() == 0 && others.is_empty() {
             let calm = if t.rain.is_some() {
                 Line::from(vec![
                     "> ".fg(t.accent).bold(),
@@ -4480,7 +4439,7 @@ impl App {
 
         // Each drawn line, and the selection row it is (none for labels).
         let width = inner.width as usize;
-        let first = self.proposals.len();
+        let rows = self.inbox_rows();
         let mut lines: Vec<(Option<usize>, Line<'static>)> = Vec::new();
         let label = |lines: &mut Vec<(Option<usize>, Line<'static>)>, name: &str, n: usize| {
             if !lines.is_empty() {
@@ -4494,7 +4453,7 @@ impl App {
                 ]),
             ));
         };
-        if self.queue.is_empty() {
+        if self.need_you() == 0 {
             lines.push((
                 None,
                 Line::from(vec![
@@ -4503,29 +4462,40 @@ impl App {
                 ]),
             ));
         } else {
-            label(&mut lines, "Needs you", self.queue.len());
-            for (i, q) in self.queue.iter().enumerate() {
-                let row = inbox_queue_row(q, now, spin, width, t);
-                lines.push((Some(first + i), row));
-            }
+            label(&mut lines, "Needs you", self.need_you());
         }
-        let first = first + self.queue.len();
-        for (name, from, to) in [("Running", 0, running), ("Quiet", running, others.len())] {
-            if from == to {
-                continue;
-            }
-            label(&mut lines, name, to - from);
-            for (i, s) in others[from..to].iter().enumerate() {
-                let row = inbox_session_row(s, now, spin, width, t);
-                lines.push((Some(first + from + i), row));
-            }
+        for (i, row) in rows.iter().enumerate() {
+            let line = match *row {
+                InboxRow::Queue(q) => inbox_queue_row(&self.queue[q], now, spin, width, t),
+                InboxRow::Decide => self.decide_row(now, width),
+                InboxRow::Filed => self.filed_row(now, width),
+                InboxRow::Session(id) => {
+                    let s = others.iter().find(|s| s.id == id).expect("listed");
+                    // A group's label before its first row.
+                    let first = i == 0 || !matches!(rows[i - 1], InboxRow::Session(_));
+                    if first && is_running(s) {
+                        label(&mut lines, "Running", running);
+                    } else if !is_running(s)
+                        && (first || {
+                            let InboxRow::Session(before) = rows[i - 1] else {
+                                unreachable!()
+                            };
+                            others.iter().any(|o| o.id == before && is_running(o))
+                        })
+                    {
+                        label(&mut lines, "Quiet", others.len() - running);
+                    }
+                    inbox_session_row(s, now, spin, width, t)
+                }
+            };
+            lines.push((Some(i), line));
         }
 
         // Keep the cursor's row in sight.
         let height = inner.height as usize;
         let at = lines
             .iter()
-            .position(|(row, _)| *row == Some(self.selected) && !in_proposals);
+            .position(|(row, _)| *row == Some(self.selected));
         let offset = match at {
             Some(at) if at + 1 > height => at + 1 - height,
             _ => 0,
@@ -4540,7 +4510,7 @@ impl App {
                 let Some(row) = row else { return line };
                 let rect = Rect::new(inner.x, inner.y + y as u16, inner.width, 1);
                 hits.push((rect, Hit::Row(row)));
-                if row == self.selected && !in_proposals {
+                if row == self.selected {
                     let mut spans = vec!["▌".fg(t.accent)];
                     spans.extend(line.spans.into_iter().skip(1));
                     Line::from(spans).style(style::Style::new().bg(t.selection))
@@ -4552,14 +4522,61 @@ impl App {
         frame.render_widget(Paragraph::new(shown), inner);
     }
 
-    /// Notes where the rows of a home table, shown from `offset`, were drawn inside
-    /// its bordered `area`; `first` is the selection index of its first row.
-    fn remember_rows(&self, area: Rect, offset: usize, len: usize, first: usize) {
-        let inner = area.inner(Margin::new(1, 1));
-        let mut rows = self.home_rows.borrow_mut();
-        for (y, row) in (inner.y..inner.bottom()).zip(offset..len) {
-            rows.push((Rect::new(inner.x, y, inner.width, 1), Hit::Row(first + row)));
+    /// The Decide row: `■ 3 decisions`, then what they are.
+    fn decide_row(&self, now: u64, width: usize) -> Line<'static> {
+        let t = self.settings.theme;
+        let n = self.to_decide();
+        let mut what: Vec<String> = self.proposals.iter().map(|d| d.title.clone()).collect();
+        what.extend(self.launches.iter().map(|l| format!("start {}", l.title)));
+        what.extend(
+            self.orders
+                .iter()
+                .map(|o| format!("build order for {}", base_name(&o.project))),
+        );
+        let since = self
+            .proposals
+            .iter()
+            .map(|d| d.created)
+            .chain(self.launches.iter().map(|l| l.made))
+            .chain(self.orders.iter().map(|o| o.made))
+            .min()
+            .unwrap_or_default();
+        record_row(
+            "■".fg(t.accent),
+            &format!("{n} decision{}", if n == 1 { "" } else { "s" }),
+            vec![what.join(" · ").fg(t.fg)],
+            age(since * 1000, now),
+            width,
+            t,
+        )
+    }
+
+    /// The Filed row: `■ 8 filed`, then how many in each repo.
+    fn filed_row(&self, now: u64, width: usize) -> Line<'static> {
+        let t = self.settings.theme;
+        let filed = self.filed();
+        let mut repos: Vec<(String, usize)> = Vec::new();
+        for item in &filed {
+            let repo = item.project.as_deref().map_or("no repo".into(), base_name);
+            match repos.iter_mut().find(|(r, _)| *r == repo) {
+                Some((_, n)) => *n += 1,
+                None => repos.push((repo, 1)),
+            }
         }
+        let text = repos
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let since = filed.first().map_or(0, |i| i.created);
+        record_row(
+            "■".fg(t.accent).add_modifier(Modifier::DIM),
+            &format!("{} filed", filed.len()),
+            vec![text.fg(t.fg)],
+            age(since * 1000, now),
+            width,
+            t,
+        )
     }
 
     /// The selected session: its full summary, then the bottom of its screen.
@@ -4583,10 +4600,59 @@ impl App {
                 )
                 .fg(t.muted),
             )];
+            let mut lines = lines;
+            // The row counts the supervisor's offers too; Enter opens the
+            // proposals, so say where the rest are.
+            let offers = self.launches.len() + self.orders.len();
+            if offers > 0 {
+                lines.push(Line::from(
+                    format!("and {offers} for the supervisor: s opens them").fg(t.muted),
+                ));
+            }
             let block = panel(title, t, false);
             let inner = block.inner(area);
             frame.render_widget(block, area);
             self.draw_proposal_text(frame, inner, d, lines);
+            return;
+        }
+        if let Some(row @ (InboxRow::Decide | InboxRow::Filed)) = self.row() {
+            let (title, lines): (&str, Vec<Line>) = match row {
+                InboxRow::Filed => (
+                    "filed by agents, not triaged",
+                    self.filed()
+                        .iter()
+                        .map(|i| {
+                            let repo = i.project.as_deref().map_or("no repo".into(), base_name);
+                            Line::from(vec![
+                                format!("{repo}#{}  ", i.number).fg(t.muted),
+                                i.title.clone().fg(t.fg),
+                            ])
+                        })
+                        .chain([
+                            Line::default(),
+                            "↩ triage in the backlog".fg(t.muted).into(),
+                        ])
+                        .collect(),
+                ),
+                _ => (
+                    "for the supervisor",
+                    self.launches
+                        .iter()
+                        .map(|l| Line::from(vec!["start  ".fg(t.muted), l.title.clone().fg(t.fg)]))
+                        .chain(self.orders.iter().map(|o| {
+                            Line::from(vec![
+                                "build order  ".fg(t.muted),
+                                base_name(&o.project).fg(t.fg),
+                            ])
+                        }))
+                        .chain([Line::default(), "↩ open the supervisor".fg(t.muted).into()])
+                        .collect(),
+                ),
+            };
+            let block = panel(Line::from(format!(" ■ {title} ").fg(t.fg).bold()), t, false);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
             return;
         }
         let (selected, _) = self.selection();
@@ -4625,9 +4691,13 @@ impl App {
         let status = &session.status;
         let color = t.state(status.state);
         let mut head = vec![Line::from(vec![
-            format!("{} {}", state_icon(status.state, 0), status.state.label())
-                .fg(color)
-                .bold(),
+            format!(
+                "{} {}",
+                state_icon(status.state, 0),
+                state_word(status.state)
+            )
+            .fg(color)
+            .bold(),
             format!("  {}  ·  {}", where_from(session), short_path(&session.cwd)).fg(t.muted),
         ])];
         if let Some(summary) = &status.summary {
@@ -5203,7 +5273,7 @@ impl App {
             let here = Some(i) == attached;
             let cursor = self.tab_mode && here;
             let (state, label) = match s.exited {
-                None => (s.status.state, s.status.state.label()),
+                None => (s.status.state, state_word(s.status.state)),
                 Some(_) => (AgentState::Exited, "exited"),
             };
             let color = t.state(state);
@@ -5291,10 +5361,11 @@ impl App {
             self.card_edge(frame, area, rect, if cursor { t.accent } else { bg });
         }
         // Home: the way back to the whole picture, with how many need you.
-        let mut needs = if self.queue.is_empty() {
+        let need_you = self.need_you();
+        let mut needs = if need_you == 0 {
             Line::default()
         } else {
-            Line::from(format!(" ● {}", self.queue.len()).fg(t.needs).bold())
+            Line::from(format!(" ● {need_you}").fg(t.needs).bold())
         };
         // On top the home card ends a column early, like the gap after a tab.
         let home = match self.settings.tab_side {
@@ -5310,8 +5381,8 @@ impl App {
                 needs,
             ]
         } else if shut {
-            vec![rail_home(self.queue.len(), t)]
-        } else if self.queue.is_empty() {
+            vec![rail_home(need_you, t)]
+        } else if need_you == 0 {
             vec![Line::from(vec![
                 " ⌂ ".fg(t.accent).bold(),
                 "home".fg(t.fg).bold(),
@@ -5446,7 +5517,7 @@ impl App {
                 String::new()
             };
             let (state, label) = match s.exited {
-                None => (s.status.state, s.status.state.label()),
+                None => (s.status.state, state_word(s.status.state)),
                 Some(_) => (AgentState::Exited, "exited"),
             };
             let color = t.state(state);
@@ -5561,10 +5632,11 @@ impl App {
             }
         }
         // Home: the way back to the whole picture, with how many need you.
-        let mut needs = if self.queue.is_empty() {
+        let need_you = self.need_you();
+        let mut needs = if need_you == 0 {
             Line::default()
         } else {
-            Line::from(format!(" ● {}", self.queue.len()).fg(t.needs).bold())
+            Line::from(format!(" ● {need_you}").fg(t.needs).bold())
         };
         let home_lines = if !minimal {
             vec![
@@ -5572,8 +5644,8 @@ impl App {
                 needs,
             ]
         } else if shut {
-            vec![rail_home(self.queue.len(), t)]
-        } else if self.queue.is_empty() {
+            vec![rail_home(need_you, t)]
+        } else if need_you == 0 {
             vec![Line::from(vec![" ⌂ ".fg(t.accent), "home".fg(t.muted)])]
         } else {
             needs.spans.insert(0, " ⌂".fg(t.accent));
@@ -5831,7 +5903,7 @@ fn tab_width(s: &SessionInfo, panes: usize, minimal: bool) -> u16 {
         .report
         .as_ref()
         .map_or_else(|| program(s).width(), |r| r.width());
-    let detail = 1 + split + lead + 5 + s.status.state.label().width();
+    let detail = 1 + split + lead + 5 + state_word(s.status.state).width();
     (name.max(detail) as u16 + 1).clamp(TAB_MIN, TAB_MAX)
 }
 
@@ -5970,27 +6042,6 @@ fn scoping(d: &Decision) -> Option<&[String]> {
     d.proposed_scope.as_deref()
 }
 
-/// A proposal's body on one line (its title when it has none), with the session it
-/// came from.
-fn proposal_text(d: &Decision) -> String {
-    if let Some(why) = &d.fresh.review {
-        return format!("may be out of date: {why}");
-    }
-    if let Some(scope) = scoping(d) {
-        return format!("scope it to {}?", scope.join(", "));
-    }
-    let body = d.body.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut text = if body.is_empty() {
-        d.title.clone()
-    } else {
-        body
-    };
-    if let Some(session) = &d.provenance.session {
-        text.push_str(&format!(" (from {session})"));
-    }
-    text
-}
-
 /// The detail's word for what runs there: the agent, and the program when it
 /// isn't the agent (an Inbox row shows neither).
 fn where_from(s: &SessionInfo) -> String {
@@ -6009,6 +6060,37 @@ fn is_running(s: &SessionInfo) -> bool {
 /// `text` padded with spaces to `cells` columns wide (wide characters count two).
 fn pad(text: &str, cells: usize) -> String {
     format!("{text}{}", " ".repeat(cells.saturating_sub(text.width())))
+}
+
+/// A record's row in Needs you (a batched decisions or filed row): its square
+/// marker, a count for a name, no repo, what's in it, and how long it's waited.
+fn record_row(
+    mark: Span<'static>,
+    name: &str,
+    text: Vec<Span<'static>>,
+    age: String,
+    width: usize,
+    t: &Theme,
+) -> Line<'static> {
+    let mut line = inbox_row(
+        (AgentState::Idle, 0),
+        (name, false),
+        Path::new(""),
+        text,
+        age,
+        width,
+        t,
+    );
+    line.spans[1] = Span::styled(format!("{} ", mark.content), mark.style);
+    line
+}
+
+/// A repository's folder name: `api` for `~/repos/api`.
+fn base_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Inbox name and repo columns, in cells.
@@ -6130,15 +6212,8 @@ fn inbox_session_row(
     )
 }
 
-/// ` ◆ VALKYRIE  agent control` on the left, colored counts on the right.
-fn header_line(
-    queue: &[QueueItem],
-    sessions: &[SessionInfo],
-    proposals: usize,
-    supervisor: usize,
-    now: u64,
-    t: &Theme,
-) -> Line<'static> {
+/// ` ◆ VALKYRIE  agent control`, then the one count of what needs you.
+fn header_line(need_you: usize, now: u64, t: &Theme) -> Line<'static> {
     let mut spans = if let Some(colors) = &t.rain {
         vec![
             rain::glitch(" ◆ VALKYRIE ", now, colors.glyphs)
@@ -6156,31 +6231,11 @@ fn header_line(
     if let Some(host) = remote() {
         spans.push(format!(" on {host} ").fg(t.bg).bg(t.accent2).bold());
     }
-    for (state, n) in counts(queue, sessions) {
-        let color = t.state(state);
-        spans.push(" ".into());
-        spans.push(format!(" {n} {} ", state.label()).fg(t.bg).bg(color).bold());
-    }
-    if proposals > 0 {
-        spans.push(" ".into());
-        spans.push(
-            format!(" {proposals} to review ")
-                .fg(t.bg)
-                .bg(t.accent2)
-                .bold(),
-        );
-    }
-    if supervisor > 0 {
-        spans.push(" ".into());
-        spans.push(
-            format!(" {supervisor} for the supervisor: s ")
-                .fg(t.accent)
-                .bold(),
-        );
-    }
-    if spans.len() == 2 {
-        spans.push(" ✓ all quiet ".fg(t.done));
-    }
+    spans.push(" ".into());
+    spans.push(match need_you {
+        0 => "✓ all quiet ".fg(t.done),
+        n => format!("● {n} need you ").fg(t.needs).bold(),
+    });
     Line::from(spans)
 }
 
@@ -6315,7 +6370,6 @@ enum BarMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BarClick {
     Action(Action),
-    Review,
 }
 
 /// The bar under a session, and the columns (from, to) its chips are clicked in.
@@ -6338,7 +6392,7 @@ fn attached_bar(
     view: &Attached,
     panes: Option<BarPanes>,
     mode: BarMode,
-    proposals: usize,
+    need_you: usize,
     hints: bool,
     t: &Theme,
     map: &Keymap,
@@ -6362,7 +6416,7 @@ fn attached_bar(
         (None, Some(s)) => {
             let color = t.state(s.state);
             spans.push(
-                format!(" {} {} ", state_icon(s.state, 0), s.state.label())
+                format!(" {} {} ", state_icon(s.state, 0), state_word(s.state))
                     .fg(color)
                     .bold(),
             );
@@ -6381,15 +6435,11 @@ fn attached_bar(
         clicks.push((from, width(&spans), BarClick::Action(Action::Zoom)));
         spans.push(" ".into());
     }
-    if proposals > 0 {
+    // The one count, as the Inbox and the ⌂ show it; a click goes home to it.
+    if need_you > 0 {
         let from = width(&spans);
-        spans.push(
-            format!(" ◇ {proposals} to review ")
-                .fg(t.bg)
-                .bg(t.accent2)
-                .bold(),
-        );
-        clicks.push((from, width(&spans), BarClick::Review));
+        spans.push(format!(" ● {need_you} need you ").fg(t.needs).bold());
+        clicks.push((from, width(&spans), BarClick::Action(Action::Home)));
         spans.push(" ".into());
     }
     if let Some(page) = &view.scroll {
@@ -6512,31 +6562,6 @@ fn short_path(path: &std::path::Path) -> String {
         return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
     }
     path.display().to_string()
-}
-
-/// How many sessions are in each state worth a glance, most urgent first.
-fn counts(queue: &[QueueItem], sessions: &[SessionInfo]) -> Vec<(AgentState, usize)> {
-    let mut out = Vec::new();
-    for state in [
-        AgentState::NeedsInput,
-        AgentState::Blocked,
-        AgentState::ReviewReady,
-        AgentState::Interrupted,
-        AgentState::Stale,
-    ] {
-        let n = queue.iter().filter(|q| q.status.state == state).count();
-        if n > 0 {
-            out.push((state, n));
-        }
-    }
-    let working = sessions
-        .iter()
-        .filter(|s| s.exited.is_none() && s.status.state == AgentState::Working)
-        .count();
-    if working > 0 {
-        out.push((AgentState::Working, working));
-    }
-    out
 }
 
 fn now_ms() -> u64 {
@@ -6842,10 +6867,23 @@ fn stdin_bytes() -> mpsc::Receiver<Vec<u8>> {
 /// Where the home screen's cursor is, by item rather than row (`App::anchor`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Anchor {
-    /// A decision, by project and id.
-    Proposal(PathBuf, u32),
-    Queue(Option<SessionId>),
+    /// The Decide or Filed row.
+    Record(InboxRow),
+    /// A session, in Needs you or below it.
     Session(Option<SessionId>),
+}
+
+/// A row of the Inbox (spec: Inbox).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboxRow {
+    /// A session waiting on you, by its place in the queue.
+    Queue(usize),
+    /// Proposals, ready items and build orders, as one row.
+    Decide,
+    /// Items agents filed, not triaged, as one row.
+    Filed,
+    /// A session not waiting on you.
+    Session(SessionId),
 }
 
 /// What a place on the home screen is for.
@@ -7389,11 +7427,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// One selection runs over the proposals, then the queue, then the sessions
-    /// not in the queue (each session once), and stays on the same proposal as the
-    /// list changes.
+    /// One selection runs over the Inbox: the queue, then one row for every
+    /// proposal, then the sessions not in the queue (each session once). It stays
+    /// on its row as the rows above it come and go.
     #[tokio::test]
-    async fn selection_runs_over_proposals_queue_and_sessions() {
+    async fn selection_runs_over_queue_decisions_and_sessions() {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-prop-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1), info(2)];
@@ -7405,8 +7443,9 @@ mod tests {
             })
             .unwrap()
         );
-        // The rows above moved the cursor down with its session.
-        assert_eq!((app.selected, app.selection().0), (3, Some(1)));
+        // The decisions' row above moved the cursor down with its session.
+        assert_eq!((app.selected, app.selection().0), (2, Some(1)));
+        assert_eq!(app.need_you(), 3, "the queue's one and both proposals");
 
         let walk: Vec<_> = (0..app.rows())
             .map(|i| {
@@ -7421,32 +7460,21 @@ mod tests {
         assert_eq!(
             walk,
             [
-                (Some("one".into()), None, None),
-                (Some("two".into()), None, None),
                 (None, Some(0), Some(2)),
+                // a/d answer the oldest proposal, the one the detail shows.
+                (Some("one".into()), None, None),
                 (None, None, Some(1)),
             ]
         );
 
-        // On "two" (/r/b #1, not /r/a #1): a new one ahead keeps it there...
+        // On the decisions' row: it stays there as they're answered...
         app.selected = 1;
         app.on_push(ServerMsg::Proposals {
-            items: vec![
-                proposed("/r/c", 3, "new"),
-                proposed("/r/a", 1, "one"),
-                proposed("/r/b", 1, "two"),
-            ],
+            items: vec![proposed("/r/b", 1, "two")],
         })
         .unwrap();
         assert_eq!(app.proposal().unwrap().title, "two");
-        // ...and once it is reviewed, the cursor stays where it was: on the next row.
-        app.on_push(ServerMsg::Proposals {
-            items: vec![proposed("/r/c", 3, "new"), proposed("/r/a", 1, "one")],
-        })
-        .unwrap();
-        assert_eq!((app.selected, app.queue_index()), (2, Some(0)));
-        // The last one gone: a session the cursor was on stays under it.
-        app.selected = 3;
+        // ...and once none are left, the cursor stays where it was: on the next row.
         app.on_push(ServerMsg::Proposals { items: vec![] }).unwrap();
         assert_eq!((app.selected, app.selection().0), (1, Some(1)));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -7538,10 +7566,81 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The proposals list sits above the queue, with its keys in the bar and the
-    /// selected one's body in the preview.
+    /// One count of what waits on you: the queue, each proposal and each item
+    /// agents filed (not one an agent filed and took, nor an open one). The header,
+    /// the Inbox and the attached status line all say the same number.
     #[tokio::test]
-    async fn home_screen_lists_proposals_to_review() {
+    async fn one_count_is_shown_the_same_everywhere() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-count-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1), info(2)];
+        app.queue = vec![queued(1)];
+        app.on_push(ServerMsg::Proposals {
+            items: vec![proposed("/r/a", 1, "one"), proposed("/r/b", 2, "two")],
+        })
+        .unwrap();
+        let item = |id: u32, status: &str, project: &str, taken: &[u32]| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "number": id, "title": format!("item {id}"), "status": status,
+                "by": "claude", "project": project, "created": id, "updated": 0,
+                "filed_by": [0, 2], "taken": taken,
+            }))
+            .unwrap()
+        };
+        app.on_push(ServerMsg::Items {
+            items: vec![
+                item(1, "proposed", "/r/api", &[]),
+                item(2, "proposed", "/r/web", &[]),
+                // Its own work, under way: not for triage.
+                item(3, "proposed", "/r/web", &[2]),
+                item(4, "open", "/r/web", &[]),
+            ],
+            orders: vec![],
+            launches: vec![],
+        })
+        .unwrap();
+        assert_eq!(app.need_you(), 5);
+        assert_eq!(
+            app.inbox_rows(),
+            [
+                InboxRow::Queue(0),
+                InboxRow::Decide,
+                InboxRow::Filed,
+                InboxRow::Session(2)
+            ]
+        );
+
+        let home = home_screen(&app, 100).join("\n");
+        for want in [
+            "● 5 need you",
+            "Needs you 5",
+            "2 decisions",
+            "2 filed",
+            "api 1 · web 1",
+        ] {
+            assert!(home.contains(want), "lacks {want:?}: {home}");
+        }
+        assert!(!home.contains("backlog 2 waiting"), "no box of its own");
+
+        let view = Attached::new(2, "two".into(), None);
+        let bar = attached_bar(
+            &view,
+            None,
+            BarMode::Session,
+            app.need_you(),
+            true,
+            app.settings.theme,
+            &app.settings.keys,
+        );
+        let line: String = bar.line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line.contains("● 5 need you"), "{line}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Proposals are one Needs-you row, with their keys in the bar and the oldest
+    /// one's body in the preview.
+    #[tokio::test]
+    async fn home_screen_batches_proposals_into_one_row() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-review-{}", std::process::id()));
@@ -7575,47 +7674,27 @@ mod tests {
                 .collect::<String>()
         };
 
-        // At the top: the first rows only, and the count of them all.
+        // One row for them all, counted; the detail reads the oldest, which a/d
+        // answer.
         app.selected = 0;
         let text = render(&app);
         for want in [
-            "10 to review",
-            "decisions to review 10",
+            "10 need you",
+            "10 decisions",
             "#10",
-            "claude · x",
+            "claude · /r/x",
             "accept",
         ] {
             assert!(text.contains(want), "lacks {want:?}");
         }
+        assert!(!text.contains("decisions to review"), "no box of its own");
         assert!(!text.contains("sqlx"));
 
-        // The last one: the list scrolls to it, and the preview reads it.
-        app.selected = 9;
-        let text = render(&app);
-        for want in [
-            "#7",
-            "constraint",
-            "Use sqlx, not diesel",
-            "claude · api",
-            "Diesel blocks.",
-        ] {
-            assert!(text.contains(want), "lacks {want:?}");
-        }
-
         // On a session, its own keys again.
-        app.selected = 10;
+        app.selected = 1;
         let text = render(&app);
         assert!(text.contains("open") && !text.contains("accept"));
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn proposal_text_is_one_line() {
-        let mut d = proposed("/r", 1, "title");
-        assert_eq!(proposal_text(&d), "title");
-        d.body = "first\n\n  second ".into();
-        d.provenance.session = Some("api".into());
-        assert_eq!(proposal_text(&d), "first second (from api)");
     }
 
     #[tokio::test]
@@ -7758,7 +7837,7 @@ mod tests {
             let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
             for want in [
                 "VALKYRIE",
-                "1 needs input",
+                " need you",
                 "cargo test -p auth",
                 "backfill",
                 "web-ui",
@@ -7939,7 +8018,7 @@ mod tests {
         app.preview = Some((3, docs.into()));
         let text = render(&app, "demo-1");
         assert!(text.contains("docs-pass") && text.contains("fixed 4 typos"));
-        assert!(!text.contains("needs input"));
+        assert!(text.contains("1 need you") && !text.contains("asks"));
 
         // 2. fix-login stops on a permission prompt and goes to the top.
         set(
@@ -7958,7 +8037,7 @@ mod tests {
             ),
         ));
         let text = render(&app, "demo-2");
-        assert!(text.contains("1 needs input") && text.contains("npm test"));
+        assert!(text.contains("2 need you") && text.contains("npm test"));
         assert!(text.contains("Do you want to proceed?"));
 
         // 3. Answered: back to work, out of the queue.
@@ -7967,7 +8046,7 @@ mod tests {
         app.selected = 0;
         app.preview = Some((3, docs.into()));
         let text = render(&app, "demo-3");
-        assert!(!text.contains("needs input") && !text.contains("Permission"));
+        assert!(text.contains("1 need you") && !text.contains("Permission"));
 
         // 4. checkout-ui finishes and joins the queue.
         set(
@@ -7984,7 +8063,7 @@ mod tests {
             "● Cart totals now update as items change\n  ⎿  2 files changed, 64 insertions, 9 deletions".into(),
         ));
         let text = render(&app, "demo-4");
-        assert!(text.contains("cart totals update live") && text.contains("2 done"));
+        assert!(text.contains("cart totals update live") && text.contains("2 need you"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8089,9 +8168,9 @@ mod tests {
             "{}",
             lines[0]
         );
-        assert!(lines[1].contains("fish · ○ idle"), "{}", lines[1]);
+        assert!(lines[1].contains("fish · ○ quiet"), "{}", lines[1]);
         assert!(lines[1].contains("claude · ") && lines[1].contains("working"));
-        assert!(lines[1].contains("codex · ● needs input"));
+        assert!(lines[1].contains("codex · ● asks"));
         assert!(lines[0].trim_end().ends_with("+ new"), "{}", lines[0]);
         assert!(
             lines[2].starts_with("inside session 2"),
@@ -8580,7 +8659,7 @@ mod tests {
                 .collect()
         };
 
-        // Home: only the proposal waits on the user.
+        // Home: only the filed item waits on the user, as one row.
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal
             .draw(|f| {
@@ -8590,8 +8669,10 @@ mod tests {
             })
             .unwrap();
         let home = text(&terminal);
-        assert!(home.contains("1 waiting"), "{home}");
-        assert!(home.contains("#2   Flaky exit test"), "{home}");
+        assert!(
+            home.contains("1 need you") && home.contains("1 filed"),
+            "{home}"
+        );
         assert!(!home.contains("Tab rename"), "{home}");
 
         // Keys after `b` in the same read go to the page, not the home screen.
@@ -8835,7 +8916,7 @@ mod tests {
         let lines = draw(&app);
         assert!(lines[0].starts_with(" ⌂ home"), "{}", lines[0]);
         assert!(lines[0].contains("2 proj2"), "{}", lines[0]);
-        assert!(lines[1].contains("codex · ● needs input"), "{}", lines[1]);
+        assert!(lines[1].contains("codex · ● asks"), "{}", lines[1]);
         assert!(lines[3].starts_with("inside session 2"), "{}", lines[3]);
         let layout = app.tab_layout(app.split_body(Rect::new(0, 0, 100, 20)).1.unwrap());
         let attached = layout.tabs[1].1;
@@ -9185,7 +9266,7 @@ mod tests {
             assert_eq!(rects.len(), 3);
             assert_eq!(rects[1].y, rects[0].y + 3, "two rows and a gap");
             assert!(text(rects[1], rects[1].y).contains("2 proj2"));
-            assert!(text(rects[2], rects[2].y + 1).contains("codex · ● needs input"));
+            assert!(text(rects[2], rects[2].y + 1).contains("codex · ● asks"));
             assert!(
                 text(main, main.y).starts_with("inside session 2"),
                 "{side:?} {style:?}"
@@ -9439,7 +9520,7 @@ mod tests {
 
         // The bar says decisions wait, though home is out of sight.
         let lines = draw(&app, &mut terminal);
-        assert!(lines[23].contains("◇ 2 to review"), "{}", lines[23]);
+        assert!(lines[23].contains("● 2 need you"), "{}", lines[23]);
         assert!(!lines.join("\n").contains("all 41 passed"));
 
         // The mouse resting on another tab peeks at it: its state, its summary and
@@ -9491,7 +9572,7 @@ mod tests {
         app.on_input(b"x".to_vec()).await;
         assert!(app.peeked().is_none());
 
-        // The bar's chips click as their keys press: tab mode, and the decisions.
+        // The bar's chips click as their keys press.
         let click = |x| Mouse {
             kind: MouseKind::Press,
             code: 0,
@@ -9508,7 +9589,7 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect::<String>();
             assert!(
-                lead.contains("◇ 2 to review    ^\\  actions  alt n"),
+                lead.contains("need you    ^\\  actions  alt n"),
                 "actions lead: {lead}"
             );
             bar.clicks
@@ -9520,9 +9601,6 @@ mod tests {
         app.on_mouse(click(chip(&app, BarClick::Action(Action::Tabs))))
             .await;
         assert!(app.tab_mode);
-        app.on_keys(b"\x1b".to_vec()).await;
-        app.on_mouse(click(chip(&app, BarClick::Review))).await;
-        assert_eq!(app.reviewing, Some(0));
         app.on_keys(b"\x1b".to_vec()).await;
         app.on_mouse(click(0)).await;
         assert_eq!(
@@ -10148,16 +10226,27 @@ mod tests {
         app.on_input(click(x, 0).into_bytes()).await;
         app.on_input(click(x, 28).into_bytes()).await;
         assert_eq!(app.selected, before);
-        // A proposal's row: the first click selects it, the second is Enter, which
-        // shows its text (a session's Enter would attach, which needs a daemon).
+        // The decisions' one row: the first click selects it, the second is Enter,
+        // which opens them to review (a session's would attach, needing a daemon).
         screen(&app, &mut terminal);
-        let y = rows.iter().position(|r| r.contains("one")).unwrap() as u16;
-        let x = rows[y as usize].find("one").unwrap() as u16;
+        let y = rows.iter().position(|r| r.contains("decision")).unwrap() as u16;
+        let x = rows[y as usize].find("decision").unwrap() as u16;
         app.on_input(click(x, y).into_bytes()).await;
-        assert_eq!((app.selected, app.status.as_str()), (0, ""));
+        assert_eq!((app.row(), app.reviewing), (Some(InboxRow::Decide), None));
         screen(&app, &mut terminal);
         app.on_input(click(x, y).into_bytes()).await;
-        assert_eq!(app.status, proposal_text(&app.proposals[0]));
+        assert_eq!(app.reviewing, Some(0));
+        // Open over home, it takes the keys: `q` closes it rather than quitting,
+        // and the rows behind don't move.
+        let behind = app.selected;
+        app.on_input(b"k".to_vec()).await;
+        assert_eq!((app.selected, app.reviewing), (behind, Some(0)));
+        app.on_input(b"q".to_vec()).await;
+        assert_eq!((app.reviewing, app.quit), (None, false));
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.reviewing, Some(0));
+        app.on_input(b"\x1b".to_vec()).await;
+        assert_eq!((app.reviewing, app.quit), (None, false));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -10293,9 +10382,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The backlog panel on home opens the backlog when clicked, as `b` does.
+    /// Items agents filed are one Needs-you row on home, a click target like any.
     #[tokio::test]
-    async fn the_home_backlog_panel_is_a_click_target() {
+    async fn filed_items_are_one_inbox_row() {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-bpanel-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         let waiting = Item {
@@ -10335,19 +10424,14 @@ mod tests {
         })
         .unwrap();
         let rows = home_screen(&app, 110);
-        let y = rows
-            .iter()
-            .position(|r| r.contains("Flaky exit test"))
-            .unwrap() as u16;
+        let y = rows.iter().position(|r| r.contains("1 filed")).unwrap() as u16;
+        let filed = app.inbox_rows().iter().position(|r| *r == InboxRow::Filed);
         assert_eq!(
-            app.home_hit(Position::new(10, y)),
-            Some(Hit::Key(HomeKey::Backlog))
+            app.home_hit(Position::new(10, y)).zip(filed),
+            Some((Hit::Row(filed.unwrap()), filed.unwrap()))
         );
-        // The sessions panel below it is not.
-        assert_ne!(
-            app.home_hit(Position::new(10, 28)),
-            Some(Hit::Key(HomeKey::Backlog))
-        );
+        // The blank space under it is not.
+        assert_eq!(app.home_hit(Position::new(10, 28)), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

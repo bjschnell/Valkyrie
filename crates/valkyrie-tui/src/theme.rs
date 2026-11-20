@@ -855,6 +855,17 @@ impl Theme {
 
 /// The glyph in front of a state: a spinner frame while working. All are in common
 /// coding fonts (JetBrains Mono lacks ✔ and ✖, for one).
+/// The one word for a state, everywhere the TUI says it (spec: Marks and color).
+pub fn state_word(state: AgentState) -> &'static str {
+    match state {
+        AgentState::NeedsInput => "asks",
+        AgentState::Blocked | AgentState::Interrupted | AgentState::Stale => "stuck",
+        AgentState::ReviewReady => "finished",
+        AgentState::Working => "working",
+        AgentState::Idle | AgentState::Exited => "quiet",
+    }
+}
+
 pub fn state_icon(state: AgentState, frame: usize) -> &'static str {
     const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     match state {

@@ -259,7 +259,11 @@ impl Page {
                 Row::Entry(e, at) => {
                     let here = i == self.cursor;
                     let from = list.len();
-                    let label = e.outcome.label();
+                    let label = match e.outcome {
+                        // One word per state: a finished turn is "finished".
+                        Outcome::Done => "finished",
+                        outcome => outcome.label(),
+                    };
                     let mut first = vec![
                         if here { "▌".fg(t.accent) } else { " ".into() },
                         format!(" {label} ").fg(t.bg).bg(color(e.outcome, t)).bold(),

@@ -57,11 +57,6 @@ impl Lane {
             Lane::Done => t.muted,
         }
     }
-
-    /// Lanes the home screen shows: the ones waiting on the user.
-    pub(crate) fn waits(self) -> bool {
-        matches!(self, Lane::Needs | Lane::Review | Lane::Proposed)
-    }
 }
 
 /// The newest of an item's sessions still running on this daemon.
@@ -128,6 +123,7 @@ pub(crate) fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> Lane {
 /// Items in page order, each with its lane: by lane, then in the order to work
 /// them (`valkyrie_proto::order`), the done ones newest first. Only the newest few
 /// done ones.
+#[cfg(test)]
 pub(crate) fn rows(items: &[Item], sessions: &[SessionInfo], boot: u64) -> Vec<(Lane, Item)> {
     rows_of(items, items, sessions, boot)
 }
@@ -1782,18 +1778,6 @@ fn item_line(
     line
 }
 
-/// An item on the home screen: its lane, number and title.
-pub(crate) fn home_line(item: &Item, lane: Lane, width: usize, t: &Theme) -> Line<'static> {
-    let label = format!(" {:<10}", lane.title());
-    let id = format!("#{:<4}", item.number);
-    let room = width.saturating_sub(label.len() + id.len());
-    Line::from(vec![
-        label.fg(lane.color(t)).bold(),
-        id.fg(t.muted),
-        fit(&item.title, room).fg(t.fg),
-    ])
-}
-
 fn typing_line(typing: &Typing, width: usize, t: &Theme) -> Line<'static> {
     // A new item's label takes its kind's color, as the list shows it.
     let (label, color, text) = match typing {
@@ -1858,7 +1842,12 @@ fn detail_lines(
             },
             format!("· {} ", item.priority.as_str()).fg(priority_color(item.priority, t)),
             match live {
-                Some(s) => format!("· tab {} {} ", s.id, s.status.state.label()).fg(t.muted),
+                Some(s) => format!(
+                    "· tab {} {} ",
+                    s.id,
+                    crate::theme::state_word(s.status.state)
+                )
+                .fg(t.muted),
                 None => "".into(),
             },
             item.branch
