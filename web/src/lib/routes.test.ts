@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { docHash, HASH, moved } from "./routes";
+import { docHash, HASH, memoryShelf, moved } from "./routes";
 
 describe("moved", () => {
   it("sends the old pages to their section's tab", () => {
@@ -21,5 +21,16 @@ describe("moved", () => {
     for (const h of ["", "#/", "#/history", "#/backlog", "#/backlog/3", "#/s/4", "#/memory/docs", "#/settings"]) {
       expect(moved(h)).toBeNull();
     }
+  });
+});
+
+describe("memoryShelf", () => {
+  it("reads Memory's shelves, null for the section itself", () => {
+    expect(memoryShelf(HASH.memory)).toBeNull();
+    expect(memoryShelf("#/memory/decisions")).toBe("decisions");
+    expect(memoryShelf(HASH.habits)).toBe("habits");
+    expect(memoryShelf(HASH.notes)).toBe("notes");
+    expect(memoryShelf(HASH.docs)).toBeUndefined();
+    expect(memoryShelf("#/memory/skills/2")).toBeUndefined();
   });
 });

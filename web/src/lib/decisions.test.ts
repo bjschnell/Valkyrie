@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Decision, DecisionKind } from "../proto";
-import { byProject, inFull, matches, parseScope, pinnable, scoping, shelf } from "./decisions";
+import { byProject, inFull, matches, parseScope, pinnable, scoping, served, shelf } from "./decisions";
 import { USER_SCOPE } from "./scope";
 
 const d = (id: number, kind: DecisionKind, more: Partial<Decision> = {}): Decision => ({
@@ -89,5 +89,23 @@ describe("the Memory page's shelves", () => {
     expect(matches("PKILL shell", "Never pkill", "it killed tool shells")).toBe(true);
     expect(matches("pkill npm", "Never pkill", "it killed tool shells")).toBe(false);
     expect(matches("  ", "anything")).toBe(true);
+  });
+});
+
+describe("served", () => {
+  it("says how each reaches agents, in full only for constraints and pins", () => {
+    expect(served(d(1, "constraint"))).toMatchObject({ word: "in full", full: true });
+    expect(served(d(2, "gotcha", { pinned: true }))).toMatchObject({ word: "pinned", full: true });
+    expect(served(d(3, "gotcha", { scope: ["web/**"] }))).toMatchObject({ word: "scoped", full: false });
+    expect(served(d(3, "gotcha", { scope: ["web/**"] })).line).toContain("web/**");
+    expect(served(d(4, "skill")).word).toBe("on demand");
+    expect(served(d(5, "policy")).word).toBe("Valkyrie");
+    expect(served(d(6, "pattern")).word).toBe("title");
+    expect(served(d(7, "policy", { project: USER_SCOPE })).word).toBe("every project");
+  });
+
+  it("says when agents no longer get it", () => {
+    expect(served(d(1, "constraint", { status: "retired" }))).toMatchObject({ word: "retired", full: false });
+    expect(served(d(2, "gotcha", { status: "superseded" })).word).toBe("replaced");
   });
 });
