@@ -40,6 +40,18 @@ pub(crate) enum Do {
     },
 }
 
+/// What the cursor is on, by identity, so it stays on the same thing when a
+/// push reorders the list (else `a` could accept another proposal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Anchor {
+    Review(std::path::PathBuf, u32),
+    Decision(std::path::PathBuf, u32),
+    Note(std::path::PathBuf, u32),
+}
+
+/// How far reading may scroll; drawing keeps it to the text's length.
+const SCROLL_MAX: usize = 10_000;
+
 /// A row of a tab: a group's label, or one thing in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Row {
@@ -56,8 +68,12 @@ pub(crate) struct Page {
     decisions: Option<Vec<Decision>>,
     notes: Option<Vec<Note>>,
     failed: Option<String>,
-    /// Index among the selectable rows (not the labels).
+    /// Index among the selectable rows (not the labels); `anchor` wins when
+    /// the thing it names is still listed.
     cursor: usize,
+    anchor: Option<Anchor>,
+    /// Repositories whose notes couldn't be read.
+    pub(crate) notes_failed: usize,
     /// Reading the selected row in full, scrolled this far.
     reading: Option<usize>,
 }
@@ -70,6 +86,8 @@ impl Page {
             notes: None,
             failed: None,
             cursor: 0,
+            anchor: None,
+            notes_failed: 0,
             reading: None,
         }
     }
@@ -173,6 +191,49 @@ impl Page {
         rows
     }
 
+    /// Every project's decisions again, after a review: the notes stay.
+    pub(crate) fn decisions_loaded(&mut self, got: Result<Vec<Decision>, String>) {
+        match got {
+            Ok(decisions) => {
+                self.decisions = Some(decisions);
+                self.failed = None;
+            }
+            Err(e) => self.failed = Some(e),
+        }
+    }
+
+    fn anchor_of(&self, row: &Row, proposals: &[Decision]) -> Option<Anchor> {
+        Some(match *row {
+            Row::Review(i) => {
+                let d = proposals.get(i)?;
+                Anchor::Review(d.project.clone(), d.id)
+            }
+            Row::Decision(i) => {
+                let d = self.decisions.as_ref()?.get(i)?;
+                Anchor::Decision(d.project.clone(), d.id)
+            }
+            Row::Note(i) => {
+                let n = self.notes.as_ref()?.get(i)?;
+                Anchor::Note(n.project.clone(), n.id)
+            }
+            Row::Head(..) => return None,
+        })
+    }
+
+    /// The cursor's place among `picks`: where its anchor is now, else where it
+    /// was (the next row, once a reviewed proposal leaves).
+    fn place(&self, picks: &[Row], proposals: &[Decision]) -> usize {
+        self.anchor
+            .as_ref()
+            .and_then(|a| {
+                picks
+                    .iter()
+                    .position(|r| self.anchor_of(r, proposals).as_ref() == Some(a))
+            })
+            .unwrap_or(self.cursor)
+            .min(picks.len().saturating_sub(1))
+    }
+
     fn picks(&self, proposals: &[Decision]) -> Vec<Row> {
         self.rows(self.tab, proposals)
             .into_iter()
@@ -187,7 +248,7 @@ impl Page {
         let mut out = Vec::new();
         let picks = self.picks(proposals);
         let n = picks.len();
-        self.cursor = self.cursor.min(n.saturating_sub(1));
+        self.cursor = self.place(&picks, proposals);
         while !bytes.is_empty() {
             let key = next_key(bytes);
             let whole = key.len() == bytes.len();
@@ -198,9 +259,9 @@ impl Page {
                     b"q" => self.reading = None,
                     [0x03] => out.push(Do::Close),
                     b"k" | b"\x1b[A" | b"\x1bOA" => *scroll = scroll.saturating_sub(1),
-                    b"j" | b"\x1b[B" | b"\x1bOB" => *scroll += 1,
+                    b"j" | b"\x1b[B" | b"\x1bOB" => *scroll = (*scroll + 1).min(SCROLL_MAX),
                     b"\x1b[5~" => *scroll = scroll.saturating_sub(20),
-                    b"\x1b[6~" | b" " => *scroll += 20,
+                    b"\x1b[6~" | b" " => *scroll = (*scroll + 20).min(SCROLL_MAX),
                     b"g" | b"\x1b[H" | b"\x1b[1~" => *scroll = 0,
                     _ => {}
                 }
@@ -222,12 +283,17 @@ impl Page {
                             index: *index,
                             accept: key == b"a",
                         });
+                        // One answer a read: the list changes under the next key.
+                        break;
                     }
                 }
                 b"r" => out.push(Do::Load),
                 _ => {}
             }
         }
+        self.anchor = picks
+            .get(self.cursor)
+            .and_then(|r| self.anchor_of(r, proposals));
         out
     }
 
@@ -343,7 +409,7 @@ impl Page {
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let picks = self.picks(proposals);
-        let cursor = self.cursor.min(picks.len().saturating_sub(1));
+        let cursor = self.place(&picks, proposals);
         let here = picks.get(cursor).cloned();
         let on_review = matches!(here, Some(Row::Review(_)));
         let hints: Vec<Span> = if self.reading.is_some() {
@@ -382,10 +448,11 @@ impl Page {
 
         if let (Some(scroll), Some(row)) = (self.reading, &here) {
             let lines = self.detail(row, proposals, inner.width.saturating_sub(2), t);
+            let text = Paragraph::new(lines).wrap(Wrap { trim: false });
+            let total = text.line_count(inner.width.saturating_sub(2).max(1));
+            let scroll = scroll.min(total.saturating_sub(inner.height as usize));
             frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((scroll as u16, 0))
+                text.scroll((scroll as u16, 0))
                     .block(Block::new().padding(ratatui::widgets::Padding::horizontal(1))),
                 inner,
             );
@@ -414,6 +481,15 @@ impl Page {
                     .into(),
             ),
             (None, None) => lines.push(" Loading…".fg(t.muted).into()),
+            _ if self.tab == Tab::Notes && self.notes_failed > 0 => lines.push(
+                format!(
+                    " Couldn't read the notes of {} repositor{} · r tries again",
+                    self.notes_failed,
+                    if self.notes_failed == 1 { "y" } else { "ies" }
+                )
+                .fg(t.blocked)
+                .into(),
+            ),
             _ if picks.is_empty() => lines.push(
                 match self.tab {
                     Tab::Decisions => " Nothing decided yet: agents propose, you review.",
@@ -563,6 +639,21 @@ mod tests {
             }]
         );
         assert!(page.keys(b"jd", &proposals).is_empty());
+        page.keys(b"k", &proposals);
+        // Two answers in one read: only the first goes.
+        assert_eq!(page.keys(b"aa", &proposals).len(), 1);
+        // A proposal pushed ahead of it: the cursor stays on the same one.
+        let more = vec![
+            decision(8, "/r/api", DecisionKind::Gotcha, DecisionStatus::Proposed),
+            proposals[0].clone(),
+        ];
+        assert_eq!(
+            page.keys(b"d", &more),
+            [Do::Review {
+                index: 1,
+                accept: false
+            }]
+        );
         // ↩ reads in full; Esc comes back, then closes.
         page.keys(b"\r", &proposals);
         assert!(!page.at_list());

@@ -849,7 +849,7 @@ impl App {
         if self.wiki.is_some() {
             return self.wiki_keys(&bytes).await;
         }
-        if self.memory.is_some() {
+        if self.memory.is_some() && self.view.is_none() {
             return self.memory_keys(&bytes).await;
         }
         // Over a session, the Docs page waits: your editor on a doc is one.
@@ -2529,18 +2529,26 @@ impl App {
                 }
             }
             let mut notes = Vec::new();
+            let mut failed = 0;
             for repo in repos {
-                // A repository that's gone has no notes to show; the rest still do.
-                if let Ok(listing) = self.client.notes(repo).await {
-                    notes.extend(listing.notes);
+                // One repository's failure leaves the rest's notes, and says so.
+                match self.client.notes(repo).await {
+                    Ok(listing) => notes.extend(listing.notes),
+                    Err(_) => failed += 1,
                 }
             }
-            anyhow::Ok((decisions, notes))
+            anyhow::Ok((decisions, notes, failed))
         }
         .await
         .map_err(|e| format!("{e:#}"));
         if let Some(page) = &mut self.memory {
-            page.loaded(got);
+            match got {
+                Ok((decisions, notes, failed)) => {
+                    page.notes_failed = failed;
+                    page.loaded(Ok((decisions, notes)));
+                }
+                Err(e) => page.loaded(Err(e)),
+            }
         }
     }
 
@@ -2554,8 +2562,15 @@ impl App {
                     if let Some(said) = self.review_at(index, accept).await {
                         self.status = said;
                     }
-                    // An accepted one joins its kind's group.
-                    self.load_memory().await;
+                    // An accepted one joins its kind's group; the notes stay.
+                    let got = self
+                        .client
+                        .decisions(None)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    if let Some(page) = &mut self.memory {
+                        page.decisions_loaded(got);
+                    }
                 }
             }
         }
@@ -4447,7 +4462,6 @@ impl App {
                         && self.supervisor.is_none()
                         && self.past.is_none()
                         && self.wiki.is_none()
-                        && self.memory.is_none()
                         && !self.docs_shown()
                         && self.backlog.is_none()
                         && !self.mini_open()
@@ -4501,7 +4515,7 @@ impl App {
             if let Some(page) = &self.wiki {
                 page.draw(frame, self.settings.theme);
             }
-            if let Some(page) = &self.memory {
+            if let Some(page) = self.memory.as_ref().filter(|_| self.view.is_none()) {
                 page.draw(frame, &self.proposals, self.settings.theme);
             }
             if let Some(page) = self.docs.as_ref().filter(|_| self.view.is_none()) {
