@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { editPatch } from "../lib/optimistic";
-import { GROUPS, agentFiled, base, byGroup, cardActions, itemRef, rowState, tree, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, itemNo, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
+import { GROUPS, agentFiled, base, boardStep, byGroup, firstLane, cardActions, itemRef, rowState, tree, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, itemNo, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, type Group, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type OrderProposal, type Priority } from "../proto";
 import { addItem, setStatuses, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
 import { RepoSelect } from "./Repos";
 import { Back, Chevron, Clip } from "./icons";
-import { useDesktop } from "./Terminal";
+import { useDesktop, useMedia } from "./Terminal";
 import { MicButton } from "./Mic";
 import { usePageKeys } from "../lib/pageKeys";
 
@@ -37,6 +37,12 @@ const write = (key: string, value: string | null) => {
     /* kept for this visit only */
   }
 };
+
+/** Room for the four lanes side by side; narrower, one lane at a time (#266). */
+const LANES_SIDE = "(min-width: 900px)";
+/** How many of Done the board shows until asked for more, and at most. */
+const DONE_FEW = 5;
+const DONE_MOST = 30;
 
 const back = () => (history.length > 1 ? history.back() : (location.hash = "#/backlog"));
 
@@ -137,15 +143,33 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
   };
   const shownOrders = ordersShown(orders, repo);
 
-  // j/k pick a row, Enter opens or closes its card, Esc closes it.
-  const rows = GROUPS.flatMap(({ group }) => (group === "done" && !showDone ? [] : tree(groups[group]).slice(0, group === "done" ? 30 : undefined)));
-  const [sel, setSel] = useState(-1);
+  // The board's lanes (#266), each a tree of rows; Done shows its newest few.
+  const side = useMedia(LANES_SIDE);
+  const laneRows = GROUPS.map(({ group }) => {
+    const rows = tree(groups[group]);
+    return group === "done" ? rows.slice(0, showDone ? DONE_MOST : DONE_FEW) : rows;
+  });
+  // j/k move down and up a lane, h/l between lanes, Enter opens or closes a
+  // card, Esc closes it. Lanes follow sessions: nothing moves by hand (#15).
+  const [cur, setCur] = useState<[number, number] | null>(null);
   const [opened, setOpened] = useState<number | null>(null);
-  const selected = rows[sel]?.item.id ?? null;
-  const pickRow = (i: number) => {
-    const next = Math.max(0, Math.min(rows.length - 1, i));
-    setSel(next);
-    document.querySelectorAll<HTMLElement>(".item-slot")[next]?.scrollIntoView({ block: "nearest" });
+  const selected = cur ? (laneRows[cur[0]]?.[cur[1]]?.item.id ?? null) : null;
+  // A phone shows one lane: the one picked, else In progress or the first with cards.
+  const [shown, setShown] = useState<Group | null>(null);
+  const laneAt = GROUPS.findIndex(({ group }) => group === (shown ?? firstLane(groups)));
+  const swipe = useRef<{ x: number; y: number } | null>(null);
+  const showLane = (i: number) => {
+    setShown(GROUPS[Math.max(0, Math.min(GROUPS.length - 1, i))].group);
+    setCur(null);
+  };
+  const move = (key: "j" | "k" | "h" | "l") => {
+    // On a phone the cursor stays in the lane on show.
+    const sizes = laneRows.map((rows, i) => (side || i === laneAt ? rows.length : 0));
+    const next = boardStep(sizes, cur, key);
+    setCur(next);
+    if (!next) return;
+    const id = laneRows[next[0]][next[1]].item.id;
+    document.querySelector<HTMLElement>(`.item-slot[data-item="${id}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   };
   const toggle = (id: number) => setOpened((was) => (was === id ? null : id));
   const newItem = () => (location.hash = "#/backlog/new");
@@ -153,12 +177,14 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
     n: newItem,
     a: newItem,
     q: () => (location.hash = "#/"),
-    j: () => pickRow(sel + 1),
-    k: () => pickRow(sel - 1),
+    j: () => move("j"),
+    k: () => move("k"),
+    h: () => move("h"),
+    l: () => move("l"),
     Enter: () => selected !== null && toggle(selected),
     Escape: () => {
       setOpened(null);
-      setSel(-1);
+      setCur(null);
     },
   }, { off: beside });
 
@@ -196,7 +222,7 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
           New item
         </button>
       </header>
-      <main className="inbox backlog">
+      <main className={`inbox backlog ${side ? "backlog-lanes" : ""}`}>
         {(choices.length > 1 || repo !== null || inThisRepo.length > 0) && (
           <div className="backlog-filter">
             {(choices.length > 1 || repo !== null) && (
@@ -259,41 +285,87 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
             </div>
           </div>
         )}
-        {GROUPS.map(({ group, title }) => {
-          const list = groups[group];
-          if (list.length === 0) return null;
-          const shut = group === "done" && !showDone;
-          return (
-            <section key={group} className="item-group">
-              {group === "done" ? (
-                <button className="section-title section-toggle" aria-expanded={showDone} onClick={() => setShowDone(!showDone)}>
-                  {title} <span className="count">{list.length}</span>
-                </button>
-              ) : (
-                <h2 className="section-title">
-                  {title} <span className="count">{list.length}</span>
-                </h2>
-              )}
-              {!shut && (
-                <div className="list item-list">
-                  {tree(list)
-                    .slice(0, group === "done" ? 30 : undefined)
-                    .map(({ item, lane, depth }) => (
+        {items.length > 0 && !side && (
+          <div className="seg lane-switch" role="tablist" aria-label="Lane">
+            {GROUPS.map(({ group, short }, i) => (
+              <button
+                key={group}
+                role="tab"
+                aria-selected={i === laneAt}
+                className={`seg-item ${i === laneAt ? "on" : ""}`}
+                onClick={() => showLane(i)}
+              >
+                {short}
+                {group !== "done" && <span className="count">{groups[group].length}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+        {items.length > 0 && (
+          <div
+            className="lanes"
+            onTouchStart={(e) => (swipe.current = { x: e.touches[0].clientX, y: e.touches[0].clientY })}
+            onTouchEnd={(e) => {
+              const from = swipe.current;
+              swipe.current = null;
+              if (side || !from) return;
+              const dx = e.changedTouches[0].clientX - from.x;
+              const dy = e.changedTouches[0].clientY - from.y;
+              if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) showLane(laneAt + (dx < 0 ? 1 : -1));
+            }}
+          >
+            {GROUPS.map(({ group, title }, li) => {
+              if (!side && li !== laneAt) return null;
+              const list = groups[group];
+              const more = Math.min(list.length, DONE_MOST) - DONE_FEW;
+              return (
+                <section key={group} className={`lane lane-${group}`} aria-label={title}>
+                  {side && (
+                    <h2 className="section-title lane-title">
+                      {title} <span className="count">{list.length}</span>
+                    </h2>
+                  )}
+                  <div className="list lane-list">
+                    {laneRows[li].map(({ item, lane, depth }, ri) => (
                       <ItemCard
                         key={item.id}
                         item={item}
                         lane={lane}
                         depth={depth}
-                        picked={selected === item.id}
+                        picked={cur !== null && cur[0] === li && cur[1] === ri}
                         open={opened === item.id}
                         onToggle={() => toggle(item.id)}
                       />
                     ))}
-                </div>
-              )}
-            </section>
-          );
-        })}
+                    {list.length === 0 && <div className="lane-empty">Nothing here</div>}
+                  </div>
+                  {group === "done" && more > 0 && (
+                    <button className="ghost lane-more" onClick={() => setShowDone(!showDone)}>
+                      {showDone ? "Show fewer" : `Show ${more} more`}
+                    </button>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+        )}
+        {items.length > 0 && side && (
+          <p className="lane-keys">
+            <span>
+              <kbd>j</kbd> <kbd>k</kbd> move in a lane
+            </span>
+            <span>
+              <kbd>h</kbd> <kbd>l</kbd> next lane
+            </span>
+            <span>
+              <kbd>Enter</kbd> open
+            </span>
+            <span>
+              <kbd>Esc</kbd> close
+            </span>
+            <span className="lane-keys-why">Lanes follow each item's session. Nothing is dragged.</span>
+          </p>
+        )}
       </main>
     </div>
   );
@@ -607,7 +679,7 @@ function ItemCard({
   const who = (by: string) => (by === "human" ? "you" : by);
 
   return (
-    <div className={`item-slot ${picked ? "picked" : ""}`} style={depth ? ({ "--depth": depth } as CSSProperties) : undefined}>
+    <div className={`item-slot ${picked ? "picked" : ""}`} data-item={item.id} style={depth ? ({ "--depth": depth } as CSSProperties) : undefined}>
       <button className={`row item-row ${picked ? "picked" : ""}`} aria-expanded={expanded} onClick={onToggle}>
         <span className="item-ref">{itemRef(item)}</span>
         <span className="row-main">

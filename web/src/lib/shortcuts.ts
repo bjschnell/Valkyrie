@@ -102,8 +102,10 @@ export const PAGE_KEYS = {
     q: "Back to the session",
   },
   backlog: {
-    j: "Pick the next, previous item",
-    k: "Pick the next, previous item",
+    j: "Pick the next, previous item in a lane",
+    k: "Pick the next, previous item in a lane",
+    h: "Pick from the lane to the left, right",
+    l: "Pick from the lane to the left, right",
     Enter: "Open or close it",
     Escape: "Close it",
     n: "Write an item down",

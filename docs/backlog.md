@@ -23,8 +23,8 @@ valk todo return 5         # back to the backlog: stops its sessions, keeps the 
 valk todo accept 5         # also: show, drop, reopen, rm
 ```
 
-In the web app, Backlog is a list grouped In progress, In review, Up next and
-Done, each item a row with where it stands (`needs you`, `PR #41 open`,
+In the web app, Backlog is four swim lanes, Up next, In progress, In review and
+Done (one at a time on a phone: swipe or tap the switch), each item a row with where it stands (`needs you`, `PR #41 open`,
 `after #3`) and its pieces indented under it. Items move on their own as their
 agent works, waits on you or finishes; one with a pull request open waits in In
 review unless its agent needs you. What agents filed waits in a tray at the top:

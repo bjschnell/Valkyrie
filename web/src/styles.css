@@ -376,7 +376,8 @@ h1[tabindex="-1"]:focus {
   font: var(--type-heading);
 }
 
-.split-empty kbd {
+.split-empty kbd,
+.lane-keys kbd {
   padding: 1px var(--space-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-xs);
@@ -3671,10 +3672,94 @@ html.with-tabs .offline-banner {
   margin-bottom: var(--space-3);
 }
 
-/* The backlog as a list (#252): In progress, In review, Up next, Done, each a
-   list of rows; a piece one step in under its item, on a guide line. */
-.item-group + .item-group {
-  margin-top: var(--space-4);
+/* The backlog's swim lanes (#266): Up next, In progress, In review and Done, side
+   by side where there's room, else one at a time under a lane switch. Each lane is
+   a list of rows; a piece one step in under its item, on a guide line. */
+.inbox.backlog-lanes {
+  max-width: 1480px;
+}
+
+.seg.lane-switch {
+  width: auto;
+  flex-wrap: nowrap;
+  margin-bottom: var(--space-3);
+}
+
+.lane-switch .seg-item {
+  flex: 1;
+  justify-content: center;
+  min-height: 36px;
+}
+
+.lanes {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.backlog-lanes .lanes {
+  grid-template-columns: repeat(3, minmax(240px, 1fr)) minmax(200px, 232px);
+  align-items: start;
+  overflow-x: auto;
+}
+
+.lane {
+  min-width: 0;
+}
+
+.lane-title {
+  margin-top: 0;
+}
+
+.lanes .row-name {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* A card opened in a narrow lane wraps its Launch row instead of spilling. */
+.lanes .card-actions,
+.lanes .launch {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.lane-empty {
+  padding: var(--space-3) var(--space-35);
+  font: var(--type-label);
+  color: var(--faint);
+}
+
+/* Done is a quieter rail: its newest few, no tags. */
+.lane-done .lane-list {
+  background: none;
+}
+
+.lane-done .item-row .row-sub {
+  display: none;
+}
+
+.lane-done .item-row {
+  opacity: 0.75;
+}
+
+.lane-more {
+  margin-top: var(--space-2);
+}
+
+.lane-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-4) var(--space-1) 0;
+  font: var(--type-label);
+  color: var(--faint);
+}
+
+.lane-keys-why {
+  margin-left: auto;
 }
 
 .item-slot + .item-slot {
