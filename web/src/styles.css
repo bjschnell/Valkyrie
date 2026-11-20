@@ -364,6 +364,11 @@ h1[tabindex="-1"]:focus {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* The waiting session the pane beside the list has open. */
+.card.current {
+  border-color: var(--accent);
+}
+
 /* Inbox ---------------------------------------------------------------- */
 
 .inbox {
