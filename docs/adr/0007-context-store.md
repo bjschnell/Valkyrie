@@ -4,7 +4,7 @@ Status: accepted (M2, first slice)
 Date: 2026-10-08
 
 ## Context
-DESIGN §6 (the project context layer) left storage open (§12: repo-local vs daemon-local). Its threat model (§11.6) names injected context as a prompt-injection vector, and §6.3 makes human review mandatory. The author uses Valkyrie on work repos, where extra files in every checkout are unwelcome, and runs several agents in worktrees of one repo at once.
+DESIGN §6 (the project context layer) left storage open (§12: repo-local vs daemon-local). Its threat model (§11.6) names injected context as a prompt-injection vector, and §6.3 makes human review mandatory. Valkyrie runs on repositories its user doesn't own alone (shared team repos), where extra files in every checkout are unwelcome, and often runs several agents in worktrees of one repo at once.
 
 ## Decision
 1. **Storage: the daemon's state dir, export on request.** Each project keeps one markdown file per decision under `<state dir>/context/<name>-<hash>/decisions/NNNN-slug.md`, with a small `key: value` front matter. `valk decisions export` copies the active ones into `<repo>/.valkyrie/decisions/` for anyone who wants them in git. No SQLite yet: a project holds tens of decisions, and FTS arrives with search and extraction.

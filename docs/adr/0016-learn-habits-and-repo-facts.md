@@ -14,12 +14,12 @@ checks: cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D 
 ```
 
 Those settings mix two kinds of thing:
-- **`until` is the user's habit.** The author ships to a PR at home and at work, in every repository.
+- **`until` is the user's habit.** The author ships to a PR in every repository.
 - **`checks` is a fact about the repository.** It differs from one repository to the next.
 
-Because the two are stored together per project, each new repository starts with no policy, and ADR-0013 phase 3 would have to learn the author's habit again in each one, two stops at a time. The author's work machine shows the cost: the same habit in every work repository, and no policy in any of them.
+Because the two are stored together per project, each new repository starts with no policy, and ADR-0013 phase 3 would have to learn the author's habit again in each one, two stops at a time. Anyone with many repositories pays the cost: the same habit in every one, and no policy in any of them.
 
-CI setups vary too. At the author's work, the code is on GitHub and Bamboo builds it. Bamboo posts build status to the PR, so `gh` sees it and `pr-red` works, and agents read the build logs through Bamboo's API (PR #73's links in the `ci-fix` reason cover that). Other teams' CI posts nothing to the forge, and only the agent can reach it, through an MCP server, an API or a CLI. There `pr-red` never fires and `ci-fix` never runs. The author also wrote a skill at work that does the ship-and-watch-CI loop by hand. That's what this ADR and ADR-0013 together should make unnecessary.
+CI setups vary too. Some teams keep code on GitHub and build it with an external CI (Bamboo, Jenkins) that posts build status to the PR, so `gh` sees it and `pr-red` works, and agents read the build logs through the CI's API (PR #73's links in the `ci-fix` reason cover that). Other teams' CI posts nothing to the forge, and only the agent can reach it, through an MCP server, an API or a CLI. There `pr-red` never fires and `ci-fix` never runs. People in that spot end up driving the ship-and-watch-CI loop by hand, which this ADR and ADR-0013 together should make unnecessary.
 
 A first draft of this ADR added onboarding: a question on first run about how far to ship, and a card for each repository's first session. The author turned it down (2026-11-02). Valkyrie should get smarter by watching how each person works, not by asking them to describe it. A configuration is what someone says they do, and it goes stale. Behaviour is what they actually do. A little friction at the start is an acceptable price for that.
 
