@@ -149,6 +149,14 @@ pub(crate) struct Page {
     back: Vec<(String, u16)>,
 }
 
+impl Page {
+    /// On the list, no doc or Recently deleted open: where section keys are the
+    /// app's.
+    pub(crate) fn at_list(&self) -> bool {
+        self.reader.is_none() && self.trash.is_none()
+    }
+}
+
 /// The group a doc is listed under, as the web app has it: "" for agent-level
 /// (the top of the folder), the repository's folder for `repos/<name>/…`, else
 /// its first folder.
