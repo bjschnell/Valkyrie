@@ -17,9 +17,6 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use valkyrie_context::digest as core;
 use valkyrie_proto::{Digest, DigestEntry, Outcome, PastSession, SessionId, SupervisorEntry};
 
-/// Columns from which the selected row's detail shows beside the list.
-const DETAIL_MIN_WIDTH: u16 = 120;
-
 /// How far back History looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Window {
@@ -648,19 +645,7 @@ impl Page {
                 .areas(inner);
         frame.render_widget(Paragraph::new(top), head);
 
-        let (list_area, detail_area) = if body.width >= DETAIL_MIN_WIDTH {
-            let [list, rule, detail] = Layout::horizontal([
-                Constraint::Percentage(58),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(body);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (list, Some(detail))
-        } else {
-            (body, None)
-        };
+        let (list_area, detail_area) = crate::list_and_detail(frame, body, t);
 
         let width = list_area.width as usize;
         let mut lines: Vec<Line> = Vec::new();
