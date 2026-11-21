@@ -8,10 +8,9 @@ use crate::backlog::fit_hints;
 use crate::markdown;
 use crate::next_key;
 use crate::theme::Theme;
-use ratatui::layout::Rect;
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use std::path::PathBuf;
 use valkyrie_proto::{WikiListing, WikiPage};
 
@@ -154,24 +153,16 @@ impl Page {
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, t: &Theme) {
         let area = frame.area();
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let block = |title: String, hints: Vec<ratatui::text::Span<'static>>| {
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(style::Style::new().fg(t.accent))
+            crate::section_block(t)
                 .title(title.fg(t.fg).bold())
                 .title_bottom(
-                    Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).centered(),
+                    Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize))
+                        .left_aligned(),
                 )
-                .style(style::Style::new().bg(t.panel).fg(t.fg))
         };
         let inner = rect.width.saturating_sub(4) as usize;
         let fit = crate::fit;

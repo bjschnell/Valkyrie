@@ -22,7 +22,7 @@ use jiff::tz::TimeZone;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use valkyrie_proto::{DeletedDoc, Doc, DocVersion, DocsListing};
 
 /// What a key on the page asks the app to do.
@@ -829,13 +829,7 @@ impl Page {
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, t: &Theme) {
         let area = frame.area();
         // Nearly the whole screen, like the backlog and digest pages.
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         match &self.reader {
             Some(r) => self.draw_reader(frame, rect, r, t),
@@ -1180,7 +1174,8 @@ impl Page {
 
 /// Recently deleted, over the list: each with where it was and when it went.
 fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) {
-    let width = area.width.saturating_sub(6).min(96);
+    // A view of the Docs page, as full as the page: no centred box (rule 8).
+    let width = area.width;
     let room = width.saturating_sub(4) as usize;
     let tz = TimeZone::system();
     let mut lines: Vec<Line> = vec![Line::default()];
@@ -1230,28 +1225,14 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
         hint(" esc ", "back ", t),
     ]
     .concat();
-    let height = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(3)
-        .min(area.height.saturating_sub(2))
-        .max(5);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-    .intersection(area);
+    let rect = area;
     let rows = rect.height.saturating_sub(2) as usize;
     let skip = (trash.cursor * 2 + 3).saturating_sub(rows);
     let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(style::Style::new().fg(t.accent))
+    let block = crate::section_block(t)
         .title(title.fg(t.fg).bold())
-        .title_bottom(Line::from(fit_hints(hints, room)).centered())
-        .padding(ratatui::widgets::Padding::horizontal(1))
-        .style(style::Style::new().bg(t.panel).fg(t.fg));
+        .title_bottom(Line::from(fit_hints(hints, room)).left_aligned())
+        .padding(ratatui::widgets::Padding::horizontal(1));
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
@@ -1332,12 +1313,9 @@ fn page_block(
     hints: Vec<ratatui::text::Span<'static>>,
     t: &Theme,
 ) -> Block<'static> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(style::Style::new().fg(t.accent))
+    crate::section_block(t)
         .title(title.fg(t.fg).bold())
-        .title_bottom(Line::from(hints).centered())
-        .style(style::Style::new().bg(t.panel).fg(t.fg))
+        .title_bottom(Line::from(hints).left_aligned())
 }
 
 fn plural(n: usize, what: &str) -> String {

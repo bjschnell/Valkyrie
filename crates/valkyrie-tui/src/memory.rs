@@ -8,10 +8,10 @@ use crate::backlog::fit_hints;
 use crate::markdown;
 use crate::next_key;
 use crate::theme::Theme;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{self, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use std::path::Path;
 use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, Note, NoteStatus};
 
@@ -399,13 +399,7 @@ impl Page {
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, proposals: &[Decision], t: &Theme) {
         let area = frame.area();
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let picks = self.picks(proposals);
@@ -435,14 +429,11 @@ impl Page {
             Tab::Skills => " Skills ",
             Tab::Notes => " Notes ",
         };
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(title.fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).centered(),
-            )
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+            );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
