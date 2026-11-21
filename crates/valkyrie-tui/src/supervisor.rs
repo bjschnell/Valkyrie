@@ -235,7 +235,7 @@ impl Page {
             if on {
                 "· last 90 days".fg(t.muted)
             } else {
-                "· the supervisor is off: `valk supervise on`".fg(t.needs)
+                "· the supervisor is off: `valk supervise on`".fg(t.dim())
             },
         ]));
         match (&self.log, &self.failed) {
@@ -244,7 +244,7 @@ impl Page {
                     "   Couldn't load it: {} · r tries again",
                     fit(e, inner.saturating_sub(36))
                 )
-                .fg(t.needs)
+                .fg(t.blocked)
                 .into(),
             ),
             (None, None) => lines.push("   Loading…".fg(t.muted).into()),
@@ -330,7 +330,7 @@ fn watch_lines(
                 "   Couldn't load it: {} · r tries again",
                 fit(e, inner.saturating_sub(36))
             )
-            .fg(t.needs)
+            .fg(t.blocked)
             .into(),
         ),
         Some(Ok(w)) if w.prs.is_empty() && w.on => {
@@ -339,9 +339,12 @@ fn watch_lines(
         Some(Ok(w)) => {
             for pr in &w.prs {
                 let color = match pr.state {
-                    PrState::Red | PrState::Conflicting => t.needs,
+                    // State colors, as Backlog's Pull requests tab has them
+                    // (rule 4): red and conflicting are stuck, not asks.
+                    PrState::Red | PrState::Conflicting => t.blocked,
                     PrState::Green => t.done,
-                    PrState::Pending | PrState::Unknown => t.muted,
+                    PrState::Pending => t.working,
+                    PrState::Unknown => t.muted,
                 };
                 let whose = match (pr.item, &pr.branch) {
                     (Some(i), _) => format!("#{}", numbers.get(&i).copied().unwrap_or(i)),
@@ -574,6 +577,15 @@ mod tests {
             .join("\n");
         assert!(text.contains("#7"), "{text}");
         assert!(!text.contains("#231"), "{text}");
+        // Red is stuck's color, not an ask's (rule 4).
+        let t = &crate::theme::VALKYRIE;
+        let lines = watch_lines(Some(&watch), &numbers, 80, 1_000, t);
+        let state = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| s.content.contains("red"))
+            .expect("the red PR's state");
+        assert_eq!(state.style.fg, Some(t.blocked));
     }
 
     #[test]
