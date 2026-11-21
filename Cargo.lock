@@ -6776,7 +6776,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6799,7 +6799,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-agents"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6808,7 +6808,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-context"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -6820,7 +6820,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-daemon"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -6839,7 +6839,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-desktop"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -6860,7 +6860,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-proto"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -6872,7 +6872,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-term"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "alacritty_terminal",
  "memchr",
@@ -6881,7 +6881,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-tui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6900,7 +6900,7 @@ dependencies = [
 
 [[package]]
 name = "valkyrie-web"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
