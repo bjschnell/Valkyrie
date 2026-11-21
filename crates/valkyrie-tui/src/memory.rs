@@ -8,7 +8,6 @@ use crate::backlog::fit_hints;
 use crate::markdown;
 use crate::next_key;
 use crate::theme::Theme;
-use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{self, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
@@ -17,8 +16,6 @@ use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, Note, NoteStatus};
 
 /// The user scope's root: habits that hold in every project.
 const USER_SCOPE: &str = "~user";
-/// Columns from which the selected row's text shows beside the list.
-const DETAIL_MIN_WIDTH: u16 = 120;
 
 /// Memory's tabs that this page draws; Docs and Wiki are pages of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,19 +447,7 @@ impl Page {
             return;
         }
 
-        let (list_area, detail_area) = if inner.width >= DETAIL_MIN_WIDTH {
-            let [list, rule, detail] = Layout::horizontal([
-                Constraint::Percentage(55),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(inner);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (list, Some(detail))
-        } else {
-            (inner, None)
-        };
+        let (list_area, detail_area) = crate::list_and_detail(frame, inner, t);
 
         let mut lines: Vec<Line> = vec![Line::default()];
         match (&self.decisions, &self.failed) {

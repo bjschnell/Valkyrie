@@ -336,6 +336,11 @@ struct App {
     /// How wide the bar under a session was last drawn, so a click finds its
     /// keys where they were drawn.
     bar_cols: std::cell::Cell<u16>,
+    /// How wide home's list was last drawn: under 100 columns a session's
+    /// detail is its own screen (spec: Layout by width).
+    home_cols: std::cell::Cell<u16>,
+    /// That screen is open, for the selected session.
+    home_detail: bool,
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
@@ -513,6 +518,8 @@ impl App {
             kill_armed: None,
             help: false,
             bar_cols: std::cell::Cell::new(80),
+            home_cols: std::cell::Cell::new(120),
+            home_detail: false,
             needing: None,
             renaming: None,
             menu: None,
@@ -802,6 +809,7 @@ impl App {
     /// Attaches to `id`'s tab, every pane of it, with `id` focused.
     async fn attach(&mut self, id: SessionId) {
         self.drop_g();
+        self.home_detail = false;
         self.help = false;
         self.kill_armed = None;
         self.attach_tab(id).await;
@@ -2920,6 +2928,14 @@ impl App {
         ]
     }
 
+    /// Whether home shows a session's detail as its own screen: narrow, opened
+    /// with Enter, and a session still selected.
+    fn narrow_detail(&self) -> bool {
+        self.home_detail
+            && self.home_cols.get() < 100
+            && matches!(self.row(), Some(InboxRow::Queue(_) | InboxRow::Session(_)))
+    }
+
     /// The row under the cursor.
     fn row(&self) -> Option<InboxRow> {
         self.inbox_rows().get(self.selected).copied()
@@ -3281,6 +3297,13 @@ impl App {
             HomeKey::Quit => self.quit = true,
             HomeKey::Enter => {
                 match self.row() {
+                    // Narrow, Enter shows the session's detail first; Enter there
+                    // attaches.
+                    Some(InboxRow::Queue(_) | InboxRow::Session(_))
+                        if self.home_cols.get() < 100 && !self.home_detail =>
+                    {
+                        self.home_detail = true;
+                    }
                     _ if selected.is_some() => self.attach(selected.unwrap()).await,
                     // The proposals one at a time, a/d on each; the supervisor's
                     // page when only its offers wait.
@@ -3346,6 +3369,7 @@ impl App {
                 _ => self.say("1-9 answer a session that asks".into()),
             },
             HomeKey::Help => self.help = true,
+            HomeKey::Back => self.home_detail = false,
             HomeKey::NewShell => self.new_shell(None).await,
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
@@ -4977,7 +5001,6 @@ const SPIN_EVERY: Duration = Duration::from_millis(100);
 /// Wide enough for the lists plus a preview of the selected session.
 /// Rows the wheel scrolls a proposal's text by, a notch.
 const WHEEL_ROWS: i32 = 3;
-const PREVIEW_MIN_WIDTH: u16 = 130;
 /// The most proposals shown at once; more scroll.
 const PROPOSAL_ROWS: usize = 6;
 
@@ -5039,23 +5062,16 @@ impl App {
             frame.render_widget(Paragraph::new(right).right_aligned(), header);
         }
 
-        let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
-            // No boxes: a single rule between the list and the detail.
-            let [lists, rule, preview] = Layout::horizontal([
-                Constraint::Percentage(62),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(main);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (lists, Some(preview))
-        } else {
-            (main, None)
-        };
+        let (lists, preview) = crate::list_and_detail(frame, main, t);
+        self.home_cols.set(main.width);
         let inbox_area = lists;
         let in_proposals = self.proposal().is_some();
-        self.draw_inbox(frame, inbox_area, now, spin);
+        if self.narrow_detail() {
+            // Narrow: the selected session's detail is the screen; Esc goes back.
+            self.draw_preview(frame, inbox_area);
+        } else {
+            self.draw_inbox(frame, inbox_area, now, spin);
+        }
 
         if let Some(area) = preview {
             self.draw_preview(frame, area);
@@ -5143,6 +5159,9 @@ impl App {
         let mut hint = |k: &str, w: &str, key: HomeKey| hints.push((k.into(), w.into(), key));
         if self.kill_armed.is_some() {
             hint("x", "close it", HomeKey::Kill);
+        } else if self.narrow_detail() {
+            hint("↩", "attach", HomeKey::Enter);
+            hint("esc", "back", HomeKey::Back);
         } else if let Some(step) = &step {
             hint("a", step.action.label(), HomeKey::Accept);
             if let Some(alt) = step.alt {
@@ -6838,6 +6857,33 @@ pub(crate) fn section_block(t: &Theme) -> Block<'static> {
         .style(style::Style::new().bg(t.bg).fg(t.fg))
 }
 
+/// The detail beside a list, by the width there is (spec: Layout by width):
+/// none under 100 columns (the list alone; a detail is its own screen), a list
+/// of 56 columns up to 139, 62 up to 199, and 72 from 200 with the detail at
+/// most 110, left-aligned. A single rule between them. The list, and the
+/// detail if any.
+pub(crate) fn list_and_detail(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    t: &Theme,
+) -> (Rect, Option<Rect>) {
+    let list = match area.width {
+        0..100 => return (area, None),
+        100..140 => 56,
+        140..200 => 62,
+        _ => 72,
+    };
+    let [list, rule, detail] = Layout::horizontal([
+        Constraint::Length(list),
+        Constraint::Length(1),
+        Constraint::Max(110),
+    ])
+    .areas(area);
+    let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
+    frame.render_widget(Paragraph::new(bar), rule);
+    (list, Some(detail))
+}
+
 /// Dims what's under a dialog (rule 8: a box is a dialog, and what's behind it
 /// steps back).
 pub(crate) fn dim(frame: &mut ratatui::Frame, area: Rect, t: &Theme) {
@@ -7740,6 +7786,8 @@ enum HomeKey {
     Answer(u8),
     /// `?`: every key, the tutor at its foot.
     Help,
+    /// Esc: back from a session's detail screen.
+    Back,
     Quit,
 }
 
@@ -7809,6 +7857,8 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
+            // A lone Esc: sequences and Alt keys were taken above.
+            0x1b if rest.len() == 1 => Some(HomeKey::Back),
             _ => None,
         };
         if let Some(key) = key {
@@ -8568,6 +8618,45 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Layout by width (spec): the list alone under 100 columns; a list of 56,
+    /// 62 or 72 columns beside a detail of at most 110 above that. Narrow,
+    /// Enter shows a session's detail as its own screen, Esc goes back.
+    #[tokio::test]
+    async fn the_layout_follows_the_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        for (width, list, detail) in [
+            (80, 80, None),
+            (120, 56, Some(63)),
+            (160, 62, Some(97)),
+            (240, 72, Some(110)),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            let mut got = None;
+            terminal
+                .draw(|f| got = Some(list_and_detail(f, f.area(), &theme::DRACULA)))
+                .unwrap();
+            let (l, d) = got.unwrap();
+            assert_eq!((l.width, d.map(|d| d.width)), (list, detail), "{width}");
+        }
+
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-narrow-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1)];
+        let rows = home_screen(&app, 80);
+        assert!(!rows.iter().any(|r| r.contains('│')), "no detail at 80");
+        app.on_input(b"\r".to_vec()).await;
+        assert!(app.narrow_detail(), "Enter shows the detail, not attaches");
+        let foot = home_screen(&app, 80).last().cloned().unwrap();
+        assert!(
+            foot.contains("↩ attach") && foot.contains("esc back"),
+            "{foot}"
+        );
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(!app.narrow_detail());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Sections are full screens (spec: rule 8): a section's page draws no box
     /// and runs edge to edge under the strip, its keys on the screen's last row,
     /// where the footer is.
@@ -8670,11 +8759,11 @@ mod tests {
                         );
                     }
                 }
-                // At 140 the detail sits beside the list, behind one rule.
+                // From 100 the detail sits beside the list, behind one rule.
                 let rules = (0..width)
                     .filter(|&x| (2..18).all(|y| buffer[(x, y)].symbol() == "│"))
                     .count();
-                assert_eq!(rules, usize::from(width >= 140), "{} {width}", theme.name);
+                assert_eq!(rules, usize::from(width >= 100), "{} {width}", theme.name);
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
@@ -8960,8 +9049,8 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
+        // The row's own "→ rerun" may be cut at the list's width; the keys say it.
         for want in [
-            "→ rerun",
             " a rerun failed jobs",
             " o ask its agent to fix CI",
             " d leave it",
