@@ -333,6 +333,9 @@ struct App {
     kill_armed: Option<SessionId>,
     /// The `?` sheet of every key is open.
     help: bool,
+    /// How wide the bar under a session was last drawn, so a click finds its
+    /// keys where they were drawn.
+    bar_cols: std::cell::Cell<u16>,
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
@@ -509,6 +512,7 @@ impl App {
             cursor_moved: false,
             kill_armed: None,
             help: false,
+            bar_cols: std::cell::Cell::new(80),
             needing: None,
             renaming: None,
             menu: None,
@@ -1634,13 +1638,37 @@ impl App {
         };
         attached_bar(
             view,
+            &self.place_of(view.id),
             self.bar_panes(view.id),
             mode,
             self.need_you(),
             self.settings.hints,
+            self.bar_cols.get(),
             self.settings.theme,
             &self.settings.keys,
         )
+    }
+
+    /// Where a session works, as its bar says it: `api · fix/login · #4` (its
+    /// repository, then its backlog item's branch and number, if it's on one).
+    fn place_of(&self, id: SessionId) -> String {
+        let mut place = Vec::new();
+        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
+            place.extend(s.cwd.file_name().map(|n| n.to_string_lossy().into_owned()));
+        }
+        let item = self.items.iter().find(|i| {
+            i.boot == self.boot()
+                && i.sessions.contains(&id)
+                && matches!(
+                    i.status,
+                    valkyrie_proto::ItemStatus::Open | valkyrie_proto::ItemStatus::Proposed
+                )
+        });
+        if let Some(item) = item {
+            place.extend(item.branch.clone());
+            place.push(format!("#{}", item.number));
+        }
+        place.join(" · ")
     }
 
     /// Where `id` is among the attached tab's panes (from 1), how many there are,
@@ -2518,6 +2546,50 @@ impl App {
                     Line::from(vec![" esc ".fg(t.accent).bold(), "close ".fg(t.dim())]).centered(),
                 ),
             ),
+            rect,
+        );
+    }
+
+    /// `^\`'s panel over a session: what each key does there, bottom right, the
+    /// session dimmed behind (spec: Attached). Only the keys tab mode has.
+    fn draw_which_key(&self, frame: &mut ratatui::Frame, main: Rect) {
+        let t = self.settings.theme;
+        let rows: &[(&str, &str)] = &[
+            ("s · v", "split below · beside"),
+            ("z", "zoom"),
+            ("p", "pane menu"),
+            ("r", "rename"),
+            ("b", "backlog"),
+            ("d", "decisions"),
+            ("m", "minimal tabs"),
+            (",", "settings"),
+        ];
+        let mut lines: Vec<Line> = rows
+            .iter()
+            .map(|(k, w)| {
+                Line::from(vec![
+                    format!(" {k:<6}").fg(t.accent).bold(),
+                    w.to_string().fg(t.secondary()),
+                ])
+            })
+            .collect();
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            " esc ".fg(t.accent).bold(),
+            "back".fg(t.dim()),
+        ]));
+        let width = 34.min(main.width);
+        let height = (lines.len() as u16 + 2).min(main.height);
+        let rect = Rect::new(
+            main.right().saturating_sub(width + 1),
+            main.bottom().saturating_sub(height),
+            width,
+            height,
+        )
+        .intersection(main);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(
+            Paragraph::new(lines).block(panel(Line::from(" actions ".fg(t.fg).bold()), t, true)),
             rect,
         );
     }
@@ -4631,6 +4703,10 @@ impl App {
                     if let Some(session) = self.peeked() {
                         self.draw_peek(frame, main, tabs, session);
                     }
+                    if self.tab_mode {
+                        dim(frame, main, self.settings.theme);
+                        self.draw_which_key(frame, main);
+                    }
                     if let Some(menu) = &self.menu {
                         dim(frame, main, self.settings.theme);
                         self.draw_menu(frame, menu);
@@ -4639,6 +4715,7 @@ impl App {
                         dim(frame, main, self.settings.theme);
                         self.draw_reviews(frame, main, cursor);
                     }
+                    self.bar_cols.set(bar.width);
                     let line = self.bar(view).line;
                     // A toast takes its own row over the bar for its few seconds,
                     // never the bar's own line (rule 9, backlog #203).
@@ -7068,22 +7145,23 @@ struct BarPanes {
     zoomed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attached_bar(
     view: &Attached,
+    place: &str,
     panes: Option<BarPanes>,
     mode: BarMode,
     need_you: usize,
     hints: bool,
+    cols: u16,
     t: &Theme,
     map: &Keymap,
 ) -> Bar {
     let width = |spans: &[Span]| spans.iter().map(|s| s.width() as u16).sum::<u16>();
     let mut clicks = Vec::new();
+    // Left: the name, its state, and where it works (spec: Attached).
     let name = format!(" {} ", view.name).fg(t.fg).bold();
-    let mut spans = vec![
-        if view.auto_name { name.italic() } else { name },
-        format!("#{} ", view.id).fg(t.muted),
-    ];
+    let mut spans = vec![if view.auto_name { name.italic() } else { name }];
     match (view.exited, &view.status) {
         (Some(code), _) => {
             let code = code.map(|c| format!(" {c}")).unwrap_or_default();
@@ -7103,18 +7181,14 @@ fn attached_bar(
         }
         (None, None) => {}
     }
+    if !place.is_empty() {
+        spans.push(format!(" {place} ").fg(t.muted));
+    }
     // Zoomed, the bar says so, and which pane it is; a click shows the split.
     if let Some(p) = panes.filter(|p| p.zoomed) {
         let from = width(&spans);
         spans.push(format!(" ⊡ zoomed {}/{} ", p.at, p.of).fg(t.accent).bold());
         clicks.push((from, width(&spans), BarClick::Action(Action::Zoom)));
-        spans.push(" ".into());
-    }
-    // The one count, as the Inbox and the ⌂ show it; a click goes home to it.
-    if need_you > 0 {
-        let from = width(&spans);
-        spans.push(format!(" ● {need_you} need you ").fg(t.needs).bold());
-        clicks.push((from, width(&spans), BarClick::Action(Action::Home)));
         spans.push(" ".into());
     }
     if let Some(page) = &view.scroll {
@@ -7131,85 +7205,67 @@ fn attached_bar(
     {
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
-    let session = match mode {
-        BarMode::Session if hints => {
-            let mut h = session_hints(map);
-            // A split tab can zoom; once zoomed, the chip above says so.
-            if panes.is_some_and(|p| !p.zoomed)
-                && let Some(key) = map.get(Action::Zoom)
-            {
-                h.push((key.label(), "zoom", Some(Action::Zoom)));
+    // Right: the one count and how to answer it, then the way to everything
+    // else and the way home, as plain hints: no chips (spec: Attached). A
+    // prompt's keys (rename, the pane menu) take their place while it's open.
+    let label = |action: Action| map.get(action).map(|k| k.label());
+    let mut right: Vec<(Span, Option<BarClick>)> = Vec::new();
+    let key = |k: String| format!("{k} ").fg(t.accent).bold();
+    let what = |w: &str| format!("{w}   ").fg(t.dim());
+    match mode {
+        BarMode::Session | BarMode::Tabs => {
+            if need_you > 0 {
+                right.push((
+                    format!("● {need_you} need you ").fg(t.needs).bold(),
+                    Some(BarClick::Action(Action::Home)),
+                ));
+                if hints && let Some(k) = label(Action::Needing) {
+                    right.push((key(k), Some(BarClick::Action(Action::Needing))));
+                }
+                right.push(("  ".into(), None));
             }
-            h
+            if mode == BarMode::Tabs {
+                right.push((key("esc".into()), None));
+                right.push((what("back"), None));
+            } else if hints {
+                if let Some(k) = label(Action::Tabs) {
+                    right.push((key(k), Some(BarClick::Action(Action::Tabs))));
+                    right.push((what("actions"), Some(BarClick::Action(Action::Tabs))));
+                }
+                if let Some(k) = label(Action::Home) {
+                    right.push((key(k), Some(BarClick::Action(Action::Home))));
+                    right.push((what("home"), Some(BarClick::Action(Action::Home))));
+                }
+            }
         }
-        _ => Vec::new(),
-    };
-    let keys: &[(&str, &str)] = match mode {
-        BarMode::Session => &[],
-        BarMode::Tabs => &[
-            ("s/v", "split"),
-            ("z", "zoom"),
-            ("p", "pane menu"),
-            ("r", "rename"),
-            ("d", "decisions"),
-            ("m", "minimal"),
-            (",", "settings"),
-            ("esc", "back"),
-        ],
-        BarMode::Menu => &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")],
-        BarMode::Renaming => &[("↩", "save"), ("esc", "cancel"), ("blank", "folder name")],
+        BarMode::Menu | BarMode::Renaming => {
+            let keys: &[(&str, &str)] = if mode == BarMode::Menu {
+                &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")]
+            } else {
+                &[("↩", "save"), ("esc", "cancel"), ("blank", "folder name")]
+            };
+            for (k, w) in keys {
+                right.push((key(k.to_string()), None));
+                right.push((what(w), None));
+            }
+        }
         // The list's own border has its keys.
-        BarMode::Reviewing => &[],
-    };
-    let keys = session
-        .iter()
-        .map(|(k, w, a)| (k.as_str(), *w, *a))
-        .chain(keys.iter().map(|&(k, w)| (k, w, None)));
-    for (key, what, action) in keys {
-        spans.push(" ".into());
+        BarMode::Reviewing => {}
+    }
+    let right_width: u16 = right.iter().map(|(s, _)| s.width() as u16).sum();
+    let pad = cols.saturating_sub(width(&spans) + right_width);
+    spans.push(" ".repeat(pad as usize).into());
+    for (span, click) in right {
         let from = width(&spans);
-        spans.push(format!(" {key} ").fg(t.accent).bold());
-        spans.push(format!(" {what}").fg(t.dim()));
-        if let Some(action) = action {
-            clicks.push((from, width(&spans), BarClick::Action(action)));
+        spans.push(span);
+        if let Some(click) = click {
+            clicks.push((from, width(&spans), click));
         }
     }
     Bar {
         line: Line::from(spans).style(style::Style::new().bg(t.panel)),
         clicks,
     }
-}
-
-/// The bar's hints under a session: the keys as mapped, tab mode first, since it
-/// leads to the rest and works in every terminal (Alt needs Option as Meta on a
-/// Mac), then the most used. The tab keys show as one hint while they are Alt and
-/// the digits. Each but that one is clicked as its key is pressed.
-fn session_hints(map: &Keymap) -> Vec<(String, &'static str, Option<Action>)> {
-    let hint = |(action, what): (Action, &'static str)| {
-        map.get(action).map(|key| (key.label(), what, Some(action)))
-    };
-    let mut hints: Vec<_> = [(Action::Tabs, "actions"), (Action::Needing, "next ●")]
-        .into_iter()
-        .filter_map(hint)
-        .collect();
-    let digits = (0..9).all(|i| map.get(Action::Tab(i)) == Some(Key::Alt(b'1' + i)));
-    if digits {
-        hints.push(("alt 1-9".to_string(), "tab", None));
-    }
-    hints.extend(
-        [
-            (Action::Home, "home"),
-            (Action::NextTab, "next"),
-            (Action::PrevTab, "prev"),
-            (Action::Last, "last"),
-            (Action::NewTab, "new"),
-            (Action::Capture, "capture"),
-            (Action::Mini, "mini"),
-        ]
-        .into_iter()
-        .filter_map(hint),
-    );
-    hints
 }
 
 /// `~/repos/x` for paths under `$HOME`.
@@ -8375,10 +8431,12 @@ mod tests {
         let view = Attached::new(2, "two".into(), None);
         let bar = attached_bar(
             &view,
+            "",
             None,
             BarMode::Session,
             app.need_you(),
             true,
+            100,
             app.settings.theme,
             &app.settings.keys,
         );
@@ -9116,10 +9174,12 @@ mod tests {
                         Paragraph::new(
                             attached_bar(
                                 view,
+                                "",
                                 app.bar_panes(view.id),
                                 BarMode::Session,
                                 0,
                                 app.settings.hints,
+                                bar.width,
                                 app.settings.theme,
                                 &app.settings.keys,
                             )
@@ -10011,32 +10071,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The bar under a session starts with its name, no `VALKYRIE` label. Its keys
-    /// show unless `hints` is off; tab mode shows its keys either way.
+    /// The bar under a session (spec: Attached): its name, state and where it
+    /// works on the left; the one count and the ways out on the right, plain
+    /// words, no chips; hints off leaves the count. Tab mode says esc.
     #[test]
-    fn the_session_bar_shows_keys_only_with_hints() {
+    fn the_session_bar_is_name_state_place_then_count_and_ways_out() {
         let view = Attached::new(2, "proj2".into(), None);
         let settings = Settings::default();
-        let bar = |mode, hints| {
-            attached_bar(&view, None, mode, 0, hints, settings.theme, &settings.keys)
+        let bar = |mode, hints, need| {
+            let b = attached_bar(
+                &view,
+                "api · fix/login · #4",
+                None,
+                mode,
+                need,
+                hints,
+                100,
+                settings.theme,
+                &settings.keys,
+            );
+            let text = b
                 .line
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
-                .collect::<String>()
+                .collect::<String>();
+            (text, b.clicks)
         };
-        let on = bar(BarMode::Session, true);
-        assert!(on.starts_with(" proj2 #2"), "{on}");
-        assert!(!on.contains("VALKYRIE"), "{on}");
-        assert!(on.contains("alt 1-9"), "{on}");
-        let off = bar(BarMode::Session, false);
-        assert_eq!(off.trim(), "proj2 #2", "{off}");
-        let tabs = bar(BarMode::Tabs, false);
-        assert!(tabs.contains("split") && tabs.contains("rename"), "{tabs}");
-        // Getting around is the direct keys', not tab mode's.
-        for gone in ["switch", "jump", "reorder", "next ●", " o "] {
-            assert!(!tabs.contains(gone), "{gone}: {tabs}");
-        }
+        let (on, clicks) = bar(BarMode::Session, true, 5);
+        assert!(on.starts_with(" proj2  api · fix/login · #4"), "{on}");
+        assert!(!on.contains("#2") && !on.contains("alt 1-9"), "{on}");
+        assert!(
+            on.trim_end()
+                .ends_with("● 5 need you alt n   ^\\ actions   alt h home"),
+            "{on}"
+        );
+        assert_eq!(on.chars().count(), 100, "right-aligned to the width");
+        assert!(clicks.iter().any(|c| c.2 == BarClick::Action(Action::Tabs)));
+        let (off, _) = bar(BarMode::Session, false, 5);
+        assert!(off.trim_end().ends_with("● 5 need you"), "{off}");
+        assert!(!off.contains("actions"), "{off}");
+        let (tabs, _) = bar(BarMode::Tabs, true, 0);
+        assert!(tabs.trim_end().ends_with("esc back"), "{tabs}");
     }
 
     /// Minimal tabs, in every style. On top: one row each, the number, the state's
@@ -10486,10 +10562,12 @@ mod tests {
                     }
                     let line = attached_bar(
                         view,
+                        "",
                         app.bar_panes(view.id),
                         BarMode::Session,
                         app.proposals.len(),
                         app.settings.hints,
+                        bar.width,
                         app.settings.theme,
                         &app.settings.keys,
                     )
@@ -10578,7 +10656,7 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect::<String>();
             assert!(
-                lead.contains("need you    ^\\  actions  alt n"),
+                lead.contains("need you alt n   ^\\ actions   alt h home"),
                 "actions lead: {lead}"
             );
             bar.clicks
@@ -10836,7 +10914,8 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect()
         };
-        assert!(bar_text(&app).contains("zoom"), "a split tab hints the key");
+        // Zoom is ^\\'s, not a chip on the slim bar.
+        assert!(!bar_text(&app).contains("zoom"), "no key chips on the bar");
         let split = app.pane_sizes();
         let hidden = app.pane_mut(2).unwrap().size;
         app.on_keys(b"\x1bz".to_vec()).await;
