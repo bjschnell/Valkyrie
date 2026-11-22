@@ -3,6 +3,7 @@
 //! fit a terminal; the selected item's detail beside or below it.
 
 use crate::edit::LineEdit;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use crate::{fit, next_key};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -171,66 +172,84 @@ const HELD_MAX: usize = 32;
 
 const DONE_SHOWN: usize = 5;
 
-/// Which items the page shows (`r` cycles it): every repository's, one
-/// repository's (its main root, as items keep it), or those with no folder yet.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) enum Repo {
+/// The backlog's filter row (spec: Backlog), cycled with `[ ]` with Pull
+/// requests as its last stop: every lane, then the ones that need nothing
+/// first, the ones agents are on, and the ones in review.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Filter {
     #[default]
     All,
-    In(PathBuf),
-    NoFolder,
+    Ready,
+    Running,
+    Review,
 }
 
-impl Repo {
-    pub(crate) fn holds(&self, item: &Item) -> bool {
+impl Filter {
+    pub(crate) const ALL: [Filter; 4] =
+        [Filter::All, Filter::Ready, Filter::Running, Filter::Review];
+
+    /// The stop after (`forward`) or before `at` on the row, where `None` is
+    /// Pull requests, the last stop, and round again.
+    pub(crate) fn step(at: Option<Filter>, forward: bool) -> Option<Filter> {
+        let stops = Filter::ALL;
+        let n = stops.len() + 1;
+        let at = at
+            .and_then(|f| stops.iter().position(|&s| s == f))
+            .unwrap_or(stops.len());
+        let next = if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        };
+        stops.get(next).copied()
+    }
+
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Repo::All => true,
-            Repo::In(root) => item.project.as_ref() == Some(root),
-            Repo::NoFolder => item.project.is_none(),
+            Filter::All => "All",
+            Filter::Ready => "Ready",
+            Filter::Running => "Running",
+            Filter::Review => "Review",
         }
     }
 
-    /// The one after this: every repository, then each one `items` are for by
-    /// name, then no folder if any item has none, and round again.
-    pub(crate) fn next(&self, items: &[Item]) -> Repo {
-        let mut roots: Vec<&PathBuf> = items.iter().filter_map(|i| i.project.as_ref()).collect();
-        roots.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then(a.cmp(b)));
-        roots.dedup();
-        let mut cycle = vec![Repo::All];
-        cycle.extend(roots.into_iter().map(|r| Repo::In(r.clone())));
-        if items.iter().any(|i| i.project.is_none()) {
-            cycle.push(Repo::NoFolder);
-        }
-        // One whose items are all gone moves on to every repository.
-        match cycle.iter().position(|r| r == self) {
-            Some(at) => cycle[(at + 1) % cycle.len()].clone(),
-            None => Repo::All,
+    /// Whether a row in `lane` (its `blocked_by` worked out) shows. Ready is
+    /// what `valk todo next` would pick from: in the backlog, waiting on
+    /// nothing unfinished. Proposed and done items show under All only.
+    pub(crate) fn shows(self, lane: Lane, item: &Item) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Ready => lane == Lane::Backlog && item.blocked_by.is_empty(),
+            Filter::Running => matches!(lane, Lane::Running | Lane::Needs),
+            Filter::Review => lane == Lane::Review,
         }
     }
 
-    /// What the page's title says it shows; nothing for every repository.
-    fn label(&self) -> Option<String> {
+    /// What it says when it shows nothing.
+    fn none(self) -> &'static str {
         match self {
-            Repo::All => None,
-            Repo::In(root) => Some(root.file_name().map_or_else(
-                || root.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            )),
-            Repo::NoFolder => Some("no folder".into()),
+            Filter::All => "nothing written down: n adds a bug or an idea",
+            Filter::Ready => "nothing ready: every open item waits on another, or is under way",
+            Filter::Running => "no agent is on an item",
+            Filter::Review => "nothing in review",
         }
     }
 }
 
-/// The kind filter after `kind` (`t`): every kind, then bug, feature, chore, spike, debt, and
-/// round again.
-pub(crate) fn next_kind(kind: Option<ItemKind>) -> Option<ItemKind> {
-    match kind {
-        None => Some(ItemKind::ALL[0]),
-        Some(k) => ItemKind::ALL
-            .iter()
-            .position(|&a| a == k)
-            .and_then(|at| ItemKind::ALL.get(at + 1).copied()),
-    }
+/// What `/` matches an item by: its title, `#number`, kind and repository.
+fn said(item: &Item) -> String {
+    let repo = item
+        .project
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map_or_else(|| "no folder".into(), |n| n.to_string_lossy().into_owned());
+    format!(
+        "{} #{} {} {}",
+        item.title,
+        item.number,
+        item.kind.as_str(),
+        repo
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,10 +431,10 @@ pub(crate) struct Page {
     /// Opened by the capture key straight into a new item: the page closes once
     /// it's added or cancelled.
     pub(crate) capture: bool,
-    /// The repository whose items it shows; new ones are written down for it.
-    pub(crate) repo: Repo,
-    /// The one kind of item it shows, or every kind.
-    pub(crate) kind: Option<ItemKind>,
+    /// The filter row's stop (`[ ]`, the app's).
+    pub(crate) filter: Filter,
+    /// `/`: items whose title, number, kind or repository has every word.
+    pub(crate) search: Search,
     /// Inside a bracketed paste while typing; `true` right after a line break, so
     /// a run of them, and the indent after, becomes one space.
     paste: Option<bool>,
@@ -439,7 +458,7 @@ impl Page {
     /// On the list itself, nothing typed or open over it: where section keys
     /// (`g b`, `[ ]`) are the app's, not the page's.
     pub(crate) fn at_list(&self) -> bool {
-        self.typing.is_none() && self.order.is_none()
+        self.typing.is_none() && self.order.is_none() && !self.search.typing
     }
 }
 
@@ -509,8 +528,6 @@ pub(crate) enum Do {
         path: String,
         back: Box<Typing>,
     },
-    /// Show the next repository's items (`Repo::next`).
-    NextRepo,
     /// Ask for a build order of this repository (`P`).
     Plan(PathBuf),
     /// Start (`R`) or leave (`X`) the ready item the supervisor offers.
@@ -531,9 +548,10 @@ pub(crate) enum Do {
 }
 
 impl Page {
-    /// Whether the page shows `item`: of its repository and its kind.
+    /// Whether `/` leaves `item` in: every word typed is in its title,
+    /// number, kind or repository.
     pub(crate) fn holds(&self, item: &Item) -> bool {
-        self.repo.holds(item) && self.kind.is_none_or(|k| item.kind == k)
+        self.search.matches(&said(item))
     }
 
     /// Handles `keys` against `rows` (from `rows`), returning what to do, in order.
@@ -744,6 +762,22 @@ impl Page {
                 }
                 continue;
             }
+            let searching = self.search.typing;
+            match self.search.key(key, whole) {
+                Searched::No => {}
+                // The search ended: the rest of the read would act on rows
+                // listed before it narrowed them.
+                _ if searching && !self.search.typing => {
+                    self.cursor = 0;
+                    break;
+                }
+                Searched::Kept => continue,
+                Searched::Changed => {
+                    self.cursor = 0;
+                    self.armed = None;
+                    continue;
+                }
+            }
             let here = rows.get(self.cursor).map(|(l, i)| (*l, i));
             if key != b"x" {
                 self.armed = None;
@@ -758,22 +792,15 @@ impl Page {
                 }
                 b"g" => self.cursor = 0,
                 b"G" => self.cursor = rows.len().saturating_sub(1),
-                // Of the kind shown, so it doesn't drop out of sight once added.
                 b"n" => {
                     self.typing = Some(Typing::Add {
-                        kind: self.kind.unwrap_or(ItemKind::Bug),
+                        kind: ItemKind::Bug,
                         text: LineEdit::default(),
                     })
                 }
-                b"r" => out.push(Do::NextRepo),
-                b"t" => {
-                    self.kind = next_kind(self.kind);
-                    self.cursor = 0;
-                    self.armed = None;
-                }
                 b"P" => out.push(match self.scope(rows) {
                     Some(project) => Do::Plan(project),
-                    None => Do::Say("pick a repository first: r".into()),
+                    None => Do::Say("select an item in a repository first".into()),
                 }),
                 b"O" => {
                     let scope = self.scope(rows);
@@ -829,14 +856,9 @@ impl Page {
         out
     }
 
-    /// The repository `P` and `O` are about: the one the page shows, else the
-    /// selected item's.
+    /// The repository `P` and `O` are about: the selected item's.
     fn scope(&self, rows: &[(Lane, Item)]) -> Option<PathBuf> {
-        match &self.repo {
-            Repo::In(root) => Some(root.clone()),
-            Repo::NoFolder => None,
-            Repo::All => rows.get(self.cursor).and_then(|(_, i)| i.project.clone()),
-        }
+        rows.get(self.cursor).and_then(|(_, i)| i.project.clone())
     }
 
     /// Opens `order` over the page, as `O` would (the supervisor page's ↩).
@@ -1070,6 +1092,9 @@ impl Page {
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let here = rows.get(self.cursor);
         let hints: Vec<_> = match (&self.typing, here) {
+            (None, _) if self.search.typing => {
+                [hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat()
+            }
             (Some(Typing::Add { .. }), _) => [
                 hint(" ↩ ", "add "),
                 hint(" tab ", "kind "),
@@ -1101,15 +1126,14 @@ impl Page {
                 hint(" esc ", "cancel "),
             ]
             .concat(),
+            // Five at most, the primary first (spec: One key grammar); the
+            // rest are on `?`.
             (None, Some((Lane::Proposed, _))) => [
                 hint(" a ", "accept "),
                 hint(" e ", "edit "),
-                hint(" +/- ", "priority "),
+                hint(" d ", "drop "),
                 hint(" x ", "delete "),
-                hint(" r ", "repo "),
-                hint(" t ", "type "),
-                hint(" n ", "new "),
-                hint(" esc ", "close "),
+                hint(" +/- ", "priority "),
             ]
             .concat(),
             (None, Some((Lane::Done, _))) => [
@@ -1117,10 +1141,7 @@ impl Page {
                 hint(" e ", "edit "),
                 hint(" x ", "delete "),
                 hint(" S ", "ship merged "),
-                hint(" r ", "repo "),
-                hint(" t ", "type "),
                 hint(" n ", "new "),
-                hint(" esc ", "close "),
             ]
             .concat(),
             (None, Some((lane, item))) => {
@@ -1142,42 +1163,38 @@ impl Page {
                     [hint(" ↩ ", "launch "), with].concat()
                 };
                 let rest = [
-                    hint(" s ", "ship "),
-                    hint(" S ", "merged "),
                     hint(" e ", "edit "),
-                    hint(" +/- ", "priority "),
+                    hint(" s ", "ship "),
                     hint(" N ", "note "),
                     hint(" d ", "drop "),
-                    hint(" B ", "to backlog "),
-                    hint(" r ", "repo "),
-                    hint(" t ", "type "),
-                    hint(" n ", "new "),
-                    hint(" P ", "order "),
-                    hint(" esc ", "close "),
                 ];
-                [open, rest.concat()].concat()
+                // The primary and its second (`L with…`, `o`), then the rest:
+                // five in all.
+                [open, rest.concat()]
+                    .concat()
+                    .into_iter()
+                    .take(10)
+                    .collect()
             }
-            (None, None) => [
-                hint(" r ", "repo "),
-                hint(" t ", "type "),
-                hint(" n ", "new "),
-                hint(" esc ", "close "),
-            ]
-            .concat(),
+            (None, None) => [hint(" n ", "new "), hint(" / ", "search ")].concat(),
         };
-        let hints = fit_hints(hints, rect.width.saturating_sub(4) as usize);
+        let around = if self.typing.is_some() || self.search.typing {
+            ""
+        } else {
+            "[ ] filter · j/k move"
+        };
+        let footer = crate::page_footer(hints, around, rect.width.saturating_sub(2), t);
         let open = rows.iter().filter(|(l, _)| *l != Lane::Done).count();
         let block = crate::section_block(t)
             .title(Line::from(
                 [
                     vec![" Backlog ".fg(t.fg).bold()],
-                    self.repo
-                        .label()
-                        .map(|r| vec![format!("{r} ").fg(t.accent).bold()])
-                        .unwrap_or_default(),
-                    self.kind
-                        .map(|k| vec![format!("{} ", k.as_str()).fg(t.accent).bold()])
-                        .unwrap_or_default(),
+                    // The filter row's stop: on the strip from 100 columns,
+                    // which a narrow screen abbreviates, so here too.
+                    match self.filter {
+                        Filter::All => vec![],
+                        f => vec![format!("{} ", f.label()).fg(t.accent).bold()],
+                    },
                     vec![format!("{open} open ").fg(t.muted)],
                     if self.waiting_order(rows) {
                         vec![" build order waits: O ".fg(t.accent).bold()]
@@ -1195,7 +1212,7 @@ impl Page {
                 ]
                 .concat(),
             ))
-            .title_bottom(Line::from(hints).left_aligned());
+            .title_bottom(footer.left_aligned());
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -1213,6 +1230,9 @@ impl Page {
 
         // The list, with a heading over each lane; rows slide to keep the cursor in view.
         let mut lines: Vec<Line> = Vec::new();
+        if self.search.shown() {
+            lines.push(self.search.line(t));
+        }
         let mut cursor_line = 0;
         let mut last = None;
         for (i, (lane, item)) in rows.iter().enumerate() {
@@ -1244,12 +1264,12 @@ impl Page {
         }
         if rows.is_empty() {
             lines.push(Line::default());
-            lines.push(Line::from(match self.kind {
-                Some(k) => {
-                    format!("  no {} items here: t shows every kind", k.as_str()).fg(t.muted)
-                }
-                None => "  nothing written down: n adds a bug or an idea".fg(t.muted),
-            }));
+            let none = if self.search.query.is_empty() {
+                format!("  {}", self.filter.none())
+            } else {
+                format!("  nothing matches “{}”: esc clears it", self.search.query)
+            };
+            lines.push(Line::from(fit(&none, list.width as usize).fg(t.muted)));
         }
         if let Some(typing) = self
             .typing
@@ -1304,31 +1324,19 @@ impl Page {
         }
     }
 
-    /// The launch offer for what the page shows: the repository's, or with every
-    /// repository shown, the selected item's repository's, else the first.
+    /// The launch offer to show: the selected item's repository's, else the
+    /// first.
     fn waiting_launch(&self, rows: &[(Lane, Item)]) -> Option<&LaunchOffer> {
         let scope = self.scope(rows);
-        let here = self
-            .launches
+        self.launches
             .iter()
-            .find(|o| Some(&o.project) == scope.as_ref());
-        match &self.repo {
-            Repo::All => here.or(self.launches.first()),
-            _ => here,
-        }
+            .find(|o| Some(&o.project) == scope.as_ref())
+            .or(self.launches.first())
     }
 
-    /// Whether a build order waits for what the page shows.
-    fn waiting_order(&self, rows: &[(Lane, Item)]) -> bool {
-        match &self.repo {
-            Repo::All => !self.orders.is_empty(),
-            _ => {
-                let scope = self.scope(rows);
-                self.orders
-                    .iter()
-                    .any(|o| Some(&o.project) == scope.as_ref())
-            }
-        }
+    /// Whether a build order waits.
+    fn waiting_order(&self, _rows: &[(Lane, Item)]) -> bool {
+        !self.orders.is_empty()
     }
 }
 
@@ -1992,8 +2000,8 @@ mod tests {
         };
         assert_eq!(press(&mut page, b"R"), [answer(true)]);
         assert_eq!(press(&mut page, b"X"), [answer(false)]);
-        // Another repository's page has no offer of its own.
-        page.repo = Repo::In("/r/other".into());
+        // None offered: R says so.
+        page.launches.clear();
         assert!(matches!(&press(&mut page, b"R")[..], [Do::Say(_)]));
     }
 
@@ -2851,86 +2859,23 @@ mod tests {
     }
 
     #[test]
-    fn r_cycles_every_repository_then_each_by_name_then_no_folder() {
-        let at = |id, project: Option<&str>| Item {
-            project: project.map(PathBuf::from),
-            ..item(id, 1)
-        };
-        let items = [
-            at(1, Some("/w/zeta")),
-            at(2, Some("/home/alpha")),
-            at(3, None),
-            at(4, Some("/w/zeta")),
-        ];
-        let mut repo = Repo::All;
-        let mut seen = Vec::new();
-        for _ in 0..4 {
-            repo = repo.next(&items);
-            seen.push(repo.clone());
-        }
-        assert_eq!(
-            seen,
-            [
-                Repo::In("/home/alpha".into()),
-                Repo::In("/w/zeta".into()),
-                Repo::NoFolder,
-                Repo::All,
-            ]
-        );
-        let held = |r: Repo| {
-            items
-                .iter()
-                .filter(|i| r.holds(i))
-                .map(|i| i.id)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(held(Repo::In("/w/zeta".into())), [1, 4]);
-        assert_eq!(held(Repo::NoFolder), [3]);
-        assert_eq!(held(Repo::All), [1, 2, 3, 4]);
-        // One whose items are gone starts over.
-        assert_eq!(Repo::In("/gone".into()).next(&items), Repo::All);
-        // And `r` asks for it, with or without items shown.
-        let mut page = Page::default();
-        assert_eq!(page.keys(b"r", &[], &[], 7), [Do::NextRepo]);
-    }
-
-    #[test]
-    fn t_cycles_every_kind_then_each_and_the_page_shows_only_that_kind() {
-        let of = |id, kind| Item {
+    fn slash_narrows_by_title_number_kind_and_repository_and_r_t_are_gone() {
+        let of = |id, kind, repo: Option<&str>, title: &str| Item {
             kind,
-            project: Some(PathBuf::from(if id == 3 { "/w/b" } else { "/w/a" })),
+            title: title.into(),
+            project: repo.map(PathBuf::from),
             ..item(id, 1)
         };
         let items = [
-            of(1, ItemKind::Bug),
-            of(2, ItemKind::Feature),
-            of(3, ItemKind::Bug),
-            of(4, ItemKind::Chore),
+            of(1, ItemKind::Bug, Some("/w/api"), "Login drops the token"),
+            of(2, ItemKind::Feature, Some("/w/api"), "Dark mode"),
+            of(3, ItemKind::Bug, Some("/w/web"), "Toasts overlap"),
+            of(4, ItemKind::Chore, None, "Tidy the scripts"),
         ];
         let mut page = Page {
             cursor: 2,
             ..Page::default()
         };
-        let mut seen = Vec::new();
-        for _ in 0..6 {
-            assert!(
-                page.keys(b"t", &[], &[], 7).is_empty(),
-                "t is the page's own"
-            );
-            seen.push(page.kind);
-        }
-        assert_eq!(
-            seen,
-            [
-                Some(ItemKind::Bug),
-                Some(ItemKind::Feature),
-                Some(ItemKind::Chore),
-                Some(ItemKind::Spike),
-                Some(ItemKind::Debt),
-                None
-            ]
-        );
-        assert_eq!(page.cursor, 0, "a new filter starts at the top");
         let shown = |page: &Page| {
             items
                 .iter()
@@ -2938,22 +2883,94 @@ mod tests {
                 .map(|i| i.id)
                 .collect::<Vec<_>>()
         };
+        // r and t aren't filters any more: rename and nothing.
+        assert!(page.keys(b"rt", &[], &[], 7).is_empty());
         assert_eq!(shown(&page), [1, 2, 3, 4]);
-        page.kind = Some(ItemKind::Bug);
-        assert_eq!(shown(&page), [1, 3]);
-        // With a repository too, both hold.
-        page.repo = Repo::In("/w/a".into());
+        assert!(page.keys(b"/api bug", &[], &[], 7).is_empty());
+        assert!(
+            page.search.typing && !page.at_list(),
+            "[ ] and g type while typing"
+        );
         assert_eq!(shown(&page), [1]);
-        // A new item starts as the kind shown.
-        page.kind = Some(ItemKind::Chore);
+        assert_eq!(page.cursor, 0, "a new search starts at the top");
+        // ↩ keeps it; Esc on the list clears it before it closes the page.
+        assert!(page.keys(b"\r", &[], &[], 7).is_empty());
+        assert!(page.at_list());
+        assert!(page.keys(b"\x1b", &[], &[], 7).is_empty());
+        assert_eq!(shown(&page), [1, 2, 3, 4]);
+        assert_eq!(page.keys(b"\x1b", &[], &[], 7), [Do::Close]);
+        // ↩ then a key in the same read: nothing runs on the stale rows.
+        let rows = rows(&items, &[], 7);
+        assert!(page.keys(b"/login\rd", &rows, &[], 7).is_empty());
+        page.keys(b"\x1b", &rows, &[], 7);
+        // By number, and the folder-less by "no folder".
+        page.keys(b"/#3\r", &[], &[], 7);
+        assert_eq!(shown(&page), [3]);
+        page.keys(b"\x1b", &[], &[], 7);
+        page.keys(b"/no folder\r", &[], &[], 7);
+        assert_eq!(shown(&page), [4]);
+        // A new item starts as a bug, whatever is shown.
         page.keys(b"n", &[], &[], 7);
         assert!(matches!(
             page.typing,
             Some(Typing::Add {
-                kind: ItemKind::Chore,
+                kind: ItemKind::Bug,
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn brackets_step_through_the_filter_row_to_pull_requests_and_round() {
+        let mut at = Some(Filter::All);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            at = Filter::step(at, true);
+            seen.push(at);
+        }
+        assert_eq!(
+            seen,
+            [
+                Some(Filter::Ready),
+                Some(Filter::Running),
+                Some(Filter::Review),
+                None,
+                Some(Filter::All)
+            ]
+        );
+        assert_eq!(Filter::step(Some(Filter::All), false), None, "[ from All");
+        assert_eq!(Filter::step(None, false), Some(Filter::Review));
+    }
+
+    #[test]
+    fn the_filter_row_maps_onto_lanes() {
+        let mut blocked = item(5, 1);
+        blocked.blocked_by = vec![4];
+        let free = item(6, 1);
+        let shows = |f: Filter, lane| {
+            [&free, &blocked]
+                .iter()
+                .filter(|i| f.shows(lane, i))
+                .map(|i| i.id)
+                .collect::<Vec<_>>()
+        };
+        for lane in Lane::ORDER {
+            assert_eq!(shows(Filter::All, lane), [6, 5], "All shows {lane:?}");
+        }
+        assert_eq!(
+            shows(Filter::Ready, Lane::Backlog),
+            [6],
+            "not one that waits"
+        );
+        assert!(shows(Filter::Ready, Lane::Proposed).is_empty());
+        assert_eq!(shows(Filter::Running, Lane::Running).len(), 2);
+        assert_eq!(shows(Filter::Running, Lane::Needs).len(), 2);
+        assert!(shows(Filter::Running, Lane::Review).is_empty());
+        assert_eq!(shows(Filter::Review, Lane::Review).len(), 2);
+        for f in [Filter::Ready, Filter::Running, Filter::Review] {
+            assert!(shows(f, Lane::Done).is_empty(), "{f:?} has no done");
+            assert!(shows(f, Lane::Proposed).is_empty(), "{f:?} has no proposed");
+        }
     }
 
     /// Backlog #235: a piece points at its group, the group counts its pieces.

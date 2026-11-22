@@ -25,6 +25,7 @@ mod prs;
 mod quiet;
 mod quota;
 mod rain;
+mod search;
 mod settings;
 mod supervisor;
 mod theme;
@@ -308,6 +309,8 @@ struct App {
     prs: Option<prs::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
+    /// When the open section page last loaded on its own (`reload_page`).
+    page_loaded: Instant,
     /// What the last `review_at` would take back, for Memory's `z`.
     last_answer: Option<Option<memory::Undo>>,
     /// The selected session's screen text, for the preview pane.
@@ -510,6 +513,7 @@ impl App {
             memory: None,
             prs: None,
             editing: None,
+            page_loaded: Instant::now(),
             last_answer: None,
             preview: None,
             pinger: Pinger::default(),
@@ -632,6 +636,9 @@ impl App {
                 }
                 _ = tick.tick() => {
                     self.refresh().await;
+                    if self.page_loaded.elapsed() >= PAGE_RELOAD {
+                        self.reload_page().await;
+                    }
                     // An editor that ended while you were elsewhere.
                     self.finish_edit().await;
                     self.update_preview().await;
@@ -1491,7 +1498,9 @@ impl App {
     /// Bracketed paste on in the outer terminal while a backlog prompt is open, so a
     /// multi-line paste reaches it as one, at home too; after, the program's mode.
     fn sync_paste(&mut self) {
-        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some());
+        // A backlog prompt, or a search being typed on any page (#273): a
+        // pasted line break mustn't end it.
+        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some()) || self.searching();
         let program = self.view.as_ref().is_some_and(|v| v.modes.bracketed_paste);
         let Some(final_byte) = paste_change(want, self.paste_forced, program) else {
             return;
@@ -1500,6 +1509,16 @@ impl App {
         let mut out = std::io::stdout();
         let _ = write!(out, "\x1b[?2004{final_byte}");
         let _ = out.flush();
+    }
+
+    /// A page's `/` search is being typed.
+    fn searching(&self) -> bool {
+        self.backlog.as_ref().is_some_and(|p| p.search.typing)
+            || self.memory.as_ref().is_some_and(|p| p.search.typing)
+            || self.docs.as_ref().is_some_and(|p| p.search.typing)
+            || self.wiki.as_ref().is_some_and(|p| p.search.typing)
+            || self.prs.as_ref().is_some_and(|p| p.search.typing)
+            || self.supervisor.as_ref().is_some_and(|p| p.search.typing)
     }
 
     /// The program's modes as the outer terminal should have them: a backlog prompt
@@ -2450,6 +2469,7 @@ impl App {
             && self.wiki.as_ref().is_none_or(wiki::Page::at_list)
             && self.memory.as_ref().is_none_or(memory::Page::at_list)
             && self.digest.as_ref().is_none_or(digest::Page::at_list)
+            && self.prs.as_ref().is_none_or(prs::Page::at_list)
     }
 
     /// `g i/b/m/h` go to a section and `[ ]` cycle the section's tabs, before
@@ -2636,14 +2656,27 @@ impl App {
     }
 
     /// `]` (forward) or `[` in Memory (Decisions, Skills, Docs, Wiki, Notes) or
-    /// Backlog (Items, Pull requests): the next or last tab. History's are its
-    /// window, which its page keeps.
+    /// Backlog (its filter row: All, Ready, Running, Review, then Pull
+    /// requests): the next or last stop. History's are its window, which its
+    /// page keeps.
     async fn cycle_tab(&mut self, forward: bool) {
         if self.section() == Section::Backlog {
-            if self.backlog.take().is_some() {
-                self.open_prs().await;
-            } else if self.prs.take().is_some() {
-                self.open_backlog().await;
+            match backlog::Filter::step(self.backlog.as_ref().map(|p| p.filter), forward) {
+                Some(filter) => {
+                    if self.backlog.is_none() {
+                        self.prs = None;
+                        self.open_backlog().await;
+                    }
+                    if let Some(page) = &mut self.backlog {
+                        page.filter = filter;
+                        page.cursor = 0;
+                        page.armed = None;
+                    }
+                }
+                None => {
+                    self.backlog = None;
+                    self.open_prs().await;
+                }
             }
             return;
         }
@@ -2691,7 +2724,41 @@ impl App {
         }
     }
 
+    /// Section pages are live (#273): the open one loads again every
+    /// `PAGE_RELOAD`, keeping its cursor, so there's no reload key. Backlog
+    /// items and proposals come pushed. Not while a session is attached over it.
+    async fn reload_page(&mut self) {
+        self.page_loaded = Instant::now();
+        if self.view.is_some() {
+            return;
+        }
+        if self.memory.is_some() {
+            self.load_memory().await;
+        }
+        if self.prs.is_some() {
+            self.load_prs().await;
+        }
+        if self.supervisor.is_some() {
+            self.load_supervisor().await;
+        }
+        if self.wiki.is_some() {
+            self.load_wiki().await;
+        }
+        if self.digest.is_some() {
+            self.fetch_digest(true).await;
+        }
+        if let Some(page) = &mut self.docs {
+            let acts = page.refresh();
+            self.fetch_docs(false).await;
+            for act in acts {
+                Box::pin(self.docs_do(act)).await;
+            }
+        }
+    }
+
     async fn open_prs(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.prs = Some(prs::Page::default());
         self.load_prs().await;
     }
@@ -2712,7 +2779,6 @@ impl App {
         for act in page.keys(bytes) {
             match act {
                 prs::Do::Close => self.prs = None,
-                prs::Do::Load => self.load_prs().await,
                 prs::Do::Open(url) => self.open_url(&url),
             }
         }
@@ -2724,6 +2790,8 @@ impl App {
     }
 
     async fn open_memory(&mut self, tab: memory::Tab) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.memory = Some(memory::Page::new(tab));
         self.load_memory().await;
     }
@@ -2773,7 +2841,6 @@ impl App {
         for act in page.keys(bytes, &self.proposals) {
             match act {
                 memory::Do::Close => self.memory = None,
-                memory::Do::Load => self.load_memory().await,
                 memory::Do::Review { index, accept } => {
                     self.last_answer = None;
                     if let Some(said) = self.review_at(index, accept).await {
@@ -3023,16 +3090,20 @@ impl App {
             None => name.to_string(),
         };
         let tabs: Vec<(String, bool)> = match here {
-            Section::Backlog => vec![
-                ("Items".into(), self.backlog.is_some()),
-                (
+            Section::Backlog => backlog::Filter::ALL
+                .iter()
+                .map(|&f| {
+                    let on = self.backlog.as_ref().is_some_and(|p| p.filter == f);
+                    (f.label().to_string(), on)
+                })
+                .chain([(
                     match self.prs.as_ref().and_then(prs::Page::count) {
                         Some(n) => format!("Pull requests {n}"),
                         None => "Pull requests".into(),
                     },
                     self.prs.is_some(),
-                ),
-            ],
+                )])
+                .collect(),
             Section::Memory => MEMORY_TABS
                 .iter()
                 .map(|&tab| {
@@ -3662,20 +3733,34 @@ impl App {
             .filter(|i| page.is_none_or(|p| p.holds(i)))
             .cloned()
             .collect();
-        backlog::rows_of(&items, &self.items, &self.sessions, self.boot())
+        let mut rows = backlog::rows_of(&items, &self.items, &self.sessions, self.boot());
+        if let Some(p) = page {
+            rows.retain(|(lane, item)| p.filter.shows(*lane, item));
+        }
+        rows
     }
 
     async fn open_digest(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.digest = Some(digest::Page::default());
         self.load_digest().await;
     }
 
     /// Asks the daemon for the digest the page's window and grouping want.
     async fn load_digest(&mut self) {
+        self.fetch_digest(false).await;
+    }
+
+    /// The digest for the page's window: `live` is a reload that keeps the
+    /// rows on screen until the answer comes (`reload_page`).
+    async fn fetch_digest(&mut self, live: bool) {
         let Some(page) = &mut self.digest else {
             return;
         };
-        page.loading();
+        if !live {
+            page.loading();
+        }
         let tz = jiff::tz::TimeZone::system();
         let since = page.win.since(now_ms(), &tz);
         // The sessions, what the supervisor did, and what ended (for `R`).
@@ -3693,7 +3778,11 @@ impl App {
             .map_err(text);
         let past = self.client.history().await.map_err(text);
         if let Some(page) = &mut self.digest {
-            page.loaded(digest, steps, past, &tz);
+            if live {
+                page.refreshed(digest, steps, past, &tz);
+            } else {
+                page.loaded(digest, steps, past, &tz);
+            }
         }
     }
 
@@ -3745,6 +3834,8 @@ impl App {
     }
 
     async fn open_supervisor(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.supervisor = Some(supervisor::Page::default());
         self.refresh_numbers();
         self.load_supervisor().await;
@@ -3776,7 +3867,6 @@ impl App {
         for act in page.keys(bytes, &waits) {
             match act {
                 supervisor::Do::Close => self.supervisor = None,
-                supervisor::Do::Load => self.load_supervisor().await,
                 supervisor::Do::Say(text) => self.say(text),
                 supervisor::Do::OpenSession => {
                     let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
@@ -3882,6 +3972,8 @@ impl App {
     }
 
     async fn open_wiki(&mut self, selected: Option<SessionId>) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         let Some(cwd) = self.wiki_repo_for(selected) else {
             self.say("the wiki is a repository's: select a session in one".into());
             return;
@@ -3924,7 +4016,6 @@ impl App {
         for act in page.keys(bytes) {
             match act {
                 wiki::Do::Close => self.wiki = None,
-                wiki::Do::Load => self.load_wiki().await,
                 wiki::Do::Read(slug) => {
                     let Some(repo) = self.wiki.as_ref().map(|p| p.repo.clone()) else {
                         return;
@@ -3975,6 +4066,8 @@ impl App {
     }
 
     async fn open_docs(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.docs = Some(docs::Page::default());
         self.refresh_numbers();
         self.load_docs().await;
@@ -3984,8 +4077,18 @@ impl App {
     /// until now read, as the web app's list does; this list still shows them
     /// as new.
     async fn load_docs(&mut self) {
+        self.fetch_docs(true).await;
+    }
+
+    /// The docs list; `seen` marks what agents wrote until now read. A live
+    /// reload doesn't: you opened the list, not what arrived since.
+    async fn fetch_docs(&mut self, seen: bool) {
         let got = self.client.docs_listing().await.map_err(|e| e.to_string());
-        let at = got.as_ref().ok().map(|l| l.at);
+        // A live reload that failed keeps the list it had.
+        if !seen && got.is_err() {
+            return;
+        }
+        let at = got.as_ref().ok().map(|l| l.at).filter(|_| seen);
         if let Some(page) = &mut self.docs {
             page.loaded(got);
         }
@@ -4011,7 +4114,6 @@ impl App {
         match act {
             docs::Do::Close => self.docs = None,
             docs::Do::Url(url) => self.open_url(&url),
-            docs::Do::Load => self.load_docs().await,
             docs::Do::Open(key) => {
                 let got = self
                     .client
@@ -4119,7 +4221,7 @@ impl App {
                         if let Some(page) = &mut self.docs {
                             page.deleted(&key, token, title.clone());
                         }
-                        self.say(format!("Deleted “{title}”: u puts it back."));
+                        self.say(format!("Deleted “{title}”: z puts it back."));
                         self.load_docs().await;
                     }
                     Ok(Err(now)) => {
@@ -4594,15 +4696,12 @@ impl App {
                 // with the user's credentials, so fetch here first. Off the event
                 // loop: a fetch can take a while, and the answer comes back on
                 // `shipping`.
-                let repo = self
-                    .backlog
-                    .as_ref()
-                    .map(|p| p.repo.clone())
-                    .unwrap_or_default();
+                // What the page's search shows.
+                let page = self.backlog.as_ref();
                 let mut projects: Vec<PathBuf> = self
                     .items
                     .iter()
-                    .filter(|i| repo.holds(i))
+                    .filter(|i| page.is_none_or(|p| p.holds(i)))
                     .filter(|i| i.status == valkyrie_proto::ItemStatus::Open && i.branch.is_some())
                     .filter_map(|i| i.project.clone())
                     .collect();
@@ -4698,27 +4797,16 @@ impl App {
                 }
                 self.say(said);
             }
-            Do::NextRepo => {
-                if let Some(page) = &mut self.backlog {
-                    page.repo = page.repo.next(&self.items);
-                    page.cursor = 0;
-                    page.armed = None;
-                }
-            }
             Do::Add { kind, text } => {
-                // For the repository the page shows, else the one the TUI is in, or
-                // the attached tab is.
-                let repo = self.backlog.as_ref().map(|p| p.repo.clone());
-                let cwd = match repo.unwrap_or_default() {
-                    backlog::Repo::In(root) => Some(root),
-                    backlog::Repo::NoFolder => None,
-                    // Another machine's paths can't be looked at here: the daemon
-                    // finds the attached tab's repository itself.
-                    backlog::Repo::All if remote().is_some() => self.attached_cwd(),
-                    backlog::Repo::All => self
-                        .attached_cwd()
+                // For the attached tab's repository, else the one the TUI is in.
+                // Another machine's paths can't be looked at here: the daemon
+                // finds the attached tab's repository itself.
+                let cwd = if remote().is_some() {
+                    self.attached_cwd()
+                } else {
+                    self.attached_cwd()
                         .or_else(|| std::env::current_dir().ok())
-                        .filter(|d| in_repository(d)),
+                        .filter(|d| in_repository(d))
                 };
                 let item = self
                     .client
@@ -5043,6 +5131,9 @@ const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 const HOVER_DELAY: Duration = Duration::from_secs(1);
 /// How soon a second press on a tab makes a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How often an open section page loads again on its own.
+const PAGE_RELOAD: Duration = Duration::from_secs(30);
+
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
 /// A backlog proposal's toast stays longer: long enough to answer it.
@@ -7033,6 +7124,30 @@ fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
         .padding(Padding::new(1, 1, 0, 0))
 }
 
+/// A section page's footer (spec: One key grammar): at most five hints for the
+/// selection, primary first, then `around` faint on the right (`j/k move`,
+/// `[ ] filter`) when there's room. `hints` is key and label spans in pairs.
+pub(crate) fn page_footer(
+    hints: Vec<Span<'static>>,
+    around: &str,
+    width: u16,
+    t: &Theme,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = hints.into_iter().take(10).collect();
+    let used: usize = spans.iter().map(Span::width).sum();
+    let width = width as usize;
+    if used > width {
+        return Line::from(backlog::fit_hints(spans, width));
+    }
+    let around = format!("{around} ");
+    let room = around.chars().count();
+    if !around.trim().is_empty() && used + room + 2 <= width {
+        spans.push(" ".repeat(width - used - room).into());
+        spans.push(around.fg(t.muted));
+    }
+    Line::from(spans)
+}
+
 /// A section's page: the whole screen under the strip, down to the footer's
 /// row (spec: sections are full screens; rule 8, no box for grouping).
 pub(crate) fn section_rect(area: Rect) -> Rect {
@@ -8557,6 +8672,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A page's footer: five hints at most, primary first, then what gets you
+    /// around, faint on the right, when there's room for it (spec: One key
+    /// grammar).
+    #[test]
+    fn a_page_footer_keeps_five_hints_and_puts_moving_on_the_right() {
+        let t = crate::theme::DRACULA;
+        let hint = |k: &str| vec![format!(" {k} ").into(), format!("{k}-label ").into()];
+        let hints: Vec<ratatui::text::Span<'static>> = ["a", "b", "c", "d", "e", "f", "g"]
+            .into_iter()
+            .flat_map(hint)
+            .collect();
+        let text = |line: Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let wide = text(page_footer(hints.clone(), "j/k move", 120, &t));
+        assert!(
+            wide.contains(" e e-label ") && !wide.contains(" f "),
+            "{wide}"
+        );
+        assert!(wide.trim_end().ends_with("j/k move"), "{wide}");
+        assert_eq!(wide.chars().count(), 120, "{wide}");
+        // Narrow: the hints first; what gets you around goes, then hints do.
+        let narrow = text(page_footer(hints.clone(), "j/k move", 60, &t));
+        assert!(
+            !narrow.contains("j/k move") && narrow.contains(" a a-label "),
+            "{narrow}"
+        );
+        let tiny = text(page_footer(hints, "j/k move", 24, &t));
+        assert!(tiny.chars().count() <= 24, "{tiny}");
+    }
+
     /// An App over a socket nobody answers: enough for state and drawing.
     async fn idle_app(dir: &std::path::Path) -> (App, valkyrie_proto::ipc::Listener) {
         let _ = std::fs::remove_dir_all(dir);
@@ -9013,10 +9162,35 @@ mod tests {
         use ratatui::backend::TestBackend;
         let t = &theme::DRACULA;
         type Draw<'a> = Box<dyn Fn(&mut ratatui::Frame) + 'a>;
+        let items: Vec<Item> = (1..=3)
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "number": id, "title": format!("Item number {id}"), "status": "open",
+                    "by": "human", "project": "/r/app", "created": 0, "updated": 0,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let rows = backlog::rows_of(&items, &items, &[], 0);
+        let mut ready = backlog::Page::default();
+        ready.filter = backlog::Filter::Ready;
         let screens: Vec<(&str, Draw)> = vec![
             (
                 "backlog",
                 Box::new(|f| backlog::Page::default().draw(f, &[], &[], &[], 0, 0, t)),
+            ),
+            (
+                "backlog, ready",
+                Box::new(|f| ready.draw(f, &rows, &items, &[], 0, 0, t)),
+            ),
+            ("docs", Box::new(|f| docs::Page::default().draw(f, t))),
+            (
+                "wiki",
+                Box::new(|f| wiki::Page::new("/r/app".into()).draw(f, t)),
+            ),
+            (
+                "supervisor",
+                Box::new(|f| supervisor::Page::default().draw(f, &[], 0, t)),
             ),
             ("history", Box::new(|f| digest::Page::default().draw(f, t))),
             (
@@ -9028,24 +9202,32 @@ mod tests {
                 Box::new(|f| prs::Page::default().draw(f, &Default::default(), 0, t)),
             ),
         ];
-        for (name, draw) in screens {
-            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-            terminal.draw(|f| draw(f)).unwrap();
-            let buffer = terminal.backend().buffer();
-            let rows: Vec<String> = (0..20)
-                .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect())
-                .collect();
-            let text = rows.join("\n");
-            assert!(
-                !text
-                    .chars()
-                    .any(|c| "╭╮╰╯│".contains(c) && !rows[0].contains(c)),
-                "{name} draws a box:\n{text}"
-            );
-            assert!(
-                rows[19].contains("esc"),
-                "{name}'s keys at the foot:\n{text}"
-            );
+        // The spec's three sizes (T5b, backlog #273).
+        for (name, draw) in &screens {
+            for (w, h) in [(80u16, 24u16), (100, 30), (140, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| draw(f)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows: Vec<String> = (0..h)
+                    .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect())
+                    .collect();
+                let text = rows.join("\n");
+                // A single rule between list and detail is no box (spec:
+                // Layout by width); corners are.
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| "╭╮╰╯".contains(c) && !rows[0].contains(c)),
+                    "{name} draws a box:\n{text}"
+                );
+                assert!(
+                    rows[h as usize - 1].contains("j/k move"),
+                    "{name}'s keys at the foot, {w}x{h}:\n{text}"
+                );
+                if *name == "backlog, ready" {
+                    assert!(rows[1].contains("Backlog Ready"), "{text}");
+                }
+            }
         }
     }
 
@@ -10189,8 +10371,8 @@ mod tests {
             assert!(shown.contains(want), "{want}: {shown}");
         }
 
-        // `r` shows one repository's items, named in the title; a check then offers
-        // only those to ship.
+        // `/` narrows it to one repository's items, the search over the list; a
+        // check then offers only those to ship.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
             orders: Vec::new(),
@@ -10205,9 +10387,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.backlog_rows().len(), 3);
-        app.on_input(b"r".to_vec()).await;
+        app.on_input(b"/app\r".to_vec()).await;
         let page = app.backlog.clone().unwrap();
-        assert_eq!(page.repo, backlog::Repo::In("/r/app".into()));
+        assert_eq!(page.search.query, "app");
+        assert!(!page.search.typing, "↩ keeps it and goes back to the list");
         let rows: Vec<u32> = app.backlog_rows().iter().map(|(_, i)| i.id).collect();
         assert_eq!(rows.len(), 2);
         assert!(!rows.contains(&3));
@@ -10225,7 +10408,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            text(&terminal).contains(" Backlog app 2 open"),
+            text(&terminal).contains(" / app  esc clears"),
             "{}",
             text(&terminal)
         );

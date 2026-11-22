@@ -3,7 +3,7 @@
 //! you answered, the ones policies took without asking, the build orders you
 //! answered. Opened on purpose and closed again, never a pane that stays up.
 
-use crate::backlog::fit_hints;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use crate::{fit, next_key};
 use ratatui::style::{self, Stylize};
@@ -81,8 +81,6 @@ pub(crate) fn waiting(
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Do {
     Close,
-    /// Fetch the log again.
-    Load,
     TakeStep {
         session: SessionId,
         seq: u64,
@@ -118,9 +116,22 @@ pub(crate) struct Page {
     cursor: usize,
     /// Item id to the number its repository calls it, for the watched PRs' lines.
     pub(crate) numbers: std::collections::HashMap<u32, u32>,
+    /// `/`: what waits, and what it did, that says every word typed.
+    pub(crate) search: Search,
 }
 
 impl Page {
+    /// What waits on you, as far as `/` leaves it.
+    fn shown<'a>(&self, waits: &'a [Wait]) -> Vec<&'a Wait> {
+        waits
+            .iter()
+            .filter(|w| {
+                let (tag, what, _) = describe(w);
+                self.search.matches(&format!("{tag} {what}"))
+            })
+            .collect()
+    }
+
     pub(crate) fn watched(&mut self, got: Result<Watch, String>) {
         self.watch = Some(got);
     }
@@ -138,16 +149,25 @@ impl Page {
     /// Keys while the page is open: ↑/↓ (j/k) pick what waits; `a` (or ↩) takes
     /// what's offered, `o` the other step, `d` leaves or rejects it; ↩ on a build
     /// order opens it; `c` opens the supervisor session, starting it if none
-    /// runs; `r` loads again; Esc or `q` closes.
+    /// runs; Esc or `q` closes. The list stays live (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8], waits: &[Wait]) -> Vec<Do> {
         let mut out = Vec::new();
-        let n = waits.len();
-        self.cursor = self.cursor.min(n.saturating_sub(1));
         while !bytes.is_empty() {
             let key = next_key(bytes);
             let whole = key.len() == bytes.len();
             bytes = &bytes[key.len()..];
-            let here = waits.get(self.cursor);
+            match self.search.key(key, whole) {
+                Searched::No => {}
+                Searched::Kept => continue,
+                Searched::Changed => {
+                    self.cursor = 0;
+                    continue;
+                }
+            }
+            let shown = self.shown(waits);
+            let n = shown.len();
+            self.cursor = self.cursor.min(n.saturating_sub(1));
+            let here = shown.get(self.cursor).copied();
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
                 b"j" | b"\x1b[B" | b"\x1bOB" => {
@@ -169,7 +189,6 @@ impl Page {
                     Some(_) => out.push(Do::Say("no other step offered there".into())),
                     None => {}
                 },
-                b"r" => out.push(Do::Load),
                 b"c" => out.push(Do::OpenSession),
                 b"\x1b" if whole => out.push(Do::Close),
                 b"q" | [0x03] => out.push(Do::Close),
@@ -184,9 +203,13 @@ impl Page {
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let inner = rect.width.saturating_sub(4) as usize;
+        let waits = self.shown(waits);
         let cursor = self.cursor.min(waits.len().saturating_sub(1));
 
-        let mut lines: Vec<Line> = vec![Line::default()];
+        let mut lines: Vec<Line> = vec![match self.search.shown() {
+            true => self.search.line(t),
+            false => Line::default(),
+        }];
         lines.push(Line::from(vec![
             " Waiting on you ".fg(t.dim()).bold(),
             format!("· {}", waits.len()).fg(t.muted),
@@ -199,7 +222,7 @@ impl Page {
             );
         }
         let mut at_cursor = 0;
-        for (i, w) in waits.iter().enumerate() {
+        for (i, w) in waits.iter().copied().enumerate() {
             let here = i == cursor;
             if here {
                 at_cursor = lines.len();
@@ -241,7 +264,7 @@ impl Page {
         match (&self.log, &self.failed) {
             (_, Some(e)) => lines.push(
                 format!(
-                    "   Couldn't load it: {} · r tries again",
+                    "   Couldn't load it: {} · trying again",
                     fit(e, inner.saturating_sub(36))
                 )
                 .fg(t.blocked)
@@ -252,7 +275,10 @@ impl Page {
                 lines.push("   Nothing yet.".fg(t.muted).into())
             }
             (Some((entries, _)), None) => {
-                for e in entries {
+                for e in entries.iter().filter(|e| {
+                    self.search
+                        .matches(&format!("{} {}", e.said, e.project.display()))
+                }) {
                     let when = crate::age(e.at * 1000, now_ms);
                     let repo = e
                         .project
@@ -276,19 +302,26 @@ impl Page {
         let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
 
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
-        let hints = [
-            hint(" a ", "take "),
-            hint(" o ", "other step "),
-            hint(" d ", "leave/reject "),
-            hint(" c ", "supervisor session "),
-            hint(" r ", "reload "),
-            hint(" esc ", "close "),
-        ]
-        .concat();
-        let hints = fit_hints(hints, rect.width.saturating_sub(4) as usize);
+        let (hints, around) = if self.search.typing {
+            ([hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat(), "")
+        } else {
+            (
+                [
+                    hint(" a ", "take "),
+                    hint(" o ", "other step "),
+                    hint(" d ", "leave "),
+                    hint(" c ", "session "),
+                    hint(" / ", "search "),
+                ]
+                .concat(),
+                "j/k move",
+            )
+        };
         let block = crate::section_block(t)
             .title(" Supervisor ".fg(t.fg).bold())
-            .title_bottom(Line::from(hints).left_aligned());
+            .title_bottom(
+                crate::page_footer(hints, around, rect.width.saturating_sub(2), t).left_aligned(),
+            );
         frame.render_widget(Paragraph::new(lines).block(block), rect);
     }
 }
@@ -327,7 +360,7 @@ fn watch_lines(
         None => lines.push("   Loading…".fg(t.muted).into()),
         Some(Err(e)) => lines.push(
             format!(
-                "   Couldn't load it: {} · r tries again",
+                "   Couldn't load it: {} · trying again",
                 fit(e, inner.saturating_sub(36))
             )
             .fg(t.blocked)

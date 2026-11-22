@@ -1,12 +1,12 @@
 //! The repository wiki (backlog #210): `W` on the home screen. The pages agents
-//! wrote about how a repository is built, stale ones marked; `↩` reads one. `e`
+//! wrote about how a repository is built, stale ones marked; `↩` reads one. `s`
 //! starts an agent that maps the repository (or fills the gaps), `S` one that
 //! rewrites only the stale pages, each after a second key to confirm, since it
 //! starts an agent.
 
-use crate::backlog::fit_hints;
 use crate::markdown;
 use crate::next_key;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
@@ -18,7 +18,6 @@ use valkyrie_proto::{WikiListing, WikiPage};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
-    Load,
     /// Read this page in full.
     Read(String),
     /// Start the agent that writes the wiki; `stale`: only the stale pages.
@@ -43,13 +42,15 @@ pub(crate) struct Page {
     confirm: Option<bool>,
     /// An exploration started and not answered yet: keys wait.
     pub(crate) starting: bool,
+    /// `/`: pages whose title, slug or summary has every word typed.
+    pub(crate) search: Search,
 }
 
 impl Page {
     /// On the list, no page read and nothing asked: where section keys are the
     /// app's.
     pub(crate) fn at_list(&self) -> bool {
-        self.reading.is_none() && self.confirm.is_none() && !self.starting
+        self.reading.is_none() && self.confirm.is_none() && !self.starting && !self.search.typing
     }
 
     pub(crate) fn new(repo: PathBuf) -> Self {
@@ -61,20 +62,20 @@ impl Page {
             reading: None,
             confirm: None,
             starting: false,
+            search: Search::default(),
         }
     }
 
     pub(crate) fn loaded(&mut self, got: Result<WikiListing, String>) {
         match got {
             Ok(listing) => {
-                self.cursor = self.cursor.min(listing.pages.len().saturating_sub(1));
                 self.listing = Some(listing);
                 self.failed = None;
+                // Within what the search shows.
+                self.cursor = self.cursor.min(self.pages().len().saturating_sub(1));
             }
-            Err(e) => {
-                self.listing = None;
-                self.failed = Some(e);
-            }
+            // A live reload that failed keeps the pages shown, and says so.
+            Err(e) => self.failed = Some(e),
         }
     }
 
@@ -82,20 +83,31 @@ impl Page {
         self.reading = Some((page, 0));
     }
 
-    fn pages(&self) -> &[WikiPage] {
+    /// Every page the repository's wiki has.
+    fn all(&self) -> &[WikiPage] {
         self.listing.as_ref().map_or(&[], |l| &l.pages)
     }
 
-    fn stale(&self) -> usize {
-        self.pages().iter().filter(|p| p.stale.is_some()).count()
+    /// The pages listed, as far as `/` leaves them.
+    fn pages(&self) -> Vec<&WikiPage> {
+        self.all()
+            .iter()
+            .filter(|p| {
+                self.search
+                    .matches(&format!("{} {} {}", p.title, p.slug, p.summary))
+            })
+            .collect()
     }
 
-    /// Keys while the page is open. Listing: ↑/↓ (j/k) pick, ↩ reads, `e` maps
-    /// the repository, `S` rewrites the stale pages, `r` reloads, Esc or `q`
+    fn stale(&self) -> usize {
+        self.all().iter().filter(|p| p.stale.is_some()).count()
+    }
+
+    /// Keys while the page is open. Listing: ↑/↓ (j/k) pick, ↩ reads, `s` maps
+    /// the repository, `S` rewrites the stale pages, `/` searches, Esc or `q`
     /// closes. Reading: ↑/↓ and PgUp/PgDn scroll, Esc goes back to the list.
     pub(crate) fn keys(&mut self, mut bytes: &[u8]) -> Vec<Do> {
         let mut out = Vec::new();
-        let n = self.pages().len();
         while !bytes.is_empty() {
             let key = next_key(bytes);
             let whole = key.len() == bytes.len();
@@ -116,7 +128,7 @@ impl Page {
             }
             if let Some(stale) = self.confirm {
                 match key {
-                    b"\r" | b"\n" | b"e" | b"S" => {
+                    b"\r" | b"\n" | b"s" | b"S" => {
                         self.confirm = None;
                         self.starting = true;
                         out.push(Do::Explore { stale });
@@ -126,6 +138,17 @@ impl Page {
                 }
                 continue;
             }
+            if !self.starting {
+                match self.search.key(key, whole) {
+                    Searched::No => {}
+                    Searched::Kept => continue,
+                    Searched::Changed => {
+                        self.cursor = 0;
+                        continue;
+                    }
+                }
+            }
+            let n = self.pages().len();
             match key {
                 b"\x1b" if whole => out.push(Do::Close),
                 b"q" | [0x03] => out.push(Do::Close),
@@ -141,10 +164,10 @@ impl Page {
                         out.push(Do::Read(p.slug.clone()));
                     }
                 }
-                b"e" if self.listing.is_some() => self.confirm = Some(false),
+                // `s` starts (spec: One key grammar): an agent that explores.
+                b"s" if self.listing.is_some() => self.confirm = Some(false),
                 b"S" if self.stale() > 0 => self.confirm = Some(true),
                 b"S" if self.listing.is_some() => out.push(Do::Say("no page is stale".into())),
-                b"r" => out.push(Do::Load),
                 _ => {}
             }
         }
@@ -156,11 +179,11 @@ impl Page {
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
-        let block = |title: String, hints: Vec<ratatui::text::Span<'static>>| {
+        let block = |title: String, hints: Vec<ratatui::text::Span<'static>>, around: &str| {
             crate::section_block(t)
                 .title(title.fg(t.fg).bold())
                 .title_bottom(
-                    Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize))
+                    crate::page_footer(hints, around, rect.width.saturating_sub(2), t)
                         .left_aligned(),
                 )
         };
@@ -211,17 +234,20 @@ impl Page {
             let shown: Vec<Line> = lines.into_iter().skip(scroll).take(room).collect();
             let hints = [hint(" ↑↓ ", "scroll "), hint(" esc ", "back ")].concat();
             frame.render_widget(
-                Paragraph::new(shown).block(block(format!(" {} ", p.title), hints)),
+                Paragraph::new(shown).block(block(format!(" {} ", p.title), hints, "")),
                 rect,
             );
             return;
         }
 
-        let mut top = vec![Line::default()];
+        let mut top = vec![match self.search.shown() {
+            true => self.search.line(t),
+            false => Line::default(),
+        }];
         match (&self.listing, &self.failed) {
             (_, Some(e)) => top.push(
                 format!(
-                    " Couldn't load the wiki: {} · r tries again",
+                    " Couldn't load the wiki: {} · trying again",
                     fit(e, inner.saturating_sub(30))
                 )
                 .fg(t.needs)
@@ -232,7 +258,7 @@ impl Page {
                 top.push(" No wiki yet.".fg(t.fg).bold().into());
                 top.push(
                     fit(
-                        " e starts an agent that explores this repository and writes pages \
+                        " s starts an agent that explores this repository and writes pages \
                          on how it's built: an overview, then one per part. Every agent \
                          started here then gets their index.",
                         inner,
@@ -261,7 +287,7 @@ impl Page {
         if let Some(stale) = self.confirm {
             let what = if stale {
                 format!("Rewrite the {} stale pages?", self.stale())
-            } else if self.pages().is_empty() {
+            } else if self.all().is_empty() {
                 "Map this repository?".to_owned()
             } else {
                 "Explore again and fill the gaps?".to_owned()
@@ -323,23 +349,29 @@ impl Page {
 
         let busy = self.starting || self.confirm.is_some();
         let mut hints = Vec::new();
-        if !busy && !self.pages().is_empty() {
-            hints.extend(hint(" ↩ ", "read "));
+        let mut around = "[ ] tab · j/k move";
+        if self.search.typing {
+            hints.extend(hint(" ↩ ", "keep "));
+            hints.extend(hint(" esc ", "clear "));
+            around = "";
+        } else if !busy {
+            if !self.pages().is_empty() {
+                hints.extend(hint(" ↩ ", "read "));
+            }
+            if self.listing.is_some() {
+                hints.extend(if self.all().is_empty() {
+                    hint(" s ", "map it ")
+                } else {
+                    hint(" s ", "explore again ")
+                });
+            }
+            if self.stale() > 0 {
+                hints.extend(hint(" S ", "refresh stale "));
+            }
+            hints.extend(hint(" / ", "search "));
         }
-        if !busy && self.listing.is_some() {
-            hints.extend(if self.pages().is_empty() {
-                hint(" e ", "map it ")
-            } else {
-                hint(" e ", "explore again ")
-            });
-        }
-        if !busy && self.stale() > 0 {
-            hints.extend(hint(" S ", "refresh stale "));
-        }
-        hints.extend(hint(" r ", "reload "));
-        hints.extend(hint(" esc ", "close "));
         frame.render_widget(
-            Paragraph::new(lines).block(block(format!(" Wiki · {repo} "), hints)),
+            Paragraph::new(lines).block(block(format!(" Wiki · {repo} "), hints, around)),
             rect,
         );
     }
@@ -383,12 +415,15 @@ mod tests {
     #[test]
     fn an_empty_wiki_offers_to_map_the_repository_after_a_confirm() {
         let mut p = Page::new("/r/app".into());
-        // Nothing loaded yet: `e` waits for the listing.
-        assert_eq!(p.keys(b"e\r"), vec![]);
+        // Nothing loaded yet: `s` waits for the listing.
+        assert_eq!(p.keys(b"s\r"), vec![]);
         p.loaded(listing(vec![]));
         assert!(screen(&p).contains("No wiki yet"));
         assert!(screen(&p).contains("map it"));
+        // `e` is edit, and the wiki is the agents' to write.
         assert_eq!(p.keys(b"e"), vec![]);
+        assert!(!screen(&p).contains("Map this repository?"));
+        assert_eq!(p.keys(b"s"), vec![]);
         let s = screen(&p);
         assert!(
             s.contains("Map this repository?") && s.contains("any other key cancels"),
@@ -396,9 +431,9 @@ mod tests {
         );
         // Any other key cancels.
         assert_eq!(p.keys(b"x"), vec![]);
-        assert_eq!(p.keys(b"e\r"), vec![Do::Explore { stale: false }]);
+        assert_eq!(p.keys(b"s\r"), vec![Do::Explore { stale: false }]);
         // Waiting on the start: more keys do nothing, Esc still closes.
-        assert_eq!(p.keys(b"e\r"), vec![]);
+        assert_eq!(p.keys(b"s\r"), vec![]);
         assert_eq!(p.keys(b"\x1b"), vec![Do::Close]);
     }
 
