@@ -977,6 +977,11 @@ impl App {
 
     /// Typed keys while on the home screen, whichever page or prompt is over it.
     async fn home_screen_keys(&mut self, bytes: Vec<u8>) {
+        // Over a page, the row above its keys says what the last key did, not
+        // something said before it (backlog #277).
+        if self.page_open() {
+            self.status.clear();
+        }
         if self.help {
             return self.help_keys(&bytes).await;
         }
@@ -1509,6 +1514,53 @@ impl App {
         let mut out = std::io::stdout();
         let _ = write!(out, "\x1b[?2004{final_byte}");
         let _ = out.flush();
+    }
+
+    /// Over a section's page, the row above its keys: a toast, else what a key
+    /// said, as at home (rule 9: never the hint line).
+    fn draw_said(&self, frame: &mut ratatui::Frame) {
+        // Over a section's page, a toast takes the row above its keys, as at
+        // home (rule 9: never the hint line).
+        let t = self.settings.theme;
+        let area = frame.area();
+        // Not over the backlog's own dialogs (the launch form, a build order).
+        let dialog = self.backlog.as_ref().is_some_and(|p| {
+            p.order.is_some() || matches!(p.typing, Some(backlog::Typing::Launch(_)))
+        });
+        // What a key said goes there too: a refusal, or where an editor's
+        // text was kept, is seen on the page that said it (backlog #277).
+        let said = match self.toast() {
+            Some(toast) => Some(Line::from(self.toast_line(toast))),
+            None if !self.status.is_empty() => {
+                Some(Line::from(format!(" {} ", self.status).fg(t.fg).bold()))
+            }
+            None => None,
+        };
+        if self.view.is_none()
+            && self.page_open()
+            && !dialog
+            && area.height > 2
+            && let Some(said) = said
+        {
+            let row = Rect::new(area.x, area.bottom() - 2, area.width, 1);
+            frame.render_widget(ratatui::widgets::Clear, row);
+            frame.render_widget(
+                Paragraph::new(said).style(style::Style::new().bg(t.panel)),
+                row,
+            );
+        }
+    }
+
+    /// A section's page is over home: Backlog, Memory, History, or one of the
+    /// pages reached by a key (Docs, Wiki, PRs, the supervisor).
+    fn page_open(&self) -> bool {
+        self.backlog.is_some()
+            || self.memory.is_some()
+            || self.digest.is_some()
+            || self.docs.is_some()
+            || self.wiki.is_some()
+            || self.prs.is_some()
+            || self.supervisor.is_some()
     }
 
     /// A page's `/` search is being typed.
@@ -5086,28 +5138,10 @@ impl App {
                     t,
                 );
             }
-            // Over a section's page, a toast takes the row above its keys, as at
-            // home (rule 9: never the hint line).
+            // Over a section's page, a toast or what a key said.
+            self.draw_said(frame);
             let t = self.settings.theme;
             let area = frame.area();
-            // Not over the backlog's own dialogs (the launch form, a build order).
-            let dialog = self.backlog.as_ref().is_some_and(|p| {
-                p.order.is_some() || matches!(p.typing, Some(backlog::Typing::Launch(_)))
-            });
-            if self.view.is_none()
-                && self.section() != Section::Inbox
-                && !dialog
-                && area.height > 2
-                && let Some(toast) = self.toast()
-            {
-                let row = Rect::new(area.x, area.bottom() - 2, area.width, 1);
-                frame.render_widget(ratatui::widgets::Clear, row);
-                frame.render_widget(
-                    Paragraph::new(Line::from(self.toast_line(toast)))
-                        .style(style::Style::new().bg(t.panel)),
-                    row,
-                );
-            }
             // Dialogs last, over a dimmed screen (rule 8: a box is a dialog).
             if self.help && self.view.is_none() {
                 self.draw_help(frame);
@@ -11938,6 +11972,47 @@ mod tests {
     }
 
     /// Renders the home screen to text lines.
+    /// What a key says on a page shows on the page, in the row over its keys,
+    /// and goes with the next key (backlog #277).
+    #[tokio::test]
+    async fn a_pages_message_shows_over_its_keys() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-said-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let screen = |app: &App| -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal
+                .draw(|f| {
+                    app.memory
+                        .as_ref()
+                        .unwrap()
+                        .draw(f, &app.proposals, app.settings.theme);
+                    app.draw_said(f);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(100)
+                .map(|r| r.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        app.status = "said at home".into();
+        app.memory = Some(memory::Page::new(memory::Tab::Decisions));
+        // A key on the page: what was said before it is gone.
+        app.on_input(b"j".to_vec()).await;
+        assert!(!screen(&app).join("\n").contains("said at home"));
+        app.say("review failed: that's for the user".into());
+        let rows = screen(&app);
+        assert!(
+            rows[18].contains("review failed: that's for the user"),
+            "the row over the keys: {rows:#?}"
+        );
+        assert!(rows[19].contains("j/k move"), "the keys stay: {rows:#?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn home_screen(app: &App, width: u16) -> Vec<String> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
