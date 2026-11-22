@@ -308,6 +308,8 @@ struct App {
     prs: Option<prs::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
+    /// What the last `review_at` would take back, for Memory's `z`.
+    last_answer: Option<Option<memory::Undo>>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -496,6 +498,7 @@ impl App {
             memory: None,
             prs: None,
             editing: None,
+            last_answer: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
@@ -2686,8 +2689,12 @@ impl App {
                 memory::Do::Close => self.memory = None,
                 memory::Do::Load => self.load_memory().await,
                 memory::Do::Review { index, accept } => {
+                    self.last_answer = None;
                     if let Some(said) = self.review_at(index, accept).await {
                         self.status = said;
+                    }
+                    if let (Some(undo), Some(page)) = (self.last_answer.take(), &mut self.memory) {
+                        page.undo = undo;
                     }
                     self.reload_memory_decisions().await;
                 }
@@ -2760,9 +2767,9 @@ impl App {
             }
         };
         // A scope sent settles it (ADR-0014 §2): only one you changed goes, and
-        // only then does `z` put the old one back.
+        // only then does `z` put the old one back. No `scope:` line: left as is.
         let mut was = was;
-        if w.scope == was.scope {
+        if w.scope.is_none() || w.scope == was.scope {
             w.scope = None;
             was.scope = None;
         }
@@ -2805,11 +2812,8 @@ impl App {
         let Some(u) = self.memory.as_mut().and_then(|p| p.undo.take()) else {
             return self.say("nothing to undo".into());
         };
-        let action = match u.how {
-            memory::Reverse::Reopen(_) => ReviewAction::Reopen,
-            memory::Reverse::Restore => ReviewAction::Restore,
-        };
         let id = u.id;
+        let action = ReviewAction::Reopen;
         let said = match self
             .client
             .review(u.project.clone(), id, action, Some(u.seen))
@@ -2817,7 +2821,11 @@ impl App {
         {
             Err(e) => format!("couldn't undo: {e:#}"),
             Ok(d) => match u.how {
-                memory::Reverse::Restore => format!("restored #{id} {}", d.title),
+                memory::Reverse::Reopen(None)
+                    if d.status == valkyrie_proto::DecisionStatus::Active =>
+                {
+                    format!("#{id} {} is in use again", d.title)
+                }
                 memory::Reverse::Reopen(None) => {
                     format!("#{id} {} is up for review again", d.title)
                 }
@@ -3272,7 +3280,7 @@ impl App {
             (true, false) => (
                 ReviewAction::Retire,
                 "retired",
-                Some(memory::Reverse::Restore),
+                Some(memory::Reverse::Reopen(None)),
             ),
         };
         let said = match self
@@ -3295,12 +3303,10 @@ impl App {
         Some(said)
     }
 
-    /// An answer given on Memory is the one its `z` takes back (`None`: the
-    /// last one can't be).
+    /// What the last answer would take back (`None`: it can't be). Memory
+    /// keeps it for `z` when the answer was given there.
     fn answered(&mut self, undo: Option<memory::Undo>) {
-        if let Some(page) = &mut self.memory {
-            page.undo = undo;
-        }
+        self.last_answer = Some(undo);
     }
 
     /// Keys over the decisions opened from a session: move, `a`/`d` as at home, and

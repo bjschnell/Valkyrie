@@ -267,7 +267,8 @@ pub enum ReviewAction {
     /// Bring a retired decision back: active again, confirmed as of now.
     Restore,
     /// Take back an accept or a reject: proposed again, so it waits on review
-    /// (backlog #271, protocol 51).
+    /// (backlog #271, protocol 51). A retire taken back is in use again,
+    /// unlike `Restore` not confirmed as of now.
     /// An accept that replaced another gives that one back its place, and the
     /// notes it was drafted from go back to search.
     Reopen,

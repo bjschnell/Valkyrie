@@ -61,10 +61,8 @@ pub(crate) struct Undo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Reverse {
     /// An accept or a reject: proposed again, with this wording when you
-    /// rewrote it on the way in (`e`).
+    /// rewrote it on the way in (`e`). A retire: in use again.
     Reopen(Option<Wording>),
-    /// A retire: active again.
-    Restore,
 }
 
 /// A decision's words, as `e` edits them.
@@ -111,6 +109,8 @@ impl Wording {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        // An editor that saves CRLF lines.
+        let text = &text.replace("\r\n", "\n");
         let (head, rest) = text
             .split_once("\n---\n")
             .or_else(|| text.strip_prefix("---\n").map(|r| ("", r)))
@@ -458,14 +458,12 @@ impl Page {
             };
             lines.push(Line::from(from.fg(t.muted)));
             if matches!(row, Row::Review(_)) {
-                let mut keys = vec![
-                    "a".fg(t.accent).bold(),
-                    " accept · ".fg(t.dim()),
-                    "e".fg(t.accent).bold(),
-                    " edit, then accept · ".fg(t.dim()),
-                    "d".fg(t.accent).bold(),
-                    " reject".fg(t.dim()),
-                ];
+                let mut keys = vec!["a".fg(t.accent).bold(), " accept · ".fg(t.dim())];
+                // A flagged decision or a proposed scope is in use already.
+                if d.status == DecisionStatus::Proposed {
+                    keys.extend(["e".fg(t.accent).bold(), " edit, then accept · ".fg(t.dim())]);
+                }
+                keys.extend(["d".fg(t.accent).bold(), " reject".fg(t.dim())]);
                 if self.undo.is_some() {
                     keys.extend([
                         " · ".fg(t.dim()),
@@ -563,14 +561,14 @@ impl Page {
                 Some(_) => hint(" z ", "undo "),
                 None => hint(" ↩ ", "read "),
             };
-            [
-                hint(" a ", "accept "),
-                hint(" e ", "edit "),
-                hint(" d ", "reject "),
-                fifth,
-                hint(" esc ", "close "),
-            ]
-            .concat()
+            let proposed = matches!(here, Some(Row::Review(i))
+                if proposals.get(i).is_some_and(|d| d.status == DecisionStatus::Proposed));
+            let mut hints = vec![hint(" a ", "accept ")];
+            if proposed {
+                hints.push(hint(" e ", "edit "));
+            }
+            hints.extend([hint(" d ", "reject "), fifth, hint(" esc ", "close ")]);
+            hints.concat()
         } else {
             let mut hints = vec![hint(" ↩ ", "read "), hint(" r ", "reload ")];
             if self.undo.is_some() {
@@ -876,6 +874,11 @@ mod tests {
                 .unwrap()
                 .scope,
             None
+        );
+        // An editor that saves CRLF lines.
+        assert_eq!(
+            Wording::parse(&text.replace('\n', "\r\n"), false).unwrap(),
+            w
         );
         // What it can't read, it says why.
         for bad in [

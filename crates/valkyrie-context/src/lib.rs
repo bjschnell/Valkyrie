@@ -333,6 +333,8 @@ impl Store {
             && let Some(old) = d.supersedes
             && let Some((_, o)) = files.get(&old)
             && o.status == Superseded
+            // Its own accept, taken back half-way (`Reopen`): not another's.
+            && o.superseded_by != Some(id)
         {
             bail!(
                 "#{id} replaces #{old}, which #{} already replaced; reject it, or propose it again against #{0}",
@@ -383,6 +385,9 @@ impl Store {
                 // Only an active decision is pinned; a proposal waits unpinned.
                 d.pinned = false;
             }
+            // A retire taken back: in use again, but not confirmed, so a flag
+            // that it may be out of date comes back with the next check.
+            (ReviewAction::Reopen, Retired) => d.status = Active,
             (ReviewAction::Pin | ReviewAction::Unpin, Active) => {
                 // A skill is an index line read when needed, and a policy's body
                 // is settings for its hook: neither has a body to put in the block.
@@ -522,7 +527,8 @@ impl Store {
                 o.updated = now;
                 self.write(root, &o, Some(path))?;
             }
-            self.demote_notes(root, &d)?;
+            // Best-effort, as promoting is: the decision is already written.
+            let _ = self.demote_notes(root, &d);
         }
         Ok(d)
     }
@@ -1879,6 +1885,19 @@ mod tests {
         f.store
             .review(&f.repo, 2, &ReviewAction::Accept, None, None, 5)
             .unwrap();
+        // A reopen that stopped half-way (the old one still replaced by this
+        // one) doesn't keep it from being accepted again.
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Reopen, None, None, 6)
+            .unwrap();
+        let mut old = f.store.load(&f.repo)[0].clone();
+        old.status = DecisionStatus::Superseded;
+        old.superseded_by = Some(2);
+        let (path, _) = f.store.files(&f.repo).remove(&1).unwrap();
+        f.store.write(&f.repo, &old, Some(&path)).unwrap();
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Accept, None, None, 7)
+            .unwrap();
         let all = f.store.load(&f.repo);
         assert_eq!(all[0].status, DecisionStatus::Superseded);
         assert_eq!(all[1].status, DecisionStatus::Active);
@@ -1898,8 +1917,11 @@ mod tests {
         assert_eq!((d.status, d.updated), (DecisionStatus::Proposed, 3));
         r(1, ReviewAction::Accept, 4).unwrap();
         r(1, ReviewAction::Retire, 5).unwrap();
-        // Retired: Restore brings it back, not Reopen.
-        assert!(r(1, ReviewAction::Reopen, 6).is_err());
+        // Retired: in use again, without counting as a confirmation.
+        let d = r(1, ReviewAction::Reopen, 6).unwrap();
+        assert_eq!((d.status, d.fresh.confirmed), (DecisionStatus::Active, 4));
+        // In use: nothing to take back but an accept.
+        assert!(r(1, ReviewAction::Reject, 7).is_err());
     }
 
     #[test]
