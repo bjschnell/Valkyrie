@@ -7,16 +7,12 @@
 use crate::backlog::fit_hints;
 use crate::next_key;
 use crate::theme::Theme;
-use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{self, Color, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use std::collections::HashMap;
 use valkyrie_proto::supervisor::Watch;
 use valkyrie_proto::{PrState, WatchedPr};
-
-/// Columns from which the selected pull request's detail shows beside the list.
-const DETAIL_MIN_WIDTH: u16 = 120;
 
 /// What a key on the page asks the app to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,13 +109,7 @@ impl Page {
         t: &Theme,
     ) {
         let area = frame.area();
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let hints: Vec<Span> = [
@@ -128,30 +118,15 @@ impl Page {
             hint(" esc ", "close "),
         ]
         .concat();
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(" Pull requests ".fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).centered(),
-            )
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+            );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
-        let (list_area, detail_area) = if inner.width >= DETAIL_MIN_WIDTH {
-            let [list, rule, detail] = Layout::horizontal([
-                Constraint::Percentage(58),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(inner);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (list, Some(detail))
-        } else {
-            (inner, None)
-        };
+        let (list_area, detail_area) = crate::list_and_detail(frame, inner, t);
 
         let ago = |at: u64| crate::age(at * 1000, now);
         let mut lines = vec![Line::default()];

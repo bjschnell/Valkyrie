@@ -10,15 +10,12 @@ use crate::backlog::fit_hints;
 use crate::next_key;
 use crate::theme::Theme;
 use jiff::tz::TimeZone;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{self, Color, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use valkyrie_context::digest as core;
 use valkyrie_proto::{Digest, DigestEntry, Outcome, PastSession, SessionId, SupervisorEntry};
-
-/// Columns from which the selected row's detail shows beside the list.
-const DETAIL_MIN_WIDTH: u16 = 120;
 
 /// How far back History looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -551,13 +548,7 @@ impl Page {
         let tz = TimeZone::system();
         let area = frame.area();
         // Nearly the whole screen, like the backlog page.
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
 
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
@@ -580,14 +571,11 @@ impl Page {
             ]
             .concat()
         };
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(" History ".fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).centered(),
-            )
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+            );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -657,19 +645,7 @@ impl Page {
                 .areas(inner);
         frame.render_widget(Paragraph::new(top), head);
 
-        let (list_area, detail_area) = if body.width >= DETAIL_MIN_WIDTH {
-            let [list, rule, detail] = Layout::horizontal([
-                Constraint::Percentage(58),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(body);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (list, Some(detail))
-        } else {
-            (body, None)
-        };
+        let (list_area, detail_area) = crate::list_and_detail(frame, body, t);
 
         let width = list_area.width as usize;
         let mut lines: Vec<Line> = Vec::new();

@@ -1065,13 +1065,7 @@ impl Page {
     ) {
         let area = frame.area();
         // Nearly the whole screen, a margin around it so it reads as over what's under.
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let here = rows.get(self.cursor);
@@ -1173,9 +1167,7 @@ impl Page {
         };
         let hints = fit_hints(hints, rect.width.saturating_sub(4) as usize);
         let open = rows.iter().filter(|(l, _)| *l != Lane::Done).count();
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(Line::from(
                 [
                     vec![" Backlog ".fg(t.fg).bold()],
@@ -1203,8 +1195,7 @@ impl Page {
                 ]
                 .concat(),
             ))
-            .title_bottom(Line::from(hints).centered())
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+            .title_bottom(Line::from(hints).left_aligned());
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -1355,6 +1346,8 @@ fn order_window(
     rows: &[(Lane, Item)],
     t: &Theme,
 ) {
+    // A dialog: the page behind it steps back.
+    crate::dim(frame, over, t);
     let width = over.width.saturating_sub(6).min(100);
     let inner_width = width.saturating_sub(2) as usize;
     let (lines, at) = order_lines(view, order, rows, inner_width, t);
@@ -1501,6 +1494,7 @@ pub(crate) fn fit_hints(hints: Vec<Span<'static>>, room: usize) -> Vec<Span<'sta
 /// `L`'s window, over the middle of the page: a row per field, the one being
 /// changed marked, and a line on what it does.
 fn launch_window(frame: &mut ratatui::Frame, over: Rect, form: &LaunchForm, t: &Theme) {
+    crate::dim(frame, over, t);
     let fields = form.fields();
     let width = over.width.saturating_sub(4).min(56);
     let height = (fields.len() as u16 + 4).min(over.height);

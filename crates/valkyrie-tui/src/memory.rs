@@ -9,17 +9,14 @@ use crate::backlog::fit_hints;
 use crate::markdown;
 use crate::next_key;
 use crate::theme::Theme;
-use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use std::path::{Path, PathBuf};
 use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, Note, NoteStatus};
 
 /// The user scope's root: habits that hold in every project.
 const USER_SCOPE: &str = "~user";
-/// Columns from which the selected row's text shows beside the list.
-const DETAIL_MIN_WIDTH: u16 = 120;
 
 /// Memory's tabs that this page draws; Docs and Wiki are pages of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,13 +537,7 @@ impl Page {
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, proposals: &[Decision], t: &Theme) {
         let area = frame.area();
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let picks = self.picks(proposals);
@@ -582,14 +573,11 @@ impl Page {
             Tab::Skills => " Skills ",
             Tab::Notes => " Notes ",
         };
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(title.fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).centered(),
-            )
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+            );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -606,19 +594,7 @@ impl Page {
             return;
         }
 
-        let (list_area, detail_area) = if inner.width >= DETAIL_MIN_WIDTH {
-            let [list, rule, detail] = Layout::horizontal([
-                Constraint::Percentage(55),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(inner);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (list, Some(detail))
-        } else {
-            (inner, None)
-        };
+        let (list_area, detail_area) = crate::list_and_detail(frame, inner, t);
 
         let mut lines: Vec<Line> = vec![Line::default()];
         match (&self.decisions, &self.failed) {
