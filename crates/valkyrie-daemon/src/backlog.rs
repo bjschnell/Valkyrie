@@ -89,7 +89,7 @@ impl Registry {
                 };
                 let info = session.info();
                 if let Some(branch) = branch {
-                    worktree::valid(&info.cwd, branch)?;
+                    worktree::valid(branch)?;
                 }
                 if let Some(pr) = pr {
                     backlog::pr_url(pr)?;
@@ -430,7 +430,7 @@ impl Registry {
                     item.number
                 );
             }
-            worktree::valid(&info.cwd, branch)?;
+            worktree::valid(branch)?;
         }
         let project = valkyrie_context::project::in_git(&info.cwd)
             .then(|| valkyrie_context::project::root(&info.cwd));
