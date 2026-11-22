@@ -18,7 +18,6 @@ use valkyrie_proto::{WikiListing, WikiPage};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
-    Load,
     /// Read this page in full.
     Read(String),
     /// Start the agent that writes the wiki; `stale`: only the stale pages.
@@ -91,7 +90,7 @@ impl Page {
     }
 
     /// Keys while the page is open. Listing: ↑/↓ (j/k) pick, ↩ reads, `e` maps
-    /// the repository, `S` rewrites the stale pages, `r` reloads, Esc or `q`
+    /// the repository, `S` rewrites the stale pages, `/` searches, Esc or `q`
     /// closes. Reading: ↑/↓ and PgUp/PgDn scroll, Esc goes back to the list.
     pub(crate) fn keys(&mut self, mut bytes: &[u8]) -> Vec<Do> {
         let mut out = Vec::new();
@@ -144,7 +143,6 @@ impl Page {
                 b"e" if self.listing.is_some() => self.confirm = Some(false),
                 b"S" if self.stale() > 0 => self.confirm = Some(true),
                 b"S" if self.listing.is_some() => out.push(Do::Say("no page is stale".into())),
-                b"r" => out.push(Do::Load),
                 _ => {}
             }
         }
@@ -221,7 +219,7 @@ impl Page {
         match (&self.listing, &self.failed) {
             (_, Some(e)) => top.push(
                 format!(
-                    " Couldn't load the wiki: {} · r tries again",
+                    " Couldn't load the wiki: {} · trying again",
                     fit(e, inner.saturating_sub(30))
                 )
                 .fg(t.needs)

@@ -30,7 +30,6 @@ pub(crate) enum Tab {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
-    Load,
     /// Accept (or reject) the proposal at this index of the pushed proposals.
     Review {
         index: usize,
@@ -362,7 +361,7 @@ impl Page {
 
     /// Keys while the page is open. List: j/k pick, ↩ reads in full, `a`/`d`
     /// accept or reject a proposal, `e` rewrites it then accepts, `z` takes the
-    /// last answer back, `r` reloads, Esc or `q` closes. Reading:
+    /// last answer back, `/` searches, Esc or `q` closes. Reading:
     /// j/k and PgUp/PgDn scroll, Esc back to the list.
     pub(crate) fn keys(&mut self, mut bytes: &[u8], proposals: &[Decision]) -> Vec<Do> {
         let mut out = Vec::new();
@@ -417,7 +416,6 @@ impl Page {
                     out.push(Do::Undo);
                     break;
                 }
-                b"r" => out.push(Do::Load),
                 _ => {}
             }
         }
@@ -599,14 +597,14 @@ impl Page {
         let mut lines: Vec<Line> = vec![Line::default()];
         match (&self.decisions, &self.failed) {
             (_, Some(e)) => lines.push(
-                format!(" Couldn't load memory: {e} · r tries again")
+                format!(" Couldn't load memory: {e} · trying again")
                     .fg(t.blocked)
                     .into(),
             ),
             (None, None) => lines.push(" Loading…".fg(t.muted).into()),
             _ if self.tab == Tab::Notes && self.notes_failed > 0 => lines.push(
                 format!(
-                    " Couldn't read the notes of {} repositor{} · r tries again",
+                    " Couldn't read the notes of {} repositor{} · trying again",
                     self.notes_failed,
                     if self.notes_failed == 1 { "y" } else { "ies" }
                 )

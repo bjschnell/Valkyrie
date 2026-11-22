@@ -25,6 +25,7 @@ mod prs;
 mod quiet;
 mod quota;
 mod rain;
+mod search;
 mod settings;
 mod supervisor;
 mod theme;
@@ -308,6 +309,8 @@ struct App {
     prs: Option<prs::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
+    /// When the open section page last loaded on its own (`reload_page`).
+    page_loaded: Instant,
     /// What the last `review_at` would take back, for Memory's `z`.
     last_answer: Option<Option<memory::Undo>>,
     /// The selected session's screen text, for the preview pane.
@@ -510,6 +513,7 @@ impl App {
             memory: None,
             prs: None,
             editing: None,
+            page_loaded: Instant::now(),
             last_answer: None,
             preview: None,
             pinger: Pinger::default(),
@@ -632,6 +636,9 @@ impl App {
                 }
                 _ = tick.tick() => {
                     self.refresh().await;
+                    if self.page_loaded.elapsed() >= PAGE_RELOAD {
+                        self.reload_page().await;
+                    }
                     // An editor that ended while you were elsewhere.
                     self.finish_edit().await;
                     self.update_preview().await;
@@ -2691,6 +2698,38 @@ impl App {
         }
     }
 
+    /// Section pages are live (#273): the open one loads again every
+    /// `PAGE_RELOAD`, keeping its cursor, so there's no reload key. Backlog
+    /// items and proposals come pushed. Not while a session is attached over it.
+    async fn reload_page(&mut self) {
+        self.page_loaded = Instant::now();
+        if self.view.is_some() {
+            return;
+        }
+        if self.memory.is_some() {
+            self.load_memory().await;
+        }
+        if self.prs.is_some() {
+            self.load_prs().await;
+        }
+        if self.supervisor.is_some() {
+            self.load_supervisor().await;
+        }
+        if self.wiki.is_some() {
+            self.load_wiki().await;
+        }
+        if self.digest.is_some() {
+            self.fetch_digest(true).await;
+        }
+        if let Some(page) = &mut self.docs {
+            let acts = page.refresh();
+            self.fetch_docs(false).await;
+            for act in acts {
+                Box::pin(self.docs_do(act)).await;
+            }
+        }
+    }
+
     async fn open_prs(&mut self) {
         self.prs = Some(prs::Page::default());
         self.load_prs().await;
@@ -2712,7 +2751,6 @@ impl App {
         for act in page.keys(bytes) {
             match act {
                 prs::Do::Close => self.prs = None,
-                prs::Do::Load => self.load_prs().await,
                 prs::Do::Open(url) => self.open_url(&url),
             }
         }
@@ -2773,7 +2811,6 @@ impl App {
         for act in page.keys(bytes, &self.proposals) {
             match act {
                 memory::Do::Close => self.memory = None,
-                memory::Do::Load => self.load_memory().await,
                 memory::Do::Review { index, accept } => {
                     self.last_answer = None;
                     if let Some(said) = self.review_at(index, accept).await {
@@ -3672,10 +3709,18 @@ impl App {
 
     /// Asks the daemon for the digest the page's window and grouping want.
     async fn load_digest(&mut self) {
+        self.fetch_digest(false).await;
+    }
+
+    /// The digest for the page's window: `live` is a reload that keeps the
+    /// rows on screen until the answer comes (`reload_page`).
+    async fn fetch_digest(&mut self, live: bool) {
         let Some(page) = &mut self.digest else {
             return;
         };
-        page.loading();
+        if !live {
+            page.loading();
+        }
         let tz = jiff::tz::TimeZone::system();
         let since = page.win.since(now_ms(), &tz);
         // The sessions, what the supervisor did, and what ended (for `R`).
@@ -3693,7 +3738,11 @@ impl App {
             .map_err(text);
         let past = self.client.history().await.map_err(text);
         if let Some(page) = &mut self.digest {
-            page.loaded(digest, steps, past, &tz);
+            if live {
+                page.refreshed(digest, steps, past, &tz);
+            } else {
+                page.loaded(digest, steps, past, &tz);
+            }
         }
     }
 
@@ -3776,7 +3825,6 @@ impl App {
         for act in page.keys(bytes, &waits) {
             match act {
                 supervisor::Do::Close => self.supervisor = None,
-                supervisor::Do::Load => self.load_supervisor().await,
                 supervisor::Do::Say(text) => self.say(text),
                 supervisor::Do::OpenSession => {
                     let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
@@ -3924,7 +3972,6 @@ impl App {
         for act in page.keys(bytes) {
             match act {
                 wiki::Do::Close => self.wiki = None,
-                wiki::Do::Load => self.load_wiki().await,
                 wiki::Do::Read(slug) => {
                     let Some(repo) = self.wiki.as_ref().map(|p| p.repo.clone()) else {
                         return;
@@ -3984,8 +4031,18 @@ impl App {
     /// until now read, as the web app's list does; this list still shows them
     /// as new.
     async fn load_docs(&mut self) {
+        self.fetch_docs(true).await;
+    }
+
+    /// The docs list; `seen` marks what agents wrote until now read. A live
+    /// reload doesn't: you opened the list, not what arrived since.
+    async fn fetch_docs(&mut self, seen: bool) {
         let got = self.client.docs_listing().await.map_err(|e| e.to_string());
-        let at = got.as_ref().ok().map(|l| l.at);
+        // A live reload that failed keeps the list it had.
+        if !seen && got.is_err() {
+            return;
+        }
+        let at = got.as_ref().ok().map(|l| l.at).filter(|_| seen);
         if let Some(page) = &mut self.docs {
             page.loaded(got);
         }
@@ -4011,7 +4068,6 @@ impl App {
         match act {
             docs::Do::Close => self.docs = None,
             docs::Do::Url(url) => self.open_url(&url),
-            docs::Do::Load => self.load_docs().await,
             docs::Do::Open(key) => {
                 let got = self
                     .client
@@ -4119,7 +4175,7 @@ impl App {
                         if let Some(page) = &mut self.docs {
                             page.deleted(&key, token, title.clone());
                         }
-                        self.say(format!("Deleted “{title}”: u puts it back."));
+                        self.say(format!("Deleted “{title}”: z puts it back."));
                         self.load_docs().await;
                     }
                     Ok(Err(now)) => {
@@ -5043,6 +5099,9 @@ const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 const HOVER_DELAY: Duration = Duration::from_secs(1);
 /// How soon a second press on a tab makes a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How often an open section page loads again on its own.
+const PAGE_RELOAD: Duration = Duration::from_secs(30);
+
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
 /// A backlog proposal's toast stays longer: long enough to answer it.
@@ -7031,6 +7090,30 @@ fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
         .style(style::Style::new().bg(t.bg).fg(t.fg))
         .title(title)
         .padding(Padding::new(1, 1, 0, 0))
+}
+
+/// A section page's footer (spec: One key grammar): at most five hints for the
+/// selection, primary first, then `around` faint on the right (`j/k move`,
+/// `[ ] filter`) when there's room. `hints` is key and label spans in pairs.
+pub(crate) fn page_footer(
+    hints: Vec<Span<'static>>,
+    around: &str,
+    width: u16,
+    t: &Theme,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = hints.into_iter().take(10).collect();
+    let used: usize = spans.iter().map(Span::width).sum();
+    let width = width as usize;
+    if used > width {
+        return Line::from(backlog::fit_hints(spans, width));
+    }
+    let around = format!("{around} ");
+    let room = around.chars().count();
+    if !around.trim().is_empty() && used + room + 2 <= width {
+        spans.push(" ".repeat(width - used - room).into());
+        spans.push(around.fg(t.muted));
+    }
+    Line::from(spans)
 }
 
 /// A section's page: the whole screen under the strip, down to the footer's

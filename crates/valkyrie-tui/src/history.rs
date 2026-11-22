@@ -138,7 +138,7 @@ impl History {
             };
             match (&self.versions, &self.failed) {
                 (_, Some(e)) => lines.push(
-                    crate::fit(&format!("Couldn't load it: {e} · r tries again"), room)
+                    crate::fit(&format!("Couldn't load it: {e} · trying again"), room)
                         .fg(t.needs)
                         .into(),
                 ),

@@ -233,7 +233,7 @@ impl Comments {
             Mode::List { cursor } => {
                 if let Some(e) = &self.failed {
                     lines.push(
-                        fit(&format!("Couldn't load them: {e} · r tries again"), room)
+                        fit(&format!("Couldn't load them: {e} · trying again"), room)
                             .fg(t.needs)
                             .into(),
                     );

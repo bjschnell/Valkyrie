@@ -18,7 +18,6 @@ use valkyrie_proto::{PrState, WatchedPr};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
-    Load,
     /// Open this pull request in the browser.
     Open(String),
 }
@@ -91,7 +90,6 @@ impl Page {
                         out.push(Do::Open(url.clone()));
                     }
                 }
-                b"r" => out.push(Do::Load),
                 b"\x1b" if whole => out.push(Do::Close),
                 b"q" | [0x03] => out.push(Do::Close),
                 _ => {}
@@ -133,7 +131,7 @@ impl Page {
         match &self.watch {
             None => lines.push(" Loading…".fg(t.muted).into()),
             Some(Err(e)) => lines.push(
-                format!(" Couldn't read them: {e} · r tries again")
+                format!(" Couldn't read them: {e} · trying again")
                     .fg(t.blocked)
                     .into(),
             ),

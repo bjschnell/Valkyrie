@@ -86,6 +86,15 @@ enum Row {
     Step(Box<SupervisorEntry>),
 }
 
+/// What a row is, by identity, so a reload can find it again.
+fn row_id(row: &Row) -> Option<String> {
+    match row {
+        Row::Day(..) => None,
+        Row::Entry(e) => Some(format!("e{}", e.key)),
+        Row::Step(st) => Some(format!("s{} {}", st.at, st.said)),
+    }
+}
+
 impl Row {
     fn at_ms(&self) -> u64 {
         match self {
@@ -169,6 +178,32 @@ impl Page {
             Err(e) => (Vec::new(), Some(e)),
         };
         self.build(tz);
+    }
+
+    /// A live reload's answer (`App::reload_page`): as `loaded`, but the
+    /// cursor stays on the row it was on, and a failed reload keeps what was
+    /// shown.
+    pub(crate) fn refreshed(
+        &mut self,
+        digest: Result<Digest, String>,
+        steps: Result<Vec<SupervisorEntry>, String>,
+        past: Result<Vec<PastSession>, String>,
+        tz: &TimeZone,
+    ) {
+        if digest.is_err() && self.digest.is_some() {
+            return;
+        }
+        let was = self.selected().and_then(row_id);
+        let cursor = self.cursor;
+        self.loaded(digest, steps, past, tz);
+        self.cursor = match was {
+            Some(id) => self
+                .items()
+                .position(|r| row_id(r).as_ref() == Some(&id))
+                .unwrap_or(cursor),
+            None => cursor,
+        };
+        self.cursor = self.cursor.min(self.items().count().saturating_sub(1));
     }
 
     /// Forgets the old answer while a new one loads, so it can't pass for it.
@@ -357,7 +392,6 @@ impl Page {
                     out.push(Do::Load);
                 }
                 b"/" => self.typing = true,
-                b"r" => out.push(Do::Load),
                 b"y" => match (&self.digest, self.win) {
                     // What's on screen: the ended sessions, as a list.
                     (_, Window::Ended) if !self.past.is_empty() => {
@@ -603,7 +637,7 @@ impl Page {
         match (&self.digest, &self.failed) {
             _ if self.win == Window::Ended => match &self.past_failed {
                 Some(e) => top.push(
-                    format!(" Couldn't read the ended sessions: {e} · r tries again")
+                    format!(" Couldn't read the ended sessions: {e} · trying again")
                         .fg(t.blocked)
                         .into(),
                 ),
@@ -619,7 +653,7 @@ impl Page {
                 }
             },
             (_, Some(e)) => top.push(
-                format!(" Couldn't load History: {e} · r tries again")
+                format!(" Couldn't load History: {e} · trying again")
                     .fg(t.blocked)
                     .into(),
             ),

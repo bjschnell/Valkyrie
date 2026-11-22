@@ -29,8 +29,6 @@ use valkyrie_proto::{DeletedDoc, Doc, DocVersion, DocsListing};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Do {
     Close,
-    /// Fetch the list again.
-    Load,
     /// Read the doc with this key.
     Open(String),
     /// Open this http(s) link in the browser.
@@ -470,6 +468,35 @@ impl Page {
         self.reader.is_some()
     }
 
+    /// What a live page asks for on its timer (`App::reload_page`): the trash
+    /// when it's open, and a doc whose history or comments failed to load,
+    /// opened again. The list itself the app reloads.
+    pub(crate) fn refresh(&mut self) -> Vec<Do> {
+        let mut out = Vec::new();
+        if let Some(trash) = &mut self.trash {
+            trash.failed = None;
+            out.push(Do::Deleted);
+        }
+        if let Some(reader) = &mut self.reader
+            && reader.conflict.is_none()
+            && (reader
+                .history
+                .as_ref()
+                .is_some_and(history::History::failed)
+                || reader.comments.failed())
+        {
+            let key = reader.key.clone();
+            let top = reader.top.get();
+            *reader = Reader {
+                key: key.clone(),
+                top: Cell::new(top),
+                ..Default::default()
+            };
+            out.push(Do::Open(key));
+        }
+        out
+    }
+
     /// Keys while the page is open.
     pub(crate) fn keys(&mut self, mut bytes: &[u8]) -> Vec<Do> {
         let mut out = Vec::new();
@@ -486,7 +513,7 @@ impl Page {
         out
     }
 
-    /// ↑/↓ (j/k) pick a doc, ↩ reads it; `r` loads again; Esc or `q` closes.
+    /// ↑/↓ (j/k) pick a doc, ↩ reads it, `/` searches; Esc or `q` closes.
     fn list_key(&mut self, key: &[u8], whole: bool, out: &mut Vec<Do>) {
         if let Some(trash) = &mut self.trash {
             let n = trash.docs.as_ref().map_or(0, Vec::len);
@@ -500,10 +527,6 @@ impl Page {
                         out.push(Do::Undelete(d.token.clone()));
                     }
                 }
-                b"r" => {
-                    trash.failed = None;
-                    out.push(Do::Deleted);
-                }
                 b"\x1b" if whole => self.trash = None,
                 b"q" | [0x03] => self.trash = None,
                 _ => {}
@@ -512,7 +535,7 @@ impl Page {
         }
         let n = self.docs().count();
         match key {
-            b"u" => match &self.undo {
+            b"z" => match &self.undo {
                 Some((token, _)) => out.push(Do::Undelete(token.clone())),
                 None => out.push(Do::Say("nothing to undo".into())),
             },
@@ -541,7 +564,6 @@ impl Page {
                     }
                 }
             }
-            b"r" => out.push(Do::Load),
             b"\x1b" if whole => out.push(Do::Close),
             b"q" | [0x03] => out.push(Do::Close),
             _ => {}
@@ -550,7 +572,7 @@ impl Page {
 
     /// ↑/↓ (j/k) scroll a row, space/PgDn and b/PgUp a page, g/G to the ends;
     /// tab/shift-tab pick a link and ↩ follows it; `y` copies the doc's markdown;
-    /// `r` reads it again; Esc goes back to the doc a wikilink came from, else
+    /// `x x` deletes it; Esc goes back to the doc a wikilink came from, else
     /// to the list, and `q` to the list.
     fn reader_key(&mut self, key: &[u8], whole: bool, out: &mut Vec<Do>) {
         if let Some(reader) = &mut self.reader
@@ -594,23 +616,6 @@ impl Page {
             }
             return;
         }
-        // A panel whose load failed: `r` opens the doc again, which asks again.
-        if key == b"r"
-            && let Some(reader) = &mut self.reader
-            && (reader
-                .history
-                .as_ref()
-                .is_some_and(history::History::failed)
-                || reader.comments.failed())
-        {
-            let key = reader.key.clone();
-            *reader = Reader {
-                key: key.clone(),
-                ..Default::default()
-            };
-            out.push(Do::Open(key));
-            return;
-        }
         if let Some(reader) = &mut self.reader
             && let Some(h) = &mut reader.history
         {
@@ -637,11 +642,11 @@ impl Page {
             }
             return;
         }
-        // `d` once asks; the next key deletes it only if it's `d` again.
+        // `x` once asks; the next key deletes it only if it's `x` again.
         if let Some(reader) = &mut self.reader
             && std::mem::take(&mut reader.deleting)
         {
-            if key == b"d" {
+            if key == b"x" {
                 if let Some(d) = &reader.doc
                     && let Some(base) = d.hash.clone()
                 {
@@ -712,11 +717,11 @@ impl Page {
                 )),
                 None => {}
             },
-            b"d" => match &reader.doc {
+            b"x" => match &reader.doc {
                 Some(d) if d.hash.is_some() => {
                     reader.deleting = true;
                     out.push(Do::Say(
-                        "d again deletes it (it can be put back); any other key doesn't".into(),
+                        "x again deletes it (it can be put back); any other key doesn't".into(),
                     ));
                 }
                 Some(_) => out.push(Do::Say("it can't be deleted from here".into())),
@@ -744,14 +749,6 @@ impl Page {
                 Some(d) => out.push(Do::Copy(body(d.text.as_deref().unwrap_or_default()))),
                 None => out.push(Do::Say("nothing to copy".into())),
             },
-            b"r" => {
-                let key = reader.key.clone();
-                self.reader = Some(Reader {
-                    key: key.clone(),
-                    ..Default::default()
-                });
-                out.push(Do::Open(key));
-            }
             b"\x1b" if whole => match self.back.pop() {
                 Some((key, top)) => {
                     self.reader = Some(Reader {
@@ -844,7 +841,7 @@ impl Page {
         match (&self.listing, &self.failed) {
             (_, Some(e)) => top.push(
                 format!(
-                    " Couldn't load the docs: {} · r tries again",
+                    " Couldn't load the docs: {} · trying again",
                     fit(e, inner.saturating_sub(16))
                 )
                 .fg(t.needs)
@@ -863,7 +860,7 @@ impl Page {
                 );
                 top.push(format!(" {}", fit(&about, inner)).fg(t.fg).into());
                 if let Some((_, title)) = &self.undo {
-                    let line = format!(" Deleted “{title}” · u puts it back");
+                    let line = format!(" Deleted “{title}” · z puts it back");
                     top.push(fit(&line, inner).fg(t.accent).into());
                 }
                 if l.docs.is_empty() {
@@ -1181,7 +1178,7 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
     let mut lines: Vec<Line> = vec![Line::default()];
     match (&trash.docs, &trash.failed) {
         (_, Some(e)) => lines.push(
-            fit(&format!("Couldn't load them: {e} · r tries again"), room)
+            fit(&format!("Couldn't load them: {e} · trying again"), room)
                 .fg(t.needs)
                 .into(),
         ),
@@ -1666,14 +1663,16 @@ mod tests {
     }
 
     #[test]
-    fn d_twice_deletes_and_u_puts_it_back() {
+    fn x_twice_deletes_and_z_puts_it_back() {
         let mut page = reading("7", "Hello\n");
-        // d, then anything else: nothing happens.
-        assert!(matches!(page.keys(b"d").as_slice(), [Do::Say(_)]));
+        // x, then anything else: nothing happens.
+        assert!(matches!(page.keys(b"x").as_slice(), [Do::Say(_)]));
         assert_eq!(page.keys(b"j"), vec![Do::Say("not deleted".into())]);
-        assert!(matches!(page.keys(b"d").as_slice(), [Do::Say(_)]));
+        // d isn't delete any more: it's reject, and a doc has nothing to reject.
+        assert!(page.keys(b"d").is_empty());
+        assert!(matches!(page.keys(b"x").as_slice(), [Do::Say(_)]));
         assert_eq!(
-            page.keys(b"d"),
+            page.keys(b"x"),
             vec![Do::Delete {
                 key: "7".into(),
                 base: "h1".into(),
@@ -1682,18 +1681,18 @@ mod tests {
         );
         page.deleted("7", "tok".into(), "title 7".into());
         assert!(!page.reading());
-        assert!(screen(&page, 80, 20).contains("Deleted “title 7” · u puts it back"));
-        assert_eq!(page.keys(b"u"), vec![Do::Undelete("tok".into())]);
+        assert!(screen(&page, 80, 20).contains("Deleted “title 7” · z puts it back"));
+        assert_eq!(page.keys(b"z"), vec![Do::Undelete("tok".into())]);
         let mut back = doc("7", "a.md", false);
         back.key = "7".into();
         assert_eq!(page.undeleted("tok", &back), Some(Do::Open("7".into())));
         assert!(page.reading());
         assert_eq!(page.keys(b"\x1b"), vec![]);
-        assert_eq!(page.keys(b"u"), vec![Do::Say("nothing to undo".into())]);
+        assert_eq!(page.keys(b"z"), vec![Do::Say("nothing to undo".into())]);
     }
 
     #[test]
-    fn the_mouse_leaves_a_covered_doc_alone_and_disarms_d() {
+    fn the_mouse_leaves_a_covered_doc_alone_and_disarms_x() {
         let mut page = reading("7", "[x](https://x.dev)\n");
         screen(&page, 60, 20);
         let r = page.reader.as_ref().unwrap();
@@ -1708,7 +1707,7 @@ mod tests {
             "not through the history panel"
         );
         page.keys(b"\x1b");
-        page.keys(b"d");
+        page.keys(b"x");
         page.pressed();
         assert!(!page.reader.as_ref().unwrap().deleting);
         page.deleted("7", "tok".into(), "t".into());
@@ -1719,14 +1718,14 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_trash_load_can_be_asked_again() {
+    fn a_failed_trash_load_is_asked_again_on_its_own() {
         let mut page = Page::default();
         page.loaded(Ok(listing(vec![doc("1", "a.md", false)])));
         assert_eq!(page.keys(b"t"), vec![Do::Deleted]);
         page.trash(Err("no reply".into()));
         let shown = screen(&page, 80, 20);
-        assert!(shown.contains("r tries again"), "{shown}");
-        assert_eq!(page.keys(b"r"), vec![Do::Deleted]);
+        assert!(shown.contains("trying again"), "{shown}");
+        assert_eq!(page.refresh(), vec![Do::Deleted]);
         assert!(page.trash.as_ref().unwrap().failed.is_none());
     }
 

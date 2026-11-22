@@ -81,8 +81,6 @@ pub(crate) fn waiting(
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Do {
     Close,
-    /// Fetch the log again.
-    Load,
     TakeStep {
         session: SessionId,
         seq: u64,
@@ -138,7 +136,7 @@ impl Page {
     /// Keys while the page is open: ↑/↓ (j/k) pick what waits; `a` (or ↩) takes
     /// what's offered, `o` the other step, `d` leaves or rejects it; ↩ on a build
     /// order opens it; `c` opens the supervisor session, starting it if none
-    /// runs; `r` loads again; Esc or `q` closes.
+    /// runs; Esc or `q` closes. The list stays live (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8], waits: &[Wait]) -> Vec<Do> {
         let mut out = Vec::new();
         let n = waits.len();
@@ -169,7 +167,6 @@ impl Page {
                     Some(_) => out.push(Do::Say("no other step offered there".into())),
                     None => {}
                 },
-                b"r" => out.push(Do::Load),
                 b"c" => out.push(Do::OpenSession),
                 b"\x1b" if whole => out.push(Do::Close),
                 b"q" | [0x03] => out.push(Do::Close),
@@ -241,7 +238,7 @@ impl Page {
         match (&self.log, &self.failed) {
             (_, Some(e)) => lines.push(
                 format!(
-                    "   Couldn't load it: {} · r tries again",
+                    "   Couldn't load it: {} · trying again",
                     fit(e, inner.saturating_sub(36))
                 )
                 .fg(t.blocked)
@@ -327,7 +324,7 @@ fn watch_lines(
         None => lines.push("   Loading…".fg(t.muted).into()),
         Some(Err(e)) => lines.push(
             format!(
-                "   Couldn't load it: {} · r tries again",
+                "   Couldn't load it: {} · trying again",
                 fit(e, inner.saturating_sub(36))
             )
             .fg(t.blocked)
