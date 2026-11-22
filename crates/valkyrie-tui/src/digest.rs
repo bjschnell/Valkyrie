@@ -192,6 +192,15 @@ impl Page {
         if digest.is_err() && self.digest.is_some() {
             return;
         }
+        // What else failed this time keeps what it had.
+        let steps = steps.or_else(|e| match self.steps_failed {
+            None => Ok(self.steps.clone()),
+            Some(_) => Err(e),
+        });
+        let past = past.or_else(|e| match self.past_failed {
+            None => Ok(self.past.clone()),
+            Some(_) => Err(e),
+        });
         let was = self.selected().and_then(row_id);
         let cursor = self.cursor;
         self.loaded(digest, steps, past, tz);
@@ -293,8 +302,9 @@ impl Page {
     }
 
     /// Keys while the page is open: ↑/↓ (j/k) pick, ↩ opens a running session,
-    /// `R` resumes an ended one, `[ ]` the window, `/` searches, `y` copies, `r`
-    /// loads again, Esc clears the search or closes.
+    /// `R` resumes an ended one, `[ ]` the window, `/` searches, `y` copies,
+    /// Esc clears the search or closes. It loads again on its own
+    /// (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8], tz: &TimeZone) -> Vec<Do> {
         let mut out = Vec::new();
         while !bytes.is_empty() {

@@ -29,7 +29,7 @@ pub(crate) struct Page {
     cursor: usize,
     /// `/`: pull requests whose number, branch, repository or state has every
     /// word typed.
-    search: Search,
+    pub(crate) search: Search,
 }
 
 impl Page {

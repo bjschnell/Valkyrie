@@ -117,7 +117,7 @@ pub(crate) struct Page {
     /// Item id to the number its repository calls it, for the watched PRs' lines.
     pub(crate) numbers: std::collections::HashMap<u32, u32>,
     /// `/`: what waits, and what it did, that says every word typed.
-    search: Search,
+    pub(crate) search: Search,
 }
 
 impl Page {

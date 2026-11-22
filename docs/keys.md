@@ -18,7 +18,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 | | `,` · `.` | settings · keys |
 | | `?` | the tutor: an agent that teaches Valkyrie, one lesson at a time |
 | Pages | `a` · `d` · `e` | accept · reject (or drop) · edit, wherever there's one to answer or change |
-| | `x` · `z` · `/` | delete, then `x` again to confirm · undo the last answer or delete · search the list (`↩` keeps it, `Esc` clears it) |
+| | `x` · `z` · `/` | delete, then `x` again to confirm · undo the last answer (Memory) or delete (Docs) · search the list (`↩` keeps it, `Esc` clears it) |
 | | `[` / `]` | the section's tabs: the backlog's filter row (All · Ready · Running · Review · Pull requests), Memory's tabs, History's window. Lists stay up to date on their own, so there's no reload key. |
 | Anywhere | `Alt-1`–`Alt-9` · `Alt-h` | jump to a tab · home |
 | | `Alt-j` / `Alt-k` · `Alt-p` | next / previous tab · the tab you were last on |

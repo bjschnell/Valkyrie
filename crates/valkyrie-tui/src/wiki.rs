@@ -43,7 +43,7 @@ pub(crate) struct Page {
     /// An exploration started and not answered yet: keys wait.
     pub(crate) starting: bool,
     /// `/`: pages whose title, slug or summary has every word typed.
-    search: Search,
+    pub(crate) search: Search,
 }
 
 impl Page {
@@ -69,14 +69,13 @@ impl Page {
     pub(crate) fn loaded(&mut self, got: Result<WikiListing, String>) {
         match got {
             Ok(listing) => {
-                self.cursor = self.cursor.min(listing.pages.len().saturating_sub(1));
                 self.listing = Some(listing);
                 self.failed = None;
+                // Within what the search shows.
+                self.cursor = self.cursor.min(self.pages().len().saturating_sub(1));
             }
-            Err(e) => {
-                self.listing = None;
-                self.failed = Some(e);
-            }
+            // A live reload that failed keeps the pages shown, and says so.
+            Err(e) => self.failed = Some(e),
         }
     }
 

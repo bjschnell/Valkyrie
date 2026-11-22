@@ -762,8 +762,15 @@ impl Page {
                 }
                 continue;
             }
+            let searching = self.search.typing;
             match self.search.key(key, whole) {
                 Searched::No => {}
+                // The search ended: the rest of the read would act on rows
+                // listed before it narrowed them.
+                _ if searching && !self.search.typing => {
+                    self.cursor = 0;
+                    break;
+                }
                 Searched::Kept => continue,
                 Searched::Changed => {
                     self.cursor = 0;
@@ -2892,6 +2899,10 @@ mod tests {
         assert!(page.keys(b"\x1b", &[], &[], 7).is_empty());
         assert_eq!(shown(&page), [1, 2, 3, 4]);
         assert_eq!(page.keys(b"\x1b", &[], &[], 7), [Do::Close]);
+        // ↩ then a key in the same read: nothing runs on the stale rows.
+        let rows = rows(&items, &[], 7);
+        assert!(page.keys(b"/login\rd", &rows, &[], 7).is_empty());
+        page.keys(b"\x1b", &rows, &[], 7);
         // By number, and the folder-less by "no folder".
         page.keys(b"/#3\r", &[], &[], 7);
         assert_eq!(shown(&page), [3]);

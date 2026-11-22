@@ -14,6 +14,9 @@ pub(crate) struct Search {
     /// The start of a character a key cut off (`next_key` is a byte at a time
     /// outside escape sequences), joined to the next key.
     partial: Vec<u8>,
+    /// Inside a bracketed paste: its line breaks are spaces, so a pasted line
+    /// never ends the search and runs the rest as the list's keys.
+    pasting: bool,
 }
 
 /// What a key did to the search.
@@ -46,8 +49,23 @@ impl Search {
             };
         }
         match key {
+            b"\x1b[200~" => {
+                self.pasting = true;
+                Searched::Kept
+            }
+            b"\x1b[201~" => {
+                self.pasting = false;
+                Searched::Kept
+            }
+            b"\r" | b"\n" | b"\t" if self.pasting => {
+                if !self.query.ends_with(' ') {
+                    self.query.push(' ');
+                }
+                Searched::Changed
+            }
             b"\r" | b"\n" => {
                 self.typing = false;
+                self.partial.clear();
                 Searched::Kept
             }
             [0x03] => self.clear(),
@@ -58,6 +76,7 @@ impl Search {
             },
             // ^U: the whole line.
             [0x15] => {
+                self.partial.clear();
                 self.query.clear();
                 Searched::Changed
             }
@@ -88,6 +107,8 @@ impl Search {
 
     fn clear(&mut self) -> Searched {
         self.typing = false;
+        self.pasting = false;
+        self.partial.clear();
         if self.query.is_empty() {
             Searched::Kept
         } else {
@@ -157,6 +178,19 @@ mod tests {
         assert_eq!(s.query, "x");
         assert_eq!(s.key(b"\x1b", true), Searched::Changed);
         assert!(!s.typing && s.query.is_empty());
+    }
+
+    #[test]
+    fn a_pasted_line_break_is_a_space_and_never_ends_the_search() {
+        let mut s = Search::default();
+        press(
+            &mut s,
+            &[b"/", b"\x1b[200~", b"a", b"\r", b"b", b"\n", b"\x1b[201~"],
+        );
+        assert!(s.typing, "still typing after the paste");
+        assert_eq!(s.query, "a b ");
+        assert_eq!(s.key(b"\r", true), Searched::Kept);
+        assert!(!s.typing, "a typed ↩ keeps it");
     }
 
     #[test]

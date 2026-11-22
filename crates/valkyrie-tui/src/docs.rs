@@ -136,7 +136,11 @@ pub(crate) struct Page {
     failed: Option<String>,
     rows: Vec<Row>,
     /// `/`: docs whose title, path, kind or author has every word typed.
-    search: Search,
+    pub(crate) search: Search,
+    /// Docs that were new when the page opened: opening it marks them read
+    /// (`DocsSeen`), so a live reload lists them as read, but this list keeps
+    /// showing them as new.
+    new: std::collections::HashSet<String>,
     /// Index among the docs (not the headings).
     cursor: usize,
     reader: Option<Reader>,
@@ -274,7 +278,14 @@ impl Page {
         let keep = self.selected().map(|d| d.key.clone());
         self.rows.clear();
         match got {
-            Ok(listing) => {
+            Ok(mut listing) => {
+                for d in &mut listing.docs {
+                    if d.unread {
+                        self.new.insert(d.key.clone());
+                    } else if self.new.contains(&d.key) {
+                        d.unread = true;
+                    }
+                }
                 let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
                 for (i, d) in listing.docs.iter().enumerate() {
                     let g = group_of(&d.path);
@@ -522,23 +533,23 @@ impl Page {
     }
 
     /// What a live page asks for on its timer (`App::reload_page`): the trash
-    /// when it's open, and a doc whose history or comments failed to load,
-    /// opened again. The list itself the app reloads.
+    /// when it's open, a doc that failed to open, opened again, and only what
+    /// failed of one that did (its history or comments), so nothing open in
+    /// it is lost. The list itself the app reloads.
     pub(crate) fn refresh(&mut self) -> Vec<Do> {
         let mut out = Vec::new();
         if let Some(trash) = &mut self.trash {
             trash.failed = None;
             out.push(Do::Deleted);
         }
-        if let Some(reader) = &mut self.reader
-            && reader.conflict.is_none()
-            && (reader
-                .history
-                .as_ref()
-                .is_some_and(history::History::failed)
-                || reader.comments.failed())
-        {
-            let key = reader.key.clone();
+        let Some(reader) = &mut self.reader else {
+            return out;
+        };
+        if reader.conflict.is_some() {
+            return out;
+        }
+        let key = reader.key.clone();
+        if reader.failed.is_some() {
             let top = reader.top.get();
             *reader = Reader {
                 key: key.clone(),
@@ -546,6 +557,19 @@ impl Page {
                 ..Default::default()
             };
             out.push(Do::Open(key));
+            return out;
+        }
+        if reader
+            .history
+            .as_ref()
+            .is_some_and(history::History::failed)
+        {
+            reader.history = Some(History::default());
+            out.push(Do::History(key.clone()));
+        }
+        // A comment being written stays: a load only replaces the list.
+        if reader.comments.failed() {
+            out.push(Do::Comments(key));
         }
         out
     }
@@ -1780,6 +1804,32 @@ mod tests {
         assert!(page.undo.is_some());
         page.undo_failed("tok");
         assert!(page.undo.is_none());
+    }
+
+    #[test]
+    fn a_live_reload_keeps_new_docs_new_and_retries_only_what_failed() {
+        let mut page = Page::default();
+        page.loaded(Ok(listing(vec![
+            doc("1", "a.md", true),
+            doc("2", "b.md", false),
+        ])));
+        // Opening marked them read: the next listing says so, the page doesn't.
+        page.loaded(Ok(listing(vec![
+            doc("1", "a.md", false),
+            doc("2", "b.md", false),
+        ])));
+        assert!(page.docs()[0].unread, "still new on this visit");
+        assert!(!page.docs()[1].unread);
+        // A doc that failed to open is opened again; one that opened keeps its
+        // comment box and asks for its comments only.
+        let mut page = reading("7", "Hello\n");
+        page.reader.as_mut().unwrap().failed = Some("gone".into());
+        assert_eq!(page.refresh(), vec![Do::Open("7".into())]);
+        let mut page = reading("7", "Hello\n");
+        page.comments("7", Err("no reply".into()), false);
+        page.reader.as_mut().unwrap().top.set(5);
+        assert_eq!(page.refresh(), vec![Do::Comments("7".into())]);
+        assert_eq!(page.reader.as_ref().unwrap().top.get(), 5, "where you were");
     }
 
     #[test]

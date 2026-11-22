@@ -443,8 +443,12 @@ impl Page {
                 }
                 continue;
             }
+            let searching = self.search.typing;
             match self.search.key(key, whole) {
                 Searched::No => {}
+                // The search ended: the rest of the read would act on rows
+                // picked before it narrowed them.
+                _ if searching && !self.search.typing => break,
                 Searched::Kept => continue,
                 Searched::Changed => {
                     self.cursor = 0;
@@ -983,6 +987,10 @@ mod tests {
         assert!(page.keys(b"\x1b", &proposals).is_empty());
         assert_eq!(page.rows(Tab::Decisions, &proposals).len(), 7);
         assert_eq!(page.keys(b"\x1b", &proposals), [Do::Close]);
+        // ↩ and a key after it in the same read (an unbracketed paste): the
+        // rest isn't run against rows picked before the search narrowed them.
+        assert!(page.keys(b"/web\ra", &proposals).is_empty());
+        assert!(!page.search.typing);
     }
 
     #[test]

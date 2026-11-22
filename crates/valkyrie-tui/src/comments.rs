@@ -58,7 +58,7 @@ pub(crate) struct Comments {
 }
 
 impl Comments {
-    /// Whether the load failed, so `r` can ask again.
+    /// Whether the load failed, so the page's live reload asks again.
     pub(crate) fn failed(&self) -> bool {
         self.failed.is_some()
     }

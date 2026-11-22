@@ -1498,7 +1498,9 @@ impl App {
     /// Bracketed paste on in the outer terminal while a backlog prompt is open, so a
     /// multi-line paste reaches it as one, at home too; after, the program's mode.
     fn sync_paste(&mut self) {
-        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some());
+        // A backlog prompt, or a search being typed on any page (#273): a
+        // pasted line break mustn't end it.
+        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some()) || self.searching();
         let program = self.view.as_ref().is_some_and(|v| v.modes.bracketed_paste);
         let Some(final_byte) = paste_change(want, self.paste_forced, program) else {
             return;
@@ -1507,6 +1509,16 @@ impl App {
         let mut out = std::io::stdout();
         let _ = write!(out, "\x1b[?2004{final_byte}");
         let _ = out.flush();
+    }
+
+    /// A page's `/` search is being typed.
+    fn searching(&self) -> bool {
+        self.backlog.as_ref().is_some_and(|p| p.search.typing)
+            || self.memory.as_ref().is_some_and(|p| p.search.typing)
+            || self.docs.as_ref().is_some_and(|p| p.search.typing)
+            || self.wiki.as_ref().is_some_and(|p| p.search.typing)
+            || self.prs.as_ref().is_some_and(|p| p.search.typing)
+            || self.supervisor.as_ref().is_some_and(|p| p.search.typing)
     }
 
     /// The program's modes as the outer terminal should have them: a backlog prompt
@@ -2745,6 +2757,8 @@ impl App {
     }
 
     async fn open_prs(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.prs = Some(prs::Page::default());
         self.load_prs().await;
     }
@@ -2776,6 +2790,8 @@ impl App {
     }
 
     async fn open_memory(&mut self, tab: memory::Tab) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.memory = Some(memory::Page::new(tab));
         self.load_memory().await;
     }
@@ -3725,6 +3741,8 @@ impl App {
     }
 
     async fn open_digest(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.digest = Some(digest::Page::default());
         self.load_digest().await;
     }
@@ -3816,6 +3834,8 @@ impl App {
     }
 
     async fn open_supervisor(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.supervisor = Some(supervisor::Page::default());
         self.refresh_numbers();
         self.load_supervisor().await;
@@ -3952,6 +3972,8 @@ impl App {
     }
 
     async fn open_wiki(&mut self, selected: Option<SessionId>) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         let Some(cwd) = self.wiki_repo_for(selected) else {
             self.say("the wiki is a repository's: select a session in one".into());
             return;
@@ -4044,6 +4066,8 @@ impl App {
     }
 
     async fn open_docs(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.docs = Some(docs::Page::default());
         self.refresh_numbers();
         self.load_docs().await;
