@@ -312,7 +312,7 @@ pub(crate) struct LaunchForm {
 
 /// The agent item `item` was last launched with, claude if never (decision #46):
 /// `↩` and `L` both start from it.
-fn last_agent(item: &Item) -> &'static str {
+pub(crate) fn last_agent(item: &Item) -> &'static str {
     match item.launch.as_ref().map(|l| l.agent.as_str()) {
         Some("codex") => "codex",
         _ => "claude",
