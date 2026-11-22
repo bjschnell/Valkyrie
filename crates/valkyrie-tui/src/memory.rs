@@ -5,9 +5,9 @@
 //! Skills the accepted procedures; Notes what agents noted. A selected row's
 //! text shows beside the list on a wide screen; `↩` reads it in full.
 
-use crate::backlog::fit_hints;
 use crate::markdown;
 use crate::next_key;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use ratatui::style::{self, Stylize};
 use ratatui::text::{Line, Span};
@@ -193,6 +193,8 @@ pub(crate) struct Page {
     reading: Option<usize>,
     /// The last answer given here, which `z` takes back.
     pub(crate) undo: Option<Undo>,
+    /// `/`: rows whose words have every word typed.
+    pub(crate) search: Search,
 }
 
 impl Page {
@@ -207,12 +209,13 @@ impl Page {
             notes_failed: 0,
             reading: None,
             undo: None,
+            search: Search::default(),
         }
     }
 
     /// On the list, nothing read in full: where section keys are the app's.
     pub(crate) fn at_list(&self) -> bool {
-        self.reading.is_none()
+        self.reading.is_none() && !self.search.typing
     }
 
     /// What the daemon said: every project's decisions and notes, or why not.
@@ -246,9 +249,63 @@ impl Page {
             .filter(|(_, d)| d.status == DecisionStatus::Active)
     }
 
+    /// A tab's rows in the order drawn, as far as `/` leaves them: each group's
+    /// label counts what's left in it, and one with nothing left goes.
+    fn rows(&self, tab: Tab, proposals: &[Decision]) -> Vec<Row> {
+        let rows = self.all_rows(tab, proposals);
+        if self.search.query.trim().is_empty() {
+            return rows;
+        }
+        let mut out = Vec::new();
+        let mut head: Option<(String, usize)> = None;
+        for row in rows {
+            match row {
+                Row::Head(label, _) => {
+                    Self::close_group(&mut out, head.take());
+                    head = Some((label, out.len()));
+                }
+                row if self.search.matches(&self.said(&row, proposals)) => out.push(row),
+                _ => {}
+            }
+        }
+        Self::close_group(&mut out, head);
+        out
+    }
+
+    /// Puts a group's label in front of what it kept, counted, or nothing.
+    fn close_group(out: &mut Vec<Row>, head: Option<(String, usize)>) {
+        if let Some((label, from)) = head {
+            let n = out.len() - from;
+            if n > 0 {
+                out.insert(from, Row::Head(label, n));
+            }
+        }
+    }
+
+    /// What `/` matches a row by: its title (a note's text), kind and repository.
+    fn said(&self, row: &Row, proposals: &[Decision]) -> String {
+        let decision = match *row {
+            Row::Review(i) => proposals.get(i),
+            Row::Decision(i) => self.decisions.as_ref().and_then(|d| d.get(i)),
+            _ => None,
+        };
+        if let Some(d) = decision {
+            return format!("{} {} {}", d.title, d.kind.as_str(), repo_name(&d.project));
+        }
+        match (*row).clone() {
+            Row::Note(i) => self
+                .notes
+                .as_ref()
+                .and_then(|n| n.get(i))
+                .map(|n| format!("{} {}", n.text, repo_name(&n.project)))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
     /// A tab's rows in the order drawn. Decisions: To review, then the accepted
     /// by kind, your habits last. Skills and Notes: by repository.
-    fn rows(&self, tab: Tab, proposals: &[Decision]) -> Vec<Row> {
+    fn all_rows(&self, tab: Tab, proposals: &[Decision]) -> Vec<Row> {
         let mut rows = Vec::new();
         match tab {
             Tab::Decisions => {
@@ -385,6 +442,15 @@ impl Page {
                     _ => {}
                 }
                 continue;
+            }
+            match self.search.key(key, whole) {
+                Searched::No => {}
+                Searched::Kept => continue,
+                Searched::Changed => {
+                    self.cursor = 0;
+                    self.anchor = None;
+                    continue;
+                }
             }
             match key {
                 b"\x1b" if whole => out.push(Do::Close),
@@ -544,27 +610,33 @@ impl Page {
         let on_review = matches!(here, Some(Row::Review(_)));
         let hints: Vec<Span> = if self.reading.is_some() {
             [hint(" ↑↓ ", "scroll "), hint(" esc ", "back ")].concat()
+        } else if self.search.typing {
+            [hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat()
         } else if on_review {
-            // Five at most: just after an answer, taking it back beats reading.
-            let fifth = match self.undo {
-                Some(_) => hint(" z ", "undo "),
-                None => hint(" ↩ ", "read "),
-            };
             let proposed = matches!(here, Some(Row::Review(i))
                 if proposals.get(i).is_some_and(|d| d.status == DecisionStatus::Proposed));
             let mut hints = vec![hint(" a ", "accept ")];
             if proposed {
                 hints.push(hint(" e ", "edit "));
             }
-            hints.extend([hint(" d ", "reject "), fifth, hint(" esc ", "close ")]);
-            hints.concat()
-        } else {
-            let mut hints = vec![hint(" ↩ ", "read "), hint(" r ", "reload ")];
+            hints.push(hint(" d ", "reject "));
             if self.undo.is_some() {
                 hints.push(hint(" z ", "undo "));
             }
-            hints.push(hint(" esc ", "close "));
+            hints.push(hint(" ↩ ", "read "));
             hints.concat()
+        } else {
+            let mut hints = vec![hint(" ↩ ", "read ")];
+            if self.undo.is_some() {
+                hints.push(hint(" z ", "undo "));
+            }
+            hints.push(hint(" / ", "search "));
+            hints.concat()
+        };
+        let around = if self.reading.is_some() || self.search.typing {
+            ""
+        } else {
+            "[ ] tab · j/k move"
         };
         let title = match self.tab {
             Tab::Decisions => " Decisions ",
@@ -574,7 +646,7 @@ impl Page {
         let block = crate::section_block(t)
             .title(title.fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+                crate::page_footer(hints, around, rect.width.saturating_sub(2), t).left_aligned(),
             );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -594,7 +666,10 @@ impl Page {
 
         let (list_area, detail_area) = crate::list_and_detail(frame, inner, t);
 
-        let mut lines: Vec<Line> = vec![Line::default()];
+        let mut lines: Vec<Line> = vec![match self.search.shown() {
+            true => self.search.line(t),
+            false => Line::default(),
+        }];
         match (&self.decisions, &self.failed) {
             (_, Some(e)) => lines.push(
                 format!(" Couldn't load memory: {e} · trying again")
@@ -610,6 +685,11 @@ impl Page {
                 )
                 .fg(t.blocked)
                 .into(),
+            ),
+            _ if picks.is_empty() && !self.search.query.is_empty() => lines.push(
+                format!(" Nothing matches “{}”: esc clears it", self.search.query)
+                    .fg(t.muted)
+                    .into(),
             ),
             _ if picks.is_empty() => lines.push(
                 match self.tab {
@@ -865,6 +945,44 @@ mod tests {
         ] {
             assert!(Wording::parse(bad, false).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn slash_narrows_every_group_and_counts_what_is_left() {
+        let mut page = Page::new(Tab::Decisions);
+        let mut a = decision(1, "/r/api", DecisionKind::Gotcha, DecisionStatus::Active);
+        a.title = "Pin the socket path".into();
+        let mut b = decision(2, "/r/web", DecisionKind::Gotcha, DecisionStatus::Active);
+        b.title = "Toasts need their own row".into();
+        let mut c = decision(
+            3,
+            "/r/api",
+            DecisionKind::Constraint,
+            DecisionStatus::Active,
+        );
+        c.title = "No secrets in logs".into();
+        page.loaded(Ok((vec![a, b, c], Vec::new())));
+        let proposals = vec![decision(
+            9,
+            "/r/api",
+            DecisionKind::Fix,
+            DecisionStatus::Proposed,
+        )];
+        assert!(page.keys(b"/web", &proposals).is_empty());
+        assert!(!page.at_list(), "[ ] type while typing");
+        assert_eq!(
+            page.rows(Tab::Decisions, &proposals),
+            [Row::Head("Gotchas".into(), 1), Row::Decision(1)]
+        );
+        // By repository and kind too; ↩ keeps it, Esc clears it, then closes.
+        page.keys(b"\x7f\x7f\x7fapi gotcha\r", &proposals);
+        assert_eq!(
+            page.rows(Tab::Decisions, &proposals),
+            [Row::Head("Gotchas".into(), 1), Row::Decision(0)]
+        );
+        assert!(page.keys(b"\x1b", &proposals).is_empty());
+        assert_eq!(page.rows(Tab::Decisions, &proposals).len(), 7);
+        assert_eq!(page.keys(b"\x1b", &proposals), [Do::Close]);
     }
 
     #[test]

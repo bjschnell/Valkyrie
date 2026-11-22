@@ -17,6 +17,7 @@ use crate::conflict::{Choice, Conflict};
 use crate::history::{self, History};
 use crate::markdown::{self, Rendered, Target};
 use crate::next_key;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use jiff::tz::TimeZone;
 use ratatui::layout::{Position, Rect};
@@ -134,6 +135,8 @@ pub(crate) struct Page {
     listing: Option<DocsListing>,
     failed: Option<String>,
     rows: Vec<Row>,
+    /// `/`: docs whose title, path, kind or author has every word typed.
+    search: Search,
     /// Index among the docs (not the headings).
     cursor: usize,
     reader: Option<Reader>,
@@ -151,7 +154,7 @@ impl Page {
     /// On the list, no doc or Recently deleted open: where section keys are the
     /// app's.
     pub(crate) fn at_list(&self) -> bool {
-        self.reader.is_none() && self.trash.is_none()
+        self.reader.is_none() && self.trash.is_none() && !self.search.typing
     }
 }
 
@@ -311,9 +314,9 @@ impl Page {
             }
         }
         // A reload keeps the doc you were on.
-        let n = self.docs().count();
+        let n = self.docs().len();
         self.cursor = keep
-            .and_then(|k| self.docs().position(|d| d.key == k))
+            .and_then(|k| self.docs().iter().position(|d| d.key == k))
             .unwrap_or(self.cursor)
             .min(n.saturating_sub(1));
     }
@@ -355,20 +358,70 @@ impl Page {
         }
     }
 
-    fn docs(&self) -> impl Iterator<Item = &Doc> {
+    /// The rows as `/` leaves them: each group's heading counts what's left
+    /// in it, and one with nothing left goes.
+    fn shown(&self) -> Vec<Row> {
+        if self.search.query.trim().is_empty() {
+            return self.rows.clone();
+        }
         let docs = self
             .listing
             .as_ref()
             .map(|l| l.docs.as_slice())
             .unwrap_or_default();
-        self.rows.iter().filter_map(|r| match r {
-            Row::Doc(i) => docs.get(*i),
-            Row::Head(..) => None,
-        })
+        let mut out = Vec::new();
+        let mut head: Option<(String, usize)> = None;
+        let close = |out: &mut Vec<Row>, head: Option<(String, usize)>| {
+            if let Some((label, from)) = head
+                && out.len() > from
+            {
+                let n = out.len() - from;
+                out.insert(from, Row::Head(label, n));
+            }
+        };
+        for row in &self.rows {
+            match row {
+                Row::Head(label, _) => {
+                    close(&mut out, head.take());
+                    head = Some((label.clone(), out.len()));
+                }
+                Row::Doc(i) => {
+                    if let Some(d) = docs.get(*i)
+                        && self.search.matches(&format!(
+                            "{} {} {} {}",
+                            d.title,
+                            d.path,
+                            d.kind.as_str(),
+                            d.by
+                        ))
+                    {
+                        out.push(row.clone());
+                    }
+                }
+            }
+        }
+        close(&mut out, head);
+        out
+    }
+
+    /// The docs listed, in the order drawn, as far as `/` leaves them.
+    fn docs(&self) -> Vec<&Doc> {
+        let docs = self
+            .listing
+            .as_ref()
+            .map(|l| l.docs.as_slice())
+            .unwrap_or_default();
+        self.shown()
+            .iter()
+            .filter_map(|r| match r {
+                Row::Doc(i) => docs.get(*i),
+                Row::Head(..) => None,
+            })
+            .collect()
     }
 
     fn selected(&self) -> Option<&Doc> {
-        self.docs().nth(self.cursor)
+        self.docs().get(self.cursor).copied()
     }
 
     /// A save went through: the reader shows the doc as written. One of your own
@@ -533,7 +586,15 @@ impl Page {
             }
             return;
         }
-        let n = self.docs().count();
+        match self.search.key(key, whole) {
+            Searched::No => {}
+            Searched::Kept => return,
+            Searched::Changed => {
+                self.cursor = 0;
+                return;
+            }
+        }
+        let n = self.docs().len();
         match key {
             b"z" => match &self.undo {
                 Some((token, _)) => out.push(Do::Undelete(token.clone())),
@@ -837,7 +898,10 @@ impl Page {
     fn draw_list(&self, frame: &mut ratatui::Frame, rect: Rect, t: &Theme) {
         let inner = rect.width.saturating_sub(4) as usize;
         let tz = TimeZone::system();
-        let mut top = vec![Line::default()];
+        let mut top = vec![match self.search.shown() {
+            true => self.search.line(t),
+            false => Line::default(),
+        }];
         match (&self.listing, &self.failed) {
             (_, Some(e)) => top.push(
                 format!(
@@ -882,7 +946,7 @@ impl Page {
         let mut list: Vec<Line> = Vec::new();
         let mut at_cursor = (0, 0);
         let mut i = 0;
-        for row in &self.rows {
+        for row in &self.shown() {
             match row {
                 Row::Head(head, n) => {
                     list.push(Line::default());
@@ -944,20 +1008,29 @@ impl Page {
         let mut lines = top;
         lines.extend(list.into_iter().skip(skip).take(room));
 
-        let hints = [
-            hint(" ↩ ", "read ", t),
-            if self.undo.is_some() {
-                hint(" u ", "undo ", t)
-            } else {
-                Vec::new()
-            },
-            hint(" t ", "recently deleted ", t),
-            hint(" r ", "reload ", t),
-            hint(" esc ", "close ", t),
-        ]
-        .concat();
-        let hints = fit_hints(hints, inner);
-        let block = page_block(" Docs ".into(), hints, t);
+        let (hints, around) = if self.search.typing {
+            (
+                [hint(" ↩ ", "keep ", t), hint(" esc ", "clear ", t)].concat(),
+                "",
+            )
+        } else {
+            (
+                [
+                    hint(" ↩ ", "read ", t),
+                    if self.undo.is_some() {
+                        hint(" z ", "undo ", t)
+                    } else {
+                        Vec::new()
+                    },
+                    hint(" / ", "search ", t),
+                    hint(" t ", "recently deleted ", t),
+                ]
+                .concat(),
+                "[ ] tab · j/k move",
+            )
+        };
+        let footer = crate::page_footer(hints, around, rect.width.saturating_sub(2), t);
+        let block = page_block(" Docs ".into(), footer, t);
         frame.render_widget(Paragraph::new(lines).block(block), rect);
         if let Some(trash) = &self.trash {
             draw_trash(frame, rect, trash, t);
@@ -990,14 +1063,18 @@ impl Page {
             let text = body(d.text.as_deref().unwrap_or_default());
             self.render_body(r, &text, rect.width.saturating_sub(4), t);
         }
-        let listed = self.docs().find(|d| d.key == r.key);
+        let listed = self
+            .listing
+            .as_ref()
+            .and_then(|l| l.docs.iter().find(|d| d.key == r.key));
         let doc = r.doc.as_ref().or(listed);
         let title = doc.map_or_else(|| "Doc".to_string(), |d| d.title.clone());
         let takes = doc.is_some_and(|d| d.id > 0);
         let open = r.comments.open_count();
+        // Five at most (spec: One key grammar): what you'd do to the doc;
+        // scrolling and going back are on the right.
         let hints = [
-            hint(" j/k ", "scroll ", t),
-            hint(" space ", "page ", t),
+            hint(" e ", "edit ", t),
             if takes {
                 hint(
                     " c ",
@@ -1011,28 +1088,25 @@ impl Page {
             } else {
                 Vec::new()
             },
-            hint(" e ", "edit ", t),
             if takes {
                 hint(" h ", "history ", t)
             } else {
                 Vec::new()
             },
-            hint(" d ", "delete ", t),
+            hint(" x ", "delete ", t),
             hint(" y ", "copy ", t),
-            hint(" r ", "reload ", t),
-            hint(" esc ", "back ", t),
-            // Last: on a narrow screen it gives way before esc does.
-            if r.drawn
-                .borrow()
-                .as_ref()
-                .is_some_and(|(_, b)| !b.links.is_empty())
-            {
-                hint(" tab ", "links ", t)
-            } else {
-                Vec::new()
-            },
         ]
         .concat();
+        let links = r
+            .drawn
+            .borrow()
+            .as_ref()
+            .is_some_and(|(_, b)| !b.links.is_empty());
+        let around = match (r.conflict.is_some(), links) {
+            (true, _) => "",
+            (false, true) => "tab links · j/k scroll · esc back",
+            (false, false) => "j/k scroll · esc back",
+        };
         let hints = if r.conflict.is_some() {
             [
                 hint(" t ", "use theirs ", t),
@@ -1044,8 +1118,8 @@ impl Page {
             hints
         };
         let inner_w = rect.width.saturating_sub(4);
-        let hints = fit_hints(hints, inner_w as usize);
-        let block = page_block(format!(" {} ", fit(&title, inner_w as usize)), hints, t);
+        let footer = crate::page_footer(hints, around, rect.width.saturating_sub(2), t);
+        let block = page_block(format!(" {} ", fit(&title, inner_w as usize)), footer, t);
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         // A column of room each side, as the list has.
@@ -1216,12 +1290,7 @@ fn draw_trash(frame: &mut ratatui::Frame, area: Rect, trash: &Trash, t: &Theme) 
         Some(d) => format!(" Recently deleted · {} ", d.len()),
         None => " Recently deleted ".into(),
     };
-    let hints = [
-        hint(" ↩ ", "put back ", t),
-        hint(" r ", "reload ", t),
-        hint(" esc ", "back ", t),
-    ]
-    .concat();
+    let hints = [hint(" ↩ ", "put back ", t), hint(" esc ", "back ", t)].concat();
     let rect = area;
     let rows = rect.height.saturating_sub(2) as usize;
     let skip = (trash.cursor * 2 + 3).saturating_sub(rows);
@@ -1305,14 +1374,10 @@ fn hint(k: &'static str, w: &'static str, t: &Theme) -> Vec<ratatui::text::Span<
     vec![k.fg(t.accent).bold(), w.fg(t.muted)]
 }
 
-fn page_block(
-    title: String,
-    hints: Vec<ratatui::text::Span<'static>>,
-    t: &Theme,
-) -> Block<'static> {
+fn page_block(title: String, footer: Line<'static>, t: &Theme) -> Block<'static> {
     crate::section_block(t)
         .title(title.fg(t.fg).bold())
-        .title_bottom(Line::from(hints).left_aligned())
+        .title_bottom(footer.left_aligned())
 }
 
 fn plural(n: usize, what: &str) -> String {
@@ -1393,7 +1458,7 @@ mod tests {
             })
             .collect();
         assert_eq!(heads, [("agent-level", 1), ("alpha", 1), ("zeta", 2)]);
-        let order: Vec<_> = page.docs().map(|d| d.key.as_str()).collect();
+        let order: Vec<_> = page.docs().into_iter().map(|d| d.key.as_str()).collect();
         assert_eq!(order, ["3", "2", "1", "4"]);
     }
 

@@ -2457,6 +2457,7 @@ impl App {
             && self.wiki.as_ref().is_none_or(wiki::Page::at_list)
             && self.memory.as_ref().is_none_or(memory::Page::at_list)
             && self.digest.as_ref().is_none_or(digest::Page::at_list)
+            && self.prs.as_ref().is_none_or(prs::Page::at_list)
     }
 
     /// `g i/b/m/h` go to a section and `[ ]` cycle the section's tabs, before
@@ -2643,14 +2644,27 @@ impl App {
     }
 
     /// `]` (forward) or `[` in Memory (Decisions, Skills, Docs, Wiki, Notes) or
-    /// Backlog (Items, Pull requests): the next or last tab. History's are its
-    /// window, which its page keeps.
+    /// Backlog (its filter row: All, Ready, Running, Review, then Pull
+    /// requests): the next or last stop. History's are its window, which its
+    /// page keeps.
     async fn cycle_tab(&mut self, forward: bool) {
         if self.section() == Section::Backlog {
-            if self.backlog.take().is_some() {
-                self.open_prs().await;
-            } else if self.prs.take().is_some() {
-                self.open_backlog().await;
+            match backlog::Filter::step(self.backlog.as_ref().map(|p| p.filter), forward) {
+                Some(filter) => {
+                    if self.backlog.is_none() {
+                        self.prs = None;
+                        self.open_backlog().await;
+                    }
+                    if let Some(page) = &mut self.backlog {
+                        page.filter = filter;
+                        page.cursor = 0;
+                        page.armed = None;
+                    }
+                }
+                None => {
+                    self.backlog = None;
+                    self.open_prs().await;
+                }
             }
             return;
         }
@@ -3060,16 +3074,20 @@ impl App {
             None => name.to_string(),
         };
         let tabs: Vec<(String, bool)> = match here {
-            Section::Backlog => vec![
-                ("Items".into(), self.backlog.is_some()),
-                (
+            Section::Backlog => backlog::Filter::ALL
+                .iter()
+                .map(|&f| {
+                    let on = self.backlog.as_ref().is_some_and(|p| p.filter == f);
+                    (f.label().to_string(), on)
+                })
+                .chain([(
                     match self.prs.as_ref().and_then(prs::Page::count) {
                         Some(n) => format!("Pull requests {n}"),
                         None => "Pull requests".into(),
                     },
                     self.prs.is_some(),
-                ),
-            ],
+                )])
+                .collect(),
             Section::Memory => MEMORY_TABS
                 .iter()
                 .map(|&tab| {
@@ -3699,7 +3717,11 @@ impl App {
             .filter(|i| page.is_none_or(|p| p.holds(i)))
             .cloned()
             .collect();
-        backlog::rows_of(&items, &self.items, &self.sessions, self.boot())
+        let mut rows = backlog::rows_of(&items, &self.items, &self.sessions, self.boot());
+        if let Some(p) = page {
+            rows.retain(|(lane, item)| p.filter.shows(*lane, item));
+        }
+        rows
     }
 
     async fn open_digest(&mut self) {
@@ -4650,15 +4672,12 @@ impl App {
                 // with the user's credentials, so fetch here first. Off the event
                 // loop: a fetch can take a while, and the answer comes back on
                 // `shipping`.
-                let repo = self
-                    .backlog
-                    .as_ref()
-                    .map(|p| p.repo.clone())
-                    .unwrap_or_default();
+                // What the page's search shows.
+                let page = self.backlog.as_ref();
                 let mut projects: Vec<PathBuf> = self
                     .items
                     .iter()
-                    .filter(|i| repo.holds(i))
+                    .filter(|i| page.is_none_or(|p| p.holds(i)))
                     .filter(|i| i.status == valkyrie_proto::ItemStatus::Open && i.branch.is_some())
                     .filter_map(|i| i.project.clone())
                     .collect();
@@ -4754,27 +4773,16 @@ impl App {
                 }
                 self.say(said);
             }
-            Do::NextRepo => {
-                if let Some(page) = &mut self.backlog {
-                    page.repo = page.repo.next(&self.items);
-                    page.cursor = 0;
-                    page.armed = None;
-                }
-            }
             Do::Add { kind, text } => {
-                // For the repository the page shows, else the one the TUI is in, or
-                // the attached tab is.
-                let repo = self.backlog.as_ref().map(|p| p.repo.clone());
-                let cwd = match repo.unwrap_or_default() {
-                    backlog::Repo::In(root) => Some(root),
-                    backlog::Repo::NoFolder => None,
-                    // Another machine's paths can't be looked at here: the daemon
-                    // finds the attached tab's repository itself.
-                    backlog::Repo::All if remote().is_some() => self.attached_cwd(),
-                    backlog::Repo::All => self
-                        .attached_cwd()
+                // For the attached tab's repository, else the one the TUI is in.
+                // Another machine's paths can't be looked at here: the daemon
+                // finds the attached tab's repository itself.
+                let cwd = if remote().is_some() {
+                    self.attached_cwd()
+                } else {
+                    self.attached_cwd()
                         .or_else(|| std::env::current_dir().ok())
-                        .filter(|d| in_repository(d)),
+                        .filter(|d| in_repository(d))
                 };
                 let item = self
                     .client
@@ -8640,6 +8648,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A page's footer: five hints at most, primary first, then what gets you
+    /// around, faint on the right, when there's room for it (spec: One key
+    /// grammar).
+    #[test]
+    fn a_page_footer_keeps_five_hints_and_puts_moving_on_the_right() {
+        let t = crate::theme::DRACULA;
+        let hint = |k: &str| vec![format!(" {k} ").into(), format!("{k}-label ").into()];
+        let hints: Vec<ratatui::text::Span<'static>> = ["a", "b", "c", "d", "e", "f", "g"]
+            .into_iter()
+            .flat_map(hint)
+            .collect();
+        let text = |line: Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let wide = text(page_footer(hints.clone(), "j/k move", 120, &t));
+        assert!(
+            wide.contains(" e e-label ") && !wide.contains(" f "),
+            "{wide}"
+        );
+        assert!(wide.trim_end().ends_with("j/k move"), "{wide}");
+        assert_eq!(wide.chars().count(), 120, "{wide}");
+        // Narrow: the hints first; what gets you around goes, then hints do.
+        let narrow = text(page_footer(hints.clone(), "j/k move", 60, &t));
+        assert!(
+            !narrow.contains("j/k move") && narrow.contains(" a a-label "),
+            "{narrow}"
+        );
+        let tiny = text(page_footer(hints, "j/k move", 24, &t));
+        assert!(tiny.chars().count() <= 24, "{tiny}");
+    }
+
     /// An App over a socket nobody answers: enough for state and drawing.
     async fn idle_app(dir: &std::path::Path) -> (App, valkyrie_proto::ipc::Listener) {
         let _ = std::fs::remove_dir_all(dir);
@@ -9126,7 +9168,7 @@ mod tests {
                 "{name} draws a box:\n{text}"
             );
             assert!(
-                rows[19].contains("esc"),
+                rows[19].contains("j/k move"),
                 "{name}'s keys at the foot:\n{text}"
             );
         }
@@ -10272,8 +10314,8 @@ mod tests {
             assert!(shown.contains(want), "{want}: {shown}");
         }
 
-        // `r` shows one repository's items, named in the title; a check then offers
-        // only those to ship.
+        // `/` narrows it to one repository's items, the search over the list; a
+        // check then offers only those to ship.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
             orders: Vec::new(),
@@ -10288,9 +10330,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.backlog_rows().len(), 3);
-        app.on_input(b"r".to_vec()).await;
+        app.on_input(b"/app\r".to_vec()).await;
         let page = app.backlog.clone().unwrap();
-        assert_eq!(page.repo, backlog::Repo::In("/r/app".into()));
+        assert_eq!(page.search.query, "app");
+        assert!(!page.search.typing, "↩ keeps it and goes back to the list");
         let rows: Vec<u32> = app.backlog_rows().iter().map(|(_, i)| i.id).collect();
         assert_eq!(rows.len(), 2);
         assert!(!rows.contains(&3));
@@ -10308,7 +10351,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            text(&terminal).contains(" Backlog app 2 open"),
+            text(&terminal).contains(" / app  esc clears"),
             "{}",
             text(&terminal)
         );

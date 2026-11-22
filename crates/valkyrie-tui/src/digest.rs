@@ -6,7 +6,6 @@
 //! summary as a standup. The selected row's detail shows beside the list on a
 //! wide screen.
 
-use crate::backlog::fit_hints;
 use crate::next_key;
 use crate::theme::Theme;
 use jiff::tz::TimeZone;
@@ -593,22 +592,23 @@ impl Page {
             }
             _ => Vec::new(),
         };
-        let hints = if self.typing {
-            [hint(" ↩ ", "done "), hint(" esc ", "clear ")].concat()
+        let (hints, around) = if self.typing {
+            ([hint(" ↩ ", "done "), hint(" esc ", "clear ")].concat(), "")
         } else {
-            [
-                first,
-                hint(" / ", "search ").to_vec(),
-                hint(" y ", "copy ").to_vec(),
-                hint(" [ ] ", "window ").to_vec(),
-                hint(" esc ", "close ").to_vec(),
-            ]
-            .concat()
+            (
+                [
+                    first,
+                    hint(" / ", "search ").to_vec(),
+                    hint(" y ", "copy ").to_vec(),
+                ]
+                .concat(),
+                "[ ] window · j/k move",
+            )
         };
         let block = crate::section_block(t)
             .title(" History ".fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+                crate::page_footer(hints, around, rect.width.saturating_sub(2), t).left_aligned(),
             );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -819,6 +819,42 @@ mod tests {
             "ended_ms": if session.is_some() { None } else { Some(last_ms) },
         }))
         .unwrap()
+    }
+
+    /// A live reload (`refreshed`) keeps the cursor on the row it was on when
+    /// a new session lands above it, and a failed one keeps what was shown.
+    #[test]
+    fn a_live_reload_keeps_the_cursor_on_its_row() {
+        let tz = TimeZone::UTC;
+        let now = 100 * 3_600_000;
+        let digest = |entries: Vec<DigestEntry>| -> Digest {
+            serde_json::from_value(serde_json::json!({
+                "since_ms": now - 3 * 3_600_000, "until_ms": now, "away": true, "by": "day",
+                "entries": entries, "markdown": "",
+            }))
+            .unwrap()
+        };
+        let mut p = Page::default();
+        let two = vec![
+            entry("k1", "fix login", "stuck", now - 600_000, Some(1)),
+            entry("k2", "bump vite", "done", now - 7_200_000, None),
+        ];
+        p.loaded(Ok(digest(two.clone())), Ok(vec![]), Ok(vec![]), &tz);
+        p.cursor = 1;
+        let on = |p: &Page| match p.selected() {
+            Some(Row::Entry(e)) => e.key.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(on(&p), "k2");
+        let mut three = two.clone();
+        three.insert(0, entry("k0", "new one", "working", now - 60_000, Some(2)));
+        p.refreshed(Ok(digest(three)), Ok(vec![]), Ok(vec![]), &tz);
+        assert_eq!(on(&p), "k2", "still on bump vite, a row further down");
+        p.refreshed(Err("gone".into()), Ok(vec![]), Ok(vec![]), &tz);
+        assert!(
+            p.failed.is_none() && on(&p) == "k2",
+            "a failed reload keeps the rows"
+        );
     }
 
     fn page(now: u64) -> Page {

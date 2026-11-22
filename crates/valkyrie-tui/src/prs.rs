@@ -4,8 +4,8 @@
 //! browser. It moved here from the supervisor page: pull requests are the
 //! backlog's work, under way.
 
-use crate::backlog::fit_hints;
 use crate::next_key;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use ratatui::style::{self, Color, Stylize};
 use ratatui::text::{Line, Span};
@@ -27,9 +27,17 @@ pub(crate) struct Page {
     watch: Option<Result<Watch, String>>,
     /// Index among the pull requests, in the order drawn.
     cursor: usize,
+    /// `/`: pull requests whose number, branch, repository or state has every
+    /// word typed.
+    search: Search,
 }
 
 impl Page {
+    /// On the list, nothing typed: `[ ]` and `g` are the app's.
+    pub(crate) fn at_list(&self) -> bool {
+        !self.search.typing
+    }
+
     pub(crate) fn loaded(&mut self, got: Result<Watch, String>) {
         self.watch = Some(got);
         self.cursor = self.cursor.min(self.prs().len().saturating_sub(1));
@@ -60,19 +68,37 @@ impl Page {
             these.sort_by_key(|p| p.order.unwrap_or(u32::MAX));
             out.extend(these);
         }
+        out.retain(|p| {
+            self.search.matches(&format!(
+                "{} {} {} {} {}",
+                number(&p.url),
+                p.branch.as_deref().unwrap_or_default(),
+                repo_of(&p.project),
+                p.state.label(),
+                p.detail
+            ))
+        });
         out
     }
 
-    /// Keys while it's open: j/k pick, ↩ opens in the browser, `r` reads them
-    /// again, Esc or `q` closes.
+    /// Keys while it's open: j/k pick, ↩ opens in the browser, `/` searches,
+    /// Esc or `q` closes. The list stays live (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8]) -> Vec<Do> {
         let mut out = Vec::new();
-        let prs: Vec<String> = self.prs().iter().map(|p| p.url.clone()).collect();
-        let n = prs.len();
         while !bytes.is_empty() {
             let key = next_key(bytes);
             let whole = key.len() == bytes.len();
             bytes = &bytes[key.len()..];
+            match self.search.key(key, whole) {
+                Searched::No => {}
+                Searched::Kept => continue,
+                Searched::Changed => {
+                    self.cursor = 0;
+                    continue;
+                }
+            }
+            let prs: Vec<String> = self.prs().iter().map(|p| p.url.clone()).collect();
+            let n = prs.len();
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
                 b"j" | b"\x1b[B" | b"\x1bOB" => {
@@ -110,16 +136,18 @@ impl Page {
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
-        let hints: Vec<Span> = [
-            hint(" ↩ ", "open "),
-            hint(" r ", "read again "),
-            hint(" esc ", "close "),
-        ]
-        .concat();
+        let (hints, around): (Vec<Span>, _) = if self.search.typing {
+            ([hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat(), "")
+        } else {
+            (
+                [hint(" ↩ ", "open "), hint(" / ", "search ")].concat(),
+                "[ ] filter · j/k move",
+            )
+        };
         let block = crate::section_block(t)
             .title(" Pull requests ".fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).left_aligned(),
+                crate::page_footer(hints, around, rect.width.saturating_sub(2), t).left_aligned(),
             );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -127,7 +155,10 @@ impl Page {
         let (list_area, detail_area) = crate::list_and_detail(frame, inner, t);
 
         let ago = |at: u64| crate::age(at * 1000, now);
-        let mut lines = vec![Line::default()];
+        let mut lines = vec![match self.search.shown() {
+            true => self.search.line(t),
+            false => Line::default(),
+        }];
         match &self.watch {
             None => lines.push(" Loading…".fg(t.muted).into()),
             Some(Err(e)) => lines.push(
