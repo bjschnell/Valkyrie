@@ -1182,6 +1182,12 @@ impl Page {
             .title(Line::from(
                 [
                     vec![" Backlog ".fg(t.fg).bold()],
+                    // The filter row's stop: on the strip from 100 columns,
+                    // which a narrow screen abbreviates, so here too.
+                    match self.filter {
+                        Filter::All => vec![],
+                        f => vec![format!("{} ", f.label()).fg(t.accent).bold()],
+                    },
                     vec![format!("{open} open ").fg(t.muted)],
                     if self.waiting_order(rows) {
                         vec![" build order waits: O ".fg(t.accent).bold()]

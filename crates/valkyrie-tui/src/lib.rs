@@ -9138,10 +9138,35 @@ mod tests {
         use ratatui::backend::TestBackend;
         let t = &theme::DRACULA;
         type Draw<'a> = Box<dyn Fn(&mut ratatui::Frame) + 'a>;
+        let items: Vec<Item> = (1..=3)
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "number": id, "title": format!("Item number {id}"), "status": "open",
+                    "by": "human", "project": "/r/app", "created": 0, "updated": 0,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let rows = backlog::rows_of(&items, &items, &[], 0);
+        let mut ready = backlog::Page::default();
+        ready.filter = backlog::Filter::Ready;
         let screens: Vec<(&str, Draw)> = vec![
             (
                 "backlog",
                 Box::new(|f| backlog::Page::default().draw(f, &[], &[], &[], 0, 0, t)),
+            ),
+            (
+                "backlog, ready",
+                Box::new(|f| ready.draw(f, &rows, &items, &[], 0, 0, t)),
+            ),
+            ("docs", Box::new(|f| docs::Page::default().draw(f, t))),
+            (
+                "wiki",
+                Box::new(|f| wiki::Page::new("/r/app".into()).draw(f, t)),
+            ),
+            (
+                "supervisor",
+                Box::new(|f| supervisor::Page::default().draw(f, &[], 0, t)),
             ),
             ("history", Box::new(|f| digest::Page::default().draw(f, t))),
             (
@@ -9153,24 +9178,32 @@ mod tests {
                 Box::new(|f| prs::Page::default().draw(f, &Default::default(), 0, t)),
             ),
         ];
-        for (name, draw) in screens {
-            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-            terminal.draw(|f| draw(f)).unwrap();
-            let buffer = terminal.backend().buffer();
-            let rows: Vec<String> = (0..20)
-                .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect())
-                .collect();
-            let text = rows.join("\n");
-            assert!(
-                !text
-                    .chars()
-                    .any(|c| "╭╮╰╯│".contains(c) && !rows[0].contains(c)),
-                "{name} draws a box:\n{text}"
-            );
-            assert!(
-                rows[19].contains("j/k move"),
-                "{name}'s keys at the foot:\n{text}"
-            );
+        // The spec's three sizes (T5b, backlog #273).
+        for (name, draw) in &screens {
+            for (w, h) in [(80u16, 24u16), (100, 30), (140, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| draw(f)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows: Vec<String> = (0..h)
+                    .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect())
+                    .collect();
+                let text = rows.join("\n");
+                // A single rule between list and detail is no box (spec:
+                // Layout by width); corners are.
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| "╭╮╰╯".contains(c) && !rows[0].contains(c)),
+                    "{name} draws a box:\n{text}"
+                );
+                assert!(
+                    rows[h as usize - 1].contains("j/k move"),
+                    "{name}'s keys at the foot, {w}x{h}:\n{text}"
+                );
+                if *name == "backlog, ready" {
+                    assert!(rows[1].contains("Backlog Ready"), "{text}");
+                }
+            }
         }
     }
 

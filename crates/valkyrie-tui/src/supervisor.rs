@@ -309,8 +309,8 @@ impl Page {
                 [
                     hint(" a ", "take "),
                     hint(" o ", "other step "),
-                    hint(" d ", "leave/reject "),
-                    hint(" c ", "supervisor session "),
+                    hint(" d ", "leave "),
+                    hint(" c ", "session "),
                     hint(" / ", "search "),
                 ]
                 .concat(),
