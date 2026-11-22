@@ -266,6 +266,11 @@ pub enum ReviewAction {
     Retire,
     /// Bring a retired decision back: active again, confirmed as of now.
     Restore,
+    /// Take back an accept or a reject: proposed again, so it waits on review
+    /// (backlog #271, protocol 51).
+    /// An accept that replaced another gives that one back its place, and the
+    /// notes it was drafted from go back to search.
+    Reopen,
     /// It still holds: an active decision flagged for review is confirmed as of now.
     Confirm,
     /// Put an active decision's body in every session's block (ADR-0014 §1).

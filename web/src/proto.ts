@@ -408,6 +408,8 @@ export type ReviewAction =
   | { a: "retire" }
   /** Bring a retired decision back (protocol 41). */
   | { a: "restore" }
+  /** Take back an accept or a reject: proposed again (protocol 51). */
+  | { a: "reopen" }
   /** An active decision flagged for review still holds. */
   | { a: "confirm" }
   /** Put an active decision's body in every session's block, or take it back to a title. */

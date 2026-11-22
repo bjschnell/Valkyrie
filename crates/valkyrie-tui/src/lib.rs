@@ -157,10 +157,13 @@ pub async fn run(
     ratatui::restore();
     // Quit with a doc still open in your editor: nothing will save it.
     if let Some(e) = &app.editing {
-        eprintln!(
-            "A doc was still open in your editor and wasn't saved; what you wrote goes to {}",
-            e.path.display()
-        );
+        let what = match e.what {
+            Edited::Doc { .. } => "A doc was still open in your editor and wasn't saved",
+            Edited::Proposal { .. } => {
+                "A proposal was still open in your editor and wasn't accepted"
+            }
+        };
+        eprintln!("{what}; what you wrote goes to {}", e.path.display());
     }
     // Another machine's daemon names a binary there, never one to run here.
     #[cfg(unix)]
@@ -2686,18 +2689,161 @@ impl App {
                     if let Some(said) = self.review_at(index, accept).await {
                         self.status = said;
                     }
-                    // An accepted one joins its kind's group; the notes stay.
-                    let got = self
-                        .client
-                        .decisions(None)
-                        .await
-                        .map_err(|e| format!("{e:#}"));
-                    if let Some(page) = &mut self.memory {
-                        page.decisions_loaded(got);
-                    }
+                    self.reload_memory_decisions().await;
                 }
+                memory::Do::Edit { index } => self.edit_proposal(index).await,
+                memory::Do::Undo => self.undo_review().await,
             }
         }
+    }
+
+    /// After an answer: an accepted one joins its kind's group; the notes stay.
+    async fn reload_memory_decisions(&mut self) {
+        if self.memory.is_none() {
+            return;
+        }
+        let got = self
+            .client
+            .decisions(None)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        if let Some(page) = &mut self.memory {
+            page.decisions_loaded(got);
+        }
+    }
+
+    /// `e` on a proposal: its words in your editor, accepted as you leave them
+    /// (`accept_edited`).
+    async fn edit_proposal(&mut self, i: usize) {
+        let Some(d) = self.proposals.get(i) else {
+            return;
+        };
+        // A flagged decision or a proposed scope is in use already: `a` or `d`.
+        if d.status != valkyrie_proto::DecisionStatus::Proposed {
+            return self.say(format!(
+                "#{} is in use already: e rewrites a proposal",
+                d.id
+            ));
+        }
+        let was = memory::Wording::of(d);
+        let (text, title) = (was.text(), d.title.clone());
+        let what = Edited::Proposal {
+            project: d.project.clone(),
+            id: d.id,
+            seen: d.updated,
+            habit: memory::is_habit(d),
+            was,
+        };
+        self.start_edit(what, text, title).await;
+    }
+
+    /// Accepts a proposal as you rewrote it. Your file goes only once it's
+    /// accepted; otherwise the message says where it is.
+    async fn accept_edited(&mut self, what: Edited, text: String, path: PathBuf) {
+        let Edited::Proposal {
+            project,
+            id,
+            seen,
+            habit,
+            was,
+        } = what
+        else {
+            return;
+        };
+        let mut w = match memory::Wording::parse(&text, habit) {
+            Ok(w) => w,
+            Err(why) => {
+                return self.say(format!(
+                    "not accepted, yours is in {}: {why}",
+                    path.display()
+                ));
+            }
+        };
+        // A scope sent settles it (ADR-0014 §2): only one you changed goes, and
+        // only then does `z` put the old one back.
+        let mut was = was;
+        if w.scope == was.scope {
+            w.scope = None;
+            was.scope = None;
+        }
+        let action = ReviewAction::Revise {
+            title: w.title,
+            body: w.body,
+            kind: w.kind,
+            scope: w.scope,
+        };
+        match self
+            .client
+            .review(project.clone(), id, action, Some(seen))
+            .await
+        {
+            Ok(d) => {
+                let _ = std::fs::remove_file(&path);
+                if let Some(page) = &mut self.memory {
+                    page.undo = Some(memory::Undo {
+                        project,
+                        id,
+                        title: d.title.clone(),
+                        seen: d.updated,
+                        how: memory::Reverse::Reopen(Some(was)),
+                    });
+                }
+                self.say(format!("accepted #{id} {}, as you wrote it", d.title));
+                self.reload_memory_decisions().await;
+            }
+            Err(e) => self.say(format!(
+                "not accepted, yours is in {}: {e:#}",
+                path.display()
+            )),
+        }
+    }
+
+    /// `z` on Memory: takes back the last answer given there. An accept or a
+    /// reject goes back to review (in its own words, if you rewrote it on the
+    /// way in); a retire comes back into use.
+    async fn undo_review(&mut self) {
+        let Some(u) = self.memory.as_mut().and_then(|p| p.undo.take()) else {
+            return self.say("nothing to undo".into());
+        };
+        let action = match u.how {
+            memory::Reverse::Reopen(_) => ReviewAction::Reopen,
+            memory::Reverse::Restore => ReviewAction::Restore,
+        };
+        let id = u.id;
+        let said = match self
+            .client
+            .review(u.project.clone(), id, action, Some(u.seen))
+            .await
+        {
+            Err(e) => format!("couldn't undo: {e:#}"),
+            Ok(d) => match u.how {
+                memory::Reverse::Restore => format!("restored #{id} {}", d.title),
+                memory::Reverse::Reopen(None) => {
+                    format!("#{id} {} is up for review again", d.title)
+                }
+                memory::Reverse::Reopen(Some(was)) => {
+                    let back = ReviewAction::Edit {
+                        title: was.title,
+                        body: was.body,
+                        kind: was.kind,
+                        scope: was.scope,
+                    };
+                    match self
+                        .client
+                        .review(u.project, id, back, Some(d.updated))
+                        .await
+                    {
+                        Ok(d) => format!(
+                            "#{id} {} is up for review again, as it was proposed",
+                            d.title
+                        ),
+                        Err(e) => format!("#{id} is up for review again, but in your words: {e:#}"),
+                    }
+                }
+            },
+        };
+        self.say(said);
+        self.reload_memory_decisions().await;
     }
 
     /// Sets the open section page aside for the session it attaches to.
@@ -3094,12 +3240,15 @@ impl App {
                 true => (ReviewAction::Scope { scope }, "scoped"),
                 false => (ReviewAction::DeclineScope, "kept everywhere:"),
             };
-            return Some(
-                match self.client.review(project, id, action, Some(seen)).await {
-                    Ok(_) => format!("{done} #{id} {title}"),
-                    Err(e) => format!("review failed: {e:#}"),
-                },
-            );
+            let said = match self.client.review(project, id, action, Some(seen)).await {
+                Ok(_) => {
+                    // A scope answer isn't one `z` takes back.
+                    self.answered(None);
+                    format!("{done} #{id} {title}")
+                }
+                Err(e) => format!("review failed: {e:#}"),
+            };
+            return Some(said);
         }
         let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
         let armed = self.retire_armed.take() == Some((project.clone(), id));
@@ -3107,18 +3256,51 @@ impl App {
             self.retire_armed = Some((project, id));
             return Some(format!("d again to retire #{id}; agents stop getting it"));
         }
-        let (action, done) = match (flagged, yes) {
-            (false, true) => (ReviewAction::Accept, "accepted"),
-            (false, false) => (ReviewAction::Reject, "rejected"),
-            (true, true) => (ReviewAction::Confirm, "still holds:"),
-            (true, false) => (ReviewAction::Retire, "retired"),
+        let (action, done, how) = match (flagged, yes) {
+            (false, true) => (
+                ReviewAction::Accept,
+                "accepted",
+                Some(memory::Reverse::Reopen(None)),
+            ),
+            (false, false) => (
+                ReviewAction::Reject,
+                "rejected",
+                Some(memory::Reverse::Reopen(None)),
+            ),
+            // It holds as of now: there's nothing to take back.
+            (true, true) => (ReviewAction::Confirm, "still holds:", None),
+            (true, false) => (
+                ReviewAction::Retire,
+                "retired",
+                Some(memory::Reverse::Restore),
+            ),
         };
-        Some(
-            match self.client.review(project, id, action, Some(seen)).await {
-                Ok(_) => format!("{done} #{id} {title}"),
-                Err(e) => format!("review failed: {e:#}"),
-            },
-        )
+        let said = match self
+            .client
+            .review(project.clone(), id, action, Some(seen))
+            .await
+        {
+            Ok(d) => {
+                self.answered(how.map(|how| memory::Undo {
+                    project,
+                    id,
+                    title: title.clone(),
+                    seen: d.updated,
+                    how,
+                }));
+                format!("{done} #{id} {title}")
+            }
+            Err(e) => format!("review failed: {e:#}"),
+        };
+        Some(said)
+    }
+
+    /// An answer given on Memory is the one its `z` takes back (`None`: the
+    /// last one can't be).
+    fn answered(&mut self, undo: Option<memory::Undo>) {
+        if let Some(page) = &mut self.memory {
+            page.undo = undo;
+        }
     }
 
     /// Keys over the decisions opened from a session: move, `a`/`d` as at home, and
@@ -3769,7 +3951,10 @@ impl App {
                 base,
                 body,
                 title,
-            } => self.start_edit(key, base, body, title).await,
+            } => {
+                self.start_edit(Edited::Doc { key, base }, body, title)
+                    .await
+            }
             docs::Do::Save { key, base, body } => self.save_doc(key, base, body, None).await,
             docs::Do::History(key) => {
                 let got = self.client.doc_history(key.clone(), None).await;
@@ -3861,17 +4046,17 @@ impl App {
         }
     }
 
-    /// Opens a doc's body in your editor (`$VISUAL`, else `$EDITOR`, else `vi`),
-    /// in a session of its own, and attaches to it. When it ends, what you wrote
-    /// is saved (`finish_edit`).
-    async fn start_edit(&mut self, key: String, base: String, body: String, title: String) {
+    /// Opens a doc's body (or a proposal's words) in your editor (`$VISUAL`,
+    /// else `$EDITOR`, else `vi`), in a session of its own, and attaches to it.
+    /// When it ends, what you wrote is saved, or accepted (`finish_edit`).
+    async fn start_edit(&mut self, what: Edited, body: String, title: String) {
         if self.editing.is_some() {
-            return self.say("a doc is already open in your editor".into());
+            return self.say("something is already open in your editor".into());
         }
         // The file to edit would be on this machine, the editor on the other.
         if let Some(host) = remote() {
             return self.say(format!(
-                "editing a doc needs {host}'s own valk: `ssh -t {host} valk`"
+                "editing needs {host}'s own valk: `ssh -t {host} valk`"
             ));
         }
         let path = match edit_file(&body) {
@@ -3894,8 +4079,7 @@ impl App {
             Ok(info) => {
                 self.editing = Some(Editing {
                     session: info.id,
-                    key,
-                    base,
+                    what,
                     path,
                     body,
                     seen: false,
@@ -3934,10 +4118,17 @@ impl App {
         match std::fs::read_to_string(&e.path) {
             Ok(text) if text == e.body => {
                 let _ = std::fs::remove_file(&e.path);
+                let still = match e.what {
+                    Edited::Doc { .. } => "",
+                    Edited::Proposal { .. } => ", so it's still up for review",
+                };
                 // An editor that forks into the background ends at once, unchanged.
-                self.say("no changes (if your editor runs in the background, make it wait, as `code -w` does)".into());
+                self.say(format!("no changes{still} (if your editor runs in the background, make it wait, as `code -w` does)"));
             }
-            Ok(text) => self.save_doc(e.key, e.base, text, Some(e.path)).await,
+            Ok(text) => match e.what {
+                Edited::Doc { key, base } => self.save_doc(key, base, text, Some(e.path)).await,
+                what @ Edited::Proposal { .. } => self.accept_edited(what, text, e.path).await,
+            },
             Err(err) => self.say(format!(
                 "couldn't read what you wrote in {}: {err}",
                 e.path.display()
@@ -7698,18 +7889,32 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
     keys
 }
 
-/// A doc open in your editor (`App::start_edit`).
+/// A doc or a proposal open in your editor (`App::start_edit`).
 #[derive(Debug)]
 struct Editing {
     session: SessionId,
-    key: String,
-    /// The hash of the version it started from, which the save names.
-    base: String,
+    what: Edited,
     path: PathBuf,
     /// The body as it went in, to tell whether you changed it.
     body: String,
     /// Its session has been seen running.
     seen: bool,
+}
+
+/// What's open in your editor, and where what you write goes.
+#[derive(Debug)]
+enum Edited {
+    /// A doc, saved over the version `base` (its hash) names.
+    Doc { key: String, base: String },
+    /// A proposal, accepted as you leave it unless it changed since `seen`.
+    Proposal {
+        project: PathBuf,
+        id: u32,
+        seen: u64,
+        habit: bool,
+        /// Its words before, which `z` puts back.
+        was: memory::Wording,
+    },
 }
 
 /// Your editor as a command, the file to come after it: `$VISUAL`, else
@@ -8037,6 +8242,142 @@ mod tests {
             },
             fresh: Default::default(),
         }
+    }
+
+    /// Memory's `z` takes back the last answer given there: an accept goes back
+    /// to review, then there's nothing left to undo. One rewritten on the way in
+    /// (`e`) goes back in its own words, and a scope you left alone is never sent.
+    #[tokio::test]
+    async fn memory_undoes_its_last_answer_and_an_edit_too() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, DecisionStatus, Reply};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        // A daemon with one decision, reviewed as the real one would, refusing
+        // what was read before it changed.
+        let mut first = proposed("/r/app", 4, "Keep it short");
+        first.body = "Why.".into();
+        first.scope = vec!["src/**".into()];
+        first.updated = 1;
+        let held = Arc::new(Mutex::new(first.clone()));
+        let sent: Arc<Mutex<Vec<ReviewAction>>> = Arc::default();
+        let (d, kept) = (held.clone(), sent.clone());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                let answer = match msg {
+                    ClientMsg::Review {
+                        req, action, seen, ..
+                    } => {
+                        kept.lock().unwrap().push(action.clone());
+                        let mut d = d.lock().unwrap();
+                        if seen != Some(d.updated) {
+                            ServerMsg::Err {
+                                req,
+                                message: "changed since you read it".into(),
+                            }
+                        } else {
+                            match action {
+                                ReviewAction::Accept => d.status = DecisionStatus::Active,
+                                ReviewAction::Reopen => d.status = DecisionStatus::Proposed,
+                                ReviewAction::Revise {
+                                    title, body, kind, ..
+                                } => {
+                                    (d.title, d.body, d.kind) = (title, body, kind);
+                                    d.status = DecisionStatus::Active;
+                                }
+                                ReviewAction::Edit {
+                                    title, body, kind, ..
+                                } => (d.title, d.body, d.kind) = (title, body, kind),
+                                _ => {}
+                            }
+                            d.updated += 1;
+                            let reply = Reply::Decision {
+                                decision: Box::new(d.clone()),
+                            };
+                            ServerMsg::Ok { req, reply }
+                        }
+                    }
+                    ClientMsg::Decisions { req, .. } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Decisions {
+                            decisions: vec![d.lock().unwrap().clone()],
+                        },
+                    },
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.memory = Some(memory::Page::new(memory::Tab::Decisions));
+        app.proposals = vec![first.clone()];
+
+        app.memory_keys(b"a").await;
+        assert_eq!(app.status, "accepted #4 Keep it short");
+        app.proposals.clear();
+        app.memory_keys(b"z").await;
+        assert_eq!(app.status, "#4 Keep it short is up for review again");
+        app.memory_keys(b"z").await;
+        assert_eq!(app.status, "nothing to undo");
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [ReviewAction::Accept, ReviewAction::Reopen]
+        );
+
+        // Rewritten in your editor, scope untouched: accepted as written.
+        let now = held.lock().unwrap().clone();
+        app.proposals = vec![now.clone()];
+        let was = memory::Wording::of(&now);
+        let path = dir.join("edit.md");
+        std::fs::write(&path, "x").unwrap();
+        let text = was.text().replace("# Keep it short", "# Keep it shorter");
+        let what = Edited::Proposal {
+            project: now.project.clone(),
+            id: 4,
+            seen: now.updated,
+            habit: false,
+            was,
+        };
+        app.accept_edited(what, text, path.clone()).await;
+        assert_eq!(app.status, "accepted #4 Keep it shorter, as you wrote it");
+        assert!(!path.exists(), "accepted, your file goes");
+        app.memory_keys(b"z").await;
+        assert_eq!(
+            app.status,
+            "#4 Keep it short is up for review again, as it was proposed"
+        );
+        let sent = sent.lock().unwrap();
+        let kind = valkyrie_proto::DecisionKind::Decision;
+        assert_eq!(
+            sent[2..],
+            [
+                ReviewAction::Revise {
+                    title: "Keep it shorter".into(),
+                    body: "Why.".into(),
+                    kind,
+                    scope: None,
+                },
+                ReviewAction::Reopen,
+                ReviewAction::Edit {
+                    title: "Keep it short".into(),
+                    body: "Why.".into(),
+                    kind,
+                    scope: None,
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// An App over a socket nobody answers: enough for state and drawing.

@@ -391,6 +391,49 @@ impl Store {
         Ok(done)
     }
 
+    /// Undoes [`Self::promote_notes`] for an accept taken back: its notes are
+    /// live again, unless another accepted decision promoted them too.
+    pub fn demote_notes(&self, root: &Path, decision: &Decision) -> Result<Vec<u32>> {
+        use valkyrie_proto::DecisionStatus;
+        let links = self.promotion_links(root);
+        let decisions = self.load(root);
+        let elsewhere: BTreeSet<u32> = links
+            .iter()
+            .filter(|l| !l.matched && !l.is_to(decision))
+            .filter(|l| {
+                decisions.iter().any(|d| {
+                    l.is_to(d)
+                        && d.status != DecisionStatus::Proposed
+                        && d.status != DecisionStatus::Rejected
+                })
+            })
+            .flat_map(|l| l.notes.iter().copied())
+            .collect();
+        let ids: BTreeSet<u32> = links
+            .into_iter()
+            .filter(|l| l.is_to(decision) && !l.matched)
+            .flat_map(|l| l.notes)
+            .filter(|n| !elsewhere.contains(n))
+            .collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = self.base.join(project::key(root)).join("notes");
+        let mut done = Vec::new();
+        for mut n in self.notes(root) {
+            if !ids.contains(&n.id) || n.status != NoteStatus::Promoted {
+                continue;
+            }
+            n.status = NoteStatus::Live;
+            write_atomic(
+                &dir.join(format!("{:04}.md", n.id)),
+                &crate::notes::render(&n),
+            )?;
+            done.push(n.id);
+        }
+        Ok(done)
+    }
+
     /// Promotes the notes of every accepted proposal that are still live, for
     /// when the write at accept time didn't happen. Returns how many.
     pub fn heal_promotions(&self, root: &Path, decisions: &[Decision]) -> Result<usize> {
@@ -777,6 +820,48 @@ mod tests {
                 (3, NoteStatus::Promoted),
                 (4, NoteStatus::Live)
             ]
+        );
+    }
+
+    #[test]
+    fn reopening_an_accepted_proposal_puts_its_notes_back_in_search() {
+        use valkyrie_proto::ReviewAction;
+        let (_d, store, repo) = store();
+        for (i, t) in FLAKY.iter().enumerate() {
+            write(&store, &repo, t, Some(&format!("c{i}")), None, i as u64);
+        }
+        let d = propose(&store, &repo, FLAKY[2]);
+        store
+            .record_promotion(&repo, (d.id, Some(d.created)), &[1, 2, 3], false, 5)
+            .unwrap();
+        let accepted = store
+            .review(&repo, d.id, &ReviewAction::Accept, None, None, 6)
+            .unwrap();
+        store
+            .review(
+                &repo,
+                d.id,
+                &ReviewAction::Reopen,
+                Some(accepted.updated),
+                None,
+                7,
+            )
+            .unwrap();
+        assert!(
+            store
+                .notes(&repo)
+                .iter()
+                .all(|n| n.status == NoteStatus::Live)
+        );
+        // Accepted again: promoted again.
+        store
+            .review(&repo, d.id, &ReviewAction::Accept, None, None, 8)
+            .unwrap();
+        assert!(
+            store
+                .notes(&repo)
+                .iter()
+                .all(|n| n.status == NoteStatus::Promoted)
         );
     }
 

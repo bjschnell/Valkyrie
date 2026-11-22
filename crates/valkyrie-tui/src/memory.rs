@@ -1,6 +1,7 @@
 //! Memory's own tabs (TUI redesign T4b, backlog #269): Decisions, Skills and
 //! Notes, beside Docs and Wiki (`g m`, then `[ ]`). Decisions has what's up for
-//! review on top, `a`/`d` answering it, then every accepted one grouped by kind;
+//! review on top, `a`/`d` answering it (`e` rewrites it in your editor, then
+//! accepts; `z` takes the last answer back), then every accepted one grouped by kind;
 //! Skills the accepted procedures; Notes what agents noted. A selected row's
 //! text shows beside the list on a wide screen; `↩` reads it in full.
 
@@ -12,7 +13,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use valkyrie_proto::{Decision, DecisionKind, DecisionStatus, Note, NoteStatus};
 
 /// The user scope's root: habits that hold in every project.
@@ -38,6 +39,124 @@ pub(crate) enum Do {
         index: usize,
         accept: bool,
     },
+    /// Open the proposal at this index in your editor, to accept what you write.
+    Edit {
+        index: usize,
+    },
+    /// Take back the last answer given here (`Page::undo`).
+    Undo,
+}
+
+/// What `z` takes back: the last answer given on this page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Undo {
+    pub(crate) project: PathBuf,
+    pub(crate) id: u32,
+    pub(crate) title: String,
+    /// Its `updated` once answered: the undo is refused if it changed since.
+    pub(crate) seen: u64,
+    pub(crate) how: Reverse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reverse {
+    /// An accept or a reject: proposed again, with this wording when you
+    /// rewrote it on the way in (`e`).
+    Reopen(Option<Wording>),
+    /// A retire: active again.
+    Restore,
+}
+
+/// A decision's words, as `e` edits them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Wording {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) kind: DecisionKind,
+    /// `None` for a habit, which has no scope.
+    pub(crate) scope: Option<Vec<String>>,
+}
+
+impl Wording {
+    pub(crate) fn of(d: &Decision) -> Self {
+        Self {
+            title: d.title.clone(),
+            body: d.body.clone(),
+            kind: d.kind,
+            scope: (!is_habit(d)).then(|| d.scope.clone()),
+        }
+    }
+
+    /// The file your editor opens: its kind and where it applies over a `---`,
+    /// then the title as a heading and the body.
+    pub(crate) fn text(&self) -> String {
+        let mut out = format!("kind: {}\n", self.kind.as_str());
+        if let Some(scope) = &self.scope {
+            out.push_str(&format!("scope: {}\n", scope.join(" ")));
+        }
+        out.push_str(&format!("---\n# {}\n\n{}", self.title, self.body));
+        if !self.body.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Reads back what `text` wrote, as edited. A habit's scope stays `None`
+    /// whatever the file says; dropping the `scope:` line leaves it as it was.
+    pub(crate) fn parse(text: &str, habit: bool) -> Result<Self, String> {
+        let kinds = || {
+            DecisionKind::ALL
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (head, rest) = text
+            .split_once("\n---\n")
+            .or_else(|| text.strip_prefix("---\n").map(|r| ("", r)))
+            .ok_or("no `---` line between the kind and the title")?;
+        let mut kind = None;
+        let mut scope = None;
+        for line in head.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            match line.split_once(':') {
+                Some(("kind", v)) => {
+                    let v = v.trim();
+                    kind = Some(
+                        DecisionKind::parse(v)
+                            .ok_or_else(|| format!("no kind `{v}`: it's one of {}", kinds()))?,
+                    );
+                }
+                Some(("scope", v)) => {
+                    scope = Some(
+                        v.split([' ', ','])
+                            .filter(|g| !g.is_empty())
+                            .map(String::from)
+                            .collect(),
+                    );
+                }
+                _ => return Err(format!("`{line}` isn't `kind:` or `scope:`")),
+            }
+        }
+        let kind = kind.ok_or_else(|| format!("no `kind:` line: it's one of {}", kinds()))?;
+        let rest = rest.trim_start_matches(['\n', '\r']);
+        let (first, body) = rest.split_once('\n').unwrap_or((rest, ""));
+        let title = first
+            .strip_prefix('#')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or("no title: the line after `---` is `# ` and the title")?;
+        Ok(Self {
+            title: title.to_string(),
+            body: body.trim().to_string(),
+            kind,
+            scope: if habit { None } else { scope },
+        })
+    }
+}
+
+/// A habit: it holds in every project, so it has no scope.
+pub(crate) fn is_habit(d: &Decision) -> bool {
+    d.project.as_os_str() == USER_SCOPE
 }
 
 /// What the cursor is on, by identity, so it stays on the same thing when a
@@ -76,6 +195,8 @@ pub(crate) struct Page {
     pub(crate) notes_failed: usize,
     /// Reading the selected row in full, scrolled this far.
     reading: Option<usize>,
+    /// The last answer given here, which `z` takes back.
+    pub(crate) undo: Option<Undo>,
 }
 
 impl Page {
@@ -89,6 +210,7 @@ impl Page {
             anchor: None,
             notes_failed: 0,
             reading: None,
+            undo: None,
         }
     }
 
@@ -242,7 +364,8 @@ impl Page {
     }
 
     /// Keys while the page is open. List: j/k pick, ↩ reads in full, `a`/`d`
-    /// accept or reject a proposal, `r` reloads, Esc or `q` closes. Reading:
+    /// accept or reject a proposal, `e` rewrites it then accepts, `z` takes the
+    /// last answer back, `r` reloads, Esc or `q` closes. Reading:
     /// j/k and PgUp/PgDn scroll, Esc back to the list.
     pub(crate) fn keys(&mut self, mut bytes: &[u8], proposals: &[Decision]) -> Vec<Do> {
         let mut out = Vec::new();
@@ -287,6 +410,16 @@ impl Page {
                         break;
                     }
                 }
+                b"e" => {
+                    if let Some(Row::Review(index)) = picks.get(self.cursor) {
+                        out.push(Do::Edit { index: *index });
+                        break;
+                    }
+                }
+                b"z" => {
+                    out.push(Do::Undo);
+                    break;
+                }
                 b"r" => out.push(Do::Load),
                 _ => {}
             }
@@ -325,12 +458,22 @@ impl Page {
             };
             lines.push(Line::from(from.fg(t.muted)));
             if matches!(row, Row::Review(_)) {
-                lines.push(Line::from(vec![
+                let mut keys = vec![
                     "a".fg(t.accent).bold(),
                     " accept · ".fg(t.dim()),
+                    "e".fg(t.accent).bold(),
+                    " edit, then accept · ".fg(t.dim()),
                     "d".fg(t.accent).bold(),
                     " reject".fg(t.dim()),
-                ]));
+                ];
+                if self.undo.is_some() {
+                    keys.extend([
+                        " · ".fg(t.dim()),
+                        "z".fg(t.accent).bold(),
+                        " undo".fg(t.dim()),
+                    ]);
+                }
+                lines.push(Line::from(keys));
             }
             lines.push(Line::default());
             lines.extend(markdown::render(&d.body, width, t).lines);
@@ -415,20 +558,26 @@ impl Page {
         let hints: Vec<Span> = if self.reading.is_some() {
             [hint(" ↑↓ ", "scroll "), hint(" esc ", "back ")].concat()
         } else if on_review {
+            // Five at most: just after an answer, taking it back beats reading.
+            let fifth = match self.undo {
+                Some(_) => hint(" z ", "undo "),
+                None => hint(" ↩ ", "read "),
+            };
             [
                 hint(" a ", "accept "),
+                hint(" e ", "edit "),
                 hint(" d ", "reject "),
-                hint(" ↩ ", "read "),
+                fifth,
                 hint(" esc ", "close "),
             ]
             .concat()
         } else {
-            [
-                hint(" ↩ ", "read "),
-                hint(" r ", "reload "),
-                hint(" esc ", "close "),
-            ]
-            .concat()
+            let mut hints = vec![hint(" ↩ ", "read "), hint(" r ", "reload ")];
+            if self.undo.is_some() {
+                hints.push(hint(" z ", "undo "));
+            }
+            hints.push(hint(" esc ", "close "));
+            hints.concat()
         };
         let title = match self.tab {
             Tab::Decisions => " Decisions ",
@@ -663,6 +812,85 @@ mod tests {
     }
 
     #[test]
+    fn e_edits_only_a_proposal_and_z_always_asks_to_undo() {
+        let mut page = Page::new(Tab::Decisions);
+        page.loaded(Ok((
+            vec![decision(
+                1,
+                "/r/api",
+                DecisionKind::Gotcha,
+                DecisionStatus::Active,
+            )],
+            Vec::new(),
+        )));
+        let proposals = vec![decision(
+            9,
+            "/r/api",
+            DecisionKind::Fix,
+            DecisionStatus::Proposed,
+        )];
+        assert_eq!(page.keys(b"e", &proposals), [Do::Edit { index: 0 }]);
+        // On an accepted one: nothing to edit before accepting.
+        assert!(page.keys(b"je", &proposals).is_empty());
+        // The app says when there's nothing to take back.
+        assert_eq!(page.keys(b"z", &proposals), [Do::Undo]);
+    }
+
+    #[test]
+    fn a_proposal_goes_through_the_editor_and_back() {
+        let mut d = decision(9, "/r/api", DecisionKind::Gotcha, DecisionStatus::Proposed);
+        d.scope = vec!["crates/a/**".into(), "web/*.ts".into()];
+        let w = Wording::of(&d);
+        let text = w.text();
+        assert_eq!(
+            text,
+            "kind: gotcha\nscope: crates/a/** web/*.ts\n---\n# d9\n\nbody 9\n"
+        );
+        assert_eq!(Wording::parse(&text, false).unwrap(), w);
+        // Rewritten: a new kind, one glob, a longer body.
+        let edited = "kind: constraint\nscope: crates/a/**\n---\n# Sharper\n\nOne.\n\nTwo.\n";
+        assert_eq!(
+            Wording::parse(edited, false).unwrap(),
+            Wording {
+                title: "Sharper".into(),
+                body: "One.\n\nTwo.".into(),
+                kind: DecisionKind::Constraint,
+                scope: Some(vec!["crates/a/**".into()]),
+            }
+        );
+        // An empty scope applies everywhere; no scope line leaves it be.
+        let everywhere = Wording::parse("kind: fix\nscope:\n---\n# T\n", false).unwrap();
+        assert_eq!(everywhere.scope, Some(Vec::new()));
+        let kept = Wording::parse("kind: fix\n---\n# T\n", false).unwrap();
+        assert_eq!(kept.scope, None);
+        // A habit has no scope line, and one typed in is ignored.
+        let habit = decision(
+            3,
+            USER_SCOPE,
+            DecisionKind::Decision,
+            DecisionStatus::Proposed,
+        );
+        assert!(!Wording::of(&habit).text().contains("scope"));
+        assert_eq!(
+            Wording::parse("kind: fix\nscope: x\n---\n# T\n", true)
+                .unwrap()
+                .scope,
+            None
+        );
+        // What it can't read, it says why.
+        for bad in [
+            "# no header\n",
+            "kind: nope\n---\n# T\n",
+            "---\n# T\n",
+            "kind: fix\n---\nno heading\n",
+            "kind: fix\n---\n#\n",
+            "kind: fix\nwhat: ever\n---\n# T\n",
+        ] {
+            assert!(Wording::parse(bad, false).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn the_page_draws_its_groups_without_boxes_inside() {
         let mut page = Page::new(Tab::Decisions);
         page.loaded(Ok((
@@ -692,7 +920,14 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect();
-            for want in ["To review 1", "■ d9", "Gotchas 1", "d1", "a accept"] {
+            for want in [
+                "To review 1",
+                "■ d9",
+                "Gotchas 1",
+                "d1",
+                "a accept",
+                "e edit",
+            ] {
                 assert!(screen.contains(want), "{width}: lacks {want:?}");
             }
             // Wide, the selected one's text beside the list.
