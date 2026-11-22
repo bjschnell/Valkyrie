@@ -6,7 +6,7 @@ use crate::edit::LineEdit;
 use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use crate::{fit, next_key};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{self, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
@@ -452,13 +452,29 @@ pub(crate) struct Page {
     /// The repositories an edit can move an item to: the daemon's list and every
     /// item's, by name.
     pub(crate) roots: Vec<PathBuf>,
+    /// Under 100 columns, the selected item's detail is the screen: the first
+    /// ↩ opens it, Esc goes back to the list (spec: Layout by width).
+    pub(crate) reading: bool,
+    /// How wide the page was last drawn, for whether ↩ opens the detail
+    /// first; 0 before the first draw (wide).
+    cols: std::cell::Cell<u16>,
 }
 
 impl Page {
     /// On the list itself, nothing typed or open over it: where section keys
     /// (`g b`, `[ ]`) are the app's, not the page's.
     pub(crate) fn at_list(&self) -> bool {
-        self.typing.is_none() && self.order.is_none() && !self.search.typing
+        self.typing.is_none() && self.order.is_none() && !self.search.typing && !self.reads()
+    }
+
+    /// The item's detail is the screen: opened narrow, and still narrow.
+    fn reads(&self) -> bool {
+        self.reading && self.narrow()
+    }
+
+    /// One pane: under 100 columns, as last drawn.
+    fn narrow(&self) -> bool {
+        (1..100).contains(&self.cols.get())
     }
 }
 
@@ -779,6 +795,18 @@ impl Page {
                 }
             }
             let here = rows.get(self.cursor).map(|(l, i)| (*l, i));
+            // Narrow: the first ↩ reads the item, Esc goes back to the list.
+            match key {
+                b"\x1b" if whole && self.reads() => {
+                    self.reading = false;
+                    continue;
+                }
+                b"\r" | b"\n" if self.narrow() && !self.reads() && here.is_some() => {
+                    self.reading = true;
+                    continue;
+                }
+                _ => {}
+            }
             if key != b"x" {
                 self.armed = None;
             }
@@ -1091,10 +1119,18 @@ impl Page {
         frame.render_widget(Clear, rect);
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let here = rows.get(self.cursor);
+        let narrow = rect.width.saturating_sub(2) < 100;
         let hints: Vec<_> = match (&self.typing, here) {
             (None, _) if self.search.typing => {
                 [hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat()
             }
+            // Narrow, on the list: ↩ reads the item first.
+            (None, Some(_)) if narrow && !self.reading && self.order.is_none() => [
+                hint(" ↩ ", "details "),
+                hint(" n ", "new "),
+                hint(" / ", "search "),
+            ]
+            .concat(),
             (Some(Typing::Add { .. }), _) => [
                 hint(" ↩ ", "add "),
                 hint(" tab ", "kind "),
@@ -1180,6 +1216,8 @@ impl Page {
         };
         let around = if self.typing.is_some() || self.search.typing {
             ""
+        } else if self.reading && narrow {
+            "esc back · j/k move"
         } else {
             "[ ] filter · j/k move"
         };
@@ -1216,16 +1254,13 @@ impl Page {
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
-        let wide = inner.width >= 100;
-        let (list, detail) = if wide {
-            let [l, d] =
-                Layout::horizontal([Constraint::Percentage(55), Constraint::Fill(1)]).areas(inner);
-            (l, d)
-        } else {
-            let [l, d] =
-                Layout::vertical([Constraint::Fill(1), Constraint::Length(inner.height / 3)])
-                    .areas(inner);
-            (l, d)
+        // The widths every section shares (spec: Layout by width); under 100
+        // columns one pane, the list or the item read on its own.
+        self.cols.set(inner.width);
+        let (list, detail) = match crate::list_and_detail(frame, inner, t) {
+            (list, Some(detail)) => (list, Some(detail)),
+            (_, None) if self.reading && here.is_some() => (Rect::default(), Some(inner)),
+            (list, None) => (list, None),
         };
 
         // The list, with a heading over each lane; rows slide to keep the cursor in view.
@@ -1284,7 +1319,7 @@ impl Page {
         let top = cursor_line.saturating_sub(room.saturating_sub(2));
         frame.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), list);
 
-        if let Some((lane, item)) = here {
+        if let (Some((lane, item)), Some(detail)) = (here, detail) {
             let facts = self
                 .facts
                 .as_ref()
@@ -1304,13 +1339,8 @@ impl Page {
             let group = group_lines(item, all, t);
             let at = text.len().min(2);
             text.splice(at..at, group);
-            let pane = Block::new()
-                .borders(if wide {
-                    ratatui::widgets::Borders::LEFT
-                } else {
-                    ratatui::widgets::Borders::TOP
-                })
-                .border_style(style::Style::new().fg(t.border));
+            // A column's width from the rule `list_and_detail` drew.
+            let pane = Block::new().padding(ratatui::widgets::Padding::horizontal(1));
             frame.render_widget(
                 Paragraph::new(text).block(pane).wrap(Wrap { trim: false }),
                 detail,
@@ -1972,6 +2002,70 @@ mod tests {
             trigger: "you asked".into(),
             steps,
         }
+    }
+
+    /// The list is as wide as every section's (spec: Layout by width), and
+    /// under 100 columns the item is a screen of its own: ↩ reads it, ↩ there
+    /// launches, Esc goes back (backlog #279).
+    #[test]
+    fn the_list_is_the_spec_width_and_narrow_reads_one_item() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut one = item(1, 1);
+        one.body = "the long story".into();
+        let rows = rows(&[one, item(2, 1)], &[], 7);
+        let all: Vec<Item> = rows.iter().map(|(_, i)| i.clone()).collect();
+        let t = crate::theme::DRACULA;
+        let screen = |page: &Page, w: u16, h: u16| -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|f| page.draw(f, &rows, &all, &[], 7, 0, &t))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(w as usize)
+                .map(|r| r.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        let mut page = Page::default();
+        // Wide: the list as wide as `list_and_detail` makes every section's,
+        // in the page's inner area (a column in from the edge): 56 under 140
+        // inner columns, 62 from 140.
+        for (width, list) in [(140, 56), (160, 62)] {
+            let wide = screen(&page, width, 40);
+            let rule = wide
+                .iter()
+                .find_map(|r| r.chars().position(|c| c == '│'))
+                .expect("a rule between list and detail");
+            assert_eq!(rule, 1 + list, "{width}: {wide:#?}");
+            assert!(wide.join("\n").contains("the long story"));
+        }
+
+        // Narrow: the list alone, no detail under it.
+        let narrow = screen(&page, 80, 24);
+        let text = narrow.join("\n");
+        assert!(
+            !text.contains("the long story") && !text.contains('│'),
+            "{text}"
+        );
+        assert!(text.contains("↩ details"), "{text}");
+        // ↩ reads the item; ↩ there launches; Esc is back at the list.
+        assert!(page.keys(b"\r", &rows, &[], 7).is_empty());
+        assert!(page.reading && !page.at_list());
+        let text = screen(&page, 80, 24).join("\n");
+        assert!(
+            text.contains("the long story") && text.contains("esc back"),
+            "{text}"
+        );
+        assert!(!text.contains("item 2"), "the item alone: {text}");
+        assert!(matches!(
+            page.keys(b"\r", &rows, &[], 7)[..],
+            [Do::Launch { id: 1, .. }]
+        ));
+        assert!(page.keys(b"\x1b", &rows, &[], 7).is_empty());
+        assert!(!page.reading && page.at_list());
+        assert_eq!(page.keys(b"\x1b", &rows, &[], 7), [Do::Close]);
     }
 
     #[test]
