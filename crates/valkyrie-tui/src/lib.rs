@@ -8,6 +8,7 @@ mod backlog;
 mod blocks;
 mod clip;
 mod comments;
+mod compose;
 mod conflict;
 mod digest;
 mod docs;
@@ -246,6 +247,11 @@ struct App {
     proposals: Vec<Decision>,
     /// Every backlog item, as last pushed (DESIGN §8.12).
     items: Vec<Item>,
+    /// The Inbox's top row: a task to start or file (backlog #276).
+    composer: compose::Composer,
+    /// The supervisor at a glance, for the composer's last line: what it
+    /// watches, and the last thing it did.
+    glance: Option<Glance>,
     /// The repositories pickers offer (backlog #240), as the backlog last fetched it.
     repo_list: valkyrie_proto::RepoList,
     /// Build orders waiting on the user, as last pushed with the items.
@@ -483,6 +489,8 @@ impl App {
             sessions: Vec::new(),
             proposals: Vec::new(),
             items: Vec::new(),
+            composer: compose::Composer::default(),
+            glance: None,
             repo_list: Default::default(),
             quota: None,
             backlog: None,
@@ -572,6 +580,9 @@ impl App {
         // Best effort: an older daemon doesn't know notices.
         let _ = self.client.watch_notices(true).await;
         self.refresh().await;
+        // The composer's repositories and supervisor line (backlog #276).
+        self.load_repos().await;
+        self.load_glance().await;
         if let Some(id) = attach_to {
             self.attach(id).await;
         }
@@ -1014,6 +1025,9 @@ impl App {
         if self.reviewing.is_some() {
             return self.review_keys(&bytes).await;
         }
+        if self.composing() {
+            return self.compose_keys(&bytes).await;
+        }
         self.option_hint(&bytes);
         self.home_input(&bytes).await;
     }
@@ -1073,6 +1087,10 @@ impl App {
                     self.selected = row;
                     self.cursor_moved = true;
                     self.kill_armed = None;
+                    // A click off the composer hands the keys back; the draft stays.
+                    if row != 0 && std::mem::take(&mut self.composer.typing) {
+                        self.sync_paste();
+                    }
                     self.update_preview().await;
                 }
                 Some(Hit::Key(key)) => self.on_home_key(key).await,
@@ -1125,6 +1143,10 @@ impl App {
             // The rest of the read is the backlog page's, once a key opened it.
             if self.backlog.is_some() {
                 return self.backlog_keys(&bytes[end..]).await;
+            }
+            // Or the composer's, once `n`, `/` or `#` focused it.
+            if self.composing() {
+                return self.compose_keys(&bytes[end..]).await;
             }
         }
     }
@@ -1500,7 +1522,9 @@ impl App {
     fn sync_paste(&mut self) {
         // A backlog prompt, or a search being typed on any page (#273): a
         // pasted line break mustn't end it.
-        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some()) || self.searching();
+        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some())
+            || self.searching()
+            || self.composing();
         let program = self.view.as_ref().is_some_and(|v| v.modes.bracketed_paste);
         let Some(final_byte) = paste_change(want, self.paste_forced, program) else {
             return;
@@ -1576,6 +1600,194 @@ impl App {
     fn attached_cwd(&self) -> Option<PathBuf> {
         let id = self.view.as_ref()?.id;
         Some(self.sessions.iter().find(|s| s.id == id)?.cwd.clone())
+    }
+
+    /// The composer has the keys: typing, on its row, at home.
+    fn composing(&self) -> bool {
+        self.composer.typing && self.view.is_none() && self.row() == Some(InboxRow::Compose)
+    }
+
+    /// The composer, typing: its row selected, `with` the draft (`#`).
+    async fn compose_focus(&mut self, with: &str) {
+        self.cursor_moved = true;
+        self.selected = 0;
+        self.home_detail = false;
+        self.composer.focus(with);
+        self.sync_paste();
+        // The pickers' list, for tab; a slow daemon leaves the last one.
+        self.load_repos().await;
+        self.update_preview().await;
+    }
+
+    /// The repositories tab steps through, and what ↩ starts with.
+    fn compose_defaults(&self) -> (Vec<PathBuf>, compose::Defaults) {
+        let known: Vec<PathBuf> = self
+            .repo_list
+            .repos
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        let repos = compose::repos(&known, &self.items);
+        let d = compose::defaults(&self.composer, &repos, &self.items);
+        (repos, d)
+    }
+
+    /// The `#` search's matches.
+    fn compose_found(&self) -> Vec<compose::Found> {
+        match self.composer.item_query() {
+            Some(q) => compose::find(q, &self.items, &self.sessions, self.boot()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Keys while the composer is typing: they're the draft's, not the Inbox's.
+    async fn compose_keys(&mut self, bytes: &[u8]) {
+        for did in self.composer.keys(bytes) {
+            match did {
+                compose::Composed::Kept => {}
+                compose::Composed::Done => self.sync_paste(),
+                compose::Composed::Repo => {
+                    let (repos, d) = self.compose_defaults();
+                    self.composer.repo = compose::step_repo(&d, &repos);
+                }
+                compose::Composed::Agent => {
+                    let (_, d) = self.compose_defaults();
+                    self.composer.agent = Some(compose::step_agent(&d));
+                }
+                compose::Composed::Start if self.composer.item_query().is_some() => {
+                    self.compose_pick().await
+                }
+                compose::Composed::Start => self.compose_start().await,
+                compose::Composed::File => self.compose_file().await,
+            }
+            // A start attached: the rest of the read is the session's.
+            if self.view.is_some() {
+                return;
+            }
+        }
+        let found = self.compose_found().len();
+        self.composer.pick = self.composer.pick.min(found.saturating_sub(1));
+    }
+
+    /// ↩: starts the agent on the task in a worktree of its own and attaches
+    /// (a shell starts in the repository itself).
+    async fn compose_start(&mut self) {
+        let (_, d) = self.compose_defaults();
+        let Some(repo) = d.repo.clone() else {
+            return self.say("no repository to start in: add one in the web app".into());
+        };
+        let task = self.composer.task().to_owned();
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let shell = d.agent == "shell";
+        let spec = SpawnSpec {
+            command: compose::command(&d, &task),
+            cwd: Some(repo),
+            name: None,
+            size,
+            env: spawn_env(),
+            worktree: (!shell).then(String::new),
+            hidden: false,
+        };
+        match self.client.spawn(spec).await {
+            Ok(info) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => self.say(format!("couldn't start it: {e:#}")),
+        }
+    }
+
+    /// ^f: the draft as a backlog item in the repository shown. Typed by you,
+    /// so a real item, not a proposal.
+    async fn compose_file(&mut self) {
+        let task = self.composer.task().to_owned();
+        if task.is_empty() || self.composer.item_query().is_some() {
+            return self.say("type a task to file it".into());
+        }
+        let (_, d) = self.compose_defaults();
+        let (title, body) = compose::as_item(&task);
+        let item = valkyrie_proto::NewItem {
+            title,
+            body,
+            cwd: d.repo,
+            ..Default::default()
+        };
+        match self.client.add_item(item).await {
+            Ok(item) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.say(format!("filed {}: {}", compose::label(&item), item.title));
+            }
+            Err(e) => self.say(format!("couldn't file it: {e:#}")),
+        }
+    }
+
+    /// ↩ on a `#` match: a ready item starts, one with a session opens it.
+    async fn compose_pick(&mut self) {
+        let found = self.compose_found();
+        let Some(f) = found.get(self.composer.pick).cloned() else {
+            return self.say("no open item matches".into());
+        };
+        match f.what {
+            compose::Can::Start => self.compose_launch(f.id).await,
+            compose::Can::Open(id, _) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.attach(id).await;
+            }
+            compose::Can::No(why) => self.say(format!("{} is {why}", f.label)),
+        }
+    }
+
+    /// `s` on the composer: the top ready item, without typing.
+    async fn start_ready(&mut self) {
+        let top = compose::ready(&self.items, &self.sessions, self.boot())
+            .first()
+            .map(|i| i.id);
+        match top {
+            Some(id) => self.compose_launch(id).await,
+            None => self.say("nothing ready in the backlog".into()),
+        }
+    }
+
+    /// Starts backlog item `id` as the backlog's ↩ does, and attaches.
+    async fn compose_launch(&mut self, id: u32) {
+        let Some(item) = self.items.iter().find(|i| i.id == id) else {
+            return;
+        };
+        let agent = backlog::last_agent(item);
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        match self.client.launch_item(id, agent, true, size, None).await {
+            Ok(info) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => self.say(format!("couldn't start it: {e:#}")),
+        }
+    }
+
+    /// The supervisor at a glance, for the composer's last line.
+    async fn load_glance(&mut self) {
+        let watch = tokio::time::timeout(PREVIEW_WAIT, self.client.supervisor_watch()).await;
+        let log = tokio::time::timeout(PREVIEW_WAIT, self.client.supervisor_log()).await;
+        if let Ok(Ok(w)) = watch {
+            self.glance = Some(Glance {
+                on: w.on,
+                watching: w.prs.len(),
+                last: match log {
+                    Ok(Ok((entries, _))) => entries.into_iter().max_by_key(|e| e.at),
+                    _ => self.glance.as_ref().and_then(|g| g.last.clone()),
+                },
+            });
+        }
     }
 
     /// Starts `$SHELL` (in `cwd`, else the daemon's default) and attaches to it.
@@ -2431,7 +2643,8 @@ impl App {
     /// one row for what's up for a decision, one for the items agents filed, then
     /// the rest of the sessions, Running before Quiet (spec: Inbox).
     fn inbox_rows(&self) -> Vec<InboxRow> {
-        let mut rows: Vec<InboxRow> = (0..self.queue.len()).map(InboxRow::Queue).collect();
+        let mut rows = vec![InboxRow::Compose];
+        rows.extend((0..self.queue.len()).map(InboxRow::Queue));
         if self.to_decide() > 0 {
             rows.push(InboxRow::Decide);
         }
@@ -2463,6 +2676,7 @@ impl App {
             && self.settings_cursor.is_none()
             && self.renaming.is_none()
             && self.reviewing.is_none()
+            && !self.composing()
             && self.supervisor.is_none()
             && self.backlog.as_ref().is_none_or(backlog::Page::at_list)
             && self.docs.as_ref().is_none_or(docs::Page::at_list)
@@ -2538,7 +2752,8 @@ impl App {
             ("a · d", "accept or allow · reject or deny"),
             ("x", "close, after a second x"),
             ("r", "rename"),
-            ("n", "new session"),
+            ("n · s", "new session, typed · start the top ready item"),
+            ("# · ^f", "a backlog item to start · file what you typed"),
             ("/ · [ ]", "search · cycle a section's tabs or filter"),
             (
                 "g i · g b · g m · g h",
@@ -2753,6 +2968,11 @@ impl App {
             for act in acts {
                 Box::pin(self.docs_do(act)).await;
             }
+        }
+        // Home, on the composer: its supervisor line and repositories.
+        if self.section() == Section::Inbox && self.row() == Some(InboxRow::Compose) {
+            self.load_glance().await;
+            self.load_repos().await;
         }
     }
 
@@ -3358,7 +3578,7 @@ impl App {
 
     fn restore(&mut self, anchor: Anchor) {
         if !self.cursor_moved {
-            self.selected = 0;
+            self.selected = self.resting_row();
             return;
         }
         let rows = self.inbox_rows();
@@ -3376,6 +3596,12 @@ impl App {
             self.selected = i;
         }
         self.clamp_selection();
+    }
+
+    /// Where the cursor rests until it's moved: the first row that waits on
+    /// you, else the composer, so inbox zero is the composer (backlog #276).
+    fn resting_row(&self) -> usize {
+        self.inbox_rows().iter().position(waits).unwrap_or(0)
     }
 
     fn clamp_selection(&mut self) {
@@ -3556,6 +3782,7 @@ impl App {
             HomeKey::Quit => self.quit = true,
             HomeKey::Enter => {
                 match self.row() {
+                    Some(InboxRow::Compose) => self.compose_focus("").await,
                     // Narrow, Enter shows the session's detail first; Enter there
                     // attaches.
                     Some(InboxRow::Queue(_) | InboxRow::Session(_))
@@ -3605,7 +3832,6 @@ impl App {
                 if rows.is_empty() {
                     return self.say("nothing waits on you".into());
                 }
-                let waits = |r: &InboxRow| !matches!(r, InboxRow::Session(_));
                 let next = (self.selected + 1..rows.len())
                     .chain(0..=self.selected.min(rows.len().saturating_sub(1)))
                     .find(|&i| waits(&rows[i]));
@@ -3629,7 +3855,8 @@ impl App {
             },
             HomeKey::Help => self.help = true,
             HomeKey::Back => self.home_detail = false,
-            HomeKey::NewShell => self.new_shell(None).await,
+            HomeKey::Compose => self.compose_focus("").await,
+            HomeKey::ComposeItem => self.compose_focus("#").await,
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
@@ -3643,6 +3870,10 @@ impl App {
                 }
             }
             HomeKey::Digest => self.open_digest().await,
+            // On the composer, `s` starts the top ready item (spec: n · s).
+            HomeKey::Supervisor if self.row() == Some(InboxRow::Compose) => {
+                self.start_ready().await
+            }
             HomeKey::Supervisor => self.open_supervisor().await,
             // `h`, as it was: History, which now holds the past sessions too.
             HomeKey::Past => self.open_digest().await,
@@ -5445,7 +5676,34 @@ impl App {
         let asks = matches!(self.selection(), (_, Some(q)) if answerable(q));
         let mut hints: Vec<(String, String, HomeKey)> = Vec::new();
         let mut hint = |k: &str, w: &str, key: HomeKey| hints.push((k.into(), w.into(), key));
-        if self.kill_armed.is_some() {
+        // Typing: only the composer's keys, since letters type (spec: Home composer).
+        let typing = self.composing();
+        if typing && self.composer.item_query().is_some() {
+            let found = self.compose_found();
+            match found.get(self.composer.pick) {
+                Some(
+                    f @ compose::Found {
+                        what: compose::Can::Start,
+                        ..
+                    },
+                ) => hint("↩", &format!("start {}", f.label), HomeKey::Compose),
+                Some(
+                    f @ compose::Found {
+                        what: compose::Can::Open(..),
+                        ..
+                    },
+                ) => hint("↩", &format!("open {}", f.label), HomeKey::Compose),
+                _ => {}
+            }
+            hint("↑↓", "pick", HomeKey::Compose);
+            hint("esc", "back to text", HomeKey::Compose);
+        } else if typing {
+            hint("↩", "start", HomeKey::Compose);
+            hint("^f", "file to backlog", HomeKey::Compose);
+            hint("#", "item", HomeKey::Compose);
+            hint("tab", "repo", HomeKey::Compose);
+            hint("esc", "done", HomeKey::Compose);
+        } else if self.kill_armed.is_some() {
             hint("x", "close it", HomeKey::Kill);
         } else if self.narrow_detail() {
             hint("↩", "attach", HomeKey::Enter);
@@ -5472,6 +5730,18 @@ impl App {
             hint("↩", "review all", HomeKey::Enter);
         } else {
             match self.row() {
+                Some(InboxRow::Compose) => {
+                    hint("n", "type", HomeKey::Compose);
+                    if let Some(top) =
+                        compose::ready(&self.items, &self.sessions, self.boot()).first()
+                    {
+                        hint(
+                            "s",
+                            &format!("start {}", compose::label(top)),
+                            HomeKey::Supervisor,
+                        );
+                    }
+                }
                 Some(InboxRow::Decide) => hint("↩", "open", HomeKey::Enter),
                 Some(InboxRow::Filed) => hint("↩", "triage", HomeKey::Enter),
                 Some(_) => {
@@ -5485,7 +5755,7 @@ impl App {
                         hint("A", "adopt", HomeKey::Adopt);
                     }
                 }
-                None => hint("n", "new session", HomeKey::NewShell),
+                None => hint("n", "new session", HomeKey::Compose),
             }
         }
         hints.truncate(5);
@@ -5502,19 +5772,151 @@ impl App {
         // Getting around, faint, as much as there is room for; `? keys` last
         // to go, since it leads to the rest.
         let left = at(&spans) as usize;
-        let around = [
-            "n new · j/k move · g sections · ? keys ",
-            "j/k move · ? keys ",
-            "? keys ",
-        ]
-        .into_iter()
-        .find(|a| left + a.chars().count() + 2 <= width as usize);
+        let around: &[&str] = if typing {
+            &["shift-tab agent "]
+        } else if self.row() == Some(InboxRow::Compose) {
+            // `n type` is already the first hint.
+            &[
+                "j/k move · g sections · ? keys ",
+                "j/k move · ? keys ",
+                "? keys ",
+            ]
+        } else {
+            &[
+                "n new · j/k move · g sections · ? keys ",
+                "j/k move · ? keys ",
+                "? keys ",
+            ]
+        };
+        let around = around
+            .iter()
+            .find(|a| left + a.chars().count() + 2 <= width as usize);
         if let Some(around) = around {
             let pad = (width as usize).saturating_sub(left + around.chars().count());
             spans.push(" ".repeat(pad).into());
             spans.push(around.fg(t.muted));
         }
         (Line::from(spans), chips)
+    }
+
+    /// Under 100 columns the composer is in the list, not a pane of its own.
+    fn compose_inline(&self) -> bool {
+        self.home_cols.get() < 100
+    }
+
+    /// The composer's lines in the Inbox list: "+ New session" beside a pane,
+    /// else the band itself, its defaults and any `#` matches.
+    fn compose_row_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let t = self.settings.theme;
+        if !self.compose_inline() {
+            let name = " + New session";
+            let pad = width.saturating_sub(name.chars().count() + 4);
+            // The first cell is the cursor's (`▌`), as on every row.
+            return vec![Line::from(vec![
+                " ".into(),
+                "+ ".fg(t.accent).bold(),
+                "New session".fg(t.fg).bold(),
+                " ".repeat(pad).into(),
+                "n".fg(t.muted),
+            ])];
+        }
+        let selected = self.row() == Some(InboxRow::Compose);
+        let mut lines = compose::band(&self.composer, width, 3, selected, t);
+        lines.extend(self.compose_under(width));
+        lines
+    }
+
+    /// Under the band: the defaults and what changes them, then the `#` matches.
+    fn compose_under(&self, width: usize) -> Vec<Line<'static>> {
+        let t = self.settings.theme;
+        if self.composer.item_query().is_some() && self.composing() {
+            return compose::match_lines(&self.compose_found(), self.composer.pick, width, t);
+        }
+        let (_, d) = self.compose_defaults();
+        let mut spans = vec!["   ".into()];
+        spans.extend(compose::defaults_line(&d, t));
+        spans.push(if self.composing() {
+            "   tab repo · shift-tab agent".fg(t.muted)
+        } else {
+            "   tab change".fg(t.muted)
+        });
+        vec![Line::from(spans)]
+    }
+
+    /// The pane beside the list on the composer: what's next, the band, the
+    /// ready items `s` starts, and the supervisor on the last line.
+    fn draw_composer(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let t = self.settings.theme;
+        let now = now_ms();
+        let area = area.inner(Margin::new(3, 0));
+        let width = area.width as usize;
+        let need = self.need_you();
+        let mut lines = vec![
+            Line::default(),
+            Line::default(),
+            Line::from("What's next?".fg(t.fg).bold()),
+            Line::from(
+                if need == 0 {
+                    "Nothing needs you. Start an agent, or pick up the backlog.".to_owned()
+                } else {
+                    format!("{need} wait on you: tab goes to them. Or start something new.")
+                }
+                .fg(t.muted),
+            ),
+            Line::default(),
+        ];
+        lines.extend(compose::band(&self.composer, width, 4, true, t));
+        lines.extend(self.compose_under(width));
+        let ready = compose::ready(&self.items, &self.sessions, self.boot());
+        let open = self
+            .items
+            .iter()
+            .filter(|i| i.status == valkyrie_proto::ItemStatus::Open)
+            .count();
+        lines.extend([Line::default(), Line::default()]);
+        let head = "Ready in the backlog";
+        let count = format!("{open} in Backlog");
+        lines.push(Line::from(vec![
+            head.fg(t.fg).bold(),
+            " ".repeat(width.saturating_sub(head.len() + count.len()))
+                .into(),
+            count.fg(t.muted),
+        ]));
+        lines.push(Line::default());
+        if ready.is_empty() {
+            lines.push(Line::from("nothing ready: b opens the backlog".fg(t.muted)));
+        }
+        for (i, item) in ready.iter().take(5).enumerate() {
+            let key = if i == 0 { "s  " } else { "   " };
+            let label = pad(&fit(&compose::label(item), 9), 10);
+            let facts = format!("{:<8}{}", item.kind.as_str(), item.priority.as_str());
+            let room = width.saturating_sub(3 + 10 + facts.len() + 2).max(8);
+            lines.push(Line::from(vec![
+                key.fg(t.accent).bold(),
+                label.fg(t.muted),
+                pad(&fit(&item.title, room), room).fg(t.fg),
+                "  ".into(),
+                facts.fg(t.muted),
+            ]));
+        }
+        let [body, foot] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+        frame.render_widget(Paragraph::new(lines), body);
+        if let Some(g) = &self.glance {
+            let line = if !g.on {
+                "◦ supervisor off".to_owned()
+            } else {
+                let mut said = format!("◦ supervisor watching {}", g.watching);
+                if let Some(last) = &g.last {
+                    said.push_str(&format!(" · {} {}", last.said, age(last.at * 1000, now)));
+                }
+                said
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(fit(&line, width).fg(t.muted))),
+                foot,
+            );
+        }
     }
 
     /// The Inbox: Needs you, Running, Quiet, each session once (spec: Inbox). A
@@ -5557,12 +5959,17 @@ impl App {
                 ])
                 .centered(),
             ];
-            let [_, mid, _] = Layout::vertical([
+            let top = self.compose_row_lines(inner.width as usize);
+            let rows = top.len() as u16;
+            let [head, _, mid, _] = Layout::vertical([
+                Constraint::Length(rows),
                 Constraint::Fill(1),
                 Constraint::Length(lines.len() as u16),
                 Constraint::Fill(1),
             ])
             .areas(inner);
+            self.home_rows.borrow_mut().push((head, Hit::Row(0)));
+            frame.render_widget(Paragraph::new(top), head);
             frame.render_widget(Paragraph::new(lines), mid);
             return;
         }
@@ -5583,7 +5990,13 @@ impl App {
                 ]),
             ));
         };
+        lines.extend(
+            self.compose_row_lines(width)
+                .into_iter()
+                .map(|line| (Some(0), line)),
+        );
         if self.need_you() == 0 {
+            lines.push((None, Line::default()));
             lines.push((
                 None,
                 Line::from(vec![
@@ -5596,6 +6009,8 @@ impl App {
         }
         for (i, row) in rows.iter().enumerate() {
             let line = match *row {
+                // Drawn above, its own lines.
+                InboxRow::Compose => continue,
                 InboxRow::Queue(q) => inbox_queue_row(&self.queue[q], now, spin, width, t),
                 InboxRow::Decide => self.decide_row(now, width),
                 InboxRow::Filed => self.filed_row(now, width),
@@ -5625,7 +6040,7 @@ impl App {
         let height = inner.height as usize;
         let at = lines
             .iter()
-            .position(|(row, _)| *row == Some(self.selected));
+            .rposition(|(row, _)| *row == Some(self.selected));
         let offset = match at {
             Some(at) if at + 1 > height => at + 1 - height,
             _ => 0,
@@ -5640,6 +6055,10 @@ impl App {
                 let Some(row) = row else { return line };
                 let rect = Rect::new(inner.x, inner.y + y as u16, inner.width, 1);
                 hits.push((rect, Hit::Row(row)));
+                // The composer in the list draws its own selection: a band.
+                if row == 0 && self.compose_inline() {
+                    return line;
+                }
                 if row == self.selected {
                     let mut spans = vec!["▌".fg(t.accent)];
                     spans.extend(line.spans.into_iter().skip(1));
@@ -5713,6 +6132,9 @@ impl App {
     /// The selected session: its full summary, then the bottom of its screen.
     fn draw_preview(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
+        if self.row() == Some(InboxRow::Compose) {
+            return self.draw_composer(frame, area);
+        }
         if let Some(d) = self.proposal() {
             let title = Line::from(vec![
                 " ■ ".fg(t.accent).bold(),
@@ -7964,6 +8386,8 @@ enum Anchor {
 /// A row of the Inbox (spec: Inbox).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InboxRow {
+    /// "+ New session": the composer (backlog #276), always the top row.
+    Compose,
     /// A session waiting on you, by its place in the queue.
     Queue(usize),
     /// Proposals, ready items and build orders, as one row.
@@ -7972,6 +8396,20 @@ enum InboxRow {
     Filed,
     /// A session not waiting on you.
     Session(SessionId),
+}
+
+/// A row that waits on you: Needs you's rows, not the composer or a session
+/// below them.
+fn waits(row: &InboxRow) -> bool {
+    !matches!(row, InboxRow::Session(_) | InboxRow::Compose)
+}
+
+/// The supervisor at a glance (`App::glance`).
+#[derive(Debug, Clone, PartialEq)]
+struct Glance {
+    on: bool,
+    watching: usize,
+    last: Option<valkyrie_proto::SupervisorEntry>,
 }
 
 /// What a place on the home screen is for.
@@ -8056,7 +8494,10 @@ enum HomeKey {
     Up,
     Down,
     Enter,
-    NewShell,
+    /// `n` or `/`: the composer, typing (backlog #276).
+    Compose,
+    /// `#`: the composer, finding a backlog item to start.
+    ComposeItem,
     Kill,
     /// Open the settings panel.
     Settings,
@@ -8149,7 +8590,8 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'k' => Some(HomeKey::Up),
             b'j' => Some(HomeKey::Down),
             b'\r' | b'\n' => Some(HomeKey::Enter),
-            b'n' => Some(HomeKey::NewShell),
+            b'n' | b'/' => Some(HomeKey::Compose),
+            b'#' => Some(HomeKey::ComposeItem),
             b'x' => Some(HomeKey::Kill),
             b',' => Some(HomeKey::Settings),
             b'r' => Some(HomeKey::Rename),
@@ -8788,7 +9230,7 @@ mod tests {
         app.sessions = vec![info(1), info(2)];
         app.queue = vec![queued(2)];
         app.cursor_moved = true;
-        app.selected = 1; // session 1, under the queue's row
+        app.selected = 2; // session 1, under the composer and the queue's row
         assert!(
             app.on_push(ServerMsg::Proposals {
                 items: vec![proposed("/r/a", 1, "one"), proposed("/r/b", 1, "two")],
@@ -8796,7 +9238,7 @@ mod tests {
             .unwrap()
         );
         // The decisions' row above moved the cursor down with its session.
-        assert_eq!((app.selected, app.selection().0), (2, Some(1)));
+        assert_eq!((app.selected, app.selection().0), (3, Some(1)));
         assert_eq!(app.need_you(), 3, "the queue's one and both proposals");
 
         let walk: Vec<_> = (0..app.rows())
@@ -8812,6 +9254,8 @@ mod tests {
         assert_eq!(
             walk,
             [
+                // The composer, on top.
+                (None, None, None),
                 (None, Some(0), Some(2)),
                 // a/d answer the oldest proposal, the one the detail shows.
                 (Some("one".into()), None, None),
@@ -8820,7 +9264,7 @@ mod tests {
         );
 
         // On the decisions' row: it stays there as they're answered...
-        app.selected = 1;
+        app.selected = 2;
         app.on_push(ServerMsg::Proposals {
             items: vec![proposed("/r/b", 1, "two")],
         })
@@ -8828,7 +9272,7 @@ mod tests {
         assert_eq!(app.proposal().unwrap().title, "two");
         // ...and once none are left, the cursor stays where it was: on the next row.
         app.on_push(ServerMsg::Proposals { items: vec![] }).unwrap();
-        assert_eq!((app.selected, app.selection().0), (1, Some(1)));
+        assert_eq!((app.selected, app.selection().0), (2, Some(1)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8869,7 +9313,11 @@ mod tests {
                 app.selection().0
             })
             .collect();
-        assert_eq!(ids, [Some(2), Some(1), Some(3)]);
+        assert_eq!(
+            ids,
+            [None, Some(2), Some(1), Some(3)],
+            "the composer, then each session once"
+        );
 
         for (width, height) in [(80, 24), (100, 30), (140, 40)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -8955,6 +9403,7 @@ mod tests {
         assert_eq!(
             app.inbox_rows(),
             [
+                InboxRow::Compose,
                 InboxRow::Queue(0),
                 InboxRow::Decide,
                 InboxRow::Filed,
@@ -9141,6 +9590,7 @@ mod tests {
         app.sessions = vec![info(1)];
         let rows = home_screen(&app, 80);
         assert!(!rows.iter().any(|r| r.contains('│')), "no detail at 80");
+        app.selected = 1;
         app.on_input(b"\r".to_vec()).await;
         assert!(app.narrow_detail(), "Enter shows the detail, not attaches");
         let foot = home_screen(&app, 80).last().cloned().unwrap();
@@ -9337,7 +9787,7 @@ mod tests {
 
         // One row for them all, counted; the detail reads the oldest, which a/d
         // answer.
-        app.selected = 0;
+        app.selected = 1;
         let text = render(&app);
         for want in ["Inbox 10", "10 decisions", "#10", "claude · /r/x", "accept"] {
             assert!(text.contains(want), "lacks {want:?}");
@@ -9346,7 +9796,7 @@ mod tests {
         assert!(!text.contains("sqlx"));
 
         // On a session, its own keys again.
-        app.selected = 1;
+        app.selected = 2;
         let text = render(&app);
         assert!(text.contains("open") && !text.contains("accept"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -9365,25 +9815,31 @@ mod tests {
         // Not whatever this machine's settings.toml says.
         app.settings = Settings::default();
         app.sessions = vec![info(1), info(2), info(3)];
-        // Before the cursor is put anywhere, pushes leave it on the top row.
+        // Before the cursor is put anywhere, pushes leave it on the first row
+        // that waits on you, else on the composer (backlog #276).
         app.selected = 2;
         app.on_push(ServerMsg::Queue {
             items: vec![queued(1)],
         })
         .unwrap();
-        assert_eq!(app.selected, 0, "the TUI opens on the top row");
+        assert_eq!(app.selected, 1, "the TUI opens on what waits");
         app.on_push(ServerMsg::Queue { items: vec![] }).unwrap();
+        assert_eq!(
+            app.row(),
+            Some(InboxRow::Compose),
+            "inbox zero: the composer"
+        );
         // Once it's been put somewhere, it follows its session.
         app.cursor_moved = true;
-        app.selected = 2; // session 3
+        app.selected = 3; // session 3
         app.on_push(ServerMsg::Queue {
             items: vec![queued(1)],
         })
         .unwrap();
         assert_eq!(app.selection().0, Some(3));
         // Session 1 moved up into the queue, so it's no longer listed below it.
-        assert_eq!(app.selected, 2);
-        app.selected = 0; // queue row for session 1
+        assert_eq!(app.selected, 3);
+        app.selected = 1; // queue row for session 1
         app.on_push(ServerMsg::Queue {
             items: vec![queued(2), queued(1)],
         })
@@ -9391,18 +9847,18 @@ mod tests {
         assert_eq!(app.selection(), (Some(1), app.queue.get(1)));
         // A session below that starts asking moves up into the queue; the cursor
         // goes with it, and back down when it's answered.
-        app.selected = 2; // session 3, under the queue's two rows
+        app.selected = 3; // session 3, under the queue's two rows
         assert_eq!(app.selection(), (Some(3), None));
         app.on_push(ServerMsg::Queue {
             items: vec![queued(3), queued(2), queued(1)],
         })
         .unwrap();
-        assert_eq!((app.selected, app.selection().0), (0, Some(3)));
+        assert_eq!((app.selected, app.selection().0), (1, Some(3)));
         app.on_push(ServerMsg::Queue {
             items: vec![queued(2), queued(1)],
         })
         .unwrap();
-        assert_eq!((app.selected, app.selection()), (2, (Some(3), None)));
+        assert_eq!((app.selected, app.selection()), (3, (Some(3), None)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -9483,6 +9939,7 @@ mod tests {
                 }
             })
             .collect();
+        app.selected = 1;
         app.preview = Some((
             1,
             "● Running the auth tests\n  ⎿  $ cargo test -p auth\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No".into(),
@@ -9560,7 +10017,7 @@ mod tests {
         });
         app.sessions = vec![s];
         app.queue = vec![row];
-        app.selected = 0;
+        app.selected = 1;
         let (session, seq, step) = app.offered().unwrap();
         assert_eq!((session, seq, step.action), (4, 3, StepAction::Rerun));
         let mut terminal = Terminal::new(TestBackend::new(160, 14)).unwrap();
@@ -9679,7 +10136,7 @@ mod tests {
             240,
         );
         queue(&mut app, &[3]);
-        app.selected = 0;
+        app.selected = 1;
         app.preview = Some((3, docs.into()));
         let text = render(&app, "demo-1");
         assert!(text.contains("docs-pass") && text.contains("fixed 4 typos"));
@@ -9694,7 +10151,7 @@ mod tests {
             2,
         );
         queue(&mut app, &[1, 3]);
-        app.selected = 0;
+        app.selected = 1;
         app.preview = Some((
             1,
             format!(
@@ -10326,7 +10783,10 @@ mod tests {
                 .collect()
         };
 
-        // Home: only the filed item waits on the user, as one row.
+        // Home: only the filed item waits on the user, as one row, and the
+        // cursor rests on it.
+        app.restore(Anchor::Session(None));
+        assert_eq!(app.row(), Some(InboxRow::Filed));
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal
             .draw(|f| {
@@ -11938,6 +12398,205 @@ mod tests {
     }
 
     /// Renders the home screen to text lines.
+    /// The composer (backlog #276): the top row, where the cursor rests at inbox
+    /// zero; `n` types, letters never reach the Inbox, ↩ starts the agent in a
+    /// worktree of the repository shown, ^f files it, `#` finds an item.
+    #[tokio::test]
+    async fn the_composer_starts_files_and_finds() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, KnownRepo, Reply, RepoList};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-compose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let item = |id: u32, title: &str, project: &str, after: &[u32]| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "number": id, "title": title, "status": "open", "by": "human",
+                "project": project, "created": id, "updated": 0, "blocked_by": after,
+            }))
+            .unwrap()
+        };
+        let items = vec![
+            item(1, "Rate-limit retries in the client", "/r/app", &[]),
+            item(2, "Rate-limit the public API", "/r/app", &[3]),
+            item(3, "Pin the runner image", "/r/app", &[]),
+        ];
+        let sent: Arc<Mutex<Vec<ClientMsg>>> = Arc::default();
+        let kept = sent.clone();
+        let filed = item(7, "Add a --json flag", "/r/web", &[]);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                kept.lock().unwrap().push(msg.clone());
+                let answer = match msg {
+                    ClientMsg::Repos { req } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Repos {
+                            list: RepoList {
+                                repos: ["/r/app", "/r/web"]
+                                    .map(|p| KnownRepo {
+                                        path: p.into(),
+                                        label: p.into(),
+                                        added: false,
+                                    })
+                                    .to_vec(),
+                                folders: vec![],
+                                hidden: vec![],
+                            },
+                        },
+                    },
+                    ClientMsg::AddItem { req, .. } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Item {
+                            item: Box::new(filed.clone()),
+                            note: None,
+                        },
+                    },
+                    // Not started here: attaching needs a real session.
+                    ClientMsg::Spawn { req, .. } | ClientMsg::LaunchItem { req, .. } => {
+                        ServerMsg::Err {
+                            req,
+                            message: "not in a test".into(),
+                        }
+                    }
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = vec![info(1)];
+        app.items = items;
+        let took = |sent: &Arc<Mutex<Vec<ClientMsg>>>| std::mem::take(&mut *sent.lock().unwrap());
+
+        // Inbox zero: the cursor rests on the composer, and the pane is it.
+        app.restore(Anchor::Session(None));
+        assert_eq!(app.row(), Some(InboxRow::Compose));
+        let wide = home_screen(&app, 140).join("\n");
+        for want in [
+            "+ New session",
+            "What's next?",
+            "describe a task, or # for a backlog item",
+            "Ready in the backlog",
+            "s  app#1",
+            "n type",
+            "s start app#1",
+        ] {
+            assert!(wide.contains(want), "lacks {want:?}:\n{wide}");
+        }
+        assert!(
+            !wide.contains("app#2"),
+            "a blocked item isn't ready:\n{wide}"
+        );
+        // Something waiting: the cursor starts there, and k goes back up.
+        app.queue = vec![queued(1)];
+        app.restore(Anchor::Session(None));
+        assert_eq!(app.row(), Some(InboxRow::Queue(0)));
+        app.on_input(b"k".to_vec()).await;
+        assert_eq!(app.row(), Some(InboxRow::Compose));
+        app.queue.clear();
+
+        // Typing: the Inbox's keys are letters now, and the footer is the
+        // composer's alone.
+        app.on_input(b"n".to_vec()).await;
+        assert!(app.composer.typing);
+        app.on_input(b"gx Add a --json flag".to_vec()).await;
+        assert_eq!(app.section(), Section::Inbox, "g types");
+        assert!(app.kill_armed.is_none() && !app.quit);
+        app.on_input(vec![0x17, 0x17, 0x17, 0x17, 0x17]).await;
+        app.on_input(b"Add a --json flag".to_vec()).await;
+        let foot = home_screen(&app, 140).last().cloned().unwrap();
+        assert!(
+            foot.contains("↩ start")
+                && foot.contains("^f file to backlog")
+                && !foot.contains("j/k"),
+            "{foot}"
+        );
+
+        // tab: the next repository; ↩ starts the agent there, in a worktree.
+        app.on_input(b"\t".to_vec()).await;
+        assert!(home_screen(&app, 140).join("\n").contains("web · claude"));
+        app.on_input(b"\r".to_vec()).await;
+        let spawn = took(&sent)
+            .into_iter()
+            .find_map(|m| match m {
+                ClientMsg::Spawn { spec, .. } => Some(spec),
+                _ => None,
+            })
+            .expect("↩ spawns");
+        assert_eq!(spawn.command, ["claude", "Add a --json flag"]);
+        assert_eq!(spawn.cwd.as_deref(), Some(Path::new("/r/web")));
+        assert_eq!(spawn.worktree.as_deref(), Some(""));
+        assert!(
+            app.status.starts_with("couldn't start it"),
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            app.composer.text, "Add a --json flag",
+            "a failed start keeps it"
+        );
+
+        // ^f files it in that repository instead, a real item.
+        app.on_input(vec![compose::FILE_KEY]).await;
+        let added = took(&sent)
+            .into_iter()
+            .find_map(|m| match m {
+                ClientMsg::AddItem { item, take, .. } => Some((item, take)),
+                _ => None,
+            })
+            .expect("^f files it");
+        assert_eq!(added.0.title, "Add a --json flag");
+        assert_eq!(added.0.cwd.as_deref(), Some(Path::new("/r/web")));
+        assert!(!added.1);
+        assert_eq!(app.status, "filed web#7: Add a --json flag");
+        assert!(!app.composer.typing && app.composer.text.is_empty());
+
+        // `#`: the backlog by number or title, the ready one first and the
+        // blocked one greyed; ↩ starts the picked item.
+        app.on_input(b"#rate".to_vec()).await;
+        let found = app.compose_found();
+        assert_eq!(found.iter().map(|f| f.id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(found[1].what, compose::Can::No("after app#3".into()));
+        let screen = home_screen(&app, 140).join("\n");
+        assert!(
+            screen.contains("↩ start app#1") && screen.contains("after app#3"),
+            "{screen}"
+        );
+        app.on_input(b"\r".to_vec()).await;
+        assert!(
+            took(&sent)
+                .iter()
+                .any(|m| matches!(m, ClientMsg::LaunchItem { id: 1, .. })),
+            "↩ launches #1"
+        );
+        // Esc goes back to text, then hands the keys back.
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.composer.typing && app.composer.text.is_empty());
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(!app.composer.typing);
+
+        // Under 100 columns, the band is in the list itself.
+        app.on_input(b"/".to_vec()).await;
+        app.on_input(b"fix the tests".to_vec()).await;
+        let narrow = home_screen(&app, 80);
+        assert!(!narrow.iter().any(|r| r.contains('│')), "one pane");
+        assert!(narrow[2].contains("› fix the tests"), "{narrow:#?}");
+        assert!(
+            narrow[3].contains("web · claude"),
+            "the repository picked stays: {narrow:#?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn home_screen(app: &App, width: u16) -> Vec<String> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -11972,15 +12631,16 @@ mod tests {
         assert_eq!(app.selected, 1, "wheel down moves down");
         app.on_input(press(65, 5, 5)).await;
         app.on_input(press(65, 5, 5)).await;
-        assert_eq!(app.selected, 2, "and stops at the last row");
+        app.on_input(press(65, 5, 5)).await;
+        assert_eq!(app.selected, 3, "and stops at the last row");
         app.on_input(press(64, 5, 5)).await;
-        assert_eq!(app.selected, 1, "wheel up moves up");
+        assert_eq!(app.selected, 2, "wheel up moves up");
 
         let mut long = proposed("/r/a", 1, "long one");
         long.body = (0..80).map(|i| format!("line {i}\n")).collect();
         app.sessions.clear();
         app.proposals = vec![long];
-        app.selected = 0;
+        app.selected = 1;
         let width = 160;
         home_screen(&app, width);
         // The preview is the right-hand panel, past the lists' 62%.
@@ -12002,7 +12662,7 @@ mod tests {
         let mut d = proposed("/r/a", 1, "md one");
         d.body = "## Why\n\n**Bold** words, then [the ADR](https://x.dev/adr).".into();
         app.proposals = vec![d];
-        app.selected = 0;
+        app.selected = 1;
         let width = 160;
         let screen: Vec<String> = home_screen(&app, width);
         let all = screen.join("\n");
@@ -12028,7 +12688,7 @@ mod tests {
         // A session selected now: the old proposal's link is gone with it.
         app.proposals.clear();
         app.sessions = vec![info(1)];
-        app.selected = 0;
+        app.selected = 1;
         app.on_input(press(0, x + 1, y as u16)).await;
         assert!(opened().is_empty(), "no stale link");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -12045,7 +12705,7 @@ mod tests {
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1), info(2), info(3)];
         app.queue = vec![queued(1), queued(3)];
-        app.selected = 2; // session 2, below the queue
+        app.selected = 3; // session 2, below the queue
         app.on_input(b"\t".to_vec()).await;
         assert_eq!(app.selection().0, Some(1), "round to the first waiting");
         app.on_input(b"\t".to_vec()).await;
@@ -12114,6 +12774,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-chips-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1)];
+        app.selected = 1;
         let chip = |app: &App, label: &str| -> (u16, u16) {
             let rows = home_screen(app, 120);
             let bar = rows.len() - 1;

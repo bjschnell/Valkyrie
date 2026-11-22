@@ -11,9 +11,12 @@ decisions. The bar under a session lists these keys, and you can click them.
 | Where | Key | Does |
 |---|---|---|
 | Home | `↩` | open the selected session |
-| | `n` · `x` · `r` | new shell · kill · rename |
+| | `n` · `/` | type a task in the composer, the Inbox's top row (`+ New session`): `↩` starts the agent on it in a worktree of its own and attaches, `^f` files it to the backlog, `alt-↩` adds a line, `tab` · `shift-tab` change the repository · agent, `Esc` keeps the draft |
+| | `#` | find a backlog item by number or title: `↩` starts a ready one, opens the session of one already running |
+| | `s` | on the composer: start the top ready item |
+| | `x` · `r` | kill · rename |
 | | `w` · `h` | away summary · past sessions, `↩` resumes one |
-| | `s` | the supervisor: what waits on you and what it did ([supervisor](supervisor.md)) |
+| | `s` | elsewhere, the supervisor: what waits on you and what it did ([supervisor](supervisor.md)) |
 | | `W` | the selected session's repository wiki: read pages, `s` maps the repository, `S` rewrites stale pages ([wiki](wiki.md)) |
 | | `,` · `.` | settings · keys |
 | | `?` | the tutor: an agent that teaches Valkyrie, one lesson at a time |
