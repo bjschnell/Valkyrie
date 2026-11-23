@@ -143,6 +143,8 @@ pub(crate) struct Page {
     typing: bool,
     /// A resume asked for and not answered yet: keys wait.
     pub(crate) resuming: bool,
+    /// Where the rows were drawn, for a click (backlog #281).
+    pub(crate) hits: crate::RowHits,
 }
 
 impl Page {
@@ -593,6 +595,7 @@ impl Page {
         // Nearly the whole screen, like the backlog page.
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
+        self.hits.clear();
 
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let first = match self.selected() {
@@ -695,6 +698,7 @@ impl Page {
         let mut lines: Vec<Line> = Vec::new();
         let mut at = 0;
         let mut i = 0;
+        let mut clickable = Vec::new();
         for row in &self.rows {
             match row {
                 Row::Day(day, n) => {
@@ -715,12 +719,16 @@ impl Page {
                             .lift_faint(line)
                             .style(style::Style::new().bg(t.selection));
                     }
+                    clickable.push((lines.len(), i as isize - self.cursor as isize));
                     lines.push(line);
                     i += 1;
                 }
             }
         }
         let skip = (at + 1).saturating_sub(list_area.height as usize);
+        if !self.typing {
+            self.hits.record(list_area, skip, &clickable);
+        }
         frame.render_widget(
             Paragraph::new(lines).scroll((skip.min(u16::MAX as usize) as u16, 0)),
             list_area,

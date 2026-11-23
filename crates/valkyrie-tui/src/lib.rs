@@ -918,19 +918,33 @@ impl App {
             if let Some(cut) = mouse::unfinished(&bytes) {
                 self.partial = bytes.split_off(cut);
             }
-            // At home, the backlog is a section: `g` and the strip's keys first.
             if self.view.is_none() {
-                let Some(rest) = self.section_keys(bytes).await else {
-                    return;
-                };
-                if self.backlog.is_none() {
-                    // The cut-off report stays after these bytes, not before.
-                    let partial = std::mem::take(&mut self.partial);
-                    Box::pin(self.on_input(rest)).await;
-                    self.partial = partial;
-                    return;
+                // At home the backlog is a section: a click is the strip's or a
+                // row's, never keys to the page (backlog #281), and a key goes
+                // to `g` and the strip's keys first. The cut-off report stays
+                // after these bytes, not before.
+                let partial = std::mem::take(&mut self.partial);
+                for input in mouse::split(&bytes) {
+                    match input {
+                        Input::Mouse(m) => self.on_home_mouse(m).await,
+                        // A click or key earlier in the read left the backlog.
+                        Input::Bytes(keys) if self.backlog.is_none() => {
+                            Box::pin(self.on_input(keys)).await;
+                        }
+                        Input::Bytes(keys) => {
+                            let Some(rest) = self.section_keys(keys).await else {
+                                continue;
+                            };
+                            if self.backlog.is_none() {
+                                Box::pin(self.on_input(rest)).await;
+                            } else {
+                                self.backlog_keys(&rest).await;
+                            }
+                        }
+                    }
                 }
-                bytes = rest;
+                self.partial = partial;
+                return;
             }
             return self.backlog_keys(&bytes).await;
         }
@@ -1084,7 +1098,12 @@ impl App {
         if self.docs.is_some() {
             return self.on_docs_mouse(m).await;
         }
-        if self.keys_page.is_some()
+        // A section page's list: a click or the wheel is the j/k and ↩ it takes.
+        if let Some(keys) = self.page_mouse_keys(&m) {
+            return self.page_keys(&keys).await;
+        }
+        if self.backlog.is_some()
+            || self.keys_page.is_some()
             || self.digest.is_some()
             || self.supervisor.is_some()
             || self.wiki.is_some()
@@ -1136,6 +1155,42 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The keys a press or the wheel stands for over the open section page's
+    /// list (backlog #281): ↩ on the selected row, j/k to another, j/k a notch.
+    /// None off the rows, or with no list page open.
+    fn page_mouse_keys(&self, m: &Mouse) -> Option<Vec<u8>> {
+        let hits = if let Some(page) = &self.backlog {
+            &page.hits
+        } else if let Some(page) = &self.prs {
+            &page.hits
+        } else if let Some(page) = &self.memory {
+            &page.hits
+        } else if let Some(page) = &self.digest {
+            &page.hits
+        } else {
+            return None;
+        };
+        match m.kind {
+            MouseKind::Press => hits.click(m.x, m.y),
+            MouseKind::WheelDown => Some(b"j".to_vec()),
+            MouseKind::WheelUp => Some(b"k".to_vec()),
+            _ => None,
+        }
+    }
+
+    /// `keys` to the open section page, as if typed there.
+    async fn page_keys(&mut self, keys: &[u8]) {
+        if self.backlog.is_some() {
+            self.backlog_keys(keys).await;
+        } else if self.prs.is_some() {
+            self.prs_keys(keys).await;
+        } else if self.memory.is_some() {
+            self.memory_keys(keys).await;
+        } else if self.digest.is_some() {
+            self.digest_keys(keys).await;
         }
     }
 
@@ -7872,6 +7927,47 @@ pub(crate) fn list_and_detail(
     (list, Some(detail))
 }
 
+/// Where a section page's list rows landed on screen, for the mouse (backlog
+/// #281). Each row is kept with its place against the cursor, so a click turns
+/// into the j/k and ↩ every list already takes (rule 7), and a page's own
+/// handling of a move (facts to load, an armed delete to drop) still runs.
+/// Recorded at each draw; a page showing no list records none.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RowHits(std::cell::RefCell<Vec<(Rect, isize)>>);
+
+impl RowHits {
+    pub(crate) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+
+    /// The rows drawn in `area`, scrolled by `skip` lines: each selectable
+    /// row's line in the list, and its place against the cursor.
+    pub(crate) fn record(&self, area: Rect, skip: usize, rows: &[(usize, isize)]) {
+        let mut hits = self.0.borrow_mut();
+        hits.clear();
+        for &(line, from) in rows {
+            let Some(y) = line.checked_sub(skip) else {
+                continue;
+            };
+            if y < area.height as usize {
+                hits.push((Rect::new(area.x, area.y + y as u16, area.width, 1), from));
+            }
+        }
+    }
+
+    /// The keys a press at `x`,`y` stands for: ↩ on the cursor's row, else the
+    /// j or k that bring the cursor to it.
+    pub(crate) fn click(&self, x: u16, y: u16) -> Option<Vec<u8>> {
+        let hits = self.0.borrow();
+        let &(_, from) = hits.iter().find(|(r, _)| r.contains(Position::new(x, y)))?;
+        Some(match from {
+            0 => b"\r".to_vec(),
+            n if n > 0 => b"j".repeat(n.unsigned_abs()),
+            n => b"k".repeat(n.unsigned_abs()),
+        })
+    }
+}
+
 /// `list_and_detail`'s areas without drawing: the list, and the column between
 /// and the detail when there's room for one.
 fn list_detail_areas(area: Rect) -> (Rect, Option<(Rect, Rect)>) {
@@ -12858,6 +12954,105 @@ mod tests {
             "the row over the keys: {rows:#?}"
         );
         assert!(rows[19].contains("j/k move"), "the keys stay: {rows:#?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backlog #281: the mouse works on a section page. A click on a row moves
+    /// the cursor there, the wheel moves it, and the strip's sections take a
+    /// click from the backlog too, which used to read a click as keys.
+    #[tokio::test]
+    async fn the_mouse_works_on_section_pages() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-pmouse-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let item = |id: u32| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "number": id, "title": format!("item {id}"), "status": "open",
+                "by": "human", "project": "/r/app", "created": 0, "updated": 0,
+            }))
+            .unwrap()
+        };
+        app.on_push(ServerMsg::Items {
+            items: vec![item(1), item(2), item(3)],
+            orders: vec![],
+            launches: vec![],
+        })
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        // As `App::draw` does at home: the strip and home, the page over them.
+        let mut draw = |app: &App| -> Vec<String> {
+            terminal
+                .draw(|f| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(f.area());
+                    app.draw_home(f, body, bar);
+                    if let Some(page) = &app.backlog {
+                        let rows = app.backlog_rows();
+                        let t = app.settings.theme;
+                        page.draw(f, &rows, &app.items, &app.sessions, 0, 0, t);
+                    }
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..30)
+                .map(|y| (0..140).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect()
+        };
+        let find = |rows: &[String], s: &str| -> (u16, u16) {
+            rows.iter()
+                .enumerate()
+                .find_map(|(y, r)| r.find(s).map(|i| (r[..i].chars().count() as u16, y as u16)))
+                .unwrap_or_else(|| panic!("{s:?} on {rows:#?}"))
+        };
+        // An SGR press, as the terminal sends it (1-based).
+        let click = |x: u16, y: u16| format!("\x1b[<0;{};{}M", x + 1, y + 1).into_bytes();
+        let cursor = |app: &App| app.backlog.as_ref().unwrap().cursor;
+        let at = |app: &App, id: u32| {
+            app.backlog_rows()
+                .iter()
+                .position(|(_, i)| i.id == id)
+                .unwrap()
+        };
+
+        app.on_input(b"gb".to_vec()).await;
+        let rows = draw(&app);
+        let (x, y) = find(&rows, "item 3");
+        app.on_input(click(x, y)).await;
+        assert_eq!(app.section(), Section::Backlog, "a click isn't keys");
+        assert_eq!(cursor(&app), at(&app, 3), "the click's row is selected");
+
+        // The wheel moves the cursor a row a notch.
+        draw(&app);
+        let before = cursor(&app);
+        app.on_input(b"\x1b[<64;10;10M".to_vec()).await;
+        assert_eq!(cursor(&app), before - 1);
+
+        // On the selected row a click is ↩; elsewhere, the j/k that get there.
+        let rows = draw(&app);
+        let hits = &app.backlog.as_ref().unwrap().hits;
+        let (x, y) = find(&rows, "item 3");
+        assert_eq!(hits.click(x, y), Some(b"j".to_vec()));
+        // The selected row, by its number at the list's left edge.
+        let id = app.backlog_rows()[cursor(&app)].1.id;
+        let y = rows
+            .iter()
+            .position(|r| r.starts_with(&format!("  #{id} ")))
+            .unwrap() as u16;
+        assert_eq!(hits.click(4, y), Some(b"\r".to_vec()));
+        assert_eq!(hits.click(4, 0), None, "the strip is no row");
+
+        // The strip takes a click from the backlog: no more trapped there.
+        // (Inbox: another page would wait on a daemon this one never answers,
+        // backlog #106.)
+        let rows = draw(&app);
+        let x = rows[0]
+            .find("Inbox")
+            .map(|i| rows[0][..i].chars().count() as u16);
+        app.on_input(click(x.expect("Inbox on the strip"), 0)).await;
+        assert_eq!(app.section(), Section::Inbox);
+        assert!(app.backlog.is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
