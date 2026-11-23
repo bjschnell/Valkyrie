@@ -8141,9 +8141,11 @@ fn attached_bar(
         }
         (None, None) => {}
     }
-    if !place.is_empty() {
+    // Where it works gives way first when the bar is short of room.
+    let place_at = (!place.is_empty()).then(|| {
         spans.push(format!(" {place} ").fg(t.muted));
-    }
+        spans.len() - 1
+    });
     // Zoomed, the bar says so, and which pane it is; a click shows the split.
     if let Some(p) = panes.filter(|p| p.zoomed) {
         let from = width(&spans);
@@ -8218,6 +8220,18 @@ fn attached_bar(
         BarMode::Reviewing => {}
     }
     let right_width: u16 = right.iter().map(|(s, _)| s.width() as u16).sum();
+    // Short of room, the place is cut so the right side (the count and the way
+    // out) stays on the bar (backlog #284).
+    let over = (width(&spans) + right_width).saturating_sub(cols);
+    if over > 0
+        && let Some(at) = place_at
+    {
+        let room = (spans[at].width() as u16).saturating_sub(over + 2) as usize;
+        spans[at] = match room {
+            0 => "".into(),
+            room => format!(" {} ", fit(place, room)).fg(t.muted),
+        };
+    }
     let pad = cols.saturating_sub(width(&spans) + right_width);
     spans.push(" ".repeat(pad as usize).into());
     for (span, click) in right {
@@ -11389,6 +11403,41 @@ mod tests {
         assert!(quiet.trim_end().ends_with("^\\ ? keys"), "{quiet}");
         let (tabs, _) = bar(BarMode::Tabs, true, 0);
         assert!(tabs.trim_end().ends_with("esc back"), "{tabs}");
+    }
+
+    /// At 80 columns a long place (a long item branch) gives way, not the right
+    /// side: the bar fits the width and still ends with its way out (backlog #284).
+    #[test]
+    fn a_long_place_never_pushes_the_way_out_off_the_bar() {
+        let view = Attached::new(1, "work".into(), None);
+        let settings = Settings::default();
+        let place = "valkyrie · feat/294-keybinds-in-valk-are-not-displayed-by-default · #283";
+        for (mode, need, end) in [
+            (BarMode::Tabs, 0, "esc back"),
+            (BarMode::Session, 3, "alt h home"),
+            (BarMode::Renaming, 0, "folder name"),
+        ] {
+            let text = attached_bar(
+                &view,
+                place,
+                None,
+                mode,
+                need,
+                true,
+                80,
+                settings.theme,
+                &settings.keys,
+            )
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+            assert!(text.chars().count() <= 80, "{mode:?} overflows: {text}");
+            assert!(text.trim_end().ends_with(end), "{mode:?}: {text}");
+            assert!(text.starts_with(" work "), "{mode:?}: {text}");
+            assert!(text.contains('…'), "{mode:?} cuts the place: {text}");
+        }
     }
 
     /// Minimal tabs, in every style. On top: one row each, the number, the state's
