@@ -5,6 +5,7 @@
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
 mod backlog;
+mod batch;
 mod blocks;
 mod clip;
 mod comments;
@@ -249,6 +250,8 @@ struct App {
     items: Vec<Item>,
     /// The Inbox's top row: a task to start or file (backlog #276).
     composer: compose::Composer,
+    /// Start agents: the composer's lines, one session each (backlog #280).
+    batch: Option<batch::Batch>,
     /// The supervisor at a glance, for the composer's last line: what it
     /// watches, and the last thing it did.
     glance: Option<Glance>,
@@ -490,6 +493,7 @@ impl App {
             proposals: Vec::new(),
             items: Vec::new(),
             composer: compose::Composer::default(),
+            batch: None,
             glance: None,
             repo_list: Default::default(),
             quota: None,
@@ -1029,6 +1033,9 @@ impl App {
         // The decisions opened from the Inbox take the keys until Esc.
         if self.reviewing.is_some() {
             return self.review_keys(&bytes).await;
+        }
+        if self.batch.is_some() && self.view.is_none() {
+            return self.batch_keys(&bytes).await;
         }
         if self.composing() {
             return self.compose_keys(&bytes).await;
@@ -1709,6 +1716,11 @@ impl App {
                 compose::Composed::Start if self.composer.item_query().is_some() => {
                     self.compose_pick().await
                 }
+                // Several lines: one session each, checked first (#280).
+                compose::Composed::Start if self.composer.task().contains('\n') => {
+                    self.open_batch();
+                    return;
+                }
                 compose::Composed::Start => self.compose_start().await,
                 compose::Composed::File => self.compose_file().await,
             }
@@ -1719,6 +1731,90 @@ impl App {
         }
         let found = self.compose_found().len();
         self.composer.pick = self.composer.pick.min(found.saturating_sub(1));
+    }
+
+    /// ↩ on a draft of several lines: the Start agents dialog, a row each.
+    fn open_batch(&mut self) {
+        let (repos, d) = self.compose_defaults();
+        let b = batch::Batch::new(self.composer.task(), &d, &repos);
+        if b.rows.is_empty() {
+            return;
+        }
+        self.batch = Some(b);
+        self.composer.typing = false;
+        self.sync_paste();
+    }
+
+    /// Keys while Start agents is open: the dialog's alone.
+    async fn batch_keys(&mut self, bytes: &[u8]) {
+        let (repos, _) = self.compose_defaults();
+        let Some(b) = &mut self.batch else { return };
+        for did in b.keys(bytes, &repos) {
+            match did {
+                // Back to the draft, as the rows now have it, typing again.
+                batch::Did::Back => {
+                    if let Some(b) = self.batch.take()
+                        && !b.rows.is_empty()
+                    {
+                        self.composer.text = b.draft();
+                    }
+                    self.composer.typing = true;
+                    self.sync_paste();
+                }
+                batch::Did::Start => self.start_batch().await,
+            }
+        }
+    }
+
+    /// ↩ in Start agents: a session for every row, each in a worktree of its
+    /// own. Started rows leave the dialog; one that failed stays, with why,
+    /// to change and try again. Nothing attaches: they're several.
+    async fn start_batch(&mut self) {
+        let Some(mut b) = self.batch.take() else {
+            return;
+        };
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let mut started: Vec<String> = Vec::new();
+        let mut left = Vec::new();
+        for mut row in b.rows.drain(..) {
+            let d = row.defaults();
+            let Some(repo) = d.repo.clone() else {
+                row.failed = Some("no repository".into());
+                left.push(row);
+                continue;
+            };
+            let spec = SpawnSpec {
+                command: compose::command(&d, &row.task),
+                cwd: Some(repo),
+                name: None,
+                size,
+                env: spawn_env(),
+                worktree: (d.agent != "shell").then(String::new),
+                hidden: false,
+            };
+            match self.client.spawn(spec).await {
+                Ok(info) => started.push(info.name),
+                Err(e) => {
+                    row.failed = Some(format!("{e:#}"));
+                    left.push(row);
+                }
+            }
+        }
+        self.refresh().await;
+        let n = started.len();
+        let said = format!("started {n} session{}", if n == 1 { "" } else { "s" });
+        if left.is_empty() {
+            self.composer.clear();
+            self.say(said);
+            return;
+        }
+        b.rows = left;
+        b.cursor = 0;
+        let failed = b.rows.len();
+        self.batch = Some(b);
+        self.say(format!(
+            "{said}, {failed} couldn't start: tab or shift-tab, then ↩"
+        ));
     }
 
     /// ↩: starts the agent on the task in a worktree of its own and attaches
@@ -2729,6 +2825,7 @@ impl App {
             && self.renaming.is_none()
             && self.reviewing.is_none()
             && !self.composing()
+            && self.batch.is_none()
             && self.supervisor.is_none()
             && self.backlog.as_ref().is_none_or(backlog::Page::at_list)
             && self.docs.as_ref().is_none_or(docs::Page::at_list)
@@ -5664,6 +5761,16 @@ impl App {
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
+        // Start agents over a dimmed home (rule 8), but not the notice row or
+        // the footer: what a start said, and the dialog's keys, stay readable.
+        if let Some(b) = &self.batch {
+            let behind = Rect {
+                height: body.height.saturating_sub(1),
+                ..body
+            };
+            dim(frame, behind, t);
+            b.draw(frame, t);
+        }
     }
 
     /// The line over the footer: a toast for a few seconds, else what a key just
@@ -5706,6 +5813,16 @@ impl App {
         on_proposal: bool,
     ) -> (Line<'static>, Vec<(u16, u16, HomeKey)>) {
         let t = self.settings.theme;
+        // A dialog's footer is its own (rule 8).
+        if let Some(b) = &self.batch {
+            let mut spans: Vec<Span> = Vec::new();
+            for (key, what) in batch::hints(b) {
+                spans.push(" ".into());
+                spans.push(format!(" {key} ").fg(t.accent).bold());
+                spans.push(format!("{what} ").fg(t.dim()));
+            }
+            return (Line::from(spans), Vec::new());
+        }
         let step = self.offered().map(|(_, _, step)| step);
         let asks = matches!(self.selection(), (_, Some(q)) if answerable(q));
         let mut hints: Vec<(String, String, HomeKey)> = Vec::new();
@@ -5732,7 +5849,17 @@ impl App {
             hint("↑↓", "pick", HomeKey::Compose);
             hint("esc", "back to text", HomeKey::Compose);
         } else if typing {
-            hint("↩", "start", HomeKey::Compose);
+            let lines = self
+                .composer
+                .task()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count();
+            if lines > 1 {
+                hint("↩", &format!("review and start {lines}"), HomeKey::Compose);
+            } else {
+                hint("↩", "start", HomeKey::Compose);
+            }
             hint("^f", "file to backlog", HomeKey::Compose);
             hint("#", "item", HomeKey::Compose);
             hint("tab", "repo", HomeKey::Compose);
@@ -12668,6 +12795,172 @@ mod tests {
             narrow[3].contains("web · claude"),
             "the repository picked stays: {narrow:#?}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Several lines in the composer (backlog #280): ↩ opens Start agents, a
+    /// row each with its repository and agent; the footer is the dialog's; ↩
+    /// starts every row in its own worktree, and one that fails stays to retry.
+    #[tokio::test]
+    async fn start_agents_starts_a_session_per_line() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, KnownRepo, Reply, RepoList};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let spawned: Arc<Mutex<Vec<SpawnSpec>>> = Arc::default();
+        let kept = spawned.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            let mut next = 10;
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                let answer = match msg {
+                    ClientMsg::Repos { req } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Repos {
+                            list: RepoList {
+                                repos: ["/r/api", "/r/web"]
+                                    .map(|p| KnownRepo {
+                                        path: p.into(),
+                                        label: p.into(),
+                                        added: false,
+                                    })
+                                    .to_vec(),
+                                folders: vec![],
+                                hidden: vec![],
+                            },
+                        },
+                    },
+                    ClientMsg::List { req } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Sessions {
+                            sessions: vec![info(1)],
+                            layouts: vec![],
+                        },
+                    },
+                    // The web repository refuses: its row stays, with why.
+                    ClientMsg::Spawn { req, spec } => {
+                        let web = spec.cwd.as_deref() == Some(Path::new("/r/web"));
+                        kept.lock().unwrap().push(spec);
+                        if web {
+                            ServerMsg::Err {
+                                req,
+                                message: "web is busy".into(),
+                            }
+                        } else {
+                            next += 1;
+                            let mut s = info(next);
+                            s.name = format!("agent-{next}");
+                            ServerMsg::Ok {
+                                req,
+                                reply: Reply::Session { info: Box::new(s) },
+                            }
+                        }
+                    }
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = vec![info(1)];
+        app.restore(Anchor::Session(None));
+
+        // A pasted list: the footer offers to review it, ↩ opens the dialog.
+        app.on_input(b"n".to_vec()).await;
+        app.on_input(
+            b"\x1b[200~Add token expiry\nBadge count in web\nCache the release build\x1b[201~"
+                .to_vec(),
+        )
+        .await;
+        let foot = home_screen(&app, 120).last().cloned().unwrap();
+        assert!(foot.contains("review and start 3"), "{foot}");
+        app.on_input(b"\r".to_vec()).await;
+        let b = app.batch.as_ref().expect("Start agents is open");
+        assert_eq!(b.summary(), "3 tasks · api, web");
+        let screen = home_screen(&app, 120);
+        let text = screen.join("\n");
+        assert!(
+            text.contains("Start agents") && text.contains("Badge count in web"),
+            "{text}"
+        );
+        let foot = screen.last().unwrap();
+        assert!(
+            foot.contains("start them all") && foot.contains("esc back") && !foot.contains("j/k"),
+            "the dialog's keys alone: {foot}"
+        );
+        // Letters are the dialog's: `g` isn't a section, `q` doesn't quit.
+        app.on_input(b"gq".to_vec()).await;
+        assert!(app.batch.is_some() && !app.quit && app.section() == Section::Inbox);
+
+        // Esc: back to the draft, typing, as it was.
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.batch.is_none() && app.composer.typing);
+        assert_eq!(
+            app.composer.text,
+            "Add token expiry\nBadge count in web\nCache the release build"
+        );
+
+        // The third on codex, then ↩ starts all three; web refuses.
+        app.on_input(b"\r".to_vec()).await;
+        app.on_input(b"jj\x1b[Z\x1b[Z\x1b[Z".to_vec()).await;
+        app.on_input(b"\r".to_vec()).await;
+        let specs = std::mem::take(&mut *spawned.lock().unwrap());
+        let got: Vec<(Vec<String>, Option<PathBuf>, Option<String>)> = specs
+            .into_iter()
+            .map(|s| (s.command, s.cwd, s.worktree))
+            .collect();
+        let w = || Some(String::new());
+        assert_eq!(
+            got,
+            [
+                (
+                    vec!["claude".into(), "Add token expiry".into()],
+                    Some("/r/api".into()),
+                    w()
+                ),
+                (
+                    vec!["claude".into(), "Badge count in web".into()],
+                    Some("/r/web".into()),
+                    w()
+                ),
+                (
+                    vec!["codex".into(), "Cache the release build".into()],
+                    Some("/r/api".into()),
+                    w()
+                ),
+            ]
+        );
+        assert!(app.view.is_none(), "several: nothing attaches");
+        let b = app.batch.as_ref().expect("the refused row stays");
+        assert_eq!(b.rows.len(), 1);
+        assert_eq!(b.rows[0].failed.as_deref(), Some("web is busy"));
+        assert!(
+            app.status
+                .starts_with("started 2 sessions, 1 couldn't start"),
+            "{}",
+            app.status
+        );
+        assert!(
+            home_screen(&app, 120)
+                .join("\n")
+                .contains("couldn't start: web is busy")
+        );
+
+        // tab moves it to api; ↩ starts it and the dialog closes, the draft gone.
+        app.on_input(b"\t\r".to_vec()).await;
+        assert!(app.batch.is_none());
+        assert_eq!(app.status, "started 1 session");
+        assert!(app.composer.text.is_empty() && !app.composer.typing);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -11,7 +11,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 | Where | Key | Does |
 |---|---|---|
 | Home | `↩` | open the selected session |
-| | `n` · `/` | type a task in the composer, the Inbox's top row (`+ New session`): `↩` starts the agent on it in a worktree of its own and attaches, `^f` files it to the backlog, `alt-↩` adds a line, `tab` · `shift-tab` change the repository · agent, `Esc` keeps the draft |
+| | `n` · `/` | type a task in the composer, the Inbox's top row (`+ New session`): `↩` starts the agent on it in a worktree of its own and attaches, `^f` files it to the backlog, `alt-↩` adds a line (with several, `↩` opens Start agents: a row per line, `tab` · `shift-tab` change the row's repository · agent, `d` drops it, `↩` starts them all), `tab` · `shift-tab` change the repository · agent, `Esc` keeps the draft |
 | | `#` | find a backlog item by number or title: `↩` starts a ready one, opens the session of one already running |
 | | `s` | on the composer: start the top ready item |
 | | `x` · `r` | kill · rename |
