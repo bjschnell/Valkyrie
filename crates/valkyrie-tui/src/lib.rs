@@ -13228,6 +13228,11 @@ mod tests {
         app.settings = Settings::default();
         app.sessions = vec![info(1)];
         app.view = Some(Attached::new(1, "proj1".into(), None));
+        // No terminal in CI: the bar's row comes from a fixed size.
+        app.fixed_size = Some(Size {
+            cols: 100,
+            rows: 24,
+        });
 
         // Tab mode's key, then `?`.
         app.on_input(b"\x1c?".to_vec()).await;
@@ -13252,8 +13257,7 @@ mod tests {
             y,
             release: false,
         };
-        let bottom = app.screen().unwrap().rows;
-        app.on_mouse(press(from + 1, bottom)).await;
+        app.on_mouse(press(from + 1, 24)).await;
         assert!(app.help);
         // A raw SGR press at (3, 3), through the input path.
         app.on_input(b"\x1b[<0;4;4M".to_vec()).await;
