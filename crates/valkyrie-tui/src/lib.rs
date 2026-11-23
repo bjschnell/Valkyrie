@@ -6571,17 +6571,30 @@ impl App {
         if let Some(summary) = &status.summary {
             head.push(Line::from(summary.clone().fg(t.fg)));
         }
-        head.push(Line::from(
-            format!(
-                "── screen {}",
-                "─".repeat((inner.width as usize).saturating_sub(10))
-            )
-            .fg(t.border),
-        ));
-        let head_height = head.len() as u16 + u16::from(status.summary.is_some()); // room to wrap
+        let head_height = head.len() as u16 + 1 + u16::from(status.summary.is_some()); // a gap, room to wrap
         let [top, screen] =
             Layout::vertical([Constraint::Length(head_height), Constraint::Fill(1)]).areas(inner);
         frame.render_widget(Paragraph::new(head).wrap(Wrap { trim: true }), top);
+
+        // The screen sits in a recessed inset, out to the frame's padding, so an
+        // agent's own prompt reads as its screen and not as more of ours.
+        let surface = if focused { t.panel } else { t.bg };
+        let inset = Rect {
+            x: screen.x.saturating_sub(1).max(area.x + 1),
+            width: (screen.width + 2).min(area.width.saturating_sub(2)),
+            ..screen
+        };
+        if inset.height == 0 {
+            return;
+        }
+        let bg = t.recessed(surface);
+        frame.render_widget(Block::new().style(style::Style::new().bg(bg)), inset);
+        let [label, screen] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(Rect {
+                x: inset.x + 1,
+                width: inset.width.saturating_sub(2),
+                ..inset
+            });
 
         let text = match &self.preview {
             Some((id, text)) if *id == session.id => text.as_str(),
@@ -6593,6 +6606,32 @@ impl App {
             .rposition(|l| !l.trim().is_empty())
             .map_or(0, |i| i + 1);
         let start = end.saturating_sub(screen.height as usize);
+        let shown = end - start;
+        let mut left = vec![
+            "screen".fg(t.dim()).bold(),
+            if session.exited.is_some() {
+                " · ended".fg(t.muted)
+            } else {
+                " · live".fg(t.muted)
+            },
+        ];
+        if shown > 0 {
+            left.push(
+                format!(" · last {shown} line{}", if shown == 1 { "" } else { "s" }).fg(t.muted),
+            );
+        }
+        frame.render_widget(Paragraph::new(Line::from(left)), label);
+        // At home Enter attaches; the peek says what a click does itself.
+        if !focused {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    "↩".fg(t.accent).bold(),
+                    " attach".fg(t.muted),
+                ]))
+                .alignment(ratatui::layout::Alignment::Right),
+                label,
+            );
+        }
         let body: Vec<Line> = lines[start..end]
             .iter()
             .map(|l| Line::from(l.to_string().fg(t.muted)))
@@ -10441,6 +10480,29 @@ mod tests {
                     continue;
                 }
                 assert!(text.contains(want), "{} theme lacks {want:?}", theme.name);
+            }
+            // The screen is a recessed inset with its own label, not a rule.
+            let row_of = |want: &str| {
+                (0..buffer.area.height).find_map(|y| {
+                    let row: String = (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect();
+                    row.find(want).map(|i| (row[..i].chars().count() as u16, y))
+                })
+            };
+            assert!(!text.contains("── screen"), "{}", theme.name);
+            let (x, y) = row_of("screen · live · last 6 lines").expect(theme.name);
+            assert!(
+                row_of("↩ attach").is_some_and(|(_, ay)| ay == y),
+                "{}",
+                theme.name
+            );
+            let (px, py) = row_of("Do you want to proceed?").unwrap();
+            assert!(py > y, "{}", theme.name);
+            let well = theme.recessed(theme.bg);
+            assert_ne!(well, theme.bg, "{}", theme.name);
+            for (cx, cy) in [(x, y), (px, py), (x - 1, py)] {
+                assert_eq!(buffer[(cx, cy)].bg, well, "{} at {cx},{cy}", theme.name);
             }
             snapshot(buffer, theme.name);
         }
