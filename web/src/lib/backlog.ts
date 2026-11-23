@@ -2,7 +2,7 @@
 // rather than dragged between columns, so it can't fall out of step.
 
 import { ITEM_KINDS } from "../proto";
-import type { Item, ItemChange, ItemFacts, ItemKind, ItemNote, KeptItem, LaunchOffer, OrderApplied, OrderProposal, OrderStep, Priority, SessionInfo, ShippedItem } from "../proto";
+import type { Item, ItemChange, ItemFacts, ItemKind, ItemNote, KeptItem, LaunchOffer, Priority, SessionInfo, ShippedItem } from "../proto";
 
 export type Lane = "proposed" | "needs" | "running" | "review" | "backlog" | "done";
 
@@ -349,58 +349,12 @@ export function editChange(
   return Object.keys(change).length > 1 ? change : null;
 }
 
-/** The repository a build order is asked for from the board: the one it shows, else
- * the only one its open items are in; null when that's no one or several. */
-export function planScope(repo: RepoFilter, items: Item[]): string | null {
-  if (repo !== null) return repo || null;
-  const roots = new Set(items.filter((i) => i.status === "open" && i.project).map((i) => i.project as string));
-  return roots.size === 1 ? [...roots][0] : null;
-}
-
 /** The launch offers the board shows: the shown repository's, or every one. */
 export const launchesShown = (offers: LaunchOffer[], repo: RepoFilter) =>
   offers.filter((o) => repo === null || o.project === repo);
 
 /** What a launch offer starts: `claude`, `codex · gpt-5`. */
 export const launchesOn = (o: LaunchOffer) => (o.model ? `${o.agent} · ${o.model}` : o.agent);
-
-/** The build orders the board shows: the shown repository's, or every one. */
-export const ordersShown = (orders: OrderProposal[], repo: RepoFilter) =>
-  orders.filter((o) => repo === null || o.project === repo);
-
-/** The page a repository's build order opens on: `#/backlog/order/%2Fhome%2Fme%2Fvalk`. */
-export const orderHref = (project: string) => `#/backlog/order/${encodeURIComponent(project)}`;
-
-/** A build order's size for its banner: `23 items, 9 to change`. */
-export function orderSize(order: OrderProposal): string {
-  const n = order.steps.length;
-  const changing = order.steps.filter(changesSomething).length;
-  const items = `${n} item${n === 1 ? "" : "s"}`;
-  return changing ? `${items}, ${changing} to change` : `${items}, nothing to change`;
-}
-
-/** What accepting `step` changes on `item`: `p2→p1, after #37`; empty for nothing. */
-export function stepChanges(step: OrderStep, item: Item | undefined, items: Item[] = []): string {
-  const parts: string[] = [];
-  if (step.priority) parts.push(item ? `${priority(item)}→${step.priority}` : step.priority);
-  if (step.blocked_by) {
-    const had = item?.blocked_by ?? [];
-    const added = step.blocked_by.filter((b) => !had.includes(b));
-    if (added.length) parts.push(`after ${added.map((b) => `#${itemNo(items, b)}`).join(", ")}`);
-  }
-  return parts.join(", ");
-}
-
-/** Whether accepting `step` changes anything. */
-export const changesSomething = (step: OrderStep) => step.priority !== undefined || step.blocked_by !== undefined;
-
-/** The toast after answering a build order. */
-export function appliedSummary(accept: boolean, applied: OrderApplied, items: Item[] = []): string {
-  if (!accept) return "Build order declined: nothing changed";
-  const changed = applied.changed.length ? `Changed ${applied.changed.map((i) => `#${itemNo(items, i)}`).join(" ")}` : "Nothing changed";
-  const left = (applied.skipped ?? []).map(([id, why]) => `#${itemNo(items, id)} left: ${why}`);
-  return [changed, ...left].join("; ");
-}
 
 /** The agent `item` starts on: the one it was last launched with (decision #46),
  * else `fallback` (the agent last picked on this device), else claude. */

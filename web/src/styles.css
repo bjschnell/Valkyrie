@@ -1600,9 +1600,9 @@ html.with-tabs .offline-banner {
 }
 
 /* One primary button per view (#250): the view's own. In an item of a list
-   (a queue card, a proposal, a build order) the main answer is tinted, not
+   (a queue card, a proposal, a ready item) the main answer is tinted, not
    filled, so a list of ten doesn't shout ten times. */
-:is(.card, .order-card, .supervisor-card) .primary {
+:is(.card, .supervisor-card) .primary {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
@@ -3910,144 +3910,12 @@ html.with-tabs .offline-banner {
   border-top: 1px solid var(--divider);
 }
 
-/* A build order waiting on the user (ADR-0019 §2), above the board. */
-.order-card {
-  margin-bottom: var(--space-35);
-  padding: var(--space-3) var(--space-35);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md);
-  background: var(--card);
-}
-
-.order-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-1) var(--space-25);
-  margin-bottom: var(--space-2);
-}
-
-.order-title {
-  font-weight: var(--weight-semibold);
-}
-
-.order-why,
-.order-reason {
-  color: var(--muted);
-  font-size: var(--text-sm);
-}
-
-.order-steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: var(--space-15);
-}
-
-.order-step {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  min-width: 0;
-  cursor: pointer;
-}
-
-.order-nobox {
-  display: inline-block;
-  width: 13px;
-}
-
-.order-id {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.order-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.order-change {
-  color: var(--accent);
-  font-size: var(--text-sm);
-  white-space: nowrap;
-}
-
-.order-reason {
-  margin-left: 21px;
-}
-
-.order-skipped .order-name,
-.order-skipped .order-change {
-  color: var(--muted);
-  text-decoration: line-through;
-}
-
+/* A row of answers under a card: Drop and Keep, Leave and Start. */
 .order-actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-25);
-}
-
-/* On the board a build order is one line; its steps are a page of their own. */
-.order-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--space-25);
-}
-
-.order-banner .order-head {
-  flex: 1;
-  min-width: 0;
-  margin-bottom: 0;
-}
-
-.order-banner .order-why {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.order-page .order-steps {
-  gap: var(--space-25);
-}
-
-/* With the room of a page, a long title wraps instead of losing its end. */
-.order-page .order-step {
-  flex-wrap: wrap;
-}
-
-.order-page .order-name {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.order-n {
-  min-width: 2.2ch;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-/* Accept and Decline stay in reach however long the order runs. */
-.order-bar {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
-  margin: var(--space-35) -14px 0;
-  padding: var(--space-3) var(--space-35);
-  padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--line);
-  background: var(--page);
-}
-
-.order-all {
-  margin-right: auto;
 }
 
 .backlog-filter select,

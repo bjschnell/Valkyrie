@@ -1,7 +1,7 @@
 //! The supervisor page (backlog #180): `s` on the home screen. What the
 //! supervisor waits on you for, each with its keys, and what it did: the steps
-//! you answered, the ones policies took without asking, the build orders you
-//! answered. Opened on purpose and closed again, never a pane that stays up.
+//! you answered and the ones policies took without asking. Opened on purpose
+//! and closed again, never a pane that stays up.
 
 use crate::search::{Search, Searched};
 use crate::theme::Theme;
@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use valkyrie_proto::PrState;
 use valkyrie_proto::supervisor::Watch;
 use valkyrie_proto::{
-    Decision, DecisionKind, DecisionStatus, LaunchOffer, OrderProposal, QueueItem, SessionId, Step,
-    StepAction, SupervisorEntry,
+    Decision, DecisionKind, DecisionStatus, LaunchOffer, QueueItem, SessionId, Step, StepAction,
+    SupervisorEntry,
 };
 
 /// Something the supervisor waits on you for.
@@ -30,23 +30,15 @@ pub(crate) enum Wait {
     },
     /// A ready item it offers to start.
     Launch(LaunchOffer),
-    /// A build order to review.
-    Order {
-        project: PathBuf,
-        id: u64,
-        steps: usize,
-    },
     /// A step policy it learned from your answers, to accept or reject.
     Policy(Decision),
 }
 
 /// Everything waiting on you, in the order the page lists it: flags first, since
-/// a red or conflicting PR is the most urgent, then ready items, build orders and
-/// policies.
+/// a red or conflicting PR is the most urgent, then ready items and policies.
 pub(crate) fn waiting(
     queue: &[QueueItem],
     launches: &[LaunchOffer],
-    orders: &[OrderProposal],
     proposals: &[Decision],
 ) -> Vec<Wait> {
     let flags = queue.iter().filter_map(|q| {
@@ -60,21 +52,12 @@ pub(crate) fn waiting(
         })
     });
     let launches = launches.iter().cloned().map(Wait::Launch);
-    let orders = orders.iter().map(|o| Wait::Order {
-        project: o.project.clone(),
-        id: o.id,
-        steps: o.steps.len(),
-    });
     let policies = proposals
         .iter()
         .filter(|d| d.kind == DecisionKind::Policy && d.status == DecisionStatus::Proposed)
         .cloned()
         .map(Wait::Policy);
-    flags
-        .chain(launches)
-        .chain(orders)
-        .chain(policies)
-        .collect()
+    flags.chain(launches).chain(policies).collect()
 }
 
 /// What a key on the page asks the app to do.
@@ -91,8 +74,6 @@ pub(crate) enum Do {
         id: u64,
         launch: bool,
     },
-    /// Open the backlog with this repository's build order over it.
-    OpenOrder(PathBuf),
     /// Accept or reject a proposed policy.
     Review {
         project: PathBuf,
@@ -147,8 +128,7 @@ impl Page {
     }
 
     /// Keys while the page is open: ↑/↓ (j/k) pick what waits; `a` (or ↩) takes
-    /// what's offered, `o` the other step, `d` leaves or rejects it; ↩ on a build
-    /// order opens it; `c` opens the supervisor session, starting it if none
+    /// what's offered, `o` the other step, `d` leaves or rejects it; `c` opens the supervisor session, starting it if none
     /// runs; Esc or `q` closes. The list stays live (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8], waits: &[Wait]) -> Vec<Do> {
         let mut out = Vec::new();
@@ -216,7 +196,7 @@ impl Page {
         ]));
         if waits.is_empty() {
             lines.push(
-                "   Nothing: no flag, ready item, build order or policy waits."
+                "   Nothing: no flag, ready item or policy waits."
                     .fg(t.muted)
                     .into(),
             );
@@ -422,9 +402,6 @@ fn take(w: &Wait, yes: bool) -> Do {
             id: o.id,
             launch: yes,
         },
-        // Accepting one is a page of ticks, not a key: it opens where they are.
-        Wait::Order { project, .. } if yes => Do::OpenOrder(project.clone()),
-        Wait::Order { .. } => Do::Say("↩ opens the build order: d declines it there".into()),
         Wait::Policy(d) => Do::Review {
             project: d.project.clone(),
             id: d.id,
@@ -451,17 +428,6 @@ fn describe(w: &Wait) -> (&'static str, String, String) {
             "ready",
             format!("#{} {} ({})", o.number, o.title, o.why),
             "a start · d leave".into(),
-        ),
-        Wait::Order { project, steps, .. } => (
-            "order",
-            format!(
-                "build order for {}: {steps} items",
-                project
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-            "↩ review".into(),
         ),
         Wait::Policy(d) => (
             "policy",
@@ -495,26 +461,19 @@ mod tests {
     }
 
     #[test]
-    fn waiting_lists_ready_items_orders_and_only_proposed_policies() {
-        let order: OrderProposal = serde_json::from_value(serde_json::json!({
-            "id": 9, "project": "/r/app", "made": 0, "trigger": "you asked",
-            "steps": [{"item": 1, "reason": ""}, {"item": 2, "reason": ""}]
-        }))
-        .unwrap();
+    fn waiting_lists_ready_items_and_only_proposed_policies() {
         let waits = waiting(
             &[],
             &[launch()],
-            &[order],
             &[
                 policy(DecisionStatus::Proposed, DecisionKind::Policy),
                 policy(DecisionStatus::Active, DecisionKind::Policy),
                 policy(DecisionStatus::Proposed, DecisionKind::Gotcha),
             ],
         );
-        assert_eq!(waits.len(), 3);
+        assert_eq!(waits.len(), 2);
         assert!(matches!(waits[0], Wait::Launch(_)));
-        assert!(matches!(waits[1], Wait::Order { steps: 2, .. }));
-        assert!(matches!(&waits[2], Wait::Policy(d) if d.id == 12));
+        assert!(matches!(&waits[1], Wait::Policy(d) if d.id == 12));
     }
 
     #[test]
@@ -525,11 +484,6 @@ mod tests {
 
     #[test]
     fn keys_take_leave_and_open_what_waits() {
-        let order = Wait::Order {
-            project: "/r/app".into(),
-            id: 9,
-            steps: 2,
-        };
         let flag = Wait::Flag {
             session: 4,
             name: "app".into(),
@@ -544,7 +498,6 @@ mod tests {
         let waits = [
             flag,
             Wait::Launch(launch()),
-            order,
             Wait::Policy(policy(DecisionStatus::Proposed, DecisionKind::Policy)),
         ];
         let mut page = Page::default();
@@ -573,8 +526,6 @@ mod tests {
                 launch: false
             }]
         );
-        assert_eq!(page.keys(b"j\r", &waits), [Do::OpenOrder("/r/app".into())]);
-        assert!(matches!(&page.keys(b"d", &waits)[..], [Do::Say(_)]));
         assert_eq!(
             page.keys(b"ja", &waits),
             [Do::Review {

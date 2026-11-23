@@ -41,7 +41,6 @@ export function Palette({ onClose, onShortcuts }: { onClose: () => void; onShort
   const queue = useApp((s) => s.queue);
   const proposals = useApp((s) => s.proposals);
   const items = useApp((s) => s.items);
-  const orders = useApp((s) => s.orders);
   // What the Docs page last loaded, at once, then the daemon's (it marks none read).
   const docs = useCached("docs", allDocs).data?.docs;
   const look = useLook();
@@ -58,13 +57,12 @@ export function Palette({ onClose, onShortcuts }: { onClose: () => void; onShort
         needs: queue.map((q) => q.session),
         proposals,
         items,
-        orders,
         docs: docs ?? [],
         pages: PAGES,
         looks: lookList().map((key) => ({ key, ...lookText(key) })),
         look,
       }),
-    [sessions, queue, proposals, items, orders, docs, look, looksVersion],
+    [sessions, queue, proposals, items, docs, look, looksVersion],
   );
   const shown = useMemo(() => rank(all, query).slice(0, SHOWN), [all, query]);
   const pick = Math.max(0, shown.findIndex((e) => e.key === sel));

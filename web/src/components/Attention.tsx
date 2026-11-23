@@ -1,14 +1,14 @@
 // The records in the attention queue (#251): decision proposals, the supervisor's
-// ready items and build orders (Decide), and agent-filed backlog items batched
+// ready items (Decide), and agent-filed backlog items batched
 // per repository (Filed). Each is a row with a square marker that opens into the
 // card that answers it; sessions keep their round dot and their own card.
 import { useMemo, useState } from "react";
 import { attention, filedLine, type Attn } from "../lib/attention";
-import { base, launchesOn, orderHref, orderSize } from "../lib/backlog";
+import { base, launchesOn } from "../lib/backlog";
 import { HASH } from "../lib/routes";
 import { age } from "../lib/time";
 import { answerLaunch, useApp } from "../store";
-import type { LaunchOffer, OrderProposal } from "../proto";
+import type { LaunchOffer } from "../proto";
 import { ProposalCard } from "./Decisions";
 import { Chevron } from "./icons";
 
@@ -17,11 +17,10 @@ export function useAttention(): Attn[] {
   const queue = useApp((s) => s.queue);
   const proposals = useApp((s) => s.proposals);
   const launches = useApp((s) => s.launches);
-  const orders = useApp((s) => s.orders);
   const items = useApp((s) => s.items);
   return useMemo(
-    () => attention({ queue, proposals, launches, orders, items }),
-    [queue, proposals, launches, orders, items],
+    () => attention({ queue, proposals, launches, items }),
+    [queue, proposals, launches, items],
   );
 }
 
@@ -46,8 +45,6 @@ function line(a: RecordItem): { name: string; where: string; ask: string } {
       };
     case "launch":
       return { name: a.offer.title, where: `${base(a.offer.project)}#${a.offer.number}`, ask: `ready to start · ${a.offer.why}` };
-    case "order":
-      return { name: `Build order for ${base(a.order.project)}`, where: base(a.order.project), ask: `${orderSize(a.order)} · ${a.order.trigger}` };
   }
 }
 
@@ -97,7 +94,7 @@ export function RecordRow({
 }
 
 /** The card that answers a record: Accept · Edit · Reject for a decision, Start or
- * Leave for a ready item, Review for a build order, Triage for filed items. */
+ * Leave for a ready item, Triage for filed items. */
 export function RecordCard({ a }: { a: RecordItem }) {
   if (a.kind === "filed") return <FiledCard a={a} />;
   switch (a.what) {
@@ -105,8 +102,6 @@ export function RecordCard({ a }: { a: RecordItem }) {
       return <ProposalCard d={a.decision} />;
     case "launch":
       return <LaunchCard offer={a.offer} />;
-    case "order":
-      return <OrderCard order={a.order} />;
   }
 }
 
@@ -137,25 +132,6 @@ function LaunchCard({ offer }: { offer: LaunchOffer }) {
         </button>
         <button className="primary" disabled={busy} onClick={() => void act(true)}>
           Start
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function OrderCard({ order }: { order: OrderProposal }) {
-  return (
-    <section className="supervisor-card">
-      <div className="supervisor-card-head">
-        <span className="tag">order</span>
-        <span className="supervisor-card-title">Build order for {base(order.project)}</span>
-      </div>
-      <div className="supervisor-card-sub">
-        {orderSize(order)} · {order.trigger}
-      </div>
-      <div className="order-actions">
-        <button className="primary" onClick={() => (location.hash = orderHref(order.project))}>
-          Review
         </button>
       </div>
     </section>

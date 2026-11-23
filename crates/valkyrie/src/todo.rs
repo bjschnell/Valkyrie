@@ -5,8 +5,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use valkyrie_proto::client::Client;
 use valkyrie_proto::{
-    AgentState, Item, ItemChange, ItemKind, ItemStatus, NewItem, OrderProposal, Priority,
-    SessionInfo, Size,
+    AgentState, Item, ItemChange, ItemKind, ItemStatus, NewItem, Priority, SessionInfo, Size,
 };
 
 #[derive(Subcommand)]
@@ -75,27 +74,6 @@ pub enum TodoCmd {
         /// Only the items for the repository holding DIR (`-C .` for the one you're in).
         #[arg(short = 'C', long, value_name = "DIR")]
         dir: Option<PathBuf>,
-    },
-    /// Propose a build order for a repository's open items: what to do first,
-    /// why, and the priority and after-links that make the board show it. A model
-    /// works it out (`valk decisions auto` must be on). Nothing changes until you
-    /// accept it: all of it, or only some items with `--accept N…`.
-    Plan {
-        /// The repository holding DIR (default: the one you're in).
-        #[arg(short = 'C', long, value_name = "DIR")]
-        dir: Option<PathBuf>,
-        /// Show the one waiting instead of asking for a new one.
-        #[arg(long, conflicts_with_all = ["accept", "decline"])]
-        show: bool,
-        /// Accept the one waiting: every change, or only those items' changes.
-        #[arg(long, value_name = "N", num_args = 0.., conflicts_with = "decline")]
-        accept: Option<Vec<Ref>>,
-        /// Decline the one waiting: nothing changes.
-        #[arg(long)]
-        decline: bool,
-        /// As JSON.
-        #[arg(long)]
-        json: bool,
     },
     /// Accept an item an agent proposed, so it can be started.
     Accept { id: Ref },
@@ -476,7 +454,7 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
             json,
         } => {
             let repo = repo_of(dir, no_folder)?;
-            let (every, orders) = client.backlog().await?;
+            let every = client.items().await?;
             let names = Items {
                 all: every.clone(),
                 here: Items::load(client).await?.here,
@@ -528,71 +506,6 @@ pub async fn run(client: &Client, cmd: Option<TodoCmd>) -> Result<Option<Session
                     }
                 );
             }
-            for o in orders.iter().filter(|o| {
-                repo.as_ref()
-                    .is_none_or(|r| r.as_deref() == Some(&*o.project))
-            }) {
-                println!(
-                    "a build order waits for {} ({}): `valk todo plan -C {} --show`",
-                    o.project.display(),
-                    o.trigger,
-                    o.project.display()
-                );
-            }
-            Ok(None)
-        }
-        TodoCmd::Plan {
-            dir,
-            show,
-            accept,
-            decline,
-            json,
-        } => {
-            let dir = std::path::absolute(dir.unwrap_or(std::env::current_dir()?))?;
-            let Some(Some(project)) = repo_of(Some(dir.clone()), false)? else {
-                unreachable!("repo_of gives a repository for a folder");
-            };
-            if accept.is_some() || decline || show {
-                let (_, orders) = client.backlog().await?;
-                let items = Items::load(client).await?;
-                let Some(order) = orders.into_iter().find(|o| o.project == project) else {
-                    bail!(
-                        "no build order waits for {}: `valk todo plan` asks for one",
-                        project.display()
-                    );
-                };
-                if show {
-                    print_order(&order, &items, json)?;
-                    return Ok(None);
-                }
-                let only = match accept.as_deref() {
-                    Some([]) | None => None,
-                    Some(refs) => Some(items.ids(refs)?),
-                };
-                let applied = client
-                    .answer_order(project, order.id, accept.is_some(), only)
-                    .await?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&applied)?);
-                } else if accept.is_none() {
-                    println!("declined: nothing changed");
-                } else {
-                    match applied.changed.as_slice() {
-                        [] => println!("nothing changed"),
-                        changed => println!("changed {}", items.tags(changed)),
-                    }
-                    for (id, why) in &applied.skipped {
-                        println!("left {} as it is: {why}", items.tag_id(*id));
-                    }
-                }
-                return Ok(None);
-            }
-            if !json {
-                eprintln!("asking the model for a build order…");
-            }
-            let order = client.plan_order(dir).await?;
-            let items = Items::load(client).await?;
-            print_order(&order, &items, json)?;
             Ok(None)
         }
         TodoCmd::Next { dir } => {
@@ -1003,57 +916,6 @@ fn lane(item: &Item, sessions: &[SessionInfo], boot: u64) -> String {
         None if !item.sessions.is_empty() => "to review".into(),
         None => "backlog".into(),
     }
-}
-
-/// A build order, numbered, each item with what accepting it changes and why.
-fn print_order(order: &OrderProposal, names: &Items, json: bool) -> Result<()> {
-    let items = &names.all;
-    if json {
-        println!("{}", serde_json::to_string_pretty(order)?);
-        return Ok(());
-    }
-    let name = order.project.file_name().map_or_else(
-        || order.project.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    println!("Build order for {name} ({}):", order.trigger);
-    for (n, step) in order.steps.iter().enumerate() {
-        let item = items.iter().find(|i| i.id == step.item);
-        let title = item.map_or("(gone)", |i| i.title.as_str());
-        println!(
-            "{:>3}. {:<6} {}",
-            n + 1,
-            names.tag_id(step.item),
-            short(title, 60)
-        );
-        let mut changes = Vec::new();
-        if let (Some(p), Some(i)) = (step.priority, item) {
-            changes.push(format!("{} → {}", i.priority.as_str(), p.as_str()));
-        }
-        if let Some(after) = &step.blocked_by {
-            let had = item.map(|i| i.blocked_by.as_slice()).unwrap_or_default();
-            let added: Vec<u32> = after.iter().filter(|b| !had.contains(b)).copied().collect();
-            if !added.is_empty() {
-                changes.push(format!("after {}", names.tags(&added)));
-            }
-        }
-        if !changes.is_empty() {
-            println!("        change: {}", changes.join(", "));
-        }
-        if !step.reason.is_empty() {
-            println!("        why: {}", step.reason);
-        }
-    }
-    if order.steps.iter().any(|s| s.change().is_some()) {
-        println!(
-            "\n`valk todo plan --accept` applies every change, `--accept ID…` only those items', `--decline` none."
-        );
-    } else {
-        println!(
-            "\nIt changes nothing: the board already shows this order. `valk todo plan --decline` clears it."
-        );
-    }
-    Ok(())
 }
 
 fn folder(item: &Item) -> String {

@@ -81,16 +81,6 @@ is ready, a model is asked once whether the first waiting item really needs its
 unfinished blocker. Start two items this way and a `template: launch` / `on:
 ready` policy is proposed, and once accepted it starts them on its own.
 
-`valk todo plan` asks for a build order for a repository's open items: what to
-do first, why, and the priorities and after-links that make the board show it.
-Nothing changes until you accept it, all of it or only some items
-(`--accept ID…`). An order is never turned into a policy: priority stays your
-call each time. On the web board a waiting order is one line above the cards;
-Review opens it on a page of its own, where you untick what to leave and
-Accept or Decline. In the TUI's backlog, `O` opens it over the page: `␣` ticks,
-`t` ticks or unticks every change, `g`/`G` and PgUp/PgDn move through a long
-one, `↩` accepts and `d` declines.
-
 ## The supervisor page
 
 Everything the supervisor waits on you for, and what it did, in one place.
@@ -101,9 +91,9 @@ History's Supervisor tab (`s` from the Inbox's keyboard) shows the pull
 requests it watches and opens its session.
 
 - **Waiting on you** (TUI): flagged pull requests with the step offered, ready
-  items it offers to start, build orders to review, and step policies it learned
-  from your answers. Each is answered right there (`a` takes, `o` the other
-  step, `d` leaves or rejects; ↩ on a build order opens it). They still show
+  items it offers to start, and step policies it learned from your answers.
+  Each is answered right there (`a` takes, `o` the other step, `d` leaves or
+  rejects). They still show
   where they always did, on the session and the board, too. On the web a flag is
   on its session's card, and the rest are Decide rows in the Inbox.
 - **Watching:** each open pull request of yours the poll read on its last
@@ -113,7 +103,7 @@ requests it watches and opens its session.
   ended) drops off.
 - **What it did:** the last 90 days, newest first: each step you answered, each
   one a policy took without asking (named by the policy, so you can see what it
-  does on its own), and each build order you answered.
+  does on its own).
 
 The page is opened on purpose and closed again; it never stays up beside your
 sessions.

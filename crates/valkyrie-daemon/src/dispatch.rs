@@ -112,8 +112,9 @@ impl Book {
         self.pending.clone()
     }
 
-    /// Milliseconds since the epoch, past any before: exact as a JavaScript
-    /// number, as `order::Book::next_id` explains.
+    /// Milliseconds since the epoch, past any before. Not nanoseconds: the web
+    /// app reads numbers as doubles, exact only below 2^53, so a larger id would
+    /// come back rounded and never match.
     fn next_id(&mut self) -> u64 {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

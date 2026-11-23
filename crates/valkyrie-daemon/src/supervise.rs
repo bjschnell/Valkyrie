@@ -922,9 +922,7 @@ impl Registry {
     /// the daemon knows, newest first (backlog #180).
     pub(crate) fn supervisor_log(&self) -> Result<Reply> {
         let now = crate::session::now_ms() / 1000;
-        let answered = self.order_book.lock().unwrap().answered().to_vec();
-        let mut roots = self.around().roots;
-        roots.extend(answered.iter().map(|a| a.project.clone()));
+        let roots = self.around().roots;
         let mut roots: Vec<PathBuf> = roots.iter().map(|r| project::root(r)).collect();
         roots.sort();
         roots.dedup();
@@ -957,18 +955,6 @@ impl Registry {
                 })
                 .collect()
         };
-        entries.extend(
-            answered
-                .iter()
-                .filter(|a| now.saturating_sub(a.at) <= steps::STEP_DAYS * 86_400)
-                .map(|a| SupervisorEntry {
-                    at: a.at,
-                    project: project::root(&a.project),
-                    said: a.said(),
-                    policy: None,
-                    pr: None,
-                }),
-        );
         entries.sort_by_key(|e| std::cmp::Reverse(e.at));
         entries.truncate(LOG_SHOWN);
         let on = self.supervisor.lock().unwrap().on();

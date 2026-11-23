@@ -55,6 +55,8 @@ const MOVED: Record<string, string> = {
 /** Where an old page's hash lives now, or null for one that hasn't moved. */
 export function moved(hash: string): string | null {
   if (MOVED[hash]) return MOVED[hash];
+  // Build orders are gone (backlog #285): a push or bookmark to one opens the backlog.
+  if (hash.startsWith("#/backlog/order/")) return HASH.backlog;
   const doc = /^#\/docs\/([^/]+)$/.exec(hash);
   return doc ? `${HASH.docs}/${doc[1]}` : null;
 }

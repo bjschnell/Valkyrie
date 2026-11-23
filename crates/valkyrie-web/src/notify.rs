@@ -209,15 +209,15 @@ impl Watch {
     }
 
     /// The backlog's share of what waits on you, as the app counts it (#251): each
-    /// build order, each ready item offered to start, and the items agents filed
-    /// that nobody kept or dropped, one per repository.
-    pub fn records(&mut self, items: &[Item], orders: usize, launches: usize) {
+    /// ready item offered to start, and the items agents filed that nobody kept
+    /// or dropped, one per repository.
+    pub fn records(&mut self, items: &[Item], launches: usize) {
         let filed: std::collections::HashSet<_> = items
             .iter()
             .filter(|i| i.status == ItemStatus::Proposed && !i.agent_filed())
             .map(|i| i.project.clone())
             .collect();
-        self.records_len = orders + launches + filed.len();
+        self.records_len = launches + filed.len();
     }
 
     /// The app icon's badge: the attention queue's length, as the open app shows it.
@@ -437,12 +437,8 @@ async fn watch_daemon(
                 Some(ServerMsg::Proposals { items }) => {
                     watch.proposals(&items, app.visible(), now_ms())
                 }
-                Some(ServerMsg::Items {
-                    items,
-                    orders,
-                    launches,
-                }) => {
-                    watch.records(&items, orders.len(), launches.len());
+                Some(ServerMsg::Items { items, launches }) => {
+                    watch.records(&items, launches.len());
                     watch.launches(&launches, app.visible(), now_ms())
                 }
                 Some(ServerMsg::Notice { text, sound }) => {
@@ -663,10 +659,10 @@ mod tests {
             taken,
             backlog(5, "/r/web", ItemStatus::Open),
         ];
-        w.records(&items, 1, 1);
-        // 1 session + 2 decisions + 2 filed rows + 1 order + 1 launch.
-        assert_eq!(w.notice("x", None, 1).badge, 7);
-        w.records(&[], 0, 0);
+        w.records(&items, 1);
+        // 1 session + 2 decisions + 2 filed rows + 1 launch.
+        assert_eq!(w.notice("x", None, 1).badge, 6);
+        w.records(&[], 0);
         w.proposals(&[], false, 0);
         assert_eq!(w.notice("x", None, 1).badge, 1);
     }

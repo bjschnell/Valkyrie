@@ -2,19 +2,18 @@
 // Inbox's Needs you group, and the badge, tab title and app badge count them all.
 // Sessions are round dots (Ask, Stuck, Done); records are squares (Decide, Filed).
 import { agentFiled, base } from "./backlog";
-import type { Decision, Item, LaunchOffer, OrderProposal, QueueItem } from "../proto";
+import type { Decision, Item, LaunchOffer, QueueItem } from "../proto";
 
 export type AttnKind = "ask" | "stuck" | "done" | "decide" | "filed";
 
 /** The order kinds are drawn in; oldest first within each. */
 export const ATTN_ORDER: AttnKind[] = ["ask", "stuck", "done", "decide", "filed"];
 
-/** What a Decide row answers: a decision proposal, a ready item the supervisor
- * offers to start, or a build order. */
+/** What a Decide row answers: a decision proposal, or a ready item the
+ * supervisor offers to start. */
 export type Decide =
   | { what: "decision"; decision: Decision }
-  | { what: "launch"; offer: LaunchOffer }
-  | { what: "order"; order: OrderProposal };
+  | { what: "launch"; offer: LaunchOffer };
 
 export type Attn =
   | { kind: "ask" | "stuck" | "done"; key: string; since: number; item: QueueItem }
@@ -40,7 +39,6 @@ export interface Waiting {
   queue: QueueItem[];
   proposals: Decision[];
   launches: LaunchOffer[];
-  orders: OrderProposal[];
   items: Item[];
 }
 
@@ -56,8 +54,6 @@ export function attention(w: Waiting): Attn[] {
     out.push({ kind: "decide", key: `d${decision.project}#${decision.id}`, since: decision.created * 1000, what: "decision", decision });
   for (const offer of w.launches)
     out.push({ kind: "decide", key: `l${offer.project}:${offer.id}`, since: offer.made * 1000, what: "launch", offer });
-  for (const order of w.orders)
-    out.push({ kind: "decide", key: `o${order.project}:${order.id}`, since: order.made * 1000, what: "order", order });
   const byRepo = new Map<string, Item[]>();
   for (const item of w.items.filter(filedByAgent)) {
     const repo = item.project ?? "";

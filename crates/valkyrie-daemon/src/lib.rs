@@ -17,7 +17,6 @@ mod habit;
 mod history;
 mod merge_order;
 mod merged;
-mod order;
 mod overlap;
 mod overseer;
 mod pairing;
@@ -191,9 +190,6 @@ struct Registry {
     backlog: Mutex<valkyrie_context::backlog::Backlog>,
     /// Every backlog item, pushed with the queue.
     items: watch::Sender<backlog::Items>,
-    /// Build orders waiting on the user (ADR-0019 §2), pushed with the items.
-    orders: watch::Sender<order::Orders>,
-    order_book: Mutex<order::Book>,
     /// What the PR poll read on its last pass (backlog #181).
     watching: Mutex<watching::Watching>,
     /// Ready items the supervisor offers to start (ADR-0019 §2 `launch`), pushed
@@ -202,9 +198,6 @@ struct Registry {
     dispatch: Mutex<dispatch::Book>,
     /// Wakes the dispatch watcher: an item changed, or a blocker call came back.
     dispatch_kick: Notify,
-    /// What the build-order watcher should look at.
-    order_tx: mpsc::UnboundedSender<order::Trigger>,
-    order_rx: Mutex<Option<mpsc::UnboundedReceiver<order::Trigger>>>,
     /// The steps offered on flagged sessions (ADR-0019 §2).
     supervisor: Mutex<supervise::Supervisor>,
     /// Items a launch is starting a session on, not yet recorded on the item: a
@@ -530,7 +523,6 @@ fn new_registry(
     let (notes_written, notes_written_rx) = mpsc::unbounded_channel();
     let (answers, answers_rx) = mpsc::unbounded_channel();
     let (seen, seen_rx) = mpsc::unbounded_channel();
-    let (order_tx, order_rx) = mpsc::unbounded_channel();
     let own_socket = socket.clone();
     let registry = Arc::new(Registry {
         sessions: Mutex::default(),
@@ -576,13 +568,7 @@ fn new_registry(
             state_dir.join("backlog"),
         )),
         items: watch::Sender::new(Arc::default()),
-        orders: watch::Sender::new(Arc::default()),
         watching: Mutex::default(),
-        order_book: Mutex::new(order::Book::load(restore::per_daemon(
-            state_dir,
-            &own_socket,
-            "orders",
-        ))),
         launches: watch::Sender::new(Arc::default()),
         notices: broadcast::channel(16).0,
         notice_viewers: AtomicU32::new(0),
@@ -601,8 +587,6 @@ fn new_registry(
             &own_socket,
             "reruns",
         ))),
-        order_tx,
-        order_rx: Mutex::new(Some(order_rx)),
         launching: Mutex::default(),
         clients: Mutex::default(),
         next_conn: AtomicU64::new(0),
@@ -611,7 +595,6 @@ fn new_registry(
     valkyrie_proto::binary_id();
     registry.refresh_proposals();
     registry.refresh_items();
-    registry.refresh_orders();
     registry.refresh_launches();
     Ok((registry, rx))
 }
@@ -637,9 +620,6 @@ async fn serve_forever(
     }
     if let Some(seen) = registry.seen_rx.lock().unwrap().take() {
         tokio::spawn(facts::run(registry.clone(), seen));
-    }
-    if let Some(triggers) = registry.order_rx.lock().unwrap().take() {
-        tokio::spawn(order::run(registry.clone(), triggers));
     }
     tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(watch_prs(registry.clone()));
@@ -1492,7 +1472,6 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::DeleteItem { req, id } => (req, registry.delete_item(id, peer).await),
             ClientMsg::NoteItem { req, id, text } => (req, registry.note_item(id, &text, peer)),
             ClientMsg::ItemFacts { req, id } => (req, registry.item_facts(id).await),
-            ClientMsg::PlanOrder { req, cwd } => (req, registry.plan_order(cwd, peer).await),
             ClientMsg::TakeStep {
                 req,
                 session,
@@ -1505,18 +1484,6 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 id,
                 launch,
             } => (req, registry.answer_launch(project, id, launch, peer).await),
-            ClientMsg::AnswerOrder {
-                req,
-                project,
-                id,
-                accept,
-                items,
-            } => (
-                req,
-                registry
-                    .answer_order(project, id, accept, items, peer)
-                    .await,
-            ),
             ClientMsg::TakeItem {
                 req,
                 id,
@@ -1893,7 +1860,6 @@ async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
     let mut rx = registry.queue.subscribe();
     let mut proposals = registry.proposals.subscribe();
     let mut backlog = registry.items.subscribe();
-    let mut orders = registry.orders.subscribe();
     let mut launches = registry.launches.subscribe();
     let mut quota = registry.quota.subscribe();
     drop(registry);
@@ -1912,16 +1878,14 @@ async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
     if !send(ServerMsg::Proposals { items }).await {
         return;
     }
-    // Items, orders and launch offers go together: a proposal names its items.
+    // Items and launch offers go together: an offer names its item.
     let both =
         |backlog: &mut watch::Receiver<backlog::Items>,
-         orders: &mut watch::Receiver<order::Orders>,
          launches: &mut watch::Receiver<dispatch::Launches>| ServerMsg::Items {
             items: (**backlog.borrow_and_update()).clone(),
-            orders: (**orders.borrow_and_update()).clone(),
             launches: (**launches.borrow_and_update()).clone(),
         };
-    if !send(both(&mut backlog, &mut orders, &mut launches)).await {
+    if !send(both(&mut backlog, &mut launches)).await {
         return;
     }
     let reading = |quota: &mut watch::Receiver<quota::Held>| ServerMsg::Quota {
@@ -1941,15 +1905,11 @@ async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
                 Err(_) => return,
             },
             changed = backlog.changed() => match changed {
-                Ok(()) => both(&mut backlog, &mut orders, &mut launches),
-                Err(_) => return,
-            },
-            changed = orders.changed() => match changed {
-                Ok(()) => both(&mut backlog, &mut orders, &mut launches),
+                Ok(()) => both(&mut backlog, &mut launches),
                 Err(_) => return,
             },
             changed = launches.changed() => match changed {
-                Ok(()) => both(&mut backlog, &mut orders, &mut launches),
+                Ok(()) => both(&mut backlog, &mut launches),
                 Err(_) => return,
             },
             changed = quota.changed() => match changed {

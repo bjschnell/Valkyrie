@@ -61,7 +61,7 @@ agent stopped. Valkyrie tracks all of them and tells you which one needs you.
 - **A supervisor on your PRs.** When CI breaks or main moves, the fix is one
   tap away.
 - **A backlog that starts agents.** Jot a bug, tap to start an agent on it, and
-  get a build order proposed.
+  get the next ready one offered when it's done.
 - **Main stays yours.** No agent merges without your yes.
 
 ## The phone app

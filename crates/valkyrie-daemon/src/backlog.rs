@@ -37,7 +37,6 @@ impl Registry {
     pub(crate) fn items(&self) -> Reply {
         Reply::Items {
             items: self.backlog.lock().unwrap().load(),
-            orders: self.order_book.lock().unwrap().pending(),
             launches: self.dispatch.lock().unwrap().pending(),
         }
     }
@@ -109,12 +108,6 @@ impl Registry {
             "backlog item added"
         );
         self.refresh_items();
-        if let Some(project) = item.project.clone() {
-            if valkyrie_context::order::names_order(&item.body) {
-                self.noticed(crate::order::Trigger::Named(project.clone(), item.id));
-            }
-            self.noticed(crate::order::Trigger::Added(project));
-        }
         Ok(Reply::Item {
             item: Box::new(item),
             note: None,
@@ -1014,11 +1007,6 @@ impl Registry {
             .note(id, &by, text, origin, now_secs())?;
         tracing::info!(id, by, "backlog note left");
         self.refresh_items();
-        if let Some(project) = item.project.clone()
-            && valkyrie_context::order::names_order(text)
-        {
-            self.noticed(crate::order::Trigger::Named(project, id));
-        }
         Ok(Reply::Item {
             item: Box::new(item),
             note: None,

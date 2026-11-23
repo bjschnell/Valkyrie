@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { attention, filedLine, sessionKind, type Waiting } from "./attention";
-import type { AgentState, Decision, Item, LaunchOffer, OrderProposal, QueueItem } from "../proto";
+import type { AgentState, Decision, Item, LaunchOffer, QueueItem } from "../proto";
 
 const q = (session: number, state: AgentState, since: number, flag = false): QueueItem =>
   ({
@@ -14,12 +14,11 @@ const q = (session: number, state: AgentState, since: number, flag = false): Que
 const decision = (id: number, created: number) =>
   ({ id, project: "/r/api", kind: "decision", status: "proposed", title: `d${id}`, created }) as unknown as Decision;
 const offer = (id: number, made: number) => ({ id, project: "/r/api", item: 1, number: 1, title: "t", agent: "claude", why: "", made }) as LaunchOffer;
-const order = (id: number, made: number) => ({ id, project: "/r/web", made, trigger: "you asked", steps: [] }) as OrderProposal;
 const item = (id: number, project: string | undefined, created: number, more: Partial<Item> = {}) =>
   ({ id, number: id, title: `i${id}`, status: "proposed", project, created, by: "claude", ...more }) as unknown as Item;
 
 const list = (w: Partial<Waiting>) =>
-  attention({ queue: [], proposals: [], launches: [], orders: [], items: [], ...w });
+  attention({ queue: [], proposals: [], launches: [], items: [], ...w });
 
 describe("sessionKind", () => {
   it("files a session by what it waits on", () => {
@@ -39,10 +38,9 @@ describe("attention", () => {
       queue: [q(1, "review_ready", 5), q(2, "needs_input", 9), q(3, "blocked", 1), q(4, "needs_input", 3)],
       proposals: [decision(7, 2)],
       launches: [offer(1, 1)],
-      orders: [order(1, 3)],
       items: [item(10, "/r/web", 0)],
     });
-    expect(got.map((a) => a.key)).toEqual(["s4", "s2", "s3", "s1", "l/r/api:1", "d/r/api#7", "o/r/web:1", "f/r/web"]);
+    expect(got.map((a) => a.key)).toEqual(["s4", "s2", "s3", "s1", "l/r/api:1", "d/r/api#7", "f/r/web"]);
   });
 
   it("batches agent-filed items per repository, one row each", () => {

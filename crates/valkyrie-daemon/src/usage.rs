@@ -24,8 +24,6 @@ pub(crate) fn feature(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::ChangeItem { .. } => "change_item",
         ClientMsg::DeleteItem { .. } => "delete_item",
         ClientMsg::NoteItem { .. } => "note_item",
-        ClientMsg::PlanOrder { .. } => "plan_order",
-        ClientMsg::AnswerOrder { .. } => "answer_order",
         ClientMsg::AnswerLaunch { .. } => "answer_launch",
         ClientMsg::Supervise { .. } => "supervise",
         ClientMsg::SupervisorSession { .. } => "supervisor_session",

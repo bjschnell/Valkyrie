@@ -258,8 +258,6 @@ struct App {
     glance: Option<Glance>,
     /// The repositories pickers offer (backlog #240), as the backlog last fetched it.
     repo_list: valkyrie_proto::RepoList,
-    /// Build orders waiting on the user, as last pushed with the items.
-    orders: Vec<valkyrie_proto::OrderProposal>,
     /// Ready items the supervisor offers to start, as last pushed with the items.
     launches: Vec<valkyrie_proto::LaunchOffer>,
     /// The plan's quota, as last pushed (protocol 30).
@@ -514,7 +512,6 @@ impl App {
             newer_rx: None,
             shipping: None,
             ship_busy: false,
-            orders: Vec::new(),
             launches: Vec::new(),
             said: None,
             settings_cursor: None,
@@ -1645,10 +1642,11 @@ impl App {
         // home (rule 9: never the hint line).
         let t = self.settings.theme;
         let area = frame.area();
-        // Not over the backlog's own dialogs (the launch form, a build order).
-        let dialog = self.backlog.as_ref().is_some_and(|p| {
-            p.order.is_some() || matches!(p.typing, Some(backlog::Typing::Launch(_)))
-        });
+        // Not over the backlog's own dialog (the launch form).
+        let dialog = self
+            .backlog
+            .as_ref()
+            .is_some_and(|p| matches!(p.typing, Some(backlog::Typing::Launch(_))));
         // What a key said goes there too: a refusal, or where an editor's
         // text was kept, is seen on the page that said it (backlog #277).
         let said = match self.toast() {
@@ -3652,10 +3650,10 @@ impl App {
         self.inbox_rows().get(self.selected).copied()
     }
 
-    /// What waits on a decision: proposals, ready items the supervisor offers to
-    /// start, and build orders. One Needs-you row, counting each.
+    /// What waits on a decision: proposals and ready items the supervisor offers
+    /// to start. One Needs-you row, counting each.
     fn to_decide(&self) -> usize {
-        self.proposals.len() + self.launches.len() + self.orders.len()
+        self.proposals.len() + self.launches.len()
     }
 
     /// Backlog items agents filed that nobody has kept or dropped yet, oldest
@@ -4343,7 +4341,7 @@ impl App {
 
     /// What the supervisor waits on you for, from what the app holds.
     fn waiting(&self) -> Vec<supervisor::Wait> {
-        supervisor::waiting(&self.queue, &self.launches, &self.orders, &self.proposals)
+        supervisor::waiting(&self.queue, &self.launches, &self.proposals)
     }
 
     async fn open_supervisor(&mut self) {
@@ -4427,19 +4425,6 @@ impl App {
                     self.say(said);
                     self.refresh().await;
                     self.load_supervisor().await;
-                }
-                supervisor::Do::OpenOrder(project) => {
-                    let Some(order) = self.orders.iter().find(|o| o.project == project).cloned()
-                    else {
-                        self.say("that build order is gone".into());
-                        continue;
-                    };
-                    self.supervisor = None;
-                    self.open_backlog().await;
-                    if let Some(page) = &mut self.backlog {
-                        page.show_order(&order);
-                    }
-                    return;
                 }
                 supervisor::Do::Review {
                     project,
@@ -4938,7 +4923,6 @@ impl App {
 
     async fn open_backlog(&mut self) {
         let mut page = backlog::Page::default();
-        page.orders = self.orders.clone();
         page.launches = self.launches.clone();
         self.backlog = Some(page);
         self.backlog_facts().await;
@@ -4971,7 +4955,6 @@ impl App {
     async fn open_backlog_at(&mut self, id: u32) {
         self.toast = None;
         let mut page = backlog::Page::default();
-        page.orders = self.orders.clone();
         page.launches = self.launches.clone();
         self.backlog = Some(page);
         let at = self.backlog_rows().iter().position(|(_, i)| i.id == id);
@@ -5254,22 +5237,6 @@ impl App {
                     });
                 });
             }
-            Do::Plan(project) => {
-                let Some(tx) = self.said.clone() else {
-                    anyhow::bail!("not ready to ask yet");
-                };
-                let client = self.client.clone();
-                self.say("asking the model for a build order…".into());
-                // Off the event loop: the model can take a minute. The order itself
-                // arrives with the items; only the outcome is said here.
-                tokio::spawn(async move {
-                    let line = match client.plan_order(project).await {
-                        Ok(o) => format!("build order ready ({} items): O opens it", o.steps.len()),
-                        Err(e) => format!("no build order: {e:#}"),
-                    };
-                    let _ = tx.send(line);
-                });
-            }
             Do::AnswerLaunch {
                 project,
                 id,
@@ -5287,29 +5254,6 @@ impl App {
                     self.item_no(item)
                 )),
             },
-            Do::AnswerOrder {
-                project,
-                id,
-                accept,
-                items,
-            } => {
-                let applied = self.client.answer_order(project, id, accept, items).await?;
-                let mut said = match (accept, applied.changed.as_slice()) {
-                    (false, _) => "build order declined: nothing changed".to_owned(),
-                    (true, []) => "nothing changed".to_owned(),
-                    (true, ids) => format!(
-                        "changed {}",
-                        ids.iter()
-                            .map(|i| format!("#{}", self.item_no(*i)))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    ),
-                };
-                for (id, why) in &applied.skipped {
-                    said += &format!("; #{} left: {why}", self.item_no(*id));
-                }
-                self.say(said);
-            }
             Do::Add { kind, text } => {
                 // For the attached tab's repository, else the one the TUI is in.
                 // Another machine's paths can't be looked at here: the daemon
@@ -5371,12 +5315,7 @@ impl App {
             self.reviewing = self.reviewing.zip(last).map(|(i, last)| i.min(last));
             return Ok(true);
         }
-        if let ServerMsg::Items {
-            items,
-            orders,
-            launches,
-        } = msg
-        {
+        if let ServerMsg::Items { items, launches } = msg {
             let new = self.new_proposals.on_items(&items);
             if self.settings.proposals
                 && let Some(ping) = Ping::proposals(&new)
@@ -5386,10 +5325,8 @@ impl App {
             self.items = items;
             self.refresh_numbers();
             if let Some(page) = &mut self.backlog {
-                page.orders = orders.clone();
                 page.launches = launches.clone();
             }
-            self.orders = orders;
             self.launches = launches;
             return Ok(true);
         }
@@ -6380,17 +6317,11 @@ impl App {
         let n = self.to_decide();
         let mut what: Vec<String> = self.proposals.iter().map(|d| d.title.clone()).collect();
         what.extend(self.launches.iter().map(|l| format!("start {}", l.title)));
-        what.extend(
-            self.orders
-                .iter()
-                .map(|o| format!("build order for {}", base_name(&o.project))),
-        );
         let since = self
             .proposals
             .iter()
             .map(|d| d.created)
             .chain(self.launches.iter().map(|l| l.made))
-            .chain(self.orders.iter().map(|o| o.made))
             .min()
             .unwrap_or_default();
         record_row(
@@ -6467,7 +6398,7 @@ impl App {
             let mut lines = lines;
             // The row counts the supervisor's offers too; Enter opens the
             // proposals, so say where the rest are.
-            let offers = self.launches.len() + self.orders.len();
+            let offers = self.launches.len();
             if offers > 0 {
                 lines.push(Line::from(
                     format!("and {offers} for the supervisor: s opens them").fg(t.muted),
@@ -6503,12 +6434,6 @@ impl App {
                     self.launches
                         .iter()
                         .map(|l| Line::from(vec!["start  ".fg(t.muted), l.title.clone().fg(t.fg)]))
-                        .chain(self.orders.iter().map(|o| {
-                            Line::from(vec![
-                                "build order  ".fg(t.muted),
-                                base_name(&o.project).fg(t.fg),
-                            ])
-                        }))
                         .chain([Line::default(), "↩ open the supervisor".fg(t.muted).into()])
                         .collect(),
                 ),
@@ -8818,7 +8743,7 @@ enum InboxRow {
     Compose,
     /// A session waiting on you, by its place in the queue.
     Queue(usize),
-    /// Proposals, ready items and build orders, as one row.
+    /// Proposals and ready items, as one row.
     Decide,
     /// Items agents filed, not triaged, as one row.
     Filed,
@@ -9607,7 +9532,6 @@ mod tests {
         let mut items = vec![item(1, "open", "human"), item(2, "proposed", "claude")];
         let push = |items: &[Item]| ServerMsg::Items {
             items: items.to_vec(),
-            orders: vec![],
             launches: vec![],
         };
         app.on_push(push(&items)).unwrap();
@@ -9823,7 +9747,6 @@ mod tests {
                 item(3, "proposed", "/r/web", &[2]),
                 item(4, "open", "/r/web", &[]),
             ],
-            orders: vec![],
             launches: vec![],
         })
         .unwrap();
@@ -11091,7 +11014,6 @@ mod tests {
         // An open item, selected when the page opens.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![Item {
                 parent: None,
                 pr_merged: false,
@@ -11298,7 +11220,6 @@ mod tests {
         use valkyrie_proto::ItemStatus::{Open, Proposed};
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
                 item(2, "Flaky exit test", Proposed),
@@ -11367,7 +11288,6 @@ mod tests {
         // check then offers only those to ship.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
                 item(2, "Flaky exit test", Proposed),
@@ -13037,7 +12957,6 @@ mod tests {
         };
         app.on_push(ServerMsg::Items {
             items: vec![item(1), item(2), item(3)],
-            orders: vec![],
             launches: vec![],
         })
         .unwrap();
@@ -13828,7 +13747,6 @@ mod tests {
         };
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![waiting],
         })
         .unwrap();
