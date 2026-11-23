@@ -11,7 +11,6 @@ import { ChatView } from "./Chat";
 import { MicButton } from "./Mic";
 import { ScreenView, useDesktop, useWide } from "./Terminal";
 import { usePageKeys } from "../lib/pageKeys";
-import { scrollMotion } from "../lib/motion";
 import { sessionDock } from "../lib/sessionDock";
 
 const VIEW_KEY = "valk.view";
@@ -88,10 +87,11 @@ export function SessionView({ id }: { id: number }) {
   };
 
   // Keys on a desktop keyboard, vim-style, when you aren't typing.
-  const by = (dy: number) => scroller.current?.scrollBy({ top: dy, behavior: scrollMotion() });
+  // A key moved it, so it jumps (#198).
+  const by = (dy: number) => scroller.current?.scrollBy({ top: dy });
   const scrollTo = (top: number | "end") => () => {
     const el = scroller.current;
-    el?.scrollTo({ top: top === "end" ? el.scrollHeight : top, behavior: scrollMotion() });
+    el?.scrollTo({ top: top === "end" ? el.scrollHeight : top });
   };
   // In the terminal every key is the program's, these included.
   usePageKeys(
