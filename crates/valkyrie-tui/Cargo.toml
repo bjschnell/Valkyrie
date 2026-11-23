@@ -16,7 +16,7 @@ serde_json.workspace = true
 base64 = "0.23"
 unicode-width = "0.2"
 arboard = { version = "3.7", features = ["wayland-data-control"] }
-jiff = "0.2"
+jiff = "1.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 

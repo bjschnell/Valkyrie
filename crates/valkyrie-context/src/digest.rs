@@ -8,7 +8,7 @@
 use crate::project;
 use anyhow::{Context, Result, bail};
 use jiff::tz::TimeZone;
-use jiff::{Timestamp, Zoned, civil};
+use jiff::{Timestamp, ZonedDateTime, civil};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -684,10 +684,10 @@ pub fn entries(runs: &[Run], known: &Known, now: u64) -> Vec<DigestEntry> {
     out
 }
 
-fn zoned(ms: u64, tz: &TimeZone) -> Option<Zoned> {
+fn zoned(ms: u64, tz: &TimeZone) -> Option<ZonedDateTime> {
     Timestamp::from_millisecond(i64::try_from(ms).ok()?)
         .ok()
-        .map(|t| t.to_zoned(tz.clone()))
+        .map(|t| t.to_zoned_datetime(tz.clone()))
 }
 
 fn day_label(ms: u64, tz: &TimeZone) -> String {
@@ -828,14 +828,14 @@ pub fn parse_since(text: &str, now: u64, tz: &TimeZone) -> Result<u64> {
     }
     let today = zoned(now, tz).context("the clock")?.date();
     let start = match text {
-        "today" => today.to_zoned(tz.clone())?,
-        "yesterday" => today.yesterday()?.to_zoned(tz.clone())?,
+        "today" => today.to_zoned_datetime(tz.clone())?,
+        "yesterday" => today.yesterday()?.to_zoned_datetime(tz.clone())?,
         // A date parses from a date and time too, dropping the time: try the
         // time first.
         _ => match text.replace(' ', "T").parse::<civil::DateTime>() {
-            Ok(dt) if text.contains(':') => dt.to_zoned(tz.clone())?,
+            Ok(dt) if text.contains(':') => dt.to_zoned_datetime(tz.clone())?,
             _ => match text.parse::<civil::Date>() {
-                Ok(d) => d.to_zoned(tz.clone())?,
+                Ok(d) => d.to_zoned_datetime(tz.clone())?,
                 Err(_) => bail!(
                     "--since {text:?}: give 90m, 12h, 3d, today, yesterday, 2026-11-10 or \"2026-11-10 09:00\""
                 ),
