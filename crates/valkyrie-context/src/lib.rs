@@ -843,6 +843,42 @@ impl Store {
         Ok(Some(blocks + 1))
     }
 
+    /// Records a `ship` block on `branch`, pushed with no pull request, at `head`
+    /// (#88) and says whether it's the first for that head. The block asks once
+    /// per pushed head: an agent that heard it and still stops (waiting on CI,
+    /// not finished, its pull request refused) is let through until it pushes
+    /// again. Branches not blocked for [`FAILURE_DAYS`] are forgotten.
+    pub fn record_ship_block(
+        &self,
+        root: &Path,
+        branch: &str,
+        head: &str,
+        now: u64,
+    ) -> Result<bool> {
+        let path = self.base.join(project::key(root)).join("ship-block.json");
+        let mut all = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let map = all
+            .as_object_mut()
+            .context("ship-block.json isn't an object")?;
+        map.retain(|_, v| {
+            now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+        });
+        if map.get(branch).and_then(|v| v["head"].as_str()) == Some(head) {
+            return Ok(false);
+        }
+        map.insert(
+            branch.to_owned(),
+            serde_json::json!({"head": head, "at": now}),
+        );
+        self.mark_project(root)?;
+        write_atomic(&path, &format!("{all}\n"))?;
+        Ok(true)
+    }
+
     fn ci_fixes(&self, root: &Path) -> serde_json::Value {
         let path = self.base.join(project::key(root)).join("ci-fix.json");
         std::fs::read_to_string(path)
@@ -2442,6 +2478,23 @@ mod tests {
         );
         let later = 3 + FAILURE_DAYS * 86_400 + 1;
         assert_eq!(record("ccc", later), Some(1), "forgotten after a while");
+    }
+
+    #[test]
+    fn ship_blocks_once_per_branch_head() {
+        let f = Fixture::new("ship-block");
+        let record = |branch, head, at| {
+            f.store
+                .record_ship_block(&f.repo, branch, head, at)
+                .unwrap()
+        };
+        assert!(record("fix/a", "aaa", 1));
+        assert!(!record("fix/a", "aaa", 2), "same head: once");
+        assert!(record("fix/b", "aaa", 3), "another branch has its own");
+        assert!(record("fix/a", "bbb", 4), "a new push asks again");
+        assert!(!record("fix/a", "bbb", 5));
+        let later = 4 + FAILURE_DAYS * 86_400 + 1;
+        assert!(record("fix/a", "bbb", later), "forgotten after a while");
     }
 
     #[test]

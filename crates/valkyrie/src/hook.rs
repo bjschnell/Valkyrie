@@ -220,16 +220,18 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         policy::Source::User(id) => (id, "user"),
         policy::Source::Project(id) => (id, "project"),
     };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     if let Some(ship) = ship
         && policy::short(&ship, state.as_str())
     {
+        let head = work::head_commit(&dir);
+        let text = ship_block(&store, &root, &ship, state, &branch, head.as_deref(), now)?;
         let (policy, scope) = named(ship.until.1);
         payload["valk_continued"] = serde_json::json!({"template": "ship", "policy": policy,
             "scope": scope, "state": state.as_str(), "until": ship.until.0.as_str()});
-        return Some(policy::reason(&ship, state.as_str(), &branch));
+        return Some(text);
     }
     let (mode, source) = ci?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     if mode == policy::Ci::Agent {
         // Valkyrie can't read this CI, so it asks once per pushed head (ADR-0016
         // §5). Never on the stop right after a block, and never without a head to
@@ -293,6 +295,33 @@ fn policy_block(payload: &mut Value) -> Option<String> {
         &branch,
         &failed,
         block,
+    ))
+}
+
+/// The `ship` block for a stop in `state`, short of what `ship` asks for, on
+/// `branch` at `head`. Pushed with no pull request, it asks once per head (#88):
+/// the branch may be pushed only to run CI, and an agent told once that still
+/// stops has a reason. Uncommitted or unpushed work can't be waiting on CI, so it
+/// asks every time, as it does when the store can't count.
+fn ship_block(
+    store: &valkyrie_context::Store,
+    root: &Path,
+    ship: &valkyrie_context::policy::Ship,
+    state: valkyrie_daemon::work::State,
+    branch: &str,
+    head: Option<&str>,
+    now: u64,
+) -> Option<String> {
+    if state == valkyrie_daemon::work::State::NoPr
+        && let Some(head) = head
+        && let Ok(false) = store.record_ship_block(root, branch, head, now)
+    {
+        return None;
+    }
+    Some(valkyrie_context::policy::reason(
+        ship,
+        state.as_str(),
+        branch,
     ))
 }
 
@@ -599,6 +628,56 @@ mod tests {
             p["last_assistant_message"].as_str().unwrap().len(),
             long.len()
         );
+    }
+
+    /// A `ship` policy of `until: pr` from habit #1, and a fresh store for it.
+    fn ship_fixture(name: &str) -> (valkyrie_context::Store, PathBuf, policy::Ship) {
+        let base = std::env::temp_dir().join(format!("valk-hook-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let ship = policy::Ship {
+            until: (policy::Until::Pr, policy::Source::User(1)),
+            checks: None,
+            ci: None,
+        };
+        (
+            valkyrie_context::Store::new(base.join("context")),
+            root,
+            ship,
+        )
+    }
+
+    use valkyrie_context::policy;
+    use valkyrie_daemon::work::State;
+
+    #[test]
+    fn ship_asks_once_per_pushed_head_not_every_turn() {
+        let (store, root, ship) = ship_fixture("ship-once");
+        let stop = |state, head, now| {
+            ship_block(&store, &root, &ship, state, "fix/wip", Some(head), now).is_some()
+        };
+        // #88: a branch pushed only to run a CI reproduction, no pull request.
+        assert!(stop(State::NoPr, "aaa", 1), "first stop on this head asks");
+        assert!(
+            !stop(State::NoPr, "aaa", 2),
+            "the agent heard it; the next stop goes through"
+        );
+        assert!(!stop(State::NoPr, "aaa", 3), "and the one after");
+        assert!(stop(State::NoPr, "bbb", 4), "a new push asks again");
+        // Work not yet pushed is still kept going every time: it can't be waiting on CI.
+        assert!(stop(State::Unpushed, "ccc", 5));
+        assert!(stop(State::Unpushed, "ccc", 6));
+        assert!(stop(State::Uncommitted, "ccc", 7));
+        assert!(stop(State::Uncommitted, "ccc", 8));
+    }
+
+    #[test]
+    fn ship_tells_the_agent_how_to_say_it_isnt_finished() {
+        let (store, root, ship) = ship_fixture("ship-text");
+        let text =
+            ship_block(&store, &root, &ship, State::NoPr, "fix/wip", Some("aaa"), 1).unwrap();
+        assert!(text.contains("isn't finished"), "{text}");
     }
 
     struct OnMain;
