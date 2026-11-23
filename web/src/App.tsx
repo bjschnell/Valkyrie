@@ -8,6 +8,7 @@ import { SupervisorView } from "./components/Supervisor";
 import { DocView, DocsList } from "./components/Docs";
 import { Inbox } from "./components/Inbox";
 import { Launcher } from "./components/Launcher";
+import { StartAgents } from "./components/StartAgents";
 import { HomePane } from "./components/Composer";
 import { Outdated } from "./components/Outdated";
 import { Pair } from "./components/Pair";
@@ -33,7 +34,7 @@ import { close, connect, open, useApp } from "./store";
 type Route =
   | { page: "inbox" }
   | { page: "new" }
-  | { page: "launch" }
+  | { page: "start" }
   | { page: "settings" }
   | { page: "backlog" }
   | { page: "decisions"; shelf: MemoryShelf | null }
@@ -49,7 +50,7 @@ type Route =
 
 /**
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the home composer
- * beside the Inbox when there's room (the launcher when there isn't), `#/launch` the launcher,
+ * beside the Inbox when there's room (the launcher when there isn't), `#/start` Start agents over the Inbox,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
  * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order.
  * Memory (`#/memory`: decisions) has the tabs `#/memory/skills`, `/policies`, `/habits`, `/notes`, `#/memory/docs`
@@ -65,7 +66,7 @@ function route(): Route {
   const m = /^#\/s\/(\d+)(\/review)?$/.exec(hash);
   if (m) return { page: m[2] ? "review" : "session", id: Number(m[1]) };
   if (hash === "#/new") return { page: "new" };
-  if (hash === "#/launch") return { page: "launch" };
+  if (hash === HASH.start) return { page: "start" };
   if (hash === HASH.settings) return { page: "settings" };
   if (hash === HASH.backlog) return { page: "backlog" };
   const shelf = memoryShelf(hash);
@@ -113,9 +114,8 @@ function navKey(r: Route): NavKey | null {
     case "settings":
       return "settings";
     case "new":
+    case "start":
       return "inbox";
-    case "launch":
-      return null;
   }
 }
 
@@ -378,8 +378,8 @@ export function App() {
   if (status === "outdated") return <Outdated />;
   // Beside the list with nothing picked: the home composer (#275), at `#/new`, or on
   // the bare Inbox when nothing waits.
-  const home = wide && (at.page === "new" || (at.page === "inbox" && !waiting && !topRecord));
-  if (wide && (at.page === "inbox" || at.page === "new" || at.page === "session" || at.page === "review")) {
+  const home = wide && (at.page === "new" || at.page === "start" || (at.page === "inbox" && !waiting && !topRecord));
+  if (wide && (at.page === "inbox" || at.page === "new" || at.page === "start" || at.page === "session" || at.page === "review")) {
     return (
       <>
         <div className="split">
@@ -395,6 +395,7 @@ export function App() {
             {home && <HomePane />}
           </div>
         </div>
+        {at.page === "start" && <StartAgents />}
         {chrome}
       </>
     );
@@ -415,8 +416,9 @@ export function App() {
   }
   return (
     <>
-      {at.page === "inbox" && <Inbox />}
-      {(at.page === "new" || at.page === "launch") && <Launcher />}
+      {(at.page === "inbox" || at.page === "start") && <Inbox />}
+      {at.page === "start" && <StartAgents />}
+      {at.page === "new" && <Launcher />}
       {at.page === "settings" && <Settings />}
       {at.page === "backlog" && <Backlog />}
       {at.page === "decisions" && <DecisionList shelf={at.shelf} />}

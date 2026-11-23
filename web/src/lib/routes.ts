@@ -16,6 +16,8 @@ export const HASH = {
   search: "#/history/search",
   supervisor: "#/history/supervisor",
   settings: "#/settings",
+  /** Start agents (#282): several tasks, a session each. */
+  start: "#/start",
 } as const;
 
 /** Memory's shelves (#253), each a tab. `#/memory` is Decisions; a phone lands

@@ -32,8 +32,9 @@ export interface Dictation {
 /**
  * Listens until stopped. `onText` gets everything heard so far: the settled words
  * and the guess still forming. `onEnd` gets an error, if that's why it ended.
+ * `lines`: each settled phrase (a pause ends one) on a line of its own.
  */
-export function dictate(onText: (settled: string, forming: string) => void, onEnd: (error?: string) => void): Dictation {
+export function dictate(onText: (settled: string, forming: string) => void, onEnd: (error?: string) => void, lines = false): Dictation {
   const Ctor = ctor();
   if (!Ctor) {
     onEnd("no speech recognition in this browser");
@@ -49,7 +50,7 @@ export function dictate(onText: (settled: string, forming: string) => void, onEn
     let forming = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) settled = join(settled, r[0].transcript);
+      if (r.isFinal) settled = lines && settled ? `${settled}\n${r[0].transcript.trim()}` : join(settled, r[0].transcript);
       else forming = join(forming, r[0].transcript);
     }
     onText(settled, forming);

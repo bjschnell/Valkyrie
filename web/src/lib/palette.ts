@@ -75,6 +75,7 @@ export function entries(s: Sources): Entry[] {
   // What only moves you comes first, so Enter on an unsearched palette never accepts.
   out.push(
     { key: "new-session", group: "Actions", label: "New session", also: "start launch agent", do: { go: "#/new" } },
+    { key: "start-agents", group: "Actions", label: "Start agents", also: "several many batch tasks", do: { go: "#/start" } },
     { key: "new-item", group: "Actions", label: "New backlog item", also: "add todo", do: { go: "#/backlog/new" } },
     { key: "shortcuts", group: "Actions", label: "Keyboard shortcuts", also: "keys help ?", do: { sheet: true } },
   );
