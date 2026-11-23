@@ -787,6 +787,17 @@ impl Theme {
         mix(self.fg, self.muted, 0.3)
     }
 
+    /// A recessed well on `surface`, like the session preview's screen: the strip's
+    /// darker shade, or the lifted panel where the strip is the surface itself (the
+    /// pure black themes, whose page can't go any darker).
+    pub fn recessed(&self, surface: Color) -> Color {
+        if self.strip != surface {
+            self.strip
+        } else {
+            self.panel
+        }
+    }
+
     /// The muted text level, between secondary and faint: group labels, hint
     /// labels.
     pub fn dim(&self) -> Color {
