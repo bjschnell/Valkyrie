@@ -458,6 +458,8 @@ pub(crate) struct Page {
     /// How wide the page was last drawn, for whether ↩ opens the detail
     /// first; 0 before the first draw (wide).
     cols: std::cell::Cell<u16>,
+    /// Where the rows were drawn, for a click (backlog #281).
+    pub(crate) hits: crate::RowHits,
 }
 
 impl Page {
@@ -1117,6 +1119,7 @@ impl Page {
         // Nearly the whole screen, a margin around it so it reads as over what's under.
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
+        self.hits.clear();
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let here = rows.get(self.cursor);
         let narrow = rect.width.saturating_sub(2) < 100;
@@ -1270,6 +1273,7 @@ impl Page {
         }
         let mut cursor_line = 0;
         let mut last = None;
+        let mut clickable = Vec::new();
         for (i, (lane, item)) in rows.iter().enumerate() {
             if last != Some(*lane) {
                 if last.is_some() {
@@ -1287,6 +1291,7 @@ impl Page {
             }
             let group = group_tag(item, all);
             let after = tags(item, &item.blocked_by, all);
+            clickable.push((lines.len(), i as isize - self.cursor as isize));
             lines.push(item_line(
                 item,
                 *lane,
@@ -1317,6 +1322,10 @@ impl Page {
         }
         let room = list.height.max(1) as usize;
         let top = cursor_line.saturating_sub(room.saturating_sub(2));
+        // While a prompt or the search takes text, a click is no move.
+        if self.typing.is_none() && !self.search.typing {
+            self.hits.record(list, top, &clickable);
+        }
         frame.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), list);
 
         if let (Some((lane, item)), Some(detail)) = (here, detail) {

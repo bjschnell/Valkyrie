@@ -66,6 +66,13 @@
   --radius-lg: 16px;
   --radius-xl: 20px;
   --radius-full: 999px;
+  /* One ring for keyboard focus and the j/k pick (#199): the same width and
+     color everywhere, so a picked row and a focused button read as one idea. */
+  --focus-ring-color: var(--accent);
+  --focus-ring: 2px solid var(--focus-ring-color);
+  --focus-ring-offset: 2px;
+  /* Inside the box, for rows and cards a scrolling list would clip. */
+  --focus-ring-inset: -2px;
   --space-05: 2px;
   --space-1: 4px;
   --space-15: 6px;
@@ -691,7 +698,7 @@ h1[tabindex="-1"]:focus {
 }
 
 .choice.selected {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -704,7 +711,7 @@ h1[tabindex="-1"]:focus {
 
 .choices.answering .choice.sent {
   opacity: 1;
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -1278,7 +1285,7 @@ html.with-tabs .offline-banner {
 }
 
 .composer textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .send {
@@ -1458,7 +1465,7 @@ html.with-tabs .offline-banner {
 }
 
 .pair-paste input:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .pair-note {
@@ -1513,8 +1520,10 @@ html.with-tabs .offline-banner {
   white-space: nowrap;
 }
 
-.toast-text:hover {
-  text-decoration: underline;
+@media (hover: hover) {
+  .toast-text:hover {
+    text-decoration: underline;
+  }
 }
 
 .toast-action {
@@ -2044,10 +2053,13 @@ html.with-tabs .offline-banner {
 
 /* Keyboard selection in the inbox ------------------------------------------- */
 
+/* The j/k pick and keyboard focus are the same ring (#199), drawn inside the
+   row or card so the list's edge doesn't clip it. */
 .card-slot.picked > .card,
-.row.picked {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+.row.picked,
+:is(.row, .card):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-inset);
 }
 
 .chat-done {
@@ -2194,7 +2206,7 @@ html.with-tabs .offline-banner {
 
 .field input:focus,
 .field textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .check-row {
@@ -2662,8 +2674,10 @@ html.with-tabs .offline-banner {
   white-space: nowrap;
 }
 
-.seg-item:hover {
-  color: var(--fg);
+@media (hover: hover) {
+  .seg-item:hover {
+    color: var(--fg);
+  }
 }
 
 .seg-item.on {
@@ -4223,8 +4237,8 @@ button.as-text {
 }
 
 .md-c:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .md-c.md-picked {
@@ -4602,7 +4616,7 @@ button.as-text {
 
 .memory-filter:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .decision-card.ended {
@@ -4733,8 +4747,10 @@ a.mem-reached-what {
   text-decoration: none;
 }
 
-a.mem-reached-what:hover {
-  text-decoration: underline;
+@media (hover: hover) {
+  a.mem-reached-what:hover {
+    text-decoration: underline;
+  }
 }
 
 .mem-reached-how {
@@ -5370,8 +5386,8 @@ html[data-vt="glide"]::view-transition-group(*) {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* The command palette (#183): a box near the top, over a dimmed page. */
@@ -5730,7 +5746,7 @@ html[data-vt="glide"]::view-transition-group(*) {
 }
 
 .composer-box:focus-within {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-ring-color) 55%, var(--line));
 }
 
 .composer-box.finding {
@@ -5799,7 +5815,7 @@ textarea.composer-text {
 }
 
 .composer-chip:focus-within {
-  box-shadow: 0 0 0 2px var(--accent);
+  box-shadow: 0 0 0 2px var(--focus-ring-color);
 }
 
 .composer-chip select {
@@ -5940,7 +5956,7 @@ textarea.composer-text {
 }
 
 .ready-row:focus-within {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--focus-ring-color) 10%, transparent);
 }
 
 .ready-start {
@@ -6029,7 +6045,7 @@ html.with-tabs .composer-phone {
 }
 
 .composer-pill:focus-within {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-ring-color) 55%, var(--line));
 }
 
 /* 16px: a smaller field makes iOS zoom the page on focus. */
@@ -6152,10 +6168,12 @@ html.with-tabs .composer-phone {
   line-height: 1;
 }
 
-.start-close:hover,
-.start-drop:hover {
-  background: var(--raised);
-  color: var(--fg);
+@media (hover: hover) {
+  .start-close:hover,
+  .start-drop:hover {
+    background: var(--raised);
+    color: var(--fg);
+  }
 }
 
 .start-body {
@@ -6200,16 +6218,18 @@ html.with-tabs .composer-phone {
   gap: var(--space-2) var(--space-3);
   padding: var(--space-2) var(--space-1) var(--space-2) var(--space-2);
   border-radius: var(--radius-md);
-  outline: none;
 }
 
-.start-row:hover {
-  background: color-mix(in srgb, var(--raised) 50%, transparent);
+@media (hover: hover) {
+  .start-row:hover {
+    background: color-mix(in srgb, var(--raised) 50%, transparent);
+  }
 }
 
 .start-row:focus-visible {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-inset);
 }
 
 /* A phone draws each line as a card: the task, then its chips under it. */
@@ -6307,7 +6327,7 @@ html.with-tabs .composer-phone {
 }
 
 .start-add:focus-within {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-ring-color) 55%, var(--line));
 }
 
 .start-add .start-n {
@@ -6431,9 +6451,18 @@ html.with-tabs .composer-phone {
   cursor: pointer;
 }
 
-.start-pick-row:hover,
 .start-pick-row:focus-within {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--focus-ring-color) 10%, transparent);
+}
+
+@media (hover: hover) {
+  .start-pick-row:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .start-pick-row.blocked:hover {
+    background: none;
+  }
 }
 
 .start-pick-row input {
@@ -6457,9 +6486,6 @@ html.with-tabs .composer-phone {
   cursor: default;
 }
 
-.start-pick-row.blocked:hover {
-  background: none;
-}
 
 .start-foot {
   display: flex;
