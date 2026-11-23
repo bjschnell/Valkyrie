@@ -89,7 +89,13 @@
   --shadow-1: 0 6px 20px rgb(0 0 0 / 25%);
   --shadow-2: 0 10px 30px rgb(0 0 0 / 40%);
   --shadow-3: 0 14px 40px rgb(0 0 0 / 45%);
+  /* One motion scale (#198). Fast is press feedback, base is entrances and state
+     colour, slow is something travelling across the screen (a swipe settling, a
+     card gliding). One curve for all of it; only ambient loops keep their own. */
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 100ms;
+  --dur-base: 160ms;
+  --dur-slow: 240ms;
   /* Six steps (#250), sentence case, no uppercase tracked labels. Words a person
      reads are sans; anything a machine made (ids, branches, ages, paths) is mono. */
   --type-title: var(--weight-bold) 28px/1.2 var(--font);
@@ -546,8 +552,8 @@ h1[tabindex="-1"]:focus {
   background: var(--card);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-1);
-  transition: transform 0.22s var(--ease-out);
-  animation: rise 0.28s ease-out;
+  transition: transform var(--dur-slow) var(--ease-out);
+  animation: rise var(--dur-base) var(--ease-out);
   overflow: hidden;
   touch-action: pan-y;
 }
@@ -680,7 +686,9 @@ h1[tabindex="-1"]:focus {
   text-align: left;
   font-size: var(--text-md);
   font-weight: var(--weight-medium);
-  transition: transform 0.08s ease, background 0.15s ease;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
 }
 
 .choice:active {
@@ -706,7 +714,7 @@ h1[tabindex="-1"]:focus {
    rest dim, and none take another tap until it goes through or doesn't. */
 .choices.answering .choice {
   opacity: 0.45;
-  transition: opacity 0.12s ease;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 
 .choices.answering .choice.sent {
@@ -770,7 +778,7 @@ h1[tabindex="-1"]:focus {
   position: relative;
   background: var(--surface);
   touch-action: pan-y;
-  transition: transform 0.2s ease;
+  transition: transform var(--dur-slow) var(--ease-out);
 }
 
 .row-slot > .row:active {
@@ -795,7 +803,7 @@ h1[tabindex="-1"]:focus {
    has slid back over it. */
 .row-slot:not(:has(> .row.dragging)) > .row-close[aria-hidden="true"] {
   visibility: hidden;
-  transition: visibility 0s linear 0.2s;
+  transition: visibility 0s linear var(--dur-slow);
 }
 
 .row:active {
@@ -1297,7 +1305,9 @@ html.with-tabs .offline-banner {
   border-radius: 50%;
   background: var(--accent);
   color: var(--page);
-  transition: opacity 0.15s ease, transform 0.08s ease;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 
 .send:disabled {
@@ -1364,7 +1374,7 @@ html.with-tabs .offline-banner {
   background: var(--card);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-3);
-  animation: rise 0.16s ease-out;
+  animation: rise var(--dur-base) var(--ease-out);
 }
 
 .menu button {
@@ -1490,7 +1500,9 @@ html.with-tabs .offline-banner {
   transform: translate(-50%, -12px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
 }
 
 .toast.show {
@@ -1659,7 +1671,7 @@ html.with-tabs .offline-banner {
   border-radius: var(--radius);
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--card)), var(--card) 70%);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
-  animation: rise 0.28s ease-out;
+  animation: rise var(--dur-base) var(--ease-out);
 }
 
 .hint-icon {
@@ -1890,7 +1902,7 @@ html.with-tabs .offline-banner {
 .tool-group-head svg {
   flex: none;
   color: var(--muted);
-  transition: transform 0.15s;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .tool-group.open > .tool-group-head svg {
@@ -2420,7 +2432,7 @@ html.with-tabs .offline-banner {
 .file-head svg {
   flex: none;
   color: var(--muted);
-  transition: transform 0.15s;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .file-card.open > .file-head svg {
@@ -3625,7 +3637,7 @@ html.with-tabs .offline-banner {
 .section-toggle::after {
   content: "▸";
   margin-left: auto;
-  transition: transform 0.15s;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .section-toggle[aria-expanded="true"]::after {
@@ -4101,7 +4113,7 @@ button.as-text {
   position: relative;
   border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background 120ms;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .md-c:focus-visible {
@@ -5086,7 +5098,7 @@ html.with-tabs .page {
   width: 56px;
   height: 28px;
   border-radius: var(--radius-full);
-  transition: background 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out);
 }
 
 .tab[aria-current="page"] {
@@ -5121,7 +5133,7 @@ html.with-rail .toast {
 /* Motion: page transitions (View Transitions API) and press and hover feedback. */
 ::view-transition-old(root),
 ::view-transition-new(root) {
-  animation-duration: 0.2s;
+  animation-duration: var(--dur-base);
   animation-timing-function: var(--ease-out);
 }
 
@@ -5150,11 +5162,11 @@ html[data-vt="back"]::view-transition-new(root) {
 
 html[data-vt="fade"]::view-transition-old(root) {
   animation-name: vt-fade-out;
-  animation-duration: 0.12s;
+  animation-duration: var(--dur-fast);
 }
 html[data-vt="fade"]::view-transition-new(root) {
   animation-name: vt-fade-in;
-  animation-duration: 0.16s;
+  animation-duration: var(--dur-base);
 }
 
 /* Cards glide to their new place (#186). The names exist only now, so a page
@@ -5170,7 +5182,7 @@ html[data-vt="glide"]::view-transition-new(root) {
   animation: none;
 }
 html[data-vt="glide"]::view-transition-group(*) {
-  animation-duration: 0.22s;
+  animation-duration: var(--dur-slow);
   animation-timing-function: var(--ease-out);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -5216,9 +5228,9 @@ html[data-vt="glide"]::view-transition-group(*) {
 
 :is(.row, .icon-btn, .tab, .rail-item, .rail-new, button.card, .chip) {
   transition:
-    transform 0.12s ease,
-    background-color 0.15s ease,
-    color 0.15s ease;
+    transform var(--dur-fast) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out);
 }
 
 :is(.row, .tab, .rail-item, button.card):active:not(:disabled) {
@@ -5258,6 +5270,20 @@ html[data-vt="glide"]::view-transition-group(*) {
   outline-offset: var(--focus-ring-offset);
 }
 
+/* Nothing a key caused animates (#198): while the keyboard drives (lib/input.ts),
+   the row Alt+J lands on, the rail item g i lights, a section Enter opens and the
+   cards of a page a key reached all change at once. A tap or click brings it back. */
+html[data-input="key"]
+  :is(.row, .icon-btn, .tab, .rail-item, .rail-new, button.card, .chip, .nav-icon, .choice,
+    .tool-group-head svg, .file-head svg),
+html[data-input="key"] .section-toggle::after {
+  transition: none;
+}
+
+html[data-input="key"] :is(.card, .hint, .menu) {
+  animation: none;
+}
+
 /* The command palette (#183): a box near the top, over a dimmed page. */
 .palette {
   width: min(640px, calc(100vw - 32px));
@@ -5270,7 +5296,6 @@ html[data-vt="glide"]::view-transition-group(*) {
   color: var(--fg);
   box-shadow: var(--shadow-3);
   overflow: hidden;
-  animation: palette-in 0.14s var(--ease-out);
 }
 
 .palette::backdrop {
@@ -5368,13 +5393,6 @@ html[data-vt="glide"]::view-transition-group(*) {
   font: var(--text-2xs) var(--mono);
 }
 
-@keyframes palette-in {
-  from {
-    opacity: 0;
-    transform: translateY(-6px) scale(0.98);
-  }
-}
-
 /* The '?' sheet (#189): the palette's box, holding a list of keys. */
 .keys {
   width: min(560px, calc(100vw - 32px));
@@ -5387,7 +5405,6 @@ html[data-vt="glide"]::view-transition-group(*) {
   color: var(--fg);
   box-shadow: var(--shadow-3);
   overflow: hidden;
-  animation: palette-in 0.14s var(--ease-out);
 }
 
 .keys::backdrop {

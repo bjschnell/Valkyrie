@@ -31,6 +31,7 @@ import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
 import { close, connect, open, useApp } from "./store";
 import { getJson } from "./lib/api";
+import { keyed } from "./lib/input";
 import { setPacks, type Pack } from "./lib/theme";
 
 type Route =
@@ -137,10 +138,12 @@ export function App() {
       f.id = next.page === "session" && next.id === f.pending ? f.pending : null;
       f.pending = null;
       const swap = () => flushSync(() => setAt(next));
-      // A transition between pages. Stepping between sessions
-      // (Alt+J/K) stays instant; so does a device asking for less motion.
+      // A transition between pages, for a tap or a click. A move a key made
+      // (g i, Enter, Alt+J/K) is instant (#198); so is one on a device asking
+      // for less motion, and stepping between sessions.
       if (
         !document.startViewTransition ||
+        keyed() ||
         matchMedia("(prefers-reduced-motion: reduce)").matches ||
         (from.page === "session" && next.page === "session")
       ) {
