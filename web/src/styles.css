@@ -6064,3 +6064,470 @@ html.with-tabs .composer-phone {
 .page:has(.composer-phone .composer-found) .ready {
   display: none;
 }
+
+/* Start agents (#282) --------------------------------------------------- */
+/* Several tasks, a session each: a modal dialog over the Inbox on a wide
+   screen, a sheet from the bottom on a phone. Tokens only. */
+
+.start-sheet {
+  width: min(960px, calc(100vw - 48px));
+  max-width: none;
+  max-height: min(720px, calc(100dvh - 64px));
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px var(--line), 0 24px 64px rgb(0 0 0 / 0.35);
+}
+
+.start-sheet::backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+
+.start-sheet.phone {
+  width: 100vw;
+  max-height: none;
+  height: calc(100dvh - 72px);
+  margin: auto 0 0;
+  border-radius: 22px 22px 0 0;
+  box-shadow: 0 -1px 0 var(--line);
+}
+
+.start-inner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: inherit;
+}
+
+.start-sheet:not(.phone) .start-inner {
+  max-height: min(720px, calc(100dvh - 64px));
+}
+
+.start-grab {
+  align-self: center;
+  width: 40px;
+  height: 5px;
+  margin: var(--space-2) 0 var(--space-1);
+  border-radius: 3px;
+  background: var(--line);
+}
+
+.start-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+}
+
+.start-head h2 {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+}
+
+.start-sub {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.start-gap {
+  flex: 1;
+}
+
+.start-close,
+.start-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-lg);
+  line-height: 1;
+}
+
+.start-close:hover,
+.start-drop:hover {
+  background: var(--raised);
+  color: var(--fg);
+}
+
+.start-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  border-top: 1px solid var(--line);
+}
+
+.start-sheet.phone .start-body {
+  grid-template-columns: minmax(0, 1fr);
+  border-top: 0;
+}
+
+.start-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.start-sheet.phone .start-main {
+  padding: 0 var(--space-3) var(--space-4);
+}
+
+.start-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.start-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto 32px;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-1) var(--space-2) var(--space-2);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+
+.start-row:hover {
+  background: color-mix(in srgb, var(--raised) 50%, transparent);
+}
+
+.start-row:focus-visible {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* A phone draws each line as a card: the task, then its chips under it. */
+.start-sheet.phone .start-row {
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2) var(--space-3) var(--space-35);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+}
+
+.start-sheet.phone .start-row .start-n {
+  display: none;
+}
+
+.start-sheet.phone .start-task {
+  grid-column: 1;
+  white-space: normal;
+}
+
+.start-sheet.phone .start-chips {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.start-sheet.phone .start-drop {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.start-n {
+  color: var(--faint);
+  font: var(--text-xs) var(--mono);
+  text-align: right;
+}
+
+.start-task {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  line-height: 1.4;
+}
+
+.start-ref {
+  flex: none;
+  color: var(--muted);
+  font: var(--text-xs) var(--mono);
+}
+
+.start-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-15);
+}
+
+.start-repo-fixed {
+  padding: 5px var(--space-1);
+  color: var(--muted);
+  font: 500 var(--text-sm) var(--mono);
+}
+
+/* Can't start: blocked, or has a session. Faint is all the state it shows. */
+.start-row.stuck .start-task {
+  color: var(--faint);
+}
+
+.start-why {
+  grid-column: 2 / -1;
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.start-sheet.phone .start-why {
+  grid-column: 1 / -1;
+}
+
+.start-why.failed,
+.start-failed {
+  color: var(--blocked);
+}
+
+.start-add {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-1) var(--space-2) var(--space-2);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.start-add:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.start-add .start-n {
+  padding-top: 4px;
+}
+
+.start-add textarea {
+  min-height: 24px;
+  padding: 1px 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: none;
+  color: var(--fg);
+  font: 400 var(--text-md) / 1.5 var(--font);
+  resize: none;
+  outline: none;
+  scrollbar-width: none;
+}
+
+.start-add textarea::placeholder {
+  color: var(--faint);
+}
+
+.start-sheet.phone .start-add {
+  grid-template-columns: minmax(0, 1fr);
+  padding: var(--space-3) var(--space-35);
+  border-radius: var(--radius-lg);
+}
+
+.start-sheet.phone .start-add .start-n {
+  display: none;
+}
+
+.start-note {
+  margin: var(--space-1) var(--space-1) 0;
+  color: var(--faint);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.start-note code {
+  font: var(--text-xs) var(--mono);
+  color: var(--muted);
+}
+
+.start-pick {
+  display: flex;
+  align-items: center;
+  gap: var(--space-25);
+  min-height: 48px;
+  padding: var(--space-3) var(--space-35);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--soft);
+  font-size: var(--text-md);
+  text-align: left;
+}
+
+.start-plus {
+  color: var(--muted);
+  font-size: var(--text-lg);
+}
+
+.start-count {
+  color: var(--muted);
+  font: var(--text-xs) var(--mono);
+}
+
+.start-side {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  border-left: 1px solid var(--line);
+  background: var(--page);
+}
+
+.start-picks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-05);
+}
+
+.start-picks-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-1) var(--space-2);
+}
+
+.start-picks-head h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.start-picks-head span,
+.start-none {
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.start-none {
+  margin: 0;
+  padding: var(--space-1);
+}
+
+.start-pick-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: 40px;
+  padding: var(--space-15) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.start-pick-row:hover,
+.start-pick-row:focus-within {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.start-pick-row input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.start-pick-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.start-pick-row .start-why {
+  grid-column: 2 / -1;
+}
+
+.start-pick-row.blocked {
+  color: var(--faint);
+  cursor: default;
+}
+
+.start-pick-row.blocked:hover {
+  background: none;
+}
+
+.start-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.start-sheet.phone .start-foot {
+  flex-wrap: nowrap;
+  padding: var(--space-3) var(--space-3) calc(env(safe-area-inset-bottom) + var(--space-3));
+}
+
+.start-sum {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.start-sheet.phone .start-sum {
+  display: none;
+}
+
+.start-foot .quota.quiet-quota {
+  padding: 0;
+}
+
+.start-keys {
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.start-keys kbd {
+  font: var(--text-xs) var(--mono);
+}
+
+.start-mic {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.start-mic.on {
+  background: var(--accent);
+  color: var(--page);
+}
+
+.start-sheet.phone .start-mic {
+  width: 52px;
+  height: 52px;
+  border-radius: 26px;
+}
+
+.start-sheet.phone .start-go {
+  flex: 1;
+  min-height: 52px;
+}
+
+/* A card is raised already: its chips step up once more to read as controls. */
+.start-sheet.phone .start-row .composer-chip {
+  background: color-mix(in srgb, var(--fg) 8%, var(--raised));
+}

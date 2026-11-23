@@ -75,9 +75,18 @@ its own worktree, in the repo the line names or the one you used last, on the
 agent and model that repo last ran; the chips under the box change either.
 Ctrl+Enter (Cmd+Enter) files the line to the backlog instead. `#` finds an item by
 number or title: a ready one starts, one with a session opens it, a blocked one
-shows greyed out. Several lines (Shift+Enter, or a paste) open the New session
-screen with them in it. On a phone the box sits over the tab bar while nothing
-needs you; otherwise the + starts a session.
+shows greyed out. Several lines (Shift+Enter, or a paste) open Start agents. On a
+phone the box sits over the tab bar while nothing needs you; otherwise the +
+starts a session.
+
+Start agents (also in the command palette) starts several at once, a session
+each in its own worktree. Every line shows the repo and agent it will start on,
+to change before anything runs; a line like `web#7` is that backlog item, and
+ticking one under Ready in the backlog (on a phone, Pick from the backlog) adds
+it with its repo fixed. Dictating, a pause or saying "next" starts another line.
+Ctrl+Enter (Cmd+Enter) starts them all; a line that couldn't start stays, with
+why. `j` and `k` move through the lines, `d` drops one, and Esc closes it with the
+lines back in the composer.
 
 Ctrl+K (Cmd+K on a Mac) opens the command palette: type to jump to any session,
 page, doc or backlog item, or to run an action: start a session, add a backlog

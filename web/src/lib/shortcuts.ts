@@ -22,7 +22,7 @@ export interface Section {
 export type PageKey =
   | "inbox"
   | "new"
-  | "launch"
+  | "start"
   | "settings"
   | "backlog"
   | "decisions"
@@ -143,7 +143,7 @@ export type KeyedPage = keyof typeof PAGE_KEYS;
 const TITLE: Record<PageKey, string> = {
   inbox: "Inbox",
   new: "New session",
-  launch: "New session",
+  start: "Start agents",
   settings: "Settings",
   backlog: "Backlog",
   decisions: "Memory",
@@ -190,11 +190,17 @@ const ALSO: Partial<Record<PageKey, (mac: boolean) => Shortcut[]>> = {
   ],
   item: (mac) => [ctrlEnter(mac, "Save")],
   inbox: (mac) => [
-    { keys: [["Shift", "Enter"]], does: "In the composer: another line (several lines go to the launcher)" },
+    { keys: [["Shift", "Enter"]], does: "In the composer: another line (several lines open Start agents)" },
     ctrlEnter(mac, "In the composer: file it to the backlog instead"),
     { keys: [["#"]], does: "In the composer: find a backlog item by number or title" },
   ],
   new: (mac) => [ctrlEnter(mac, "Start it")],
-  launch: (mac) => [ctrlEnter(mac, "Start it")],
+  start: (mac) => [
+    ctrlEnter(mac, "Start them all"),
+    { keys: [["Enter"]], does: "Add the task typed, or on a line: start them all" },
+    { keys: [["j"], ["k"]], does: "Next, previous line or backlog item" },
+    { keys: [["d"], [mac ? "⌘" : "Ctrl", "Backspace"]], does: "Drop the line" },
+    { keys: [["Esc"]], does: "Back to the box, or close and keep the lines in the composer" },
+  ],
   doc: (mac) => [ctrlEnter(mac, "Save, when editing")],
 };

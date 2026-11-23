@@ -120,7 +120,8 @@ export interface Found {
   why: string | null;
 }
 
-function found(item: Item, items: Item[], sessions: SessionInfo[], boot: number): Found {
+/** What picking `item` does: open its session, start it, or nothing yet (and why). */
+export function foundItem(item: Item, items: Item[], sessions: SessionInfo[], boot: number): Found {
   const session = liveSession(item, sessions, boot);
   if (session) return { item, pick: "open", session, why: null };
   const waits = waitingOn(item, items);
@@ -157,7 +158,7 @@ export function findItems(query: string, items: Item[], sessions: SessionInfo[],
     .filter(hit)
     .sort((a, b) => Number(exact(b)) - Number(exact(a)) || work(a, b))
     .slice(0, limit)
-    .map((i) => found(i, items, sessions, boot));
+    .map((i) => foundItem(i, items, sessions, boot));
 }
 
 /**

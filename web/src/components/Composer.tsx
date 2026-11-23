@@ -26,14 +26,8 @@ import { useAttention } from "./Attention";
 const DRAFT_KEY = "valk.compose.draft";
 const REPO_KEY = "valk.compose.repo";
 const RAN_KEY = "valk.compose.ran";
-/** What the composer hands the launcher for several lines (read once by Launcher). */
-export const HANDOFF_KEY = "valk.launch.handoff";
-
-export interface Handoff {
-  message: string;
-  folder: string | null;
-  agent: string;
-}
+/** Says the draft changed from outside the box (Start agents gives it back). */
+const DRAFT_EVENT = "valk-compose-draft";
 
 function read<T>(key: string, fallback: T): T {
   try {
@@ -53,6 +47,25 @@ function write(key: string, v: unknown): void {
   }
 }
 
+/** The composer's draft as it was last typed: what Start agents opens with. */
+export const composerDraft = () => read<string>(DRAFT_KEY, "");
+
+/** Replaces the composer's draft, drawn or not. */
+export function setComposerDraft(text: string): void {
+  write(DRAFT_KEY, text);
+  window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: text }));
+}
+
+/** The repo started in last, and what each repo last ran from here (decision #46). */
+export const lastRepo = () => read<string | null>(REPO_KEY, null);
+export const rememberedRan = () => read<Record<string, Ran>>(RAN_KEY, {});
+
+/** Remembers a start in `repo` on `ran`, for the next guess. */
+export function rememberStart(repo: string, ran: Ran): void {
+  write(REPO_KEY, repo);
+  write(RAN_KEY, { ...rememberedRan(), [repo]: ran });
+}
+
 // `n` or `/` asks for the box before it may be drawn (the Inbox moves to `#/new` first).
 let wanted = false;
 
@@ -66,7 +79,7 @@ export function focusComposer(): void {
 }
 
 /** The launch offers' items: drawn in Needs you already, so not again here. */
-function useOffered(): Set<number> {
+export function useOffered(): Set<number> {
   const launches = useApp((s) => s.launches);
   return useMemo(() => new Set(launches.map((l) => l.item)), [launches]);
 }
@@ -75,7 +88,7 @@ function useOffered(): Set<number> {
  * The home composer (backlog #275): what the Inbox shows when nothing is picked.
  * One box, never focused until asked (`n`, `/`, a click), so the Inbox's keys stay
  * yours. A line and Enter starts a session in its own worktree; ⌘/Ctrl+Enter
- * files it to the backlog; `#` finds an item; several lines go to the launcher.
+ * files it to the backlog; `#` finds an item; several lines go to Start agents.
  * `phone` is the slim one pinned over the tab bar.
  */
 export function Composer({ phone = false }: { phone?: boolean }) {
@@ -103,6 +116,9 @@ export function Composer({ phone = false }: { phone?: boolean }) {
   }, [text]);
   useEffect(() => {
     if (wanted) focusComposer();
+    const given = (e: Event) => setText((e as CustomEvent<string>).detail);
+    window.addEventListener(DRAFT_EVENT, given);
+    return () => window.removeEventListener(DRAFT_EVENT, given);
   }, []);
   useLayoutEffect(() => {
     const el = area.current;
@@ -112,8 +128,8 @@ export function Composer({ phone = false }: { phone?: boolean }) {
   }, [text, phone]);
 
   const what = intent(text);
-  const repo = pickedRepo ?? guessRepo(what.kind === "task" ? what.text : text, repos, read<string | null>(REPO_KEY, null));
-  const ran = pickedRan ?? lastRan(repo, read<Record<string, Ran>>(RAN_KEY, {}), items, sessions);
+  const repo = pickedRepo ?? guessRepo(what.kind === "task" ? what.text : text, repos, lastRepo());
+  const ran = pickedRan ?? lastRan(repo, rememberedRan(), items, sessions);
   const found: Found[] = what.kind === "find" ? findItems(what.query, items, sessions, boot) : [];
   useEffect(() => setHi(0), [what.kind === "find" ? what.query : null]);
 
@@ -137,8 +153,7 @@ export function Composer({ phone = false }: { phone?: boolean }) {
       if (what.kind !== "task" || !repo) return;
       try {
         const id = await spawn(command(ran, what.text), repo, slug(what.text), "");
-        write(REPO_KEY, repo);
-        write(RAN_KEY, { ...read<Record<string, Ran>>(RAN_KEY, {}), [repo]: ran });
+        rememberStart(repo, ran);
         done();
         navigator.vibrate?.(10);
         location.hash = `#/s/${id}`;
@@ -162,16 +177,11 @@ export function Composer({ phone = false }: { phone?: boolean }) {
       }
     });
 
-  // Several lines: the launcher, with the lines in it, until the Start agents sheet exists.
+  // Several lines: Start agents (#282), a session per line, checked there first.
+  // The draft stays until they start, so Esc there comes back to it.
   const batch = () => {
-    const handoff: Handoff = { message: text.trim(), folder: repo, agent: ran.agent };
-    try {
-      sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(handoff));
-    } catch {
-      /* the launcher opens empty */
-    }
-    done();
-    location.hash = "#/launch";
+    area.current?.blur();
+    location.hash = HASH.start;
   };
 
   const pick = (f: Found | undefined) => {
@@ -293,7 +303,7 @@ export function Composer({ phone = false }: { phone?: boolean }) {
           <div className="composer-row">
             {what.kind === "batch" ? (
               <span className="composer-batch">
-                {what.lines.length} tasks · each checked in the launcher
+                {what.lines.length} tasks · an agent each
               </span>
             ) : (
               chips
@@ -329,7 +339,7 @@ function Arrow() {
   );
 }
 
-function RepoChip({ repo, list, onPick }: { repo: string | null; list: ReturnType<typeof useRepos>["list"]; onPick: (r: string) => void }) {
+export function RepoChip({ repo, list, onPick }: { repo: string | null; list: ReturnType<typeof useRepos>["list"]; onPick: (r: string) => void }) {
   const choices = repoChoices(list, repo);
   if (choices.length === 0) return <span className="composer-chip none">no repo</span>;
   return (
@@ -349,7 +359,7 @@ function RepoChip({ repo, list, onPick }: { repo: string | null; list: ReturnTyp
 
 const ranKey = (r: Ran) => `${r.agent}|${r.model ?? ""}`;
 
-function AgentChip({ ran, onPick }: { ran: Ran; onPick: (r: Ran) => void }) {
+export function AgentChip({ ran, onPick }: { ran: Ran; onPick: (r: Ran) => void }) {
   const options: Ran[] = [
     { agent: "claude" },
     ...MODEL_CHOICES.claude.map((model) => ({ agent: "claude" as const, model })),
