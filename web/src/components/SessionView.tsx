@@ -12,6 +12,7 @@ import { MicButton } from "./Mic";
 import { ScreenView, useDesktop, useWide } from "./Terminal";
 import { usePageKeys } from "../lib/pageKeys";
 import { scrollMotion } from "../lib/motion";
+import { sessionDock } from "../lib/sessionDock";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -71,6 +72,7 @@ export function SessionView({ id }: { id: number }) {
   const [typing, setTyping] = useState(false);
   const live = !exited && info?.exited == null;
   const keyboard = typing && mode === "terminal" && live && desktop;
+  const dock = sessionDock(mode, desktop);
   // The chat, a window gone narrow or a program gone: it starts again with a
   // click, never by itself. It does follow you to another session's terminal
   // (Alt-J), where a click on the list has already given it back.
@@ -99,7 +101,8 @@ export function SessionView({ id }: { id: number }) {
       k: () => by(-80),
       g: scrollTo(0),
       G: scrollTo("end"),
-      i: () => composer.current?.focus(),
+      // Where the terminal has the whole pane, it is where you type.
+      i: () => (dock.composer ? composer.current?.focus() : live && setTyping(true)),
       t: () => hasChat && choose(mode === "chat" ? "terminal" : "chat"),
       r: () => (location.hash = `#/s/${id}/review`),
       q: () => (location.hash = "#/"),
@@ -211,9 +214,9 @@ export function SessionView({ id }: { id: number }) {
         </div>
       )}
 
-      {!exited && (
+      {!exited && (dock.composer || dock.keybar || (dock.choices && choices.length > 0)) && (
         <footer className="dock">
-          {choices.length > 0 && (
+          {dock.choices && choices.length > 0 && (
             <div className={`choices dock-choices ${sent !== null ? "answering" : ""}`} aria-busy={sent !== null}>
               {choices.map((c, i) => (
                 <button
@@ -228,9 +231,8 @@ export function SessionView({ id }: { id: number }) {
               ))}
             </div>
           )}
-          {/* A desktop keyboard has these keys; click the terminal to use them. */}
-          {!(desktop && mode === "terminal") && <KeyBar />}
-          <Composer key={id} id={id} area={composer} />
+          {dock.keybar && <KeyBar />}
+          {dock.composer && <Composer key={id} id={id} area={composer} />}
         </footer>
       )}
     </div>

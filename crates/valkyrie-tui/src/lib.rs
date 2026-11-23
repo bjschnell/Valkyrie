@@ -5,9 +5,11 @@
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
 mod backlog;
+mod batch;
 mod blocks;
 mod clip;
 mod comments;
+mod compose;
 mod conflict;
 mod digest;
 mod docs;
@@ -25,6 +27,7 @@ mod prs;
 mod quiet;
 mod quota;
 mod rain;
+mod search;
 mod settings;
 mod supervisor;
 mod theme;
@@ -157,10 +160,13 @@ pub async fn run(
     ratatui::restore();
     // Quit with a doc still open in your editor: nothing will save it.
     if let Some(e) = &app.editing {
-        eprintln!(
-            "A doc was still open in your editor and wasn't saved; what you wrote goes to {}",
-            e.path.display()
-        );
+        let what = match e.what {
+            Edited::Doc { .. } => "A doc was still open in your editor and wasn't saved",
+            Edited::Proposal { .. } => {
+                "A proposal was still open in your editor and wasn't accepted"
+            }
+        };
+        eprintln!("{what}; what you wrote goes to {}", e.path.display());
     }
     // Another machine's daemon names a binary there, never one to run here.
     #[cfg(unix)]
@@ -242,6 +248,13 @@ struct App {
     proposals: Vec<Decision>,
     /// Every backlog item, as last pushed (DESIGN §8.12).
     items: Vec<Item>,
+    /// The Inbox's top row: a task to start or file (backlog #276).
+    composer: compose::Composer,
+    /// Start agents: the composer's lines, one session each (backlog #280).
+    batch: Option<batch::Batch>,
+    /// The supervisor at a glance, for the composer's last line: what it
+    /// watches, and the last thing it did.
+    glance: Option<Glance>,
     /// The repositories pickers offer (backlog #240), as the backlog last fetched it.
     repo_list: valkyrie_proto::RepoList,
     /// Build orders waiting on the user, as last pushed with the items.
@@ -305,6 +318,10 @@ struct App {
     prs: Option<prs::Page>,
     /// A doc open in your editor, in a session of its own.
     editing: Option<Editing>,
+    /// When the open section page last loaded on its own (`reload_page`).
+    page_loaded: Instant,
+    /// What the last `review_at` would take back, for Memory's `z`.
+    last_answer: Option<Option<memory::Undo>>,
     /// The selected session's screen text, for the preview pane.
     preview: Option<(SessionId, String)>,
     pinger: Pinger,
@@ -324,11 +341,23 @@ struct App {
     parked: Option<Parked>,
     /// `g` was pressed: the next key picks a section.
     g_pending: bool,
+    /// The cursor was put somewhere, by a key, a click or an attach. Until then
+    /// it stays on the top row while the first pushes arrive, rather than
+    /// following whichever row loaded first (backlog #267).
+    cursor_moved: bool,
     /// `x` pressed once on this session: a second closes it (rule 9: x always
     /// confirms).
     kill_armed: Option<SessionId>,
     /// The `?` sheet of every key is open.
     help: bool,
+    /// How wide the bar under a session was last drawn, so a click finds its
+    /// keys where they were drawn.
+    bar_cols: std::cell::Cell<u16>,
+    /// How wide home's list was last drawn: under 100 columns a session's
+    /// detail is its own screen (spec: Layout by width).
+    home_cols: std::cell::Cell<u16>,
+    /// That screen is open, for the selected session.
+    home_detail: bool,
     /// The Alt-n run going on, if the last switch was one.
     needing: Option<NeedingRun>,
     /// The session being renamed, and the name typed so far.
@@ -463,6 +492,9 @@ impl App {
             sessions: Vec::new(),
             proposals: Vec::new(),
             items: Vec::new(),
+            composer: compose::Composer::default(),
+            batch: None,
+            glance: None,
             repo_list: Default::default(),
             quota: None,
             backlog: None,
@@ -493,6 +525,8 @@ impl App {
             memory: None,
             prs: None,
             editing: None,
+            page_loaded: Instant::now(),
+            last_answer: None,
             preview: None,
             pinger: Pinger::default(),
             toast: None,
@@ -502,8 +536,12 @@ impl App {
             previous: None,
             parked: None,
             g_pending: false,
+            cursor_moved: false,
             kill_armed: None,
             help: false,
+            bar_cols: std::cell::Cell::new(80),
+            home_cols: std::cell::Cell::new(120),
+            home_detail: false,
             needing: None,
             renaming: None,
             menu: None,
@@ -546,6 +584,9 @@ impl App {
         // Best effort: an older daemon doesn't know notices.
         let _ = self.client.watch_notices(true).await;
         self.refresh().await;
+        // The composer's repositories and supervisor line (backlog #276).
+        self.load_repos().await;
+        self.load_glance().await;
         if let Some(id) = attach_to {
             self.attach(id).await;
         }
@@ -610,6 +651,9 @@ impl App {
                 }
                 _ = tick.tick() => {
                     self.refresh().await;
+                    if self.page_loaded.elapsed() >= PAGE_RELOAD {
+                        self.reload_page().await;
+                    }
                     // An editor that ended while you were elsewhere.
                     self.finish_edit().await;
                     self.update_preview().await;
@@ -793,6 +837,7 @@ impl App {
     /// Attaches to `id`'s tab, every pane of it, with `id` focused.
     async fn attach(&mut self, id: SessionId) {
         self.drop_g();
+        self.home_detail = false;
         self.help = false;
         self.kill_armed = None;
         self.attach_tab(id).await;
@@ -947,6 +992,11 @@ impl App {
 
     /// Typed keys while on the home screen, whichever page or prompt is over it.
     async fn home_screen_keys(&mut self, bytes: Vec<u8>) {
+        // Over a page, the row above its keys says what the last key did, not
+        // something said before it (backlog #277).
+        if self.page_open() {
+            self.status.clear();
+        }
         if self.help {
             return self.help_keys(&bytes).await;
         }
@@ -983,6 +1033,12 @@ impl App {
         // The decisions opened from the Inbox take the keys until Esc.
         if self.reviewing.is_some() {
             return self.review_keys(&bytes).await;
+        }
+        if self.batch.is_some() && self.view.is_none() {
+            return self.batch_keys(&bytes).await;
+        }
+        if self.composing() {
+            return self.compose_keys(&bytes).await;
         }
         self.option_hint(&bytes);
         self.home_input(&bytes).await;
@@ -1041,7 +1097,12 @@ impl App {
                 }
                 Some(Hit::Row(row)) => {
                     self.selected = row;
+                    self.cursor_moved = true;
                     self.kill_armed = None;
+                    // A click off the composer hands the keys back; the draft stays.
+                    if row != 0 && std::mem::take(&mut self.composer.typing) {
+                        self.sync_paste();
+                    }
                     self.update_preview().await;
                 }
                 Some(Hit::Key(key)) => self.on_home_key(key).await,
@@ -1094,6 +1155,10 @@ impl App {
             // The rest of the read is the backlog page's, once a key opened it.
             if self.backlog.is_some() {
                 return self.backlog_keys(&bytes[end..]).await;
+            }
+            // Or the composer's, once `n`, `/` or `#` focused it.
+            if self.composing() {
+                return self.compose_keys(&bytes[end..]).await;
             }
         }
     }
@@ -1467,7 +1532,11 @@ impl App {
     /// Bracketed paste on in the outer terminal while a backlog prompt is open, so a
     /// multi-line paste reaches it as one, at home too; after, the program's mode.
     fn sync_paste(&mut self) {
-        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some());
+        // A backlog prompt, or a search being typed on any page (#273): a
+        // pasted line break mustn't end it.
+        let want = self.backlog.as_ref().is_some_and(|p| p.typing.is_some())
+            || self.searching()
+            || self.composing();
         let program = self.view.as_ref().is_some_and(|v| v.modes.bracketed_paste);
         let Some(final_byte) = paste_change(want, self.paste_forced, program) else {
             return;
@@ -1476,6 +1545,82 @@ impl App {
         let mut out = std::io::stdout();
         let _ = write!(out, "\x1b[?2004{final_byte}");
         let _ = out.flush();
+    }
+
+    /// An attached session's bar, and a toast on the row over it.
+    fn draw_session_bar(&self, frame: &mut ratatui::Frame, view: &Attached, body: Rect, bar: Rect) {
+        self.bar_cols.set(bar.width);
+        let panel = style::Style::new().bg(self.settings.theme.panel);
+        // A toast takes its own row over the bar for its few seconds, never the
+        // bar's own line, where the hints would push it off (rule 9, backlog #203).
+        if let Some(toast) = self.toast()
+            && bar.y > body.y
+        {
+            let row = Rect::new(body.x, bar.y - 1, body.width, 1);
+            frame.render_widget(ratatui::widgets::Clear, row);
+            frame.render_widget(
+                Paragraph::new(Line::from(self.toast_line(toast))).style(panel),
+                row,
+            );
+        }
+        frame.render_widget(Paragraph::new(self.bar(view).line).style(panel), bar);
+    }
+
+    /// Over a section's page, the row above its keys: a toast, else what a key
+    /// said, as at home (rule 9: never the hint line).
+    fn draw_said(&self, frame: &mut ratatui::Frame) {
+        // Over a section's page, a toast takes the row above its keys, as at
+        // home (rule 9: never the hint line).
+        let t = self.settings.theme;
+        let area = frame.area();
+        // Not over the backlog's own dialogs (the launch form, a build order).
+        let dialog = self.backlog.as_ref().is_some_and(|p| {
+            p.order.is_some() || matches!(p.typing, Some(backlog::Typing::Launch(_)))
+        });
+        // What a key said goes there too: a refusal, or where an editor's
+        // text was kept, is seen on the page that said it (backlog #277).
+        let said = match self.toast() {
+            Some(toast) => Some(Line::from(self.toast_line(toast))),
+            None if !self.status.is_empty() => {
+                Some(Line::from(format!(" {} ", self.status).fg(t.fg).bold()))
+            }
+            None => None,
+        };
+        if self.view.is_none()
+            && self.page_open()
+            && !dialog
+            && area.height > 2
+            && let Some(said) = said
+        {
+            let row = Rect::new(area.x, area.bottom() - 2, area.width, 1);
+            frame.render_widget(ratatui::widgets::Clear, row);
+            frame.render_widget(
+                Paragraph::new(said).style(style::Style::new().bg(t.panel)),
+                row,
+            );
+        }
+    }
+
+    /// A section's page is over home: Backlog, Memory, History, or one of the
+    /// pages reached by a key (Docs, Wiki, PRs, the supervisor).
+    fn page_open(&self) -> bool {
+        self.backlog.is_some()
+            || self.memory.is_some()
+            || self.digest.is_some()
+            || self.docs.is_some()
+            || self.wiki.is_some()
+            || self.prs.is_some()
+            || self.supervisor.is_some()
+    }
+
+    /// A page's `/` search is being typed.
+    fn searching(&self) -> bool {
+        self.backlog.as_ref().is_some_and(|p| p.search.typing)
+            || self.memory.as_ref().is_some_and(|p| p.search.typing)
+            || self.docs.as_ref().is_some_and(|p| p.search.typing)
+            || self.wiki.as_ref().is_some_and(|p| p.search.typing)
+            || self.prs.as_ref().is_some_and(|p| p.search.typing)
+            || self.supervisor.as_ref().is_some_and(|p| p.search.typing)
     }
 
     /// The program's modes as the outer terminal should have them: a backlog prompt
@@ -1533,6 +1678,283 @@ impl App {
     fn attached_cwd(&self) -> Option<PathBuf> {
         let id = self.view.as_ref()?.id;
         Some(self.sessions.iter().find(|s| s.id == id)?.cwd.clone())
+    }
+
+    /// The composer has the keys: typing, on its row, at home.
+    fn composing(&self) -> bool {
+        self.composer.typing && self.view.is_none() && self.row() == Some(InboxRow::Compose)
+    }
+
+    /// The composer, typing: its row selected, `with` the draft (`#`).
+    async fn compose_focus(&mut self, with: &str) {
+        self.cursor_moved = true;
+        self.selected = 0;
+        self.home_detail = false;
+        self.composer.focus(with);
+        self.sync_paste();
+        // The pickers' list, for tab; a slow daemon leaves the last one.
+        self.load_repos().await;
+        self.update_preview().await;
+    }
+
+    /// The repositories tab steps through, and what ↩ starts with.
+    fn compose_defaults(&self) -> (Vec<PathBuf>, compose::Defaults) {
+        let known: Vec<PathBuf> = self
+            .repo_list
+            .repos
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        let repos = compose::repos(&known, &self.items);
+        let d = compose::defaults(&self.composer, &repos, &self.items);
+        (repos, d)
+    }
+
+    /// The `#` search's matches.
+    fn compose_found(&self) -> Vec<compose::Found> {
+        match self.composer.item_query() {
+            Some(q) => compose::find(q, &self.items, &self.sessions, self.boot()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Keys while the composer is typing: they're the draft's, not the Inbox's.
+    async fn compose_keys(&mut self, bytes: &[u8]) {
+        for did in self.composer.keys(bytes) {
+            match did {
+                compose::Composed::Kept => {}
+                compose::Composed::Done => self.sync_paste(),
+                compose::Composed::Repo => {
+                    let (repos, d) = self.compose_defaults();
+                    self.composer.repo = compose::step_repo(&d, &repos);
+                }
+                compose::Composed::Agent => {
+                    let (_, d) = self.compose_defaults();
+                    self.composer.agent = Some(compose::step_agent(&d));
+                }
+                compose::Composed::Start if self.composer.item_query().is_some() => {
+                    self.compose_pick().await
+                }
+                // Several lines: one session each, checked first (#280).
+                compose::Composed::Start if self.composer.task().contains('\n') => {
+                    self.open_batch();
+                    return;
+                }
+                compose::Composed::Start => self.compose_start().await,
+                compose::Composed::File => self.compose_file().await,
+            }
+            // A start attached: the rest of the read is the session's.
+            if self.view.is_some() {
+                return;
+            }
+        }
+        let found = self.compose_found().len();
+        self.composer.pick = self.composer.pick.min(found.saturating_sub(1));
+    }
+
+    /// ↩ on a draft of several lines: the Start agents dialog, a row each.
+    fn open_batch(&mut self) {
+        let (repos, d) = self.compose_defaults();
+        let b = batch::Batch::new(self.composer.task(), &d, &repos);
+        if b.rows.is_empty() {
+            return;
+        }
+        self.batch = Some(b);
+        self.composer.typing = false;
+        self.sync_paste();
+    }
+
+    /// Keys while Start agents is open: the dialog's alone.
+    async fn batch_keys(&mut self, bytes: &[u8]) {
+        let (repos, _) = self.compose_defaults();
+        let Some(b) = &mut self.batch else { return };
+        for did in b.keys(bytes, &repos) {
+            match did {
+                // Back to the draft, as the rows now have it, typing again.
+                batch::Did::Back => {
+                    if let Some(b) = self.batch.take()
+                        && !b.rows.is_empty()
+                    {
+                        self.composer.text = b.draft();
+                    }
+                    self.composer.typing = true;
+                    self.sync_paste();
+                }
+                batch::Did::Start => self.start_batch().await,
+            }
+        }
+    }
+
+    /// ↩ in Start agents: a session for every row, each in a worktree of its
+    /// own. Started rows leave the dialog; one that failed stays, with why,
+    /// to change and try again. Nothing attaches: they're several.
+    async fn start_batch(&mut self) {
+        let Some(mut b) = self.batch.take() else {
+            return;
+        };
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let mut started: Vec<String> = Vec::new();
+        let mut left = Vec::new();
+        for mut row in b.rows.drain(..) {
+            let d = row.defaults();
+            let Some(repo) = d.repo.clone() else {
+                row.failed = Some("no repository".into());
+                left.push(row);
+                continue;
+            };
+            let spec = SpawnSpec {
+                command: compose::command(&d, &row.task),
+                cwd: Some(repo),
+                name: None,
+                size,
+                env: spawn_env(),
+                worktree: (d.agent != "shell").then(String::new),
+                hidden: false,
+            };
+            match self.client.spawn(spec).await {
+                Ok(info) => started.push(info.name),
+                Err(e) => {
+                    row.failed = Some(format!("{e:#}"));
+                    left.push(row);
+                }
+            }
+        }
+        self.refresh().await;
+        let n = started.len();
+        let said = format!("started {n} session{}", if n == 1 { "" } else { "s" });
+        if left.is_empty() {
+            self.composer.clear();
+            self.say(said);
+            return;
+        }
+        b.rows = left;
+        b.cursor = 0;
+        let failed = b.rows.len();
+        self.batch = Some(b);
+        self.say(format!(
+            "{said}, {failed} couldn't start: tab or shift-tab, then ↩"
+        ));
+    }
+
+    /// ↩: starts the agent on the task in a worktree of its own and attaches
+    /// (a shell starts in the repository itself).
+    async fn compose_start(&mut self) {
+        let (_, d) = self.compose_defaults();
+        let Some(repo) = d.repo.clone() else {
+            return self.say("no repository to start in: add one in the web app".into());
+        };
+        let task = self.composer.task().to_owned();
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        let shell = d.agent == "shell";
+        let spec = SpawnSpec {
+            command: compose::command(&d, &task),
+            cwd: Some(repo),
+            name: None,
+            size,
+            env: spawn_env(),
+            worktree: (!shell).then(String::new),
+            hidden: false,
+        };
+        match self.client.spawn(spec).await {
+            Ok(info) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => self.say(format!("couldn't start it: {e:#}")),
+        }
+    }
+
+    /// ^f: the draft as a backlog item in the repository shown. Typed by you,
+    /// so a real item, not a proposal.
+    async fn compose_file(&mut self) {
+        let task = self.composer.task().to_owned();
+        if task.is_empty() || self.composer.item_query().is_some() {
+            return self.say("type a task to file it".into());
+        }
+        let (_, d) = self.compose_defaults();
+        let (title, body) = compose::as_item(&task);
+        let item = valkyrie_proto::NewItem {
+            title,
+            body,
+            cwd: d.repo,
+            ..Default::default()
+        };
+        match self.client.add_item(item).await {
+            Ok(item) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.say(format!("filed {}: {}", compose::label(&item), item.title));
+            }
+            Err(e) => self.say(format!("couldn't file it: {e:#}")),
+        }
+    }
+
+    /// ↩ on a `#` match: a ready item starts, one with a session opens it.
+    async fn compose_pick(&mut self) {
+        let found = self.compose_found();
+        let Some(f) = found.get(self.composer.pick).cloned() else {
+            return self.say("no open item matches".into());
+        };
+        match f.what {
+            compose::Can::Start => self.compose_launch(f.id).await,
+            compose::Can::Open(id, _) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.attach(id).await;
+            }
+            compose::Can::No(why) => self.say(format!("{} is {why}", f.label)),
+        }
+    }
+
+    /// `s` on the composer: the top ready item, without typing.
+    async fn start_ready(&mut self) {
+        let top = compose::ready(&self.items, &self.sessions, self.boot())
+            .first()
+            .map(|i| i.id);
+        match top {
+            Some(id) => self.compose_launch(id).await,
+            None => self.say("nothing ready in the backlog".into()),
+        }
+    }
+
+    /// Starts backlog item `id` as the backlog's ↩ does, and attaches.
+    async fn compose_launch(&mut self, id: u32) {
+        let Some(item) = self.items.iter().find(|i| i.id == id) else {
+            return;
+        };
+        let agent = backlog::last_agent(item);
+        let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
+        match self.client.launch_item(id, agent, true, size, None).await {
+            Ok(info) => {
+                self.composer.clear();
+                self.composer.typing = false;
+                self.sync_paste();
+                self.refresh().await;
+                self.attach(info.id).await;
+            }
+            Err(e) => self.say(format!("couldn't start it: {e:#}")),
+        }
+    }
+
+    /// The supervisor at a glance, for the composer's last line.
+    async fn load_glance(&mut self) {
+        let watch = tokio::time::timeout(PREVIEW_WAIT, self.client.supervisor_watch()).await;
+        let log = tokio::time::timeout(PREVIEW_WAIT, self.client.supervisor_log()).await;
+        if let Ok(Ok(w)) = watch {
+            self.glance = Some(Glance {
+                on: w.on,
+                watching: w.prs.len(),
+                last: match log {
+                    Ok(Ok((entries, _))) => entries.into_iter().max_by_key(|e| e.at),
+                    _ => self.glance.as_ref().and_then(|g| g.last.clone()),
+                },
+            });
+        }
     }
 
     /// Starts `$SHELL` (in `cwd`, else the daemon's default) and attaches to it.
@@ -1628,13 +2050,37 @@ impl App {
         };
         attached_bar(
             view,
+            &self.place_of(view.id),
             self.bar_panes(view.id),
             mode,
             self.need_you(),
             self.settings.hints,
+            self.bar_cols.get(),
             self.settings.theme,
             &self.settings.keys,
         )
+    }
+
+    /// Where a session works, as its bar says it: `api · fix/login · #4` (its
+    /// repository, then its backlog item's branch and number, if it's on one).
+    fn place_of(&self, id: SessionId) -> String {
+        let mut place = Vec::new();
+        if let Some(s) = self.sessions.iter().find(|s| s.id == id) {
+            place.extend(s.cwd.file_name().map(|n| n.to_string_lossy().into_owned()));
+        }
+        let item = self.items.iter().find(|i| {
+            i.boot == self.boot()
+                && i.sessions.contains(&id)
+                && matches!(
+                    i.status,
+                    valkyrie_proto::ItemStatus::Open | valkyrie_proto::ItemStatus::Proposed
+                )
+        });
+        if let Some(item) = item {
+            place.extend(item.branch.clone());
+            place.push(format!("#{}", item.number));
+        }
+        place.join(" · ")
     }
 
     /// Where `id` is among the attached tab's panes (from 1), how many there are,
@@ -2364,7 +2810,8 @@ impl App {
     /// one row for what's up for a decision, one for the items agents filed, then
     /// the rest of the sessions, Running before Quiet (spec: Inbox).
     fn inbox_rows(&self) -> Vec<InboxRow> {
-        let mut rows: Vec<InboxRow> = (0..self.queue.len()).map(InboxRow::Queue).collect();
+        let mut rows = vec![InboxRow::Compose];
+        rows.extend((0..self.queue.len()).map(InboxRow::Queue));
         if self.to_decide() > 0 {
             rows.push(InboxRow::Decide);
         }
@@ -2396,12 +2843,15 @@ impl App {
             && self.settings_cursor.is_none()
             && self.renaming.is_none()
             && self.reviewing.is_none()
+            && !self.composing()
+            && self.batch.is_none()
             && self.supervisor.is_none()
             && self.backlog.as_ref().is_none_or(backlog::Page::at_list)
             && self.docs.as_ref().is_none_or(docs::Page::at_list)
             && self.wiki.as_ref().is_none_or(wiki::Page::at_list)
             && self.memory.as_ref().is_none_or(memory::Page::at_list)
             && self.digest.as_ref().is_none_or(digest::Page::at_list)
+            && self.prs.as_ref().is_none_or(prs::Page::at_list)
     }
 
     /// `g i/b/m/h` go to a section and `[ ]` cycle the section's tabs, before
@@ -2470,7 +2920,8 @@ impl App {
             ("a · d", "accept or allow · reject or deny"),
             ("x", "close, after a second x"),
             ("r", "rename"),
-            ("n", "new session"),
+            ("n · s", "new session, typed · start the top ready item"),
+            ("# · ^f", "a backlog item to start · file what you typed"),
             ("/ · [ ]", "search · cycle a section's tabs or filter"),
             (
                 "g i · g b · g m · g h",
@@ -2516,6 +2967,50 @@ impl App {
         );
     }
 
+    /// `^\`'s panel over a session: what each key does there, bottom right, the
+    /// session dimmed behind (spec: Attached). Only the keys tab mode has.
+    fn draw_which_key(&self, frame: &mut ratatui::Frame, main: Rect) {
+        let t = self.settings.theme;
+        let rows: &[(&str, &str)] = &[
+            ("s · v", "split below · beside"),
+            ("z", "zoom"),
+            ("p", "pane menu"),
+            ("r", "rename"),
+            ("b", "backlog"),
+            ("d", "decisions"),
+            ("m", "minimal tabs"),
+            (",", "settings"),
+        ];
+        let mut lines: Vec<Line> = rows
+            .iter()
+            .map(|(k, w)| {
+                Line::from(vec![
+                    format!(" {k:<6}").fg(t.accent).bold(),
+                    w.to_string().fg(t.secondary()),
+                ])
+            })
+            .collect();
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            " esc ".fg(t.accent).bold(),
+            "back".fg(t.dim()),
+        ]));
+        let width = 34.min(main.width);
+        let height = (lines.len() as u16 + 2).min(main.height);
+        let rect = Rect::new(
+            main.right().saturating_sub(width + 1),
+            main.bottom().saturating_sub(height),
+            width,
+            height,
+        )
+        .intersection(main);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(
+            Paragraph::new(lines).block(panel(Line::from(" actions ".fg(t.fg).bold()), t, true)),
+            rect,
+        );
+    }
+
     /// Forgets a pending `g`, and the hint it put up.
     fn drop_g(&mut self) {
         if std::mem::take(&mut self.g_pending) {
@@ -2544,14 +3039,27 @@ impl App {
     }
 
     /// `]` (forward) or `[` in Memory (Decisions, Skills, Docs, Wiki, Notes) or
-    /// Backlog (Items, Pull requests): the next or last tab. History's are its
-    /// window, which its page keeps.
+    /// Backlog (its filter row: All, Ready, Running, Review, then Pull
+    /// requests): the next or last stop. History's are its window, which its
+    /// page keeps.
     async fn cycle_tab(&mut self, forward: bool) {
         if self.section() == Section::Backlog {
-            if self.backlog.take().is_some() {
-                self.open_prs().await;
-            } else if self.prs.take().is_some() {
-                self.open_backlog().await;
+            match backlog::Filter::step(self.backlog.as_ref().map(|p| p.filter), forward) {
+                Some(filter) => {
+                    if self.backlog.is_none() {
+                        self.prs = None;
+                        self.open_backlog().await;
+                    }
+                    if let Some(page) = &mut self.backlog {
+                        page.filter = filter;
+                        page.cursor = 0;
+                        page.armed = None;
+                    }
+                }
+                None => {
+                    self.backlog = None;
+                    self.open_prs().await;
+                }
             }
             return;
         }
@@ -2599,7 +3107,46 @@ impl App {
         }
     }
 
+    /// Section pages are live (#273): the open one loads again every
+    /// `PAGE_RELOAD`, keeping its cursor, so there's no reload key. Backlog
+    /// items and proposals come pushed. Not while a session is attached over it.
+    async fn reload_page(&mut self) {
+        self.page_loaded = Instant::now();
+        if self.view.is_some() {
+            return;
+        }
+        if self.memory.is_some() {
+            self.load_memory().await;
+        }
+        if self.prs.is_some() {
+            self.load_prs().await;
+        }
+        if self.supervisor.is_some() {
+            self.load_supervisor().await;
+        }
+        if self.wiki.is_some() {
+            self.load_wiki().await;
+        }
+        if self.digest.is_some() {
+            self.fetch_digest(true).await;
+        }
+        if let Some(page) = &mut self.docs {
+            let acts = page.refresh();
+            self.fetch_docs(false).await;
+            for act in acts {
+                Box::pin(self.docs_do(act)).await;
+            }
+        }
+        // Home, on the composer: its supervisor line and repositories.
+        if self.section() == Section::Inbox && self.row() == Some(InboxRow::Compose) {
+            self.load_glance().await;
+            self.load_repos().await;
+        }
+    }
+
     async fn open_prs(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.prs = Some(prs::Page::default());
         self.load_prs().await;
     }
@@ -2620,7 +3167,6 @@ impl App {
         for act in page.keys(bytes) {
             match act {
                 prs::Do::Close => self.prs = None,
-                prs::Do::Load => self.load_prs().await,
                 prs::Do::Open(url) => self.open_url(&url),
             }
         }
@@ -2632,6 +3178,8 @@ impl App {
     }
 
     async fn open_memory(&mut self, tab: memory::Tab) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.memory = Some(memory::Page::new(tab));
         self.load_memory().await;
     }
@@ -2681,23 +3229,170 @@ impl App {
         for act in page.keys(bytes, &self.proposals) {
             match act {
                 memory::Do::Close => self.memory = None,
-                memory::Do::Load => self.load_memory().await,
                 memory::Do::Review { index, accept } => {
+                    self.last_answer = None;
                     if let Some(said) = self.review_at(index, accept).await {
                         self.status = said;
                     }
-                    // An accepted one joins its kind's group; the notes stay.
-                    let got = self
-                        .client
-                        .decisions(None)
-                        .await
-                        .map_err(|e| format!("{e:#}"));
-                    if let Some(page) = &mut self.memory {
-                        page.decisions_loaded(got);
+                    if let (Some(undo), Some(page)) = (self.last_answer.take(), &mut self.memory) {
+                        page.undo = undo;
                     }
+                    self.reload_memory_decisions().await;
                 }
+                memory::Do::Edit { index } => self.edit_proposal(index).await,
+                memory::Do::Undo => self.undo_review().await,
             }
         }
+    }
+
+    /// After an answer: an accepted one joins its kind's group; the notes stay.
+    async fn reload_memory_decisions(&mut self) {
+        if self.memory.is_none() {
+            return;
+        }
+        let got = self
+            .client
+            .decisions(None)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        if let Some(page) = &mut self.memory {
+            page.decisions_loaded(got);
+        }
+    }
+
+    /// `e` on a proposal: its words in your editor, accepted as you leave them
+    /// (`accept_edited`).
+    async fn edit_proposal(&mut self, i: usize) {
+        let Some(d) = self.proposals.get(i) else {
+            return;
+        };
+        // A flagged decision or a proposed scope is in use already: `a` or `d`.
+        if d.status != valkyrie_proto::DecisionStatus::Proposed {
+            return self.say(format!(
+                "#{} is in use already: e rewrites a proposal",
+                d.id
+            ));
+        }
+        let was = memory::Wording::of(d);
+        let (text, title) = (was.text(), d.title.clone());
+        let what = Edited::Proposal {
+            project: d.project.clone(),
+            id: d.id,
+            seen: d.updated,
+            habit: memory::is_habit(d),
+            was,
+        };
+        self.start_edit(what, text, title).await;
+    }
+
+    /// Accepts a proposal as you rewrote it. Your file goes only once it's
+    /// accepted; otherwise the message says where it is.
+    async fn accept_edited(&mut self, what: Edited, text: String, path: PathBuf) {
+        let Edited::Proposal {
+            project,
+            id,
+            seen,
+            habit,
+            was,
+        } = what
+        else {
+            return;
+        };
+        let mut w = match memory::Wording::parse(&text, habit) {
+            Ok(w) => w,
+            Err(why) => {
+                return self.say(format!(
+                    "not accepted, yours is in {}: {why}",
+                    path.display()
+                ));
+            }
+        };
+        // A scope sent settles it (ADR-0014 §2): only one you changed goes, and
+        // only then does `z` put the old one back. No `scope:` line: left as is.
+        let mut was = was;
+        if w.scope.is_none() || w.scope == was.scope {
+            w.scope = None;
+            was.scope = None;
+        }
+        let action = ReviewAction::Revise {
+            title: w.title,
+            body: w.body,
+            kind: w.kind,
+            scope: w.scope,
+        };
+        match self
+            .client
+            .review(project.clone(), id, action, Some(seen))
+            .await
+        {
+            Ok(d) => {
+                let _ = std::fs::remove_file(&path);
+                if let Some(page) = &mut self.memory {
+                    page.undo = Some(memory::Undo {
+                        project,
+                        id,
+                        title: d.title.clone(),
+                        seen: d.updated,
+                        how: memory::Reverse::Reopen(Some(was)),
+                    });
+                }
+                self.say(format!("accepted #{id} {}, as you wrote it", d.title));
+                self.reload_memory_decisions().await;
+            }
+            Err(e) => self.say(format!(
+                "not accepted, yours is in {}: {e:#}",
+                path.display()
+            )),
+        }
+    }
+
+    /// `z` on Memory: takes back the last answer given there. An accept or a
+    /// reject goes back to review (in its own words, if you rewrote it on the
+    /// way in); a retire comes back into use.
+    async fn undo_review(&mut self) {
+        let Some(u) = self.memory.as_mut().and_then(|p| p.undo.take()) else {
+            return self.say("nothing to undo".into());
+        };
+        let id = u.id;
+        let action = ReviewAction::Reopen;
+        let said = match self
+            .client
+            .review(u.project.clone(), id, action, Some(u.seen))
+            .await
+        {
+            Err(e) => format!("couldn't undo: {e:#}"),
+            Ok(d) => match u.how {
+                memory::Reverse::Reopen(None)
+                    if d.status == valkyrie_proto::DecisionStatus::Active =>
+                {
+                    format!("#{id} {} is in use again", d.title)
+                }
+                memory::Reverse::Reopen(None) => {
+                    format!("#{id} {} is up for review again", d.title)
+                }
+                memory::Reverse::Reopen(Some(was)) => {
+                    let back = ReviewAction::Edit {
+                        title: was.title,
+                        body: was.body,
+                        kind: was.kind,
+                        scope: was.scope,
+                    };
+                    match self
+                        .client
+                        .review(u.project, id, back, Some(d.updated))
+                        .await
+                    {
+                        Ok(d) => format!(
+                            "#{id} {} is up for review again, as it was proposed",
+                            d.title
+                        ),
+                        Err(e) => format!("#{id} is up for review again, but in your words: {e:#}"),
+                    }
+                }
+            },
+        };
+        self.say(said);
+        self.reload_memory_decisions().await;
     }
 
     /// Sets the open section page aside for the session it attaches to.
@@ -2783,16 +3478,20 @@ impl App {
             None => name.to_string(),
         };
         let tabs: Vec<(String, bool)> = match here {
-            Section::Backlog => vec![
-                ("Items".into(), self.backlog.is_some()),
-                (
+            Section::Backlog => backlog::Filter::ALL
+                .iter()
+                .map(|&f| {
+                    let on = self.backlog.as_ref().is_some_and(|p| p.filter == f);
+                    (f.label().to_string(), on)
+                })
+                .chain([(
                     match self.prs.as_ref().and_then(prs::Page::count) {
                         Some(n) => format!("Pull requests {n}"),
                         None => "Pull requests".into(),
                     },
                     self.prs.is_some(),
-                ),
-            ],
+                )])
+                .collect(),
             Section::Memory => MEMORY_TABS
                 .iter()
                 .map(|&tab| {
@@ -2840,6 +3539,14 @@ impl App {
             vec![format!(" {host} · {running} running · {clock} ").fg(t.muted)],
             vec![format!(" {running} running · {clock} ").fg(t.muted)],
         ]
+    }
+
+    /// Whether home shows a session's detail as its own screen: narrow, opened
+    /// with Enter, and a session still selected.
+    fn narrow_detail(&self) -> bool {
+        self.home_detail
+            && self.home_cols.get() < 100
+            && matches!(self.row(), Some(InboxRow::Queue(_) | InboxRow::Session(_)))
     }
 
     /// The row under the cursor.
@@ -3038,6 +3745,10 @@ impl App {
     }
 
     fn restore(&mut self, anchor: Anchor) {
+        if !self.cursor_moved {
+            self.selected = self.resting_row();
+            return;
+        }
         let rows = self.inbox_rows();
         // A session can move between Needs you and the rows below it (it asks,
         // or it's seen): the cursor goes with it, wherever it is now.
@@ -3053,6 +3764,12 @@ impl App {
             self.selected = i;
         }
         self.clamp_selection();
+    }
+
+    /// Where the cursor rests until it's moved: the first row that waits on
+    /// you, else the composer, so inbox zero is the composer (backlog #276).
+    fn resting_row(&self) -> usize {
+        self.inbox_rows().iter().position(waits).unwrap_or(0)
     }
 
     fn clamp_selection(&mut self) {
@@ -3094,12 +3811,15 @@ impl App {
                 true => (ReviewAction::Scope { scope }, "scoped"),
                 false => (ReviewAction::DeclineScope, "kept everywhere:"),
             };
-            return Some(
-                match self.client.review(project, id, action, Some(seen)).await {
-                    Ok(_) => format!("{done} #{id} {title}"),
-                    Err(e) => format!("review failed: {e:#}"),
-                },
-            );
+            let said = match self.client.review(project, id, action, Some(seen)).await {
+                Ok(_) => {
+                    // A scope answer isn't one `z` takes back.
+                    self.answered(None);
+                    format!("{done} #{id} {title}")
+                }
+                Err(e) => format!("review failed: {e:#}"),
+            };
+            return Some(said);
         }
         let flagged = d.status == valkyrie_proto::DecisionStatus::Active;
         let armed = self.retire_armed.take() == Some((project.clone(), id));
@@ -3107,18 +3827,49 @@ impl App {
             self.retire_armed = Some((project, id));
             return Some(format!("d again to retire #{id}; agents stop getting it"));
         }
-        let (action, done) = match (flagged, yes) {
-            (false, true) => (ReviewAction::Accept, "accepted"),
-            (false, false) => (ReviewAction::Reject, "rejected"),
-            (true, true) => (ReviewAction::Confirm, "still holds:"),
-            (true, false) => (ReviewAction::Retire, "retired"),
+        let (action, done, how) = match (flagged, yes) {
+            (false, true) => (
+                ReviewAction::Accept,
+                "accepted",
+                Some(memory::Reverse::Reopen(None)),
+            ),
+            (false, false) => (
+                ReviewAction::Reject,
+                "rejected",
+                Some(memory::Reverse::Reopen(None)),
+            ),
+            // It holds as of now: there's nothing to take back.
+            (true, true) => (ReviewAction::Confirm, "still holds:", None),
+            (true, false) => (
+                ReviewAction::Retire,
+                "retired",
+                Some(memory::Reverse::Reopen(None)),
+            ),
         };
-        Some(
-            match self.client.review(project, id, action, Some(seen)).await {
-                Ok(_) => format!("{done} #{id} {title}"),
-                Err(e) => format!("review failed: {e:#}"),
-            },
-        )
+        let said = match self
+            .client
+            .review(project.clone(), id, action, Some(seen))
+            .await
+        {
+            Ok(d) => {
+                self.answered(how.map(|how| memory::Undo {
+                    project,
+                    id,
+                    title: title.clone(),
+                    seen: d.updated,
+                    how,
+                }));
+                format!("{done} #{id} {title}")
+            }
+            Err(e) => format!("review failed: {e:#}"),
+        };
+        Some(said)
+    }
+
+    /// What the last answer would take back (`None`: it can't be). Memory
+    /// keeps it for `z` when the answer was given there.
+    fn answered(&mut self, undo: Option<memory::Undo>) {
+        self.last_answer = Some(undo);
     }
 
     /// Keys over the decisions opened from a session: move, `a`/`d` as at home, and
@@ -3165,6 +3916,12 @@ impl App {
 
     async fn on_home_key(&mut self, key: HomeKey) {
         let (selected, _) = self.selection();
+        if matches!(
+            key,
+            HomeKey::Up | HomeKey::Down | HomeKey::NextWaiting | HomeKey::Enter
+        ) {
+            self.cursor_moved = true;
+        }
         // Any other key keeps the session a first `x` asked about.
         if key != HomeKey::Kill {
             self.kill_armed = None;
@@ -3193,6 +3950,14 @@ impl App {
             HomeKey::Quit => self.quit = true,
             HomeKey::Enter => {
                 match self.row() {
+                    Some(InboxRow::Compose) => self.compose_focus("").await,
+                    // Narrow, Enter shows the session's detail first; Enter there
+                    // attaches.
+                    Some(InboxRow::Queue(_) | InboxRow::Session(_))
+                        if self.home_cols.get() < 100 && !self.home_detail =>
+                    {
+                        self.home_detail = true;
+                    }
                     _ if selected.is_some() => self.attach(selected.unwrap()).await,
                     // The proposals one at a time, a/d on each; the supervisor's
                     // page when only its offers wait.
@@ -3235,7 +4000,6 @@ impl App {
                 if rows.is_empty() {
                     return self.say("nothing waits on you".into());
                 }
-                let waits = |r: &InboxRow| !matches!(r, InboxRow::Session(_));
                 let next = (self.selected + 1..rows.len())
                     .chain(0..=self.selected.min(rows.len().saturating_sub(1)))
                     .find(|&i| waits(&rows[i]));
@@ -3258,7 +4022,9 @@ impl App {
                 _ => self.say("1-9 answer a session that asks".into()),
             },
             HomeKey::Help => self.help = true,
-            HomeKey::NewShell => self.new_shell(None).await,
+            HomeKey::Back => self.home_detail = false,
+            HomeKey::Compose => self.compose_focus("").await,
+            HomeKey::ComposeItem => self.compose_focus("#").await,
             HomeKey::Direct(action) => self.on_direct(action).await,
             HomeKey::Keys => self.keys_page = Some(KeysPage::default()),
             HomeKey::AddDevice => self.add_device().await,
@@ -3272,6 +4038,10 @@ impl App {
                 }
             }
             HomeKey::Digest => self.open_digest().await,
+            // On the composer, `s` starts the top ready item (spec: n · s).
+            HomeKey::Supervisor if self.row() == Some(InboxRow::Compose) => {
+                self.start_ready().await
+            }
             HomeKey::Supervisor => self.open_supervisor().await,
             // `h`, as it was: History, which now holds the past sessions too.
             HomeKey::Past => self.open_digest().await,
@@ -3362,20 +4132,34 @@ impl App {
             .filter(|i| page.is_none_or(|p| p.holds(i)))
             .cloned()
             .collect();
-        backlog::rows_of(&items, &self.items, &self.sessions, self.boot())
+        let mut rows = backlog::rows_of(&items, &self.items, &self.sessions, self.boot());
+        if let Some(p) = page {
+            rows.retain(|(lane, item)| p.filter.shows(*lane, item));
+        }
+        rows
     }
 
     async fn open_digest(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.digest = Some(digest::Page::default());
         self.load_digest().await;
     }
 
     /// Asks the daemon for the digest the page's window and grouping want.
     async fn load_digest(&mut self) {
+        self.fetch_digest(false).await;
+    }
+
+    /// The digest for the page's window: `live` is a reload that keeps the
+    /// rows on screen until the answer comes (`reload_page`).
+    async fn fetch_digest(&mut self, live: bool) {
         let Some(page) = &mut self.digest else {
             return;
         };
-        page.loading();
+        if !live {
+            page.loading();
+        }
         let tz = jiff::tz::TimeZone::system();
         let since = page.win.since(now_ms(), &tz);
         // The sessions, what the supervisor did, and what ended (for `R`).
@@ -3393,7 +4177,11 @@ impl App {
             .map_err(text);
         let past = self.client.history().await.map_err(text);
         if let Some(page) = &mut self.digest {
-            page.loaded(digest, steps, past, &tz);
+            if live {
+                page.refreshed(digest, steps, past, &tz);
+            } else {
+                page.loaded(digest, steps, past, &tz);
+            }
         }
     }
 
@@ -3445,6 +4233,8 @@ impl App {
     }
 
     async fn open_supervisor(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.supervisor = Some(supervisor::Page::default());
         self.refresh_numbers();
         self.load_supervisor().await;
@@ -3476,7 +4266,6 @@ impl App {
         for act in page.keys(bytes, &waits) {
             match act {
                 supervisor::Do::Close => self.supervisor = None,
-                supervisor::Do::Load => self.load_supervisor().await,
                 supervisor::Do::Say(text) => self.say(text),
                 supervisor::Do::OpenSession => {
                     let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
@@ -3582,6 +4371,8 @@ impl App {
     }
 
     async fn open_wiki(&mut self, selected: Option<SessionId>) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         let Some(cwd) = self.wiki_repo_for(selected) else {
             self.say("the wiki is a repository's: select a session in one".into());
             return;
@@ -3624,7 +4415,6 @@ impl App {
         for act in page.keys(bytes) {
             match act {
                 wiki::Do::Close => self.wiki = None,
-                wiki::Do::Load => self.load_wiki().await,
                 wiki::Do::Read(slug) => {
                     let Some(repo) = self.wiki.as_ref().map(|p| p.repo.clone()) else {
                         return;
@@ -3675,6 +4465,8 @@ impl App {
     }
 
     async fn open_docs(&mut self) {
+        // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
+        self.page_loaded = Instant::now();
         self.docs = Some(docs::Page::default());
         self.refresh_numbers();
         self.load_docs().await;
@@ -3684,8 +4476,18 @@ impl App {
     /// until now read, as the web app's list does; this list still shows them
     /// as new.
     async fn load_docs(&mut self) {
+        self.fetch_docs(true).await;
+    }
+
+    /// The docs list; `seen` marks what agents wrote until now read. A live
+    /// reload doesn't: you opened the list, not what arrived since.
+    async fn fetch_docs(&mut self, seen: bool) {
         let got = self.client.docs_listing().await.map_err(|e| e.to_string());
-        let at = got.as_ref().ok().map(|l| l.at);
+        // A live reload that failed keeps the list it had.
+        if !seen && got.is_err() {
+            return;
+        }
+        let at = got.as_ref().ok().map(|l| l.at).filter(|_| seen);
         if let Some(page) = &mut self.docs {
             page.loaded(got);
         }
@@ -3711,7 +4513,6 @@ impl App {
         match act {
             docs::Do::Close => self.docs = None,
             docs::Do::Url(url) => self.open_url(&url),
-            docs::Do::Load => self.load_docs().await,
             docs::Do::Open(key) => {
                 let got = self
                     .client
@@ -3769,7 +4570,10 @@ impl App {
                 base,
                 body,
                 title,
-            } => self.start_edit(key, base, body, title).await,
+            } => {
+                self.start_edit(Edited::Doc { key, base }, body, title)
+                    .await
+            }
             docs::Do::Save { key, base, body } => self.save_doc(key, base, body, None).await,
             docs::Do::History(key) => {
                 let got = self.client.doc_history(key.clone(), None).await;
@@ -3816,7 +4620,7 @@ impl App {
                         if let Some(page) = &mut self.docs {
                             page.deleted(&key, token, title.clone());
                         }
-                        self.say(format!("Deleted “{title}”: u puts it back."));
+                        self.say(format!("Deleted “{title}”: z puts it back."));
                         self.load_docs().await;
                     }
                     Ok(Err(now)) => {
@@ -3861,17 +4665,17 @@ impl App {
         }
     }
 
-    /// Opens a doc's body in your editor (`$VISUAL`, else `$EDITOR`, else `vi`),
-    /// in a session of its own, and attaches to it. When it ends, what you wrote
-    /// is saved (`finish_edit`).
-    async fn start_edit(&mut self, key: String, base: String, body: String, title: String) {
+    /// Opens a doc's body (or a proposal's words) in your editor (`$VISUAL`,
+    /// else `$EDITOR`, else `vi`), in a session of its own, and attaches to it.
+    /// When it ends, what you wrote is saved, or accepted (`finish_edit`).
+    async fn start_edit(&mut self, what: Edited, body: String, title: String) {
         if self.editing.is_some() {
-            return self.say("a doc is already open in your editor".into());
+            return self.say("something is already open in your editor".into());
         }
         // The file to edit would be on this machine, the editor on the other.
         if let Some(host) = remote() {
             return self.say(format!(
-                "editing a doc needs {host}'s own valk: `ssh -t {host} valk`"
+                "editing needs {host}'s own valk: `ssh -t {host} valk`"
             ));
         }
         let path = match edit_file(&body) {
@@ -3894,8 +4698,7 @@ impl App {
             Ok(info) => {
                 self.editing = Some(Editing {
                     session: info.id,
-                    key,
-                    base,
+                    what,
                     path,
                     body,
                     seen: false,
@@ -3934,10 +4737,17 @@ impl App {
         match std::fs::read_to_string(&e.path) {
             Ok(text) if text == e.body => {
                 let _ = std::fs::remove_file(&e.path);
+                let still = match e.what {
+                    Edited::Doc { .. } => "",
+                    Edited::Proposal { .. } => ", so it's still up for review",
+                };
                 // An editor that forks into the background ends at once, unchanged.
-                self.say("no changes (if your editor runs in the background, make it wait, as `code -w` does)".into());
+                self.say(format!("no changes{still} (if your editor runs in the background, make it wait, as `code -w` does)"));
             }
-            Ok(text) => self.save_doc(e.key, e.base, text, Some(e.path)).await,
+            Ok(text) => match e.what {
+                Edited::Doc { key, base } => self.save_doc(key, base, text, Some(e.path)).await,
+                what @ Edited::Proposal { .. } => self.accept_edited(what, text, e.path).await,
+            },
             Err(err) => self.say(format!(
                 "couldn't read what you wrote in {}: {err}",
                 e.path.display()
@@ -4285,15 +5095,12 @@ impl App {
                 // with the user's credentials, so fetch here first. Off the event
                 // loop: a fetch can take a while, and the answer comes back on
                 // `shipping`.
-                let repo = self
-                    .backlog
-                    .as_ref()
-                    .map(|p| p.repo.clone())
-                    .unwrap_or_default();
+                // What the page's search shows.
+                let page = self.backlog.as_ref();
                 let mut projects: Vec<PathBuf> = self
                     .items
                     .iter()
-                    .filter(|i| repo.holds(i))
+                    .filter(|i| page.is_none_or(|p| p.holds(i)))
                     .filter(|i| i.status == valkyrie_proto::ItemStatus::Open && i.branch.is_some())
                     .filter_map(|i| i.project.clone())
                     .collect();
@@ -4389,27 +5196,16 @@ impl App {
                 }
                 self.say(said);
             }
-            Do::NextRepo => {
-                if let Some(page) = &mut self.backlog {
-                    page.repo = page.repo.next(&self.items);
-                    page.cursor = 0;
-                    page.armed = None;
-                }
-            }
             Do::Add { kind, text } => {
-                // For the repository the page shows, else the one the TUI is in, or
-                // the attached tab is.
-                let repo = self.backlog.as_ref().map(|p| p.repo.clone());
-                let cwd = match repo.unwrap_or_default() {
-                    backlog::Repo::In(root) => Some(root),
-                    backlog::Repo::NoFolder => None,
-                    // Another machine's paths can't be looked at here: the daemon
-                    // finds the attached tab's repository itself.
-                    backlog::Repo::All if remote().is_some() => self.attached_cwd(),
-                    backlog::Repo::All => self
-                        .attached_cwd()
+                // For the attached tab's repository, else the one the TUI is in.
+                // Another machine's paths can't be looked at here: the daemon
+                // finds the attached tab's repository itself.
+                let cwd = if remote().is_some() {
+                    self.attached_cwd()
+                } else {
+                    self.attached_cwd()
                         .or_else(|| std::env::current_dir().ok())
-                        .filter(|d| in_repository(d)),
+                        .filter(|d| in_repository(d))
                 };
                 let item = self
                     .client
@@ -4615,50 +5411,29 @@ impl App {
                     if let Some(session) = self.peeked() {
                         self.draw_peek(frame, main, tabs, session);
                     }
+                    if self.tab_mode {
+                        dim(frame, main, self.settings.theme);
+                        self.draw_which_key(frame, main);
+                    }
                     if let Some(menu) = &self.menu {
+                        dim(frame, main, self.settings.theme);
                         self.draw_menu(frame, menu);
                     }
                     if let Some(cursor) = self.reviewing {
+                        dim(frame, main, self.settings.theme);
                         self.draw_reviews(frame, main, cursor);
                     }
-                    let line = self.bar(view).line;
-                    // A toast takes its own row over the bar for its few seconds,
-                    // never the bar's own line (rule 9, backlog #203).
-                    if let Some(toast) = self.toast()
-                        && bar.y > body.y
-                    {
-                        let row = Rect::new(body.x, bar.y - 1, body.width, 1);
-                        let spans = self.toast_line(toast);
-                        frame.render_widget(ratatui::widgets::Clear, row);
-                        frame.render_widget(
-                            Paragraph::new(Line::from(spans))
-                                .style(style::Style::new().bg(self.settings.theme.panel)),
-                            row,
-                        );
-                    }
-                    frame.render_widget(
-                        Paragraph::new(line)
-                            .style(style::Style::new().bg(self.settings.theme.panel)),
-                        bar,
-                    );
+                    self.draw_session_bar(frame, view, body, bar);
                 }
                 None => {
                     self.draw_home(frame, body, bar);
                     if let Some(cursor) = self.reviewing {
+                        dim(frame, body, self.settings.theme);
                         self.draw_reviews(frame, body, cursor);
                     }
                 }
             }
             self.draw_mini(frame);
-            if self.help && self.view.is_none() {
-                self.draw_help(frame);
-            }
-            if let Some(cursor) = self.settings_cursor {
-                self.draw_settings(frame, cursor);
-            }
-            if let Some(page) = &self.keys_page {
-                self.draw_keys_page(frame, page);
-            }
             if let Some(page) = &self.digest {
                 page.draw(frame, self.settings.theme);
             }
@@ -4690,6 +5465,22 @@ impl App {
                     t,
                 );
             }
+            // Over a section's page, a toast or what a key said.
+            self.draw_said(frame);
+            let t = self.settings.theme;
+            let area = frame.area();
+            // Dialogs last, over a dimmed screen (rule 8: a box is a dialog).
+            if self.help && self.view.is_none() {
+                self.draw_help(frame);
+            }
+            if let Some(cursor) = self.settings_cursor {
+                dim(frame, area, t);
+                self.draw_settings(frame, cursor);
+            }
+            if let Some(page) = &self.keys_page {
+                dim(frame, area, t);
+                self.draw_keys_page(frame, page);
+            }
         })?;
         Ok(())
     }
@@ -4701,6 +5492,9 @@ const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 const HOVER_DELAY: Duration = Duration::from_secs(1);
 /// How soon a second press on a tab makes a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How often an open section page loads again on its own.
+const PAGE_RELOAD: Duration = Duration::from_secs(30);
+
 /// How long a ping's toast stays in the bar.
 const TOAST_FOR: Duration = Duration::from_secs(6);
 /// A backlog proposal's toast stays longer: long enough to answer it.
@@ -4856,7 +5650,6 @@ const SPIN_EVERY: Duration = Duration::from_millis(100);
 /// Wide enough for the lists plus a preview of the selected session.
 /// Rows the wheel scrolls a proposal's text by, a notch.
 const WHEEL_ROWS: i32 = 3;
-const PREVIEW_MIN_WIDTH: u16 = 130;
 /// The most proposals shown at once; more scroll.
 const PROPOSAL_ROWS: usize = 6;
 
@@ -4918,23 +5711,16 @@ impl App {
             frame.render_widget(Paragraph::new(right).right_aligned(), header);
         }
 
-        let (lists, preview) = if main.width >= PREVIEW_MIN_WIDTH {
-            // No boxes: a single rule between the list and the detail.
-            let [lists, rule, preview] = Layout::horizontal([
-                Constraint::Percentage(62),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(main);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (lists, Some(preview))
-        } else {
-            (main, None)
-        };
+        let (lists, preview) = crate::list_and_detail(frame, main, t);
+        self.home_cols.set(main.width);
         let inbox_area = lists;
         let in_proposals = self.proposal().is_some();
-        self.draw_inbox(frame, inbox_area, now, spin);
+        if self.narrow_detail() {
+            // Narrow: the selected session's detail is the screen; Esc goes back.
+            self.draw_preview(frame, inbox_area);
+        } else {
+            self.draw_inbox(frame, inbox_area, now, spin);
+        }
 
         if let Some(area) = preview {
             self.draw_preview(frame, area);
@@ -4974,6 +5760,16 @@ impl App {
             Paragraph::new(footer).style(style::Style::new().bg(t.panel)),
             bar,
         );
+        // Start agents over a dimmed home (rule 8), but not the notice row or
+        // the footer: what a start said, and the dialog's keys, stay readable.
+        if let Some(b) = &self.batch {
+            let behind = Rect {
+                height: body.height.saturating_sub(1),
+                ..body
+            };
+            dim(frame, behind, t);
+            b.draw(frame, t);
+        }
     }
 
     /// The line over the footer: a toast for a few seconds, else what a key just
@@ -5016,12 +5812,62 @@ impl App {
         on_proposal: bool,
     ) -> (Line<'static>, Vec<(u16, u16, HomeKey)>) {
         let t = self.settings.theme;
+        // A dialog's footer is its own (rule 8).
+        if let Some(b) = &self.batch {
+            let mut spans: Vec<Span> = Vec::new();
+            for (key, what) in batch::hints(b) {
+                spans.push(" ".into());
+                spans.push(format!(" {key} ").fg(t.accent).bold());
+                spans.push(format!("{what} ").fg(t.dim()));
+            }
+            return (Line::from(spans), Vec::new());
+        }
         let step = self.offered().map(|(_, _, step)| step);
         let asks = matches!(self.selection(), (_, Some(q)) if answerable(q));
         let mut hints: Vec<(String, String, HomeKey)> = Vec::new();
         let mut hint = |k: &str, w: &str, key: HomeKey| hints.push((k.into(), w.into(), key));
-        if self.kill_armed.is_some() {
+        // Typing: only the composer's keys, since letters type (spec: Home composer).
+        let typing = self.composing();
+        if typing && self.composer.item_query().is_some() {
+            let found = self.compose_found();
+            match found.get(self.composer.pick) {
+                Some(
+                    f @ compose::Found {
+                        what: compose::Can::Start,
+                        ..
+                    },
+                ) => hint("↩", &format!("start {}", f.label), HomeKey::Compose),
+                Some(
+                    f @ compose::Found {
+                        what: compose::Can::Open(..),
+                        ..
+                    },
+                ) => hint("↩", &format!("open {}", f.label), HomeKey::Compose),
+                _ => {}
+            }
+            hint("↑↓", "pick", HomeKey::Compose);
+            hint("esc", "back to text", HomeKey::Compose);
+        } else if typing {
+            let lines = self
+                .composer
+                .task()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count();
+            if lines > 1 {
+                hint("↩", &format!("review and start {lines}"), HomeKey::Compose);
+            } else {
+                hint("↩", "start", HomeKey::Compose);
+            }
+            hint("^f", "file to backlog", HomeKey::Compose);
+            hint("#", "item", HomeKey::Compose);
+            hint("tab", "repo", HomeKey::Compose);
+            hint("esc", "done", HomeKey::Compose);
+        } else if self.kill_armed.is_some() {
             hint("x", "close it", HomeKey::Kill);
+        } else if self.narrow_detail() {
+            hint("↩", "attach", HomeKey::Enter);
+            hint("esc", "back", HomeKey::Back);
         } else if let Some(step) = &step {
             hint("a", step.action.label(), HomeKey::Accept);
             if let Some(alt) = step.alt {
@@ -5044,6 +5890,18 @@ impl App {
             hint("↩", "review all", HomeKey::Enter);
         } else {
             match self.row() {
+                Some(InboxRow::Compose) => {
+                    hint("n", "type", HomeKey::Compose);
+                    if let Some(top) =
+                        compose::ready(&self.items, &self.sessions, self.boot()).first()
+                    {
+                        hint(
+                            "s",
+                            &format!("start {}", compose::label(top)),
+                            HomeKey::Supervisor,
+                        );
+                    }
+                }
                 Some(InboxRow::Decide) => hint("↩", "open", HomeKey::Enter),
                 Some(InboxRow::Filed) => hint("↩", "triage", HomeKey::Enter),
                 Some(_) => {
@@ -5057,7 +5915,7 @@ impl App {
                         hint("A", "adopt", HomeKey::Adopt);
                     }
                 }
-                None => hint("n", "new session", HomeKey::NewShell),
+                None => hint("n", "new session", HomeKey::Compose),
             }
         }
         hints.truncate(5);
@@ -5074,19 +5932,151 @@ impl App {
         // Getting around, faint, as much as there is room for; `? keys` last
         // to go, since it leads to the rest.
         let left = at(&spans) as usize;
-        let around = [
-            "n new · j/k move · g sections · ? keys ",
-            "j/k move · ? keys ",
-            "? keys ",
-        ]
-        .into_iter()
-        .find(|a| left + a.chars().count() + 2 <= width as usize);
+        let around: &[&str] = if typing {
+            &["shift-tab agent "]
+        } else if self.row() == Some(InboxRow::Compose) {
+            // `n type` is already the first hint.
+            &[
+                "j/k move · g sections · ? keys ",
+                "j/k move · ? keys ",
+                "? keys ",
+            ]
+        } else {
+            &[
+                "n new · j/k move · g sections · ? keys ",
+                "j/k move · ? keys ",
+                "? keys ",
+            ]
+        };
+        let around = around
+            .iter()
+            .find(|a| left + a.chars().count() + 2 <= width as usize);
         if let Some(around) = around {
             let pad = (width as usize).saturating_sub(left + around.chars().count());
             spans.push(" ".repeat(pad).into());
             spans.push(around.fg(t.muted));
         }
         (Line::from(spans), chips)
+    }
+
+    /// Under 100 columns the composer is in the list, not a pane of its own.
+    fn compose_inline(&self) -> bool {
+        self.home_cols.get() < 100
+    }
+
+    /// The composer's lines in the Inbox list: "+ New session" beside a pane,
+    /// else the band itself, its defaults and any `#` matches.
+    fn compose_row_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let t = self.settings.theme;
+        if !self.compose_inline() {
+            let name = " + New session";
+            let pad = width.saturating_sub(name.chars().count() + 4);
+            // The first cell is the cursor's (`▌`), as on every row.
+            return vec![Line::from(vec![
+                " ".into(),
+                "+ ".fg(t.accent).bold(),
+                "New session".fg(t.fg).bold(),
+                " ".repeat(pad).into(),
+                "n".fg(t.muted),
+            ])];
+        }
+        let selected = self.row() == Some(InboxRow::Compose);
+        let mut lines = compose::band(&self.composer, width, 3, selected, t);
+        lines.extend(self.compose_under(width));
+        lines
+    }
+
+    /// Under the band: the defaults and what changes them, then the `#` matches.
+    fn compose_under(&self, width: usize) -> Vec<Line<'static>> {
+        let t = self.settings.theme;
+        if self.composer.item_query().is_some() && self.composing() {
+            return compose::match_lines(&self.compose_found(), self.composer.pick, width, t);
+        }
+        let (_, d) = self.compose_defaults();
+        let mut spans = vec!["   ".into()];
+        spans.extend(compose::defaults_line(&d, t));
+        spans.push(if self.composing() {
+            "   tab repo · shift-tab agent".fg(t.muted)
+        } else {
+            "   tab change".fg(t.muted)
+        });
+        vec![Line::from(spans)]
+    }
+
+    /// The pane beside the list on the composer: what's next, the band, the
+    /// ready items `s` starts, and the supervisor on the last line.
+    fn draw_composer(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let t = self.settings.theme;
+        let now = now_ms();
+        let area = area.inner(Margin::new(3, 0));
+        let width = area.width as usize;
+        let need = self.need_you();
+        let mut lines = vec![
+            Line::default(),
+            Line::default(),
+            Line::from("What's next?".fg(t.fg).bold()),
+            Line::from(
+                if need == 0 {
+                    "Nothing needs you. Start an agent, or pick up the backlog.".to_owned()
+                } else {
+                    format!("{need} wait on you: tab goes to them. Or start something new.")
+                }
+                .fg(t.muted),
+            ),
+            Line::default(),
+        ];
+        lines.extend(compose::band(&self.composer, width, 4, true, t));
+        lines.extend(self.compose_under(width));
+        let ready = compose::ready(&self.items, &self.sessions, self.boot());
+        let open = self
+            .items
+            .iter()
+            .filter(|i| i.status == valkyrie_proto::ItemStatus::Open)
+            .count();
+        lines.extend([Line::default(), Line::default()]);
+        let head = "Ready in the backlog";
+        let count = format!("{open} in Backlog");
+        lines.push(Line::from(vec![
+            head.fg(t.fg).bold(),
+            " ".repeat(width.saturating_sub(head.len() + count.len()))
+                .into(),
+            count.fg(t.muted),
+        ]));
+        lines.push(Line::default());
+        if ready.is_empty() {
+            lines.push(Line::from("nothing ready: b opens the backlog".fg(t.muted)));
+        }
+        for (i, item) in ready.iter().take(5).enumerate() {
+            let key = if i == 0 { "s  " } else { "   " };
+            let label = pad(&fit(&compose::label(item), 9), 10);
+            let facts = format!("{:<8}{}", item.kind.as_str(), item.priority.as_str());
+            let room = width.saturating_sub(3 + 10 + facts.len() + 2).max(8);
+            lines.push(Line::from(vec![
+                key.fg(t.accent).bold(),
+                label.fg(t.muted),
+                pad(&fit(&item.title, room), room).fg(t.fg),
+                "  ".into(),
+                facts.fg(t.muted),
+            ]));
+        }
+        let [body, foot] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(area);
+        frame.render_widget(Paragraph::new(lines), body);
+        if let Some(g) = &self.glance {
+            let line = if !g.on {
+                "◦ supervisor off".to_owned()
+            } else {
+                let mut said = format!("◦ supervisor watching {}", g.watching);
+                if let Some(last) = &g.last {
+                    said.push_str(&format!(" · {} {}", last.said, age(last.at * 1000, now)));
+                }
+                said
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(fit(&line, width).fg(t.muted))),
+                foot,
+            );
+        }
     }
 
     /// The Inbox: Needs you, Running, Quiet, each session once (spec: Inbox). A
@@ -5129,12 +6119,17 @@ impl App {
                 ])
                 .centered(),
             ];
-            let [_, mid, _] = Layout::vertical([
+            let top = self.compose_row_lines(inner.width as usize);
+            let rows = top.len() as u16;
+            let [head, _, mid, _] = Layout::vertical([
+                Constraint::Length(rows),
                 Constraint::Fill(1),
                 Constraint::Length(lines.len() as u16),
                 Constraint::Fill(1),
             ])
             .areas(inner);
+            self.home_rows.borrow_mut().push((head, Hit::Row(0)));
+            frame.render_widget(Paragraph::new(top), head);
             frame.render_widget(Paragraph::new(lines), mid);
             return;
         }
@@ -5155,7 +6150,13 @@ impl App {
                 ]),
             ));
         };
+        lines.extend(
+            self.compose_row_lines(width)
+                .into_iter()
+                .map(|line| (Some(0), line)),
+        );
         if self.need_you() == 0 {
+            lines.push((None, Line::default()));
             lines.push((
                 None,
                 Line::from(vec![
@@ -5168,6 +6169,8 @@ impl App {
         }
         for (i, row) in rows.iter().enumerate() {
             let line = match *row {
+                // Drawn above, its own lines.
+                InboxRow::Compose => continue,
                 InboxRow::Queue(q) => inbox_queue_row(&self.queue[q], now, spin, width, t),
                 InboxRow::Decide => self.decide_row(now, width),
                 InboxRow::Filed => self.filed_row(now, width),
@@ -5197,7 +6200,7 @@ impl App {
         let height = inner.height as usize;
         let at = lines
             .iter()
-            .position(|(row, _)| *row == Some(self.selected));
+            .rposition(|(row, _)| *row == Some(self.selected));
         let offset = match at {
             Some(at) if at + 1 > height => at + 1 - height,
             _ => 0,
@@ -5212,6 +6215,10 @@ impl App {
                 let Some(row) = row else { return line };
                 let rect = Rect::new(inner.x, inner.y + y as u16, inner.width, 1);
                 hits.push((rect, Hit::Row(row)));
+                // The composer in the list draws its own selection: a band.
+                if row == 0 && self.compose_inline() {
+                    return line;
+                }
                 if row == self.selected {
                     let mut spans = vec!["▌".fg(t.accent)];
                     spans.extend(line.spans.into_iter().skip(1));
@@ -5285,6 +6292,9 @@ impl App {
     /// The selected session: its full summary, then the bottom of its screen.
     fn draw_preview(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
+        if self.row() == Some(InboxRow::Compose) {
+            return self.draw_composer(frame, area);
+        }
         if let Some(d) = self.proposal() {
             let title = Line::from(vec![
                 " ■ ".fg(t.accent).bold(),
@@ -6696,9 +7706,81 @@ fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
         .padding(Padding::new(1, 1, 0, 0))
 }
 
+/// A section page's footer (spec: One key grammar): at most five hints for the
+/// selection, primary first, then `around` faint on the right (`j/k move`,
+/// `[ ] filter`) when there's room. `hints` is key and label spans in pairs.
+pub(crate) fn page_footer(
+    hints: Vec<Span<'static>>,
+    around: &str,
+    width: u16,
+    t: &Theme,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = hints.into_iter().take(10).collect();
+    let used: usize = spans.iter().map(Span::width).sum();
+    let width = width as usize;
+    if used > width {
+        return Line::from(backlog::fit_hints(spans, width));
+    }
+    let around = format!("{around} ");
+    let room = around.chars().count();
+    if !around.trim().is_empty() && used + room + 2 <= width {
+        spans.push(" ".repeat(width - used - room).into());
+        spans.push(around.fg(t.muted));
+    }
+    Line::from(spans)
+}
+
+/// A section's page: the whole screen under the strip, down to the footer's
+/// row (spec: sections are full screens; rule 8, no box for grouping).
+pub(crate) fn section_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    )
+}
+
+/// A section page's frame: no border, its title on its first row and its keys
+/// on its last, where the footer is (they're the page's footer).
+pub(crate) fn section_block(t: &Theme) -> Block<'static> {
+    // A quiet row over the keys, as home has: where a toast goes, never over
+    // the page's own text.
+    Block::new()
+        .padding(Padding::new(1, 1, 0, 1))
+        .style(style::Style::new().bg(t.bg).fg(t.fg))
+}
+
+/// The detail beside a list, by the width there is (spec: Layout by width):
+/// none under 100 columns (the list alone; a detail is its own screen), a list
+/// of 56 columns up to 139, 62 up to 199, and 72 from 200 with the detail at
+/// most 110, left-aligned. A single rule between them. The list, and the
+/// detail if any.
+pub(crate) fn list_and_detail(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    t: &Theme,
+) -> (Rect, Option<Rect>) {
+    let list = match area.width {
+        0..100 => return (area, None),
+        100..140 => 56,
+        140..200 => 62,
+        _ => 72,
+    };
+    let [list, rule, detail] = Layout::horizontal([
+        Constraint::Length(list),
+        Constraint::Length(1),
+        Constraint::Max(110),
+    ])
+    .areas(area);
+    let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
+    frame.render_widget(Paragraph::new(bar), rule);
+    (list, Some(detail))
+}
+
 /// Dims what's under a dialog (rule 8: a box is a dialog, and what's behind it
 /// steps back).
-fn dim(frame: &mut ratatui::Frame, area: Rect, t: &Theme) {
+pub(crate) fn dim(frame: &mut ratatui::Frame, area: Rect, t: &Theme) {
     frame.buffer_mut().set_style(
         area,
         style::Style::new()
@@ -7003,22 +8085,23 @@ struct BarPanes {
     zoomed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attached_bar(
     view: &Attached,
+    place: &str,
     panes: Option<BarPanes>,
     mode: BarMode,
     need_you: usize,
     hints: bool,
+    cols: u16,
     t: &Theme,
     map: &Keymap,
 ) -> Bar {
     let width = |spans: &[Span]| spans.iter().map(|s| s.width() as u16).sum::<u16>();
     let mut clicks = Vec::new();
+    // Left: the name, its state, and where it works (spec: Attached).
     let name = format!(" {} ", view.name).fg(t.fg).bold();
-    let mut spans = vec![
-        if view.auto_name { name.italic() } else { name },
-        format!("#{} ", view.id).fg(t.muted),
-    ];
+    let mut spans = vec![if view.auto_name { name.italic() } else { name }];
     match (view.exited, &view.status) {
         (Some(code), _) => {
             let code = code.map(|c| format!(" {c}")).unwrap_or_default();
@@ -7038,18 +8121,14 @@ fn attached_bar(
         }
         (None, None) => {}
     }
+    if !place.is_empty() {
+        spans.push(format!(" {place} ").fg(t.muted));
+    }
     // Zoomed, the bar says so, and which pane it is; a click shows the split.
     if let Some(p) = panes.filter(|p| p.zoomed) {
         let from = width(&spans);
         spans.push(format!(" ⊡ zoomed {}/{} ", p.at, p.of).fg(t.accent).bold());
         clicks.push((from, width(&spans), BarClick::Action(Action::Zoom)));
-        spans.push(" ".into());
-    }
-    // The one count, as the Inbox and the ⌂ show it; a click goes home to it.
-    if need_you > 0 {
-        let from = width(&spans);
-        spans.push(format!(" ● {need_you} need you ").fg(t.needs).bold());
-        clicks.push((from, width(&spans), BarClick::Action(Action::Home)));
         spans.push(" ".into());
     }
     if let Some(page) = &view.scroll {
@@ -7066,85 +8145,67 @@ fn attached_bar(
     {
         spans.push(format!(" {notice} ").fg(t.done).bold());
     }
-    let session = match mode {
-        BarMode::Session if hints => {
-            let mut h = session_hints(map);
-            // A split tab can zoom; once zoomed, the chip above says so.
-            if panes.is_some_and(|p| !p.zoomed)
-                && let Some(key) = map.get(Action::Zoom)
-            {
-                h.push((key.label(), "zoom", Some(Action::Zoom)));
+    // Right: the one count and how to answer it, then the way to everything
+    // else and the way home, as plain hints: no chips (spec: Attached). A
+    // prompt's keys (rename, the pane menu) take their place while it's open.
+    let label = |action: Action| map.get(action).map(|k| k.label());
+    let mut right: Vec<(Span, Option<BarClick>)> = Vec::new();
+    let key = |k: String| format!("{k} ").fg(t.accent).bold();
+    let what = |w: &str| format!("{w}   ").fg(t.dim());
+    match mode {
+        BarMode::Session | BarMode::Tabs => {
+            if need_you > 0 {
+                right.push((
+                    format!("● {need_you} need you ").fg(t.needs).bold(),
+                    Some(BarClick::Action(Action::Home)),
+                ));
+                if hints && let Some(k) = label(Action::Needing) {
+                    right.push((key(k), Some(BarClick::Action(Action::Needing))));
+                }
+                right.push(("  ".into(), None));
             }
-            h
+            if mode == BarMode::Tabs {
+                right.push((key("esc".into()), None));
+                right.push((what("back"), None));
+            } else if hints {
+                if let Some(k) = label(Action::Tabs) {
+                    right.push((key(k), Some(BarClick::Action(Action::Tabs))));
+                    right.push((what("actions"), Some(BarClick::Action(Action::Tabs))));
+                }
+                if let Some(k) = label(Action::Home) {
+                    right.push((key(k), Some(BarClick::Action(Action::Home))));
+                    right.push((what("home"), Some(BarClick::Action(Action::Home))));
+                }
+            }
         }
-        _ => Vec::new(),
-    };
-    let keys: &[(&str, &str)] = match mode {
-        BarMode::Session => &[],
-        BarMode::Tabs => &[
-            ("s/v", "split"),
-            ("z", "zoom"),
-            ("p", "pane menu"),
-            ("r", "rename"),
-            ("d", "decisions"),
-            ("m", "minimal"),
-            (",", "settings"),
-            ("esc", "back"),
-        ],
-        BarMode::Menu => &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")],
-        BarMode::Renaming => &[("↩", "save"), ("esc", "cancel"), ("blank", "folder name")],
+        BarMode::Menu | BarMode::Renaming => {
+            let keys: &[(&str, &str)] = if mode == BarMode::Menu {
+                &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")]
+            } else {
+                &[("↩", "save"), ("esc", "cancel"), ("blank", "folder name")]
+            };
+            for (k, w) in keys {
+                right.push((key(k.to_string()), None));
+                right.push((what(w), None));
+            }
+        }
         // The list's own border has its keys.
-        BarMode::Reviewing => &[],
-    };
-    let keys = session
-        .iter()
-        .map(|(k, w, a)| (k.as_str(), *w, *a))
-        .chain(keys.iter().map(|&(k, w)| (k, w, None)));
-    for (key, what, action) in keys {
-        spans.push(" ".into());
+        BarMode::Reviewing => {}
+    }
+    let right_width: u16 = right.iter().map(|(s, _)| s.width() as u16).sum();
+    let pad = cols.saturating_sub(width(&spans) + right_width);
+    spans.push(" ".repeat(pad as usize).into());
+    for (span, click) in right {
         let from = width(&spans);
-        spans.push(format!(" {key} ").fg(t.accent).bold());
-        spans.push(format!(" {what}").fg(t.dim()));
-        if let Some(action) = action {
-            clicks.push((from, width(&spans), BarClick::Action(action)));
+        spans.push(span);
+        if let Some(click) = click {
+            clicks.push((from, width(&spans), click));
         }
     }
     Bar {
         line: Line::from(spans).style(style::Style::new().bg(t.panel)),
         clicks,
     }
-}
-
-/// The bar's hints under a session: the keys as mapped, tab mode first, since it
-/// leads to the rest and works in every terminal (Alt needs Option as Meta on a
-/// Mac), then the most used. The tab keys show as one hint while they are Alt and
-/// the digits. Each but that one is clicked as its key is pressed.
-fn session_hints(map: &Keymap) -> Vec<(String, &'static str, Option<Action>)> {
-    let hint = |(action, what): (Action, &'static str)| {
-        map.get(action).map(|key| (key.label(), what, Some(action)))
-    };
-    let mut hints: Vec<_> = [(Action::Tabs, "actions"), (Action::Needing, "next ●")]
-        .into_iter()
-        .filter_map(hint)
-        .collect();
-    let digits = (0..9).all(|i| map.get(Action::Tab(i)) == Some(Key::Alt(b'1' + i)));
-    if digits {
-        hints.push(("alt 1-9".to_string(), "tab", None));
-    }
-    hints.extend(
-        [
-            (Action::Home, "home"),
-            (Action::NextTab, "next"),
-            (Action::PrevTab, "prev"),
-            (Action::Last, "last"),
-            (Action::NewTab, "new"),
-            (Action::Capture, "capture"),
-            (Action::Mini, "mini"),
-        ]
-        .into_iter()
-        .filter_map(hint),
-    );
-    hints
 }
 
 /// `~/repos/x` for paths under `$HOME`.
@@ -7485,6 +8546,8 @@ enum Anchor {
 /// A row of the Inbox (spec: Inbox).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InboxRow {
+    /// "+ New session": the composer (backlog #276), always the top row.
+    Compose,
     /// A session waiting on you, by its place in the queue.
     Queue(usize),
     /// Proposals, ready items and build orders, as one row.
@@ -7493,6 +8556,20 @@ enum InboxRow {
     Filed,
     /// A session not waiting on you.
     Session(SessionId),
+}
+
+/// A row that waits on you: Needs you's rows, not the composer or a session
+/// below them.
+fn waits(row: &InboxRow) -> bool {
+    !matches!(row, InboxRow::Session(_) | InboxRow::Compose)
+}
+
+/// The supervisor at a glance (`App::glance`).
+#[derive(Debug, Clone, PartialEq)]
+struct Glance {
+    on: bool,
+    watching: usize,
+    last: Option<valkyrie_proto::SupervisorEntry>,
 }
 
 /// What a place on the home screen is for.
@@ -7577,7 +8654,10 @@ enum HomeKey {
     Up,
     Down,
     Enter,
-    NewShell,
+    /// `n` or `/`: the composer, typing (backlog #276).
+    Compose,
+    /// `#`: the composer, finding a backlog item to start.
+    ComposeItem,
     Kill,
     /// Open the settings panel.
     Settings,
@@ -7619,6 +8699,8 @@ enum HomeKey {
     Answer(u8),
     /// `?`: every key, the tutor at its foot.
     Help,
+    /// Esc: back from a session's detail screen.
+    Back,
     Quit,
 }
 
@@ -7668,7 +8750,8 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'k' => Some(HomeKey::Up),
             b'j' => Some(HomeKey::Down),
             b'\r' | b'\n' => Some(HomeKey::Enter),
-            b'n' => Some(HomeKey::NewShell),
+            b'n' | b'/' => Some(HomeKey::Compose),
+            b'#' => Some(HomeKey::ComposeItem),
             b'x' => Some(HomeKey::Kill),
             b',' => Some(HomeKey::Settings),
             b'r' => Some(HomeKey::Rename),
@@ -7688,6 +8771,8 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
             b'A' => Some(HomeKey::Adopt),
             b'o' => Some(HomeKey::Other),
             b'q' | 0x03 => Some(HomeKey::Quit),
+            // A lone Esc: sequences and Alt keys were taken above.
+            0x1b if rest.len() == 1 => Some(HomeKey::Back),
             _ => None,
         };
         if let Some(key) = key {
@@ -7698,18 +8783,32 @@ fn home_keys_at(bytes: &[u8], map: &Keymap) -> Vec<(HomeKey, usize)> {
     keys
 }
 
-/// A doc open in your editor (`App::start_edit`).
+/// A doc or a proposal open in your editor (`App::start_edit`).
 #[derive(Debug)]
 struct Editing {
     session: SessionId,
-    key: String,
-    /// The hash of the version it started from, which the save names.
-    base: String,
+    what: Edited,
     path: PathBuf,
     /// The body as it went in, to tell whether you changed it.
     body: String,
     /// Its session has been seen running.
     seen: bool,
+}
+
+/// What's open in your editor, and where what you write goes.
+#[derive(Debug)]
+enum Edited {
+    /// A doc, saved over the version `base` (its hash) names.
+    Doc { key: String, base: String },
+    /// A proposal, accepted as you leave it unless it changed since `seen`.
+    Proposal {
+        project: PathBuf,
+        id: u32,
+        seen: u64,
+        habit: bool,
+        /// Its words before, which `z` puts back.
+        was: memory::Wording,
+    },
 }
 
 /// Your editor as a command, the file to come after it: `$VISUAL`, else
@@ -8039,6 +9138,176 @@ mod tests {
         }
     }
 
+    /// Memory's `z` takes back the last answer given there: an accept goes back
+    /// to review, then there's nothing left to undo. One rewritten on the way in
+    /// (`e`) goes back in its own words, and a scope you left alone is never sent.
+    #[tokio::test]
+    async fn memory_undoes_its_last_answer_and_an_edit_too() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, DecisionStatus, Reply};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        // A daemon with one decision, reviewed as the real one would, refusing
+        // what was read before it changed.
+        let mut first = proposed("/r/app", 4, "Keep it short");
+        first.body = "Why.".into();
+        first.scope = vec!["src/**".into()];
+        first.updated = 1;
+        let held = Arc::new(Mutex::new(first.clone()));
+        let sent: Arc<Mutex<Vec<ReviewAction>>> = Arc::default();
+        let (d, kept) = (held.clone(), sent.clone());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                let answer = match msg {
+                    ClientMsg::Review {
+                        req, action, seen, ..
+                    } => {
+                        kept.lock().unwrap().push(action.clone());
+                        let mut d = d.lock().unwrap();
+                        if seen != Some(d.updated) {
+                            ServerMsg::Err {
+                                req,
+                                message: "changed since you read it".into(),
+                            }
+                        } else {
+                            match action {
+                                ReviewAction::Accept => d.status = DecisionStatus::Active,
+                                ReviewAction::Reopen => d.status = DecisionStatus::Proposed,
+                                ReviewAction::Revise {
+                                    title, body, kind, ..
+                                } => {
+                                    (d.title, d.body, d.kind) = (title, body, kind);
+                                    d.status = DecisionStatus::Active;
+                                }
+                                ReviewAction::Edit {
+                                    title, body, kind, ..
+                                } => (d.title, d.body, d.kind) = (title, body, kind),
+                                _ => {}
+                            }
+                            d.updated += 1;
+                            let reply = Reply::Decision {
+                                decision: Box::new(d.clone()),
+                            };
+                            ServerMsg::Ok { req, reply }
+                        }
+                    }
+                    ClientMsg::Decisions { req, .. } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Decisions {
+                            decisions: vec![d.lock().unwrap().clone()],
+                        },
+                    },
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.memory = Some(memory::Page::new(memory::Tab::Decisions));
+        app.proposals = vec![first.clone()];
+
+        app.memory_keys(b"a").await;
+        assert_eq!(app.status, "accepted #4 Keep it short");
+        app.proposals.clear();
+        app.memory_keys(b"z").await;
+        assert_eq!(app.status, "#4 Keep it short is up for review again");
+        app.memory_keys(b"z").await;
+        assert_eq!(app.status, "nothing to undo");
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [ReviewAction::Accept, ReviewAction::Reopen]
+        );
+
+        // Rewritten in your editor, scope untouched: accepted as written.
+        let now = held.lock().unwrap().clone();
+        app.proposals = vec![now.clone()];
+        let was = memory::Wording::of(&now);
+        let path = dir.join("edit.md");
+        std::fs::write(&path, "x").unwrap();
+        let text = was.text().replace("# Keep it short", "# Keep it shorter");
+        let what = Edited::Proposal {
+            project: now.project.clone(),
+            id: 4,
+            seen: now.updated,
+            habit: false,
+            was,
+        };
+        app.accept_edited(what, text, path.clone()).await;
+        assert_eq!(app.status, "accepted #4 Keep it shorter, as you wrote it");
+        assert!(!path.exists(), "accepted, your file goes");
+        app.memory_keys(b"z").await;
+        assert_eq!(
+            app.status,
+            "#4 Keep it short is up for review again, as it was proposed"
+        );
+        let sent = sent.lock().unwrap();
+        let kind = valkyrie_proto::DecisionKind::Decision;
+        assert_eq!(
+            sent[2..],
+            [
+                ReviewAction::Revise {
+                    title: "Keep it shorter".into(),
+                    body: "Why.".into(),
+                    kind,
+                    scope: None,
+                },
+                ReviewAction::Reopen,
+                ReviewAction::Edit {
+                    title: "Keep it short".into(),
+                    body: "Why.".into(),
+                    kind,
+                    scope: None,
+                },
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A page's footer: five hints at most, primary first, then what gets you
+    /// around, faint on the right, when there's room for it (spec: One key
+    /// grammar).
+    #[test]
+    fn a_page_footer_keeps_five_hints_and_puts_moving_on_the_right() {
+        let t = crate::theme::DRACULA;
+        let hint = |k: &str| vec![format!(" {k} ").into(), format!("{k}-label ").into()];
+        let hints: Vec<ratatui::text::Span<'static>> = ["a", "b", "c", "d", "e", "f", "g"]
+            .into_iter()
+            .flat_map(hint)
+            .collect();
+        let text = |line: Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let wide = text(page_footer(hints.clone(), "j/k move", 120, &t));
+        assert!(
+            wide.contains(" e e-label ") && !wide.contains(" f "),
+            "{wide}"
+        );
+        assert!(wide.trim_end().ends_with("j/k move"), "{wide}");
+        assert_eq!(wide.chars().count(), 120, "{wide}");
+        // Narrow: the hints first; what gets you around goes, then hints do.
+        let narrow = text(page_footer(hints.clone(), "j/k move", 60, &t));
+        assert!(
+            !narrow.contains("j/k move") && narrow.contains(" a a-label "),
+            "{narrow}"
+        );
+        let tiny = text(page_footer(hints, "j/k move", 24, &t));
+        assert!(tiny.chars().count() <= 24, "{tiny}");
+    }
+
     /// An App over a socket nobody answers: enough for state and drawing.
     async fn idle_app(dir: &std::path::Path) -> (App, valkyrie_proto::ipc::Listener) {
         let _ = std::fs::remove_dir_all(dir);
@@ -8120,7 +9389,8 @@ mod tests {
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1), info(2)];
         app.queue = vec![queued(2)];
-        app.selected = 1; // session 1, under the queue's row
+        app.cursor_moved = true;
+        app.selected = 2; // session 1, under the composer and the queue's row
         assert!(
             app.on_push(ServerMsg::Proposals {
                 items: vec![proposed("/r/a", 1, "one"), proposed("/r/b", 1, "two")],
@@ -8128,7 +9398,7 @@ mod tests {
             .unwrap()
         );
         // The decisions' row above moved the cursor down with its session.
-        assert_eq!((app.selected, app.selection().0), (2, Some(1)));
+        assert_eq!((app.selected, app.selection().0), (3, Some(1)));
         assert_eq!(app.need_you(), 3, "the queue's one and both proposals");
 
         let walk: Vec<_> = (0..app.rows())
@@ -8144,6 +9414,8 @@ mod tests {
         assert_eq!(
             walk,
             [
+                // The composer, on top.
+                (None, None, None),
                 (None, Some(0), Some(2)),
                 // a/d answer the oldest proposal, the one the detail shows.
                 (Some("one".into()), None, None),
@@ -8152,7 +9424,7 @@ mod tests {
         );
 
         // On the decisions' row: it stays there as they're answered...
-        app.selected = 1;
+        app.selected = 2;
         app.on_push(ServerMsg::Proposals {
             items: vec![proposed("/r/b", 1, "two")],
         })
@@ -8160,7 +9432,7 @@ mod tests {
         assert_eq!(app.proposal().unwrap().title, "two");
         // ...and once none are left, the cursor stays where it was: on the next row.
         app.on_push(ServerMsg::Proposals { items: vec![] }).unwrap();
-        assert_eq!((app.selected, app.selection().0), (1, Some(1)));
+        assert_eq!((app.selected, app.selection().0), (2, Some(1)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8201,7 +9473,11 @@ mod tests {
                 app.selection().0
             })
             .collect();
-        assert_eq!(ids, [Some(2), Some(1), Some(3)]);
+        assert_eq!(
+            ids,
+            [None, Some(2), Some(1), Some(3)],
+            "the composer, then each session once"
+        );
 
         for (width, height) in [(80, 24), (100, 30), (140, 40)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -8287,6 +9563,7 @@ mod tests {
         assert_eq!(
             app.inbox_rows(),
             [
+                InboxRow::Compose,
                 InboxRow::Queue(0),
                 InboxRow::Decide,
                 InboxRow::Filed,
@@ -8309,10 +9586,12 @@ mod tests {
         let view = Attached::new(2, "two".into(), None);
         let bar = attached_bar(
             &view,
+            "",
             None,
             BarMode::Session,
             app.need_you(),
             true,
+            100,
             app.settings.theme,
             &app.settings.keys,
         );
@@ -8444,6 +9723,124 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Layout by width (spec): the list alone under 100 columns; a list of 56,
+    /// 62 or 72 columns beside a detail of at most 110 above that. Narrow,
+    /// Enter shows a session's detail as its own screen, Esc goes back.
+    #[tokio::test]
+    async fn the_layout_follows_the_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        for (width, list, detail) in [
+            (80, 80, None),
+            (120, 56, Some(63)),
+            (160, 62, Some(97)),
+            (240, 72, Some(110)),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+            let mut got = None;
+            terminal
+                .draw(|f| got = Some(list_and_detail(f, f.area(), &theme::DRACULA)))
+                .unwrap();
+            let (l, d) = got.unwrap();
+            assert_eq!((l.width, d.map(|d| d.width)), (list, detail), "{width}");
+        }
+
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-narrow-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1)];
+        let rows = home_screen(&app, 80);
+        assert!(!rows.iter().any(|r| r.contains('│')), "no detail at 80");
+        app.selected = 1;
+        app.on_input(b"\r".to_vec()).await;
+        assert!(app.narrow_detail(), "Enter shows the detail, not attaches");
+        let foot = home_screen(&app, 80).last().cloned().unwrap();
+        assert!(
+            foot.contains("↩ attach") && foot.contains("esc back"),
+            "{foot}"
+        );
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(!app.narrow_detail());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Sections are full screens (spec: rule 8): a section's page draws no box
+    /// and runs edge to edge under the strip, its keys on the screen's last row,
+    /// where the footer is.
+    #[test]
+    fn section_pages_fill_the_screen_with_their_keys_at_the_foot() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let t = &theme::DRACULA;
+        type Draw<'a> = Box<dyn Fn(&mut ratatui::Frame) + 'a>;
+        let items: Vec<Item> = (1..=3)
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "number": id, "title": format!("Item number {id}"), "status": "open",
+                    "by": "human", "project": "/r/app", "created": 0, "updated": 0,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let rows = backlog::rows_of(&items, &items, &[], 0);
+        let mut ready = backlog::Page::default();
+        ready.filter = backlog::Filter::Ready;
+        let screens: Vec<(&str, Draw)> = vec![
+            (
+                "backlog",
+                Box::new(|f| backlog::Page::default().draw(f, &[], &[], &[], 0, 0, t)),
+            ),
+            (
+                "backlog, ready",
+                Box::new(|f| ready.draw(f, &rows, &items, &[], 0, 0, t)),
+            ),
+            ("docs", Box::new(|f| docs::Page::default().draw(f, t))),
+            (
+                "wiki",
+                Box::new(|f| wiki::Page::new("/r/app".into()).draw(f, t)),
+            ),
+            (
+                "supervisor",
+                Box::new(|f| supervisor::Page::default().draw(f, &[], 0, t)),
+            ),
+            ("history", Box::new(|f| digest::Page::default().draw(f, t))),
+            (
+                "memory",
+                Box::new(|f| memory::Page::new(memory::Tab::Decisions).draw(f, &[], t)),
+            ),
+            (
+                "pull requests",
+                Box::new(|f| prs::Page::default().draw(f, &Default::default(), 0, t)),
+            ),
+        ];
+        // The spec's three sizes (T5b, backlog #273).
+        for (name, draw) in &screens {
+            for (w, h) in [(80u16, 24u16), (100, 30), (140, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| draw(f)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let rows: Vec<String> = (0..h)
+                    .map(|y| (0..w).map(|x| buffer[(x, y)].symbol()).collect())
+                    .collect();
+                let text = rows.join("\n");
+                // A single rule between list and detail is no box (spec:
+                // Layout by width); corners are.
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| "╭╮╰╯".contains(c) && !rows[0].contains(c)),
+                    "{name} draws a box:\n{text}"
+                );
+                assert!(
+                    rows[h as usize - 1].contains("j/k move"),
+                    "{name}'s keys at the foot, {w}x{h}:\n{text}"
+                );
+                if *name == "backlog, ready" {
+                    assert!(rows[1].contains("Backlog Ready"), "{text}");
+                }
+            }
+        }
+    }
+
     /// Color is state, in every theme (spec: Marks and color): home draws no box,
     /// no filled chip (the logo aside, until the strip replaces it), a single rule
     /// between list and detail, and stuck-ish states share the stuck color.
@@ -8501,11 +9898,11 @@ mod tests {
                         );
                     }
                 }
-                // At 140 the detail sits beside the list, behind one rule.
+                // From 100 the detail sits beside the list, behind one rule.
                 let rules = (0..width)
                     .filter(|&x| (2..18).all(|y| buffer[(x, y)].symbol() == "│"))
                     .count();
-                assert_eq!(rules, usize::from(width >= 140), "{} {width}", theme.name);
+                assert_eq!(rules, usize::from(width >= 100), "{} {width}", theme.name);
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
@@ -8550,7 +9947,7 @@ mod tests {
 
         // One row for them all, counted; the detail reads the oldest, which a/d
         // answer.
-        app.selected = 0;
+        app.selected = 1;
         let text = render(&app);
         for want in ["Inbox 10", "10 decisions", "#10", "claude · /r/x", "accept"] {
             assert!(text.contains(want), "lacks {want:?}");
@@ -8559,7 +9956,7 @@ mod tests {
         assert!(!text.contains("sqlx"));
 
         // On a session, its own keys again.
-        app.selected = 1;
+        app.selected = 2;
         let text = render(&app);
         assert!(text.contains("open") && !text.contains("accept"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -8578,15 +9975,31 @@ mod tests {
         // Not whatever this machine's settings.toml says.
         app.settings = Settings::default();
         app.sessions = vec![info(1), info(2), info(3)];
-        app.selected = 2; // session 3
+        // Before the cursor is put anywhere, pushes leave it on the first row
+        // that waits on you, else on the composer (backlog #276).
+        app.selected = 2;
+        app.on_push(ServerMsg::Queue {
+            items: vec![queued(1)],
+        })
+        .unwrap();
+        assert_eq!(app.selected, 1, "the TUI opens on what waits");
+        app.on_push(ServerMsg::Queue { items: vec![] }).unwrap();
+        assert_eq!(
+            app.row(),
+            Some(InboxRow::Compose),
+            "inbox zero: the composer"
+        );
+        // Once it's been put somewhere, it follows its session.
+        app.cursor_moved = true;
+        app.selected = 3; // session 3
         app.on_push(ServerMsg::Queue {
             items: vec![queued(1)],
         })
         .unwrap();
         assert_eq!(app.selection().0, Some(3));
         // Session 1 moved up into the queue, so it's no longer listed below it.
-        assert_eq!(app.selected, 2);
-        app.selected = 0; // queue row for session 1
+        assert_eq!(app.selected, 3);
+        app.selected = 1; // queue row for session 1
         app.on_push(ServerMsg::Queue {
             items: vec![queued(2), queued(1)],
         })
@@ -8594,18 +10007,18 @@ mod tests {
         assert_eq!(app.selection(), (Some(1), app.queue.get(1)));
         // A session below that starts asking moves up into the queue; the cursor
         // goes with it, and back down when it's answered.
-        app.selected = 2; // session 3, under the queue's two rows
+        app.selected = 3; // session 3, under the queue's two rows
         assert_eq!(app.selection(), (Some(3), None));
         app.on_push(ServerMsg::Queue {
             items: vec![queued(3), queued(2), queued(1)],
         })
         .unwrap();
-        assert_eq!((app.selected, app.selection().0), (0, Some(3)));
+        assert_eq!((app.selected, app.selection().0), (1, Some(3)));
         app.on_push(ServerMsg::Queue {
             items: vec![queued(2), queued(1)],
         })
         .unwrap();
-        assert_eq!((app.selected, app.selection()), (2, (Some(3), None)));
+        assert_eq!((app.selected, app.selection()), (3, (Some(3), None)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8686,6 +10099,7 @@ mod tests {
                 }
             })
             .collect();
+        app.selected = 1;
         app.preview = Some((
             1,
             "● Running the auth tests\n  ⎿  $ cargo test -p auth\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No".into(),
@@ -8763,7 +10177,7 @@ mod tests {
         });
         app.sessions = vec![s];
         app.queue = vec![row];
-        app.selected = 0;
+        app.selected = 1;
         let (session, seq, step) = app.offered().unwrap();
         assert_eq!((session, seq, step.action), (4, 3, StepAction::Rerun));
         let mut terminal = Terminal::new(TestBackend::new(160, 14)).unwrap();
@@ -8781,8 +10195,8 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
+        // The row's own "→ rerun" may be cut at the list's width; the keys say it.
         for want in [
-            "→ rerun",
             " a rerun failed jobs",
             " o ask its agent to fix CI",
             " d leave it",
@@ -8882,7 +10296,7 @@ mod tests {
             240,
         );
         queue(&mut app, &[3]);
-        app.selected = 0;
+        app.selected = 1;
         app.preview = Some((3, docs.into()));
         let text = render(&app, "demo-1");
         assert!(text.contains("docs-pass") && text.contains("fixed 4 typos"));
@@ -8897,7 +10311,7 @@ mod tests {
             2,
         );
         queue(&mut app, &[1, 3]);
-        app.selected = 0;
+        app.selected = 1;
         app.preview = Some((
             1,
             format!(
@@ -8995,10 +10409,12 @@ mod tests {
                         Paragraph::new(
                             attached_bar(
                                 view,
+                                "",
                                 app.bar_panes(view.id),
                                 BarMode::Session,
                                 0,
                                 app.settings.hints,
+                                bar.width,
                                 app.settings.theme,
                                 &app.settings.keys,
                             )
@@ -9527,7 +10943,10 @@ mod tests {
                 .collect()
         };
 
-        // Home: only the filed item waits on the user, as one row.
+        // Home: only the filed item waits on the user, as one row, and the
+        // cursor rests on it.
+        app.restore(Anchor::Session(None));
+        assert_eq!(app.row(), Some(InboxRow::Filed));
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal
             .draw(|f| {
@@ -9572,8 +10991,8 @@ mod tests {
             assert!(shown.contains(want), "{want}: {shown}");
         }
 
-        // `r` shows one repository's items, named in the title; a check then offers
-        // only those to ship.
+        // `/` narrows it to one repository's items, the search over the list; a
+        // check then offers only those to ship.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
             orders: Vec::new(),
@@ -9588,9 +11007,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.backlog_rows().len(), 3);
-        app.on_input(b"r".to_vec()).await;
+        app.on_input(b"/app\r".to_vec()).await;
         let page = app.backlog.clone().unwrap();
-        assert_eq!(page.repo, backlog::Repo::In("/r/app".into()));
+        assert_eq!(page.search.query, "app");
+        assert!(!page.search.typing, "↩ keeps it and goes back to the list");
         let rows: Vec<u32> = app.backlog_rows().iter().map(|(_, i)| i.id).collect();
         assert_eq!(rows.len(), 2);
         assert!(!rows.contains(&3));
@@ -9608,7 +11028,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            text(&terminal).contains(" Backlog app 2 open"),
+            text(&terminal).contains(" / app  esc clears"),
             "{}",
             text(&terminal)
         );
@@ -9890,32 +11310,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The bar under a session starts with its name, no `VALKYRIE` label. Its keys
-    /// show unless `hints` is off; tab mode shows its keys either way.
+    /// The bar under a session (spec: Attached): its name, state and where it
+    /// works on the left; the one count and the ways out on the right, plain
+    /// words, no chips; hints off leaves the count. Tab mode says esc.
     #[test]
-    fn the_session_bar_shows_keys_only_with_hints() {
+    fn the_session_bar_is_name_state_place_then_count_and_ways_out() {
         let view = Attached::new(2, "proj2".into(), None);
         let settings = Settings::default();
-        let bar = |mode, hints| {
-            attached_bar(&view, None, mode, 0, hints, settings.theme, &settings.keys)
+        let bar = |mode, hints, need| {
+            let b = attached_bar(
+                &view,
+                "api · fix/login · #4",
+                None,
+                mode,
+                need,
+                hints,
+                100,
+                settings.theme,
+                &settings.keys,
+            );
+            let text = b
                 .line
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
-                .collect::<String>()
+                .collect::<String>();
+            (text, b.clicks)
         };
-        let on = bar(BarMode::Session, true);
-        assert!(on.starts_with(" proj2 #2"), "{on}");
-        assert!(!on.contains("VALKYRIE"), "{on}");
-        assert!(on.contains("alt 1-9"), "{on}");
-        let off = bar(BarMode::Session, false);
-        assert_eq!(off.trim(), "proj2 #2", "{off}");
-        let tabs = bar(BarMode::Tabs, false);
-        assert!(tabs.contains("split") && tabs.contains("rename"), "{tabs}");
-        // Getting around is the direct keys', not tab mode's.
-        for gone in ["switch", "jump", "reorder", "next ●", " o "] {
-            assert!(!tabs.contains(gone), "{gone}: {tabs}");
-        }
+        let (on, clicks) = bar(BarMode::Session, true, 5);
+        assert!(on.starts_with(" proj2  api · fix/login · #4"), "{on}");
+        assert!(!on.contains("#2") && !on.contains("alt 1-9"), "{on}");
+        assert!(
+            on.trim_end()
+                .ends_with("● 5 need you alt n   ^\\ actions   alt h home"),
+            "{on}"
+        );
+        assert_eq!(on.chars().count(), 100, "right-aligned to the width");
+        assert!(clicks.iter().any(|c| c.2 == BarClick::Action(Action::Tabs)));
+        let (off, _) = bar(BarMode::Session, false, 5);
+        assert!(off.trim_end().ends_with("● 5 need you"), "{off}");
+        assert!(!off.contains("actions"), "{off}");
+        let (tabs, _) = bar(BarMode::Tabs, true, 0);
+        assert!(tabs.trim_end().ends_with("esc back"), "{tabs}");
     }
 
     /// Minimal tabs, in every style. On top: one row each, the number, the state's
@@ -10365,10 +11801,12 @@ mod tests {
                     }
                     let line = attached_bar(
                         view,
+                        "",
                         app.bar_panes(view.id),
                         BarMode::Session,
                         app.proposals.len(),
                         app.settings.hints,
+                        bar.width,
                         app.settings.theme,
                         &app.settings.keys,
                     )
@@ -10457,7 +11895,7 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect::<String>();
             assert!(
-                lead.contains("need you    ^\\  actions  alt n"),
+                lead.contains("need you alt n   ^\\ actions   alt h home"),
                 "actions lead: {lead}"
             );
             bar.clicks
@@ -10715,7 +12153,8 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect()
         };
-        assert!(bar_text(&app).contains("zoom"), "a split tab hints the key");
+        // Zoom is ^\\'s, not a chip on the slim bar.
+        assert!(!bar_text(&app).contains("zoom"), "no key chips on the bar");
         let split = app.pane_sizes();
         let hidden = app.pane_mut(2).unwrap().size;
         app.on_keys(b"\x1bz".to_vec()).await;
@@ -11118,6 +12557,456 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// What a key says on a page shows on the page, in the row over its keys,
+    /// and goes with the next key (backlog #277).
+    #[tokio::test]
+    async fn a_pages_message_shows_over_its_keys() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-said-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let screen = |app: &App| -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+            terminal
+                .draw(|f| {
+                    app.memory
+                        .as_ref()
+                        .unwrap()
+                        .draw(f, &app.proposals, app.settings.theme);
+                    app.draw_said(f);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(100)
+                .map(|r| r.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        app.status = "said at home".into();
+        app.memory = Some(memory::Page::new(memory::Tab::Decisions));
+        // A key on the page: what was said before it is gone.
+        app.on_input(b"j".to_vec()).await;
+        assert!(!screen(&app).join("\n").contains("said at home"));
+        app.say("review failed: that's for the user".into());
+        let rows = screen(&app);
+        assert!(
+            rows[18].contains("review failed: that's for the user"),
+            "the row over the keys: {rows:#?}"
+        );
+        assert!(rows[19].contains("j/k move"), "the keys stay: {rows:#?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backlog #203: at 80 columns with hints on, the hints fill the session's
+    /// bar, so a toast takes the row over it instead of falling off the end.
+    #[tokio::test]
+    async fn a_toast_over_a_narrow_session_bar_is_seen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir =
+            std::env::temp_dir().join(format!("valkyrie-tui-bar-toast-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.settings = Settings::default();
+        app.settings.hints = true;
+        app.sessions = vec![info(1)];
+        let mut view = Attached::new(1, "proj1".into(), None);
+        view.apply(update(true, vec![row(0, "inside session 1")]));
+        app.view = Some(view);
+        let screen = |app: &App| -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|f| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(f.area());
+                    app.draw_session_bar(f, app.view.as_ref().unwrap(), body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(80)
+                .map(|r| r.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        let before = screen(&app);
+        app.show_ping(Ping::notice("hi from another pane", None));
+        let rows = screen(&app);
+        assert!(
+            rows[22].contains("hi from another pane"),
+            "the row over the bar: {rows:#?}"
+        );
+        assert_eq!(rows[23], before[23], "the bar keeps its hints");
+        assert!(!rows[23].contains("hi from"), "{rows:#?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The composer (backlog #276): the top row, where the cursor rests at inbox
+    /// zero; `n` types, letters never reach the Inbox, ↩ starts the agent in a
+    /// worktree of the repository shown, ^f files it, `#` finds an item.
+    #[tokio::test]
+    async fn the_composer_starts_files_and_finds() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, KnownRepo, Reply, RepoList};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-compose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let item = |id: u32, title: &str, project: &str, after: &[u32]| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "number": id, "title": title, "status": "open", "by": "human",
+                "project": project, "created": id, "updated": 0, "blocked_by": after,
+            }))
+            .unwrap()
+        };
+        let items = vec![
+            item(1, "Rate-limit retries in the client", "/r/app", &[]),
+            item(2, "Rate-limit the public API", "/r/app", &[3]),
+            item(3, "Pin the runner image", "/r/app", &[]),
+        ];
+        let sent: Arc<Mutex<Vec<ClientMsg>>> = Arc::default();
+        let kept = sent.clone();
+        let filed = item(7, "Add a --json flag", "/r/web", &[]);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                kept.lock().unwrap().push(msg.clone());
+                let answer = match msg {
+                    ClientMsg::Repos { req } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Repos {
+                            list: RepoList {
+                                repos: ["/r/app", "/r/web"]
+                                    .map(|p| KnownRepo {
+                                        path: p.into(),
+                                        label: p.into(),
+                                        added: false,
+                                    })
+                                    .to_vec(),
+                                folders: vec![],
+                                hidden: vec![],
+                            },
+                        },
+                    },
+                    ClientMsg::AddItem { req, .. } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Item {
+                            item: Box::new(filed.clone()),
+                            note: None,
+                        },
+                    },
+                    // Not started here: attaching needs a real session.
+                    ClientMsg::Spawn { req, .. } | ClientMsg::LaunchItem { req, .. } => {
+                        ServerMsg::Err {
+                            req,
+                            message: "not in a test".into(),
+                        }
+                    }
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = vec![info(1)];
+        app.items = items;
+        let took = |sent: &Arc<Mutex<Vec<ClientMsg>>>| std::mem::take(&mut *sent.lock().unwrap());
+
+        // Inbox zero: the cursor rests on the composer, and the pane is it.
+        app.restore(Anchor::Session(None));
+        assert_eq!(app.row(), Some(InboxRow::Compose));
+        let wide = home_screen(&app, 140).join("\n");
+        for want in [
+            "+ New session",
+            "What's next?",
+            "describe a task, or # for a backlog item",
+            "Ready in the backlog",
+            "s  app#1",
+            "n type",
+            "s start app#1",
+        ] {
+            assert!(wide.contains(want), "lacks {want:?}:\n{wide}");
+        }
+        assert!(
+            !wide.contains("app#2"),
+            "a blocked item isn't ready:\n{wide}"
+        );
+        // Something waiting: the cursor starts there, and k goes back up.
+        app.queue = vec![queued(1)];
+        app.restore(Anchor::Session(None));
+        assert_eq!(app.row(), Some(InboxRow::Queue(0)));
+        app.on_input(b"k".to_vec()).await;
+        assert_eq!(app.row(), Some(InboxRow::Compose));
+        app.queue.clear();
+
+        // Typing: the Inbox's keys are letters now, and the footer is the
+        // composer's alone.
+        app.on_input(b"n".to_vec()).await;
+        assert!(app.composer.typing);
+        app.on_input(b"gx Add a --json flag".to_vec()).await;
+        assert_eq!(app.section(), Section::Inbox, "g types");
+        assert!(app.kill_armed.is_none() && !app.quit);
+        app.on_input(vec![0x17, 0x17, 0x17, 0x17, 0x17]).await;
+        app.on_input(b"Add a --json flag".to_vec()).await;
+        let foot = home_screen(&app, 140).last().cloned().unwrap();
+        assert!(
+            foot.contains("↩ start")
+                && foot.contains("^f file to backlog")
+                && !foot.contains("j/k"),
+            "{foot}"
+        );
+
+        // tab: the next repository; ↩ starts the agent there, in a worktree.
+        app.on_input(b"\t".to_vec()).await;
+        assert!(home_screen(&app, 140).join("\n").contains("web · claude"));
+        app.on_input(b"\r".to_vec()).await;
+        let spawn = took(&sent)
+            .into_iter()
+            .find_map(|m| match m {
+                ClientMsg::Spawn { spec, .. } => Some(spec),
+                _ => None,
+            })
+            .expect("↩ spawns");
+        assert_eq!(spawn.command, ["claude", "Add a --json flag"]);
+        assert_eq!(spawn.cwd.as_deref(), Some(Path::new("/r/web")));
+        assert_eq!(spawn.worktree.as_deref(), Some(""));
+        assert!(
+            app.status.starts_with("couldn't start it"),
+            "{}",
+            app.status
+        );
+        assert_eq!(
+            app.composer.text, "Add a --json flag",
+            "a failed start keeps it"
+        );
+
+        // ^f files it in that repository instead, a real item.
+        app.on_input(vec![compose::FILE_KEY]).await;
+        let added = took(&sent)
+            .into_iter()
+            .find_map(|m| match m {
+                ClientMsg::AddItem { item, take, .. } => Some((item, take)),
+                _ => None,
+            })
+            .expect("^f files it");
+        assert_eq!(added.0.title, "Add a --json flag");
+        assert_eq!(added.0.cwd.as_deref(), Some(Path::new("/r/web")));
+        assert!(!added.1);
+        assert_eq!(app.status, "filed web#7: Add a --json flag");
+        assert!(!app.composer.typing && app.composer.text.is_empty());
+
+        // `#`: the backlog by number or title, the ready one first and the
+        // blocked one greyed; ↩ starts the picked item.
+        app.on_input(b"#rate".to_vec()).await;
+        let found = app.compose_found();
+        assert_eq!(found.iter().map(|f| f.id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(found[1].what, compose::Can::No("after app#3".into()));
+        let screen = home_screen(&app, 140).join("\n");
+        assert!(
+            screen.contains("↩ start app#1") && screen.contains("after app#3"),
+            "{screen}"
+        );
+        app.on_input(b"\r".to_vec()).await;
+        assert!(
+            took(&sent)
+                .iter()
+                .any(|m| matches!(m, ClientMsg::LaunchItem { id: 1, .. })),
+            "↩ launches #1"
+        );
+        // Esc goes back to text, then hands the keys back.
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.composer.typing && app.composer.text.is_empty());
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(!app.composer.typing);
+
+        // Under 100 columns, the band is in the list itself.
+        app.on_input(b"/".to_vec()).await;
+        app.on_input(b"fix the tests".to_vec()).await;
+        let narrow = home_screen(&app, 80);
+        assert!(!narrow.iter().any(|r| r.contains('│')), "one pane");
+        assert!(narrow[2].contains("› fix the tests"), "{narrow:#?}");
+        assert!(
+            narrow[3].contains("web · claude"),
+            "the repository picked stays: {narrow:#?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Several lines in the composer (backlog #280): ↩ opens Start agents, a
+    /// row each with its repository and agent; the footer is the dialog's; ↩
+    /// starts every row in its own worktree, and one that fails stays to retry.
+    #[tokio::test]
+    async fn start_agents_starts_a_session_per_line() {
+        use std::sync::{Arc, Mutex};
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, KnownRepo, Reply, RepoList};
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let spawned: Arc<Mutex<Vec<SpawnSpec>>> = Arc::default();
+        let kept = spawned.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            let mut next = 10;
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                let answer = match msg {
+                    ClientMsg::Repos { req } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Repos {
+                            list: RepoList {
+                                repos: ["/r/api", "/r/web"]
+                                    .map(|p| KnownRepo {
+                                        path: p.into(),
+                                        label: p.into(),
+                                        added: false,
+                                    })
+                                    .to_vec(),
+                                folders: vec![],
+                                hidden: vec![],
+                            },
+                        },
+                    },
+                    ClientMsg::List { req } => ServerMsg::Ok {
+                        req,
+                        reply: Reply::Sessions {
+                            sessions: vec![info(1)],
+                            layouts: vec![],
+                        },
+                    },
+                    // The web repository refuses: its row stays, with why.
+                    ClientMsg::Spawn { req, spec } => {
+                        let web = spec.cwd.as_deref() == Some(Path::new("/r/web"));
+                        kept.lock().unwrap().push(spec);
+                        if web {
+                            ServerMsg::Err {
+                                req,
+                                message: "web is busy".into(),
+                            }
+                        } else {
+                            next += 1;
+                            let mut s = info(next);
+                            s.name = format!("agent-{next}");
+                            ServerMsg::Ok {
+                                req,
+                                reply: Reply::Session { info: Box::new(s) },
+                            }
+                        }
+                    }
+                    _ => continue,
+                };
+                if write_frame(&mut wr, &answer).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.sessions = vec![info(1)];
+        app.restore(Anchor::Session(None));
+
+        // A pasted list: the footer offers to review it, ↩ opens the dialog.
+        app.on_input(b"n".to_vec()).await;
+        app.on_input(
+            b"\x1b[200~Add token expiry\nBadge count in web\nCache the release build\x1b[201~"
+                .to_vec(),
+        )
+        .await;
+        let foot = home_screen(&app, 120).last().cloned().unwrap();
+        assert!(foot.contains("review and start 3"), "{foot}");
+        app.on_input(b"\r".to_vec()).await;
+        let b = app.batch.as_ref().expect("Start agents is open");
+        assert_eq!(b.summary(), "3 tasks · api, web");
+        let screen = home_screen(&app, 120);
+        let text = screen.join("\n");
+        assert!(
+            text.contains("Start agents") && text.contains("Badge count in web"),
+            "{text}"
+        );
+        let foot = screen.last().unwrap();
+        assert!(
+            foot.contains("start them all") && foot.contains("esc back") && !foot.contains("j/k"),
+            "the dialog's keys alone: {foot}"
+        );
+        // Letters are the dialog's: `g` isn't a section, `q` doesn't quit.
+        app.on_input(b"gq".to_vec()).await;
+        assert!(app.batch.is_some() && !app.quit && app.section() == Section::Inbox);
+
+        // Esc: back to the draft, typing, as it was.
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.batch.is_none() && app.composer.typing);
+        assert_eq!(
+            app.composer.text,
+            "Add token expiry\nBadge count in web\nCache the release build"
+        );
+
+        // The third on codex, then ↩ starts all three; web refuses.
+        app.on_input(b"\r".to_vec()).await;
+        app.on_input(b"jj\x1b[Z\x1b[Z\x1b[Z".to_vec()).await;
+        app.on_input(b"\r".to_vec()).await;
+        let specs = std::mem::take(&mut *spawned.lock().unwrap());
+        let got: Vec<(Vec<String>, Option<PathBuf>, Option<String>)> = specs
+            .into_iter()
+            .map(|s| (s.command, s.cwd, s.worktree))
+            .collect();
+        let w = || Some(String::new());
+        assert_eq!(
+            got,
+            [
+                (
+                    vec!["claude".into(), "Add token expiry".into()],
+                    Some("/r/api".into()),
+                    w()
+                ),
+                (
+                    vec!["claude".into(), "Badge count in web".into()],
+                    Some("/r/web".into()),
+                    w()
+                ),
+                (
+                    vec!["codex".into(), "Cache the release build".into()],
+                    Some("/r/api".into()),
+                    w()
+                ),
+            ]
+        );
+        assert!(app.view.is_none(), "several: nothing attaches");
+        let b = app.batch.as_ref().expect("the refused row stays");
+        assert_eq!(b.rows.len(), 1);
+        assert_eq!(b.rows[0].failed.as_deref(), Some("web is busy"));
+        assert!(
+            app.status
+                .starts_with("started 2 sessions, 1 couldn't start"),
+            "{}",
+            app.status
+        );
+        assert!(
+            home_screen(&app, 120)
+                .join("\n")
+                .contains("couldn't start: web is busy")
+        );
+
+        // tab moves it to api; ↩ starts it and the dialog closes, the draft gone.
+        app.on_input(b"\t\r".to_vec()).await;
+        assert!(app.batch.is_none());
+        assert_eq!(app.status, "started 1 session");
+        assert!(app.composer.text.is_empty() && !app.composer.typing);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Renders the home screen to text lines.
     fn home_screen(app: &App, width: u16) -> Vec<String> {
         use ratatui::Terminal;
@@ -11153,15 +13042,16 @@ mod tests {
         assert_eq!(app.selected, 1, "wheel down moves down");
         app.on_input(press(65, 5, 5)).await;
         app.on_input(press(65, 5, 5)).await;
-        assert_eq!(app.selected, 2, "and stops at the last row");
+        app.on_input(press(65, 5, 5)).await;
+        assert_eq!(app.selected, 3, "and stops at the last row");
         app.on_input(press(64, 5, 5)).await;
-        assert_eq!(app.selected, 1, "wheel up moves up");
+        assert_eq!(app.selected, 2, "wheel up moves up");
 
         let mut long = proposed("/r/a", 1, "long one");
         long.body = (0..80).map(|i| format!("line {i}\n")).collect();
         app.sessions.clear();
         app.proposals = vec![long];
-        app.selected = 0;
+        app.selected = 1;
         let width = 160;
         home_screen(&app, width);
         // The preview is the right-hand panel, past the lists' 62%.
@@ -11183,7 +13073,7 @@ mod tests {
         let mut d = proposed("/r/a", 1, "md one");
         d.body = "## Why\n\n**Bold** words, then [the ADR](https://x.dev/adr).".into();
         app.proposals = vec![d];
-        app.selected = 0;
+        app.selected = 1;
         let width = 160;
         let screen: Vec<String> = home_screen(&app, width);
         let all = screen.join("\n");
@@ -11209,7 +13099,7 @@ mod tests {
         // A session selected now: the old proposal's link is gone with it.
         app.proposals.clear();
         app.sessions = vec![info(1)];
-        app.selected = 0;
+        app.selected = 1;
         app.on_input(press(0, x + 1, y as u16)).await;
         assert!(opened().is_empty(), "no stale link");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -11226,7 +13116,7 @@ mod tests {
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1), info(2), info(3)];
         app.queue = vec![queued(1), queued(3)];
-        app.selected = 2; // session 2, below the queue
+        app.selected = 3; // session 2, below the queue
         app.on_input(b"\t".to_vec()).await;
         assert_eq!(app.selection().0, Some(1), "round to the first waiting");
         app.on_input(b"\t".to_vec()).await;
@@ -11295,6 +13185,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-chips-{}", std::process::id()));
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1)];
+        app.selected = 1;
         let chip = |app: &App, label: &str| -> (u16, u16) {
             let rows = home_screen(app, 120);
             let bar = rows.len() - 1;

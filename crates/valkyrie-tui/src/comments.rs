@@ -58,7 +58,7 @@ pub(crate) struct Comments {
 }
 
 impl Comments {
-    /// Whether the load failed, so `r` can ask again.
+    /// Whether the load failed, so the page's live reload asks again.
     pub(crate) fn failed(&self) -> bool {
         self.failed.is_some()
     }
@@ -233,7 +233,7 @@ impl Comments {
             Mode::List { cursor } => {
                 if let Some(e) = &self.failed {
                     lines.push(
-                        fit(&format!("Couldn't load them: {e} · r tries again"), room)
+                        fit(&format!("Couldn't load them: {e} · trying again"), room)
                             .fg(t.needs)
                             .into(),
                     );

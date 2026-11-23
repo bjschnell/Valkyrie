@@ -6,19 +6,15 @@
 //! summary as a standup. The selected row's detail shows beside the list on a
 //! wide screen.
 
-use crate::backlog::fit_hints;
 use crate::next_key;
 use crate::theme::Theme;
 use jiff::tz::TimeZone;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{self, Color, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use valkyrie_context::digest as core;
 use valkyrie_proto::{Digest, DigestEntry, Outcome, PastSession, SessionId, SupervisorEntry};
-
-/// Columns from which the selected row's detail shows beside the list.
-const DETAIL_MIN_WIDTH: u16 = 120;
 
 /// How far back History looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -87,6 +83,15 @@ enum Row {
     Day(String, usize),
     Entry(Box<DigestEntry>),
     Step(Box<SupervisorEntry>),
+}
+
+/// What a row is, by identity, so a reload can find it again.
+fn row_id(row: &Row) -> Option<String> {
+    match row {
+        Row::Day(..) => None,
+        Row::Entry(e) => Some(format!("e{}", e.key)),
+        Row::Step(st) => Some(format!("s{} {}", st.at, st.said)),
+    }
 }
 
 impl Row {
@@ -172,6 +177,41 @@ impl Page {
             Err(e) => (Vec::new(), Some(e)),
         };
         self.build(tz);
+    }
+
+    /// A live reload's answer (`App::reload_page`): as `loaded`, but the
+    /// cursor stays on the row it was on, and a failed reload keeps what was
+    /// shown.
+    pub(crate) fn refreshed(
+        &mut self,
+        digest: Result<Digest, String>,
+        steps: Result<Vec<SupervisorEntry>, String>,
+        past: Result<Vec<PastSession>, String>,
+        tz: &TimeZone,
+    ) {
+        if digest.is_err() && self.digest.is_some() {
+            return;
+        }
+        // What else failed this time keeps what it had.
+        let steps = steps.or_else(|e| match self.steps_failed {
+            None => Ok(self.steps.clone()),
+            Some(_) => Err(e),
+        });
+        let past = past.or_else(|e| match self.past_failed {
+            None => Ok(self.past.clone()),
+            Some(_) => Err(e),
+        });
+        let was = self.selected().and_then(row_id);
+        let cursor = self.cursor;
+        self.loaded(digest, steps, past, tz);
+        self.cursor = match was {
+            Some(id) => self
+                .items()
+                .position(|r| row_id(r).as_ref() == Some(&id))
+                .unwrap_or(cursor),
+            None => cursor,
+        };
+        self.cursor = self.cursor.min(self.items().count().saturating_sub(1));
     }
 
     /// Forgets the old answer while a new one loads, so it can't pass for it.
@@ -262,8 +302,9 @@ impl Page {
     }
 
     /// Keys while the page is open: ↑/↓ (j/k) pick, ↩ opens a running session,
-    /// `R` resumes an ended one, `[ ]` the window, `/` searches, `y` copies, `r`
-    /// loads again, Esc clears the search or closes.
+    /// `R` resumes an ended one, `[ ]` the window, `/` searches, `y` copies,
+    /// Esc clears the search or closes. It loads again on its own
+    /// (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8], tz: &TimeZone) -> Vec<Do> {
         let mut out = Vec::new();
         while !bytes.is_empty() {
@@ -360,7 +401,6 @@ impl Page {
                     out.push(Do::Load);
                 }
                 b"/" => self.typing = true,
-                b"r" => out.push(Do::Load),
                 b"y" => match (&self.digest, self.win) {
                     // What's on screen: the ended sessions, as a list.
                     (_, Window::Ended) if !self.past.is_empty() => {
@@ -551,13 +591,7 @@ impl Page {
         let tz = TimeZone::system();
         let area = frame.area();
         // Nearly the whole screen, like the backlog page.
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
 
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
@@ -568,26 +602,24 @@ impl Page {
             }
             _ => Vec::new(),
         };
-        let hints = if self.typing {
-            [hint(" ↩ ", "done "), hint(" esc ", "clear ")].concat()
+        let (hints, around) = if self.typing {
+            ([hint(" ↩ ", "done "), hint(" esc ", "clear ")].concat(), "")
         } else {
-            [
-                first,
-                hint(" / ", "search ").to_vec(),
-                hint(" y ", "copy ").to_vec(),
-                hint(" [ ] ", "window ").to_vec(),
-                hint(" esc ", "close ").to_vec(),
-            ]
-            .concat()
+            (
+                [
+                    first,
+                    hint(" / ", "search ").to_vec(),
+                    hint(" y ", "copy ").to_vec(),
+                ]
+                .concat(),
+                "[ ] window · j/k move",
+            )
         };
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let block = crate::section_block(t)
             .title(" History ".fg(t.fg).bold())
             .title_bottom(
-                Line::from(fit_hints(hints, rect.width.saturating_sub(4) as usize)).centered(),
-            )
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+                crate::page_footer(hints, around, rect.width.saturating_sub(2), t).left_aligned(),
+            );
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -615,7 +647,7 @@ impl Page {
         match (&self.digest, &self.failed) {
             _ if self.win == Window::Ended => match &self.past_failed {
                 Some(e) => top.push(
-                    format!(" Couldn't read the ended sessions: {e} · r tries again")
+                    format!(" Couldn't read the ended sessions: {e} · trying again")
                         .fg(t.blocked)
                         .into(),
                 ),
@@ -631,7 +663,7 @@ impl Page {
                 }
             },
             (_, Some(e)) => top.push(
-                format!(" Couldn't load History: {e} · r tries again")
+                format!(" Couldn't load History: {e} · trying again")
                     .fg(t.blocked)
                     .into(),
             ),
@@ -657,19 +689,7 @@ impl Page {
                 .areas(inner);
         frame.render_widget(Paragraph::new(top), head);
 
-        let (list_area, detail_area) = if body.width >= DETAIL_MIN_WIDTH {
-            let [list, rule, detail] = Layout::horizontal([
-                Constraint::Percentage(58),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .areas(body);
-            let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-            frame.render_widget(Paragraph::new(bar), rule);
-            (list, Some(detail))
-        } else {
-            (body, None)
-        };
+        let (list_area, detail_area) = crate::list_and_detail(frame, body, t);
 
         let width = list_area.width as usize;
         let mut lines: Vec<Line> = Vec::new();
@@ -809,6 +829,42 @@ mod tests {
             "ended_ms": if session.is_some() { None } else { Some(last_ms) },
         }))
         .unwrap()
+    }
+
+    /// A live reload (`refreshed`) keeps the cursor on the row it was on when
+    /// a new session lands above it, and a failed one keeps what was shown.
+    #[test]
+    fn a_live_reload_keeps_the_cursor_on_its_row() {
+        let tz = TimeZone::UTC;
+        let now = 100 * 3_600_000;
+        let digest = |entries: Vec<DigestEntry>| -> Digest {
+            serde_json::from_value(serde_json::json!({
+                "since_ms": now - 3 * 3_600_000, "until_ms": now, "away": true, "by": "day",
+                "entries": entries, "markdown": "",
+            }))
+            .unwrap()
+        };
+        let mut p = Page::default();
+        let two = vec![
+            entry("k1", "fix login", "stuck", now - 600_000, Some(1)),
+            entry("k2", "bump vite", "done", now - 7_200_000, None),
+        ];
+        p.loaded(Ok(digest(two.clone())), Ok(vec![]), Ok(vec![]), &tz);
+        p.cursor = 1;
+        let on = |p: &Page| match p.selected() {
+            Some(Row::Entry(e)) => e.key.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(on(&p), "k2");
+        let mut three = two.clone();
+        three.insert(0, entry("k0", "new one", "working", now - 60_000, Some(2)));
+        p.refreshed(Ok(digest(three)), Ok(vec![]), Ok(vec![]), &tz);
+        assert_eq!(on(&p), "k2", "still on bump vite, a row further down");
+        p.refreshed(Err("gone".into()), Ok(vec![]), Ok(vec![]), &tz);
+        assert!(
+            p.failed.is_none() && on(&p) == "k2",
+            "a failed reload keeps the rows"
+        );
     }
 
     fn page(now: u64) -> Page {
