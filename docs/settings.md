@@ -10,7 +10,7 @@ Press `,` to open the settings panel. You can change:
 - the tab style (`underline`, `folder`, `cards`), side (`top`, `left`, `right`)
   and detail (`full`, or `minimal`: one row per tab; at the side, a rail of numbers
   and state icons that opens over the session under the mouse)
-- key hints (`on`/`off`): whether the bar under a session lists its keys.
+- key hints (`on`/`off`, off by default): whether the bar under a session lists its keys. Off, it shows one `keys` chip instead; click it, or press the actions key then `?`, for the sheet of every key.
   Actions (`^\`) show their keys either way
 - the ping sound (`chime`, `pop`, `wood`, `beep`, 8-bit `coin`, `powerup`, `zap`,
   `1up`, or `none`), desktop notifications for toasts (`on`/`off`), and project context

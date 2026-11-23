@@ -913,6 +913,16 @@ impl App {
                         Box::pin(self.backlog_keys(&rest)).await;
                     }
                     (_, Input::Mouse(_)) if self.backlog.is_some() => {}
+                    // The key sheet is open over the session: keys are its, and a
+                    // press closes it and goes no further.
+                    (Some(_), Input::Bytes(rest)) if self.help => {
+                        Box::pin(self.help_keys(&rest)).await;
+                    }
+                    (Some(_), Input::Mouse(m)) if self.help => {
+                        if m.kind == MouseKind::Press {
+                            self.help = false;
+                        }
+                    }
                     // Detached mid-read: the rest belongs to the home screen.
                     (None, Input::Bytes(rest)) => Box::pin(self.home_input(&rest)).await,
                     (None, Input::Mouse(_)) => {}
@@ -1370,6 +1380,12 @@ impl App {
                     self.detach().await;
                     return;
                 }
+                // The key sheet, over the session; its keys are the sheet's.
+                b"?" => {
+                    self.tab_mode = false;
+                    self.help = true;
+                    return;
+                }
                 b"q" => self.tab_mode = false,
                 b"\x1b" if whole => self.tab_mode = false,
                 _ => {}
@@ -1666,6 +1682,7 @@ impl App {
                 self.tab_mode = true;
             }
             BarClick::Action(action) => self.on_direct(action).await,
+            BarClick::Help => self.help = true,
         }
     }
 
@@ -4650,7 +4667,7 @@ impl App {
                 }
             }
             self.draw_mini(frame);
-            if self.help && self.view.is_none() {
+            if self.help {
                 self.draw_help(frame);
             }
             if let Some(cursor) = self.settings_cursor {
@@ -6985,6 +7002,8 @@ enum BarMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BarClick {
     Action(Action),
+    /// The `keys` chip, while hints are off: the `?` sheet.
+    Help,
 }
 
 /// The bar under a session, and the columns (from, to) its chips are clicked in.
@@ -7079,6 +7098,18 @@ fn attached_bar(
         }
         _ => Vec::new(),
     };
+    // Without hints, one chip says where the keys are: tab mode's key, then `?`
+    // (a bare `?` is the session's). A click opens the sheet.
+    if matches!(mode, BarMode::Session)
+        && !hints
+        && let Some(key) = map.get(Action::Tabs)
+    {
+        spans.push(" ".into());
+        let from = width(&spans);
+        spans.push(format!(" {} ? ", key.label()).fg(t.muted).bold());
+        spans.push(" keys".fg(t.muted));
+        clicks.push((from, width(&spans), BarClick::Help));
+    }
     let keys: &[(&str, &str)] = match mode {
         BarMode::Session => &[],
         BarMode::Tabs => &[
@@ -7089,6 +7120,7 @@ fn attached_bar(
             ("d", "decisions"),
             ("m", "minimal"),
             (",", "settings"),
+            ("?", "keys"),
             ("esc", "back"),
         ],
         BarMode::Menu => &[("↑/↓", "move"), ("↩", "pick"), ("esc", "close menu")],
@@ -9891,9 +9923,15 @@ mod tests {
     }
 
     /// The bar under a session starts with its name, no `VALKYRIE` label. Its keys
-    /// show unless `hints` is off; tab mode shows its keys either way.
+    /// show only with `hints`, which is off by default: then one chip says where
+    /// they are, and a click on it opens the key sheet. Tab mode shows its keys
+    /// either way.
     #[test]
     fn the_session_bar_shows_keys_only_with_hints() {
+        assert!(
+            !Settings::default().hints,
+            "keys are off the bar by default"
+        );
         let view = Attached::new(2, "proj2".into(), None);
         let settings = Settings::default();
         let bar = |mode, hints| {
@@ -9908,10 +9946,27 @@ mod tests {
         assert!(on.starts_with(" proj2 #2"), "{on}");
         assert!(!on.contains("VALKYRIE"), "{on}");
         assert!(on.contains("alt 1-9"), "{on}");
+        assert!(!on.contains("? "), "with hints, no keys chip: {on}");
         let off = bar(BarMode::Session, false);
-        assert_eq!(off.trim(), "proj2 #2", "{off}");
+        assert_eq!(off.trim(), "proj2 #2   ^\\ ?  keys", "{off}");
+        let clicks = attached_bar(
+            &view,
+            None,
+            BarMode::Session,
+            0,
+            false,
+            settings.theme,
+            &settings.keys,
+        )
+        .clicks;
+        assert_eq!(
+            clicks.iter().map(|c| c.2).collect::<Vec<_>>(),
+            [BarClick::Help]
+        );
         let tabs = bar(BarMode::Tabs, false);
         assert!(tabs.contains("split") && tabs.contains("rename"), "{tabs}");
+        assert!(tabs.contains(" ?  keys"), "{tabs}");
+        assert!(!bar(BarMode::Tabs, true).contains("^\\ ?"), "one keys hint");
         // Getting around is the direct keys', not tab mode's.
         for gone in ["switch", "jump", "reorder", "next ●", " o "] {
             assert!(!tabs.contains(gone), "{gone}: {tabs}");
@@ -10337,6 +10392,7 @@ mod tests {
         app.sessions[0].status.state = AgentState::ReviewReady;
         app.sessions[0].status.summary = Some("Fixed the login\nredirect".into());
         app.preview = Some((1, "cargo test\nall 41 passed\n\n".into()));
+        app.settings.hints = true;
         app.proposals = vec![
             proposed("/r/api", 1, "Use pnpm"),
             proposed("/r/api", 2, "Never pkill by pattern"),
@@ -10555,6 +10611,7 @@ mod tests {
         let mut app = App::new(client, PathBuf::new());
         // Not whatever this machine's settings.toml says: the two-row cards.
         app.settings = Settings::default();
+        app.settings.hints = true;
         app.settings.tabs = TabStyle::Cards;
         app.fixed_size = Some(Size { cols: 81, rows: 23 });
         app.sessions = (1..=3)
@@ -11286,6 +11343,50 @@ mod tests {
         app.selected = 0;
         app.on_input(b"\t".to_vec()).await;
         assert_eq!(app.status, "nothing waits on you");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Attached, with hints off (the default), the key sheet is a click on the
+    /// bar's keys chip or tab mode's `?` away; while it's open its keys and
+    /// clicks are its own, and closing it leaves you in the session.
+    #[tokio::test]
+    async fn the_key_sheet_opens_over_a_session() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-sheet-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.settings = Settings::default();
+        app.sessions = vec![info(1)];
+        app.view = Some(Attached::new(1, "proj1".into(), None));
+
+        // Tab mode's key, then `?`.
+        app.on_input(b"\x1c?".to_vec()).await;
+        assert!(app.help && !app.tab_mode);
+        app.on_input(b"j".to_vec()).await;
+        assert!(app.help, "the sheet takes the keys");
+        app.on_input(b"q".to_vec()).await;
+        assert!(!app.help);
+        assert_eq!(app.view.as_ref().map(|v| v.id), Some(1));
+
+        // The chip on the bar, then any press closes it.
+        let (from, _, _) = app
+            .bar(app.view.as_ref().unwrap())
+            .clicks
+            .into_iter()
+            .find(|c| c.2 == BarClick::Help)
+            .expect("a keys chip");
+        let press = |x, y| Mouse {
+            kind: MouseKind::Press,
+            code: 0,
+            x,
+            y,
+            release: false,
+        };
+        let bottom = app.screen().unwrap().rows;
+        app.on_mouse(press(from + 1, bottom)).await;
+        assert!(app.help);
+        // A raw SGR press at (3, 3), through the input path.
+        app.on_input(b"\x1b[<0;4;4M".to_vec()).await;
+        assert!(!app.help);
+        assert_eq!(app.view.as_ref().map(|v| v.id), Some(1));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
