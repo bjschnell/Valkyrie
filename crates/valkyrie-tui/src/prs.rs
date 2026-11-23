@@ -30,6 +30,8 @@ pub(crate) struct Page {
     /// `/`: pull requests whose number, branch, repository or state has every
     /// word typed.
     pub(crate) search: Search,
+    /// Where the rows were drawn, for a click (backlog #281).
+    pub(crate) hits: crate::RowHits,
 }
 
 impl Page {
@@ -135,6 +137,7 @@ impl Page {
         let area = frame.area();
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
+        self.hits.clear();
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let (hints, around): (Vec<Span>, _) = if self.search.typing {
             ([hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat(), "")
@@ -187,6 +190,7 @@ impl Page {
         let width = list_area.width as usize;
         let mut repo = None;
         let mut at = 0;
+        let mut clickable = Vec::new();
         for (i, pr) in prs.iter().enumerate() {
             if repo != Some(&pr.project) {
                 repo = Some(&pr.project);
@@ -207,9 +211,13 @@ impl Page {
                     .lift_faint(line)
                     .style(style::Style::new().bg(t.selection));
             }
+            clickable.push((lines.len(), i as isize - self.cursor as isize));
             lines.push(line);
         }
         let skip = (at + 1).saturating_sub(list_area.height as usize);
+        if !self.search.typing {
+            self.hits.record(list_area, skip, &clickable);
+        }
         frame.render_widget(
             Paragraph::new(lines).scroll((skip.min(u16::MAX as usize) as u16, 0)),
             list_area,

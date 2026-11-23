@@ -195,6 +195,8 @@ pub(crate) struct Page {
     pub(crate) undo: Option<Undo>,
     /// `/`: rows whose words have every word typed.
     pub(crate) search: Search,
+    /// Where the rows were drawn, for a click (backlog #281).
+    pub(crate) hits: crate::RowHits,
 }
 
 impl Page {
@@ -210,6 +212,7 @@ impl Page {
             reading: None,
             undo: None,
             search: Search::default(),
+            hits: crate::RowHits::default(),
         }
     }
 
@@ -607,6 +610,8 @@ impl Page {
         let area = frame.area();
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
+        // Reading in full or typing a search: no rows to click.
+        self.hits.clear();
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let picks = self.picks(proposals);
         let cursor = self.place(&picks, proposals);
@@ -709,6 +714,7 @@ impl Page {
         let width = list_area.width as usize;
         let mut at = 0;
         let mut seen = 0;
+        let mut clickable = Vec::new();
         for row in self.rows(self.tab, proposals) {
             if matches!(row, Row::Head(..)) {
                 if lines.len() > 1 {
@@ -727,11 +733,15 @@ impl Page {
                     .lift_faint(line)
                     .style(style::Style::new().bg(t.selection));
             }
+            clickable.push((lines.len(), seen as isize - cursor as isize));
             seen += 1;
             lines.push(line);
         }
         let room = list_area.height as usize;
         let skip = (at + 1).saturating_sub(room);
+        if !self.search.typing {
+            self.hits.record(list_area, skip, &clickable);
+        }
         frame.render_widget(Paragraph::new(lines).scroll((skip as u16, 0)), list_area);
 
         if let (Some(area), Some(row)) = (detail_area, &here) {
