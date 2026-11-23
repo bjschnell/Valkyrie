@@ -22,6 +22,7 @@ export interface Section {
 export type PageKey =
   | "inbox"
   | "new"
+  | "launch"
   | "settings"
   | "backlog"
   | "decisions"
@@ -72,15 +73,15 @@ export const PAGE_KEYS = {
     k: "Pick the next, previous item or session",
     Enter: "Open it",
     o: "Open it",
-    Escape: "Close the picked item",
+    Escape: "Close the picked item, back to the composer",
     r: "Review its changes",
-    n: "New session",
+    n: "New session: the composer beside the list (Enter starts the task in its own worktree, Esc leaves it and keeps what's typed), or the launcher",
     b: "Backlog",
     d: "Memory (decisions, skills, policies)",
     a: "What agents did while you were gone",
     h: "History (what happened, to search and resume)",
     s: "Supervisor",
-    "/": "Search session history",
+    "/": "Type in the composer when it shows, else search session history",
     ",": "Settings",
   },
   session: {
@@ -142,6 +143,7 @@ export type KeyedPage = keyof typeof PAGE_KEYS;
 const TITLE: Record<PageKey, string> = {
   inbox: "Inbox",
   new: "New session",
+  launch: "New session",
   settings: "Settings",
   backlog: "Backlog",
   decisions: "Memory",
@@ -187,6 +189,12 @@ const ALSO: Partial<Record<PageKey, (mac: boolean) => Shortcut[]>> = {
     { keys: [["Ctrl", "Shift", "C"], ["Ctrl", "Shift", "V"]], does: "Copy, paste in the terminal" },
   ],
   item: (mac) => [ctrlEnter(mac, "Save")],
+  inbox: (mac) => [
+    { keys: [["Shift", "Enter"]], does: "In the composer: another line (several lines go to the launcher)" },
+    ctrlEnter(mac, "In the composer: file it to the backlog instead"),
+    { keys: [["#"]], does: "In the composer: find a backlog item by number or title" },
+  ],
   new: (mac) => [ctrlEnter(mac, "Start it")],
+  launch: (mac) => [ctrlEnter(mac, "Start it")],
   doc: (mac) => [ctrlEnter(mac, "Save, when editing")],
 };

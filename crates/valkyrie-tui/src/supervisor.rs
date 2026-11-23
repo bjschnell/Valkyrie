@@ -3,13 +3,12 @@
 //! you answered, the ones policies took without asking, the build orders you
 //! answered. Opened on purpose and closed again, never a pane that stays up.
 
-use crate::backlog::fit_hints;
+use crate::search::{Search, Searched};
 use crate::theme::Theme;
 use crate::{fit, next_key};
-use ratatui::layout::Rect;
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use std::path::PathBuf;
 use valkyrie_proto::PrState;
 use valkyrie_proto::supervisor::Watch;
@@ -82,8 +81,6 @@ pub(crate) fn waiting(
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Do {
     Close,
-    /// Fetch the log again.
-    Load,
     TakeStep {
         session: SessionId,
         seq: u64,
@@ -119,9 +116,22 @@ pub(crate) struct Page {
     cursor: usize,
     /// Item id to the number its repository calls it, for the watched PRs' lines.
     pub(crate) numbers: std::collections::HashMap<u32, u32>,
+    /// `/`: what waits, and what it did, that says every word typed.
+    pub(crate) search: Search,
 }
 
 impl Page {
+    /// What waits on you, as far as `/` leaves it.
+    fn shown<'a>(&self, waits: &'a [Wait]) -> Vec<&'a Wait> {
+        waits
+            .iter()
+            .filter(|w| {
+                let (tag, what, _) = describe(w);
+                self.search.matches(&format!("{tag} {what}"))
+            })
+            .collect()
+    }
+
     pub(crate) fn watched(&mut self, got: Result<Watch, String>) {
         self.watch = Some(got);
     }
@@ -139,16 +149,25 @@ impl Page {
     /// Keys while the page is open: ↑/↓ (j/k) pick what waits; `a` (or ↩) takes
     /// what's offered, `o` the other step, `d` leaves or rejects it; ↩ on a build
     /// order opens it; `c` opens the supervisor session, starting it if none
-    /// runs; `r` loads again; Esc or `q` closes.
+    /// runs; Esc or `q` closes. The list stays live (`App::reload_page`).
     pub(crate) fn keys(&mut self, mut bytes: &[u8], waits: &[Wait]) -> Vec<Do> {
         let mut out = Vec::new();
-        let n = waits.len();
-        self.cursor = self.cursor.min(n.saturating_sub(1));
         while !bytes.is_empty() {
             let key = next_key(bytes);
             let whole = key.len() == bytes.len();
             bytes = &bytes[key.len()..];
-            let here = waits.get(self.cursor);
+            match self.search.key(key, whole) {
+                Searched::No => {}
+                Searched::Kept => continue,
+                Searched::Changed => {
+                    self.cursor = 0;
+                    continue;
+                }
+            }
+            let shown = self.shown(waits);
+            let n = shown.len();
+            self.cursor = self.cursor.min(n.saturating_sub(1));
+            let here = shown.get(self.cursor).copied();
             match key {
                 b"k" | b"\x1b[A" | b"\x1bOA" => self.cursor = self.cursor.saturating_sub(1),
                 b"j" | b"\x1b[B" | b"\x1bOB" => {
@@ -170,7 +189,6 @@ impl Page {
                     Some(_) => out.push(Do::Say("no other step offered there".into())),
                     None => {}
                 },
-                b"r" => out.push(Do::Load),
                 b"c" => out.push(Do::OpenSession),
                 b"\x1b" if whole => out.push(Do::Close),
                 b"q" | [0x03] => out.push(Do::Close),
@@ -182,18 +200,16 @@ impl Page {
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, waits: &[Wait], now_ms: u64, t: &Theme) {
         let area = frame.area();
-        let rect = Rect::new(
-            area.x + 2,
-            area.y + 1,
-            area.width.saturating_sub(4),
-            area.height.saturating_sub(2),
-        )
-        .intersection(area);
+        let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
         let inner = rect.width.saturating_sub(4) as usize;
+        let waits = self.shown(waits);
         let cursor = self.cursor.min(waits.len().saturating_sub(1));
 
-        let mut lines: Vec<Line> = vec![Line::default()];
+        let mut lines: Vec<Line> = vec![match self.search.shown() {
+            true => self.search.line(t),
+            false => Line::default(),
+        }];
         lines.push(Line::from(vec![
             " Waiting on you ".fg(t.dim()).bold(),
             format!("· {}", waits.len()).fg(t.muted),
@@ -206,7 +222,7 @@ impl Page {
             );
         }
         let mut at_cursor = 0;
-        for (i, w) in waits.iter().enumerate() {
+        for (i, w) in waits.iter().copied().enumerate() {
             let here = i == cursor;
             if here {
                 at_cursor = lines.len();
@@ -242,16 +258,16 @@ impl Page {
             if on {
                 "· last 90 days".fg(t.muted)
             } else {
-                "· the supervisor is off: `valk supervise on`".fg(t.needs)
+                "· the supervisor is off: `valk supervise on`".fg(t.dim())
             },
         ]));
         match (&self.log, &self.failed) {
             (_, Some(e)) => lines.push(
                 format!(
-                    "   Couldn't load it: {} · r tries again",
+                    "   Couldn't load it: {} · trying again",
                     fit(e, inner.saturating_sub(36))
                 )
-                .fg(t.needs)
+                .fg(t.blocked)
                 .into(),
             ),
             (None, None) => lines.push("   Loading…".fg(t.muted).into()),
@@ -259,7 +275,10 @@ impl Page {
                 lines.push("   Nothing yet.".fg(t.muted).into())
             }
             (Some((entries, _)), None) => {
-                for e in entries {
+                for e in entries.iter().filter(|e| {
+                    self.search
+                        .matches(&format!("{} {}", e.said, e.project.display()))
+                }) {
                     let when = crate::age(e.at * 1000, now_ms);
                     let repo = e
                         .project
@@ -283,22 +302,26 @@ impl Page {
         let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
 
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
-        let hints = [
-            hint(" a ", "take "),
-            hint(" o ", "other step "),
-            hint(" d ", "leave/reject "),
-            hint(" c ", "supervisor session "),
-            hint(" r ", "reload "),
-            hint(" esc ", "close "),
-        ]
-        .concat();
-        let hints = fit_hints(hints, rect.width.saturating_sub(4) as usize);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(style::Style::new().fg(t.accent))
+        let (hints, around) = if self.search.typing {
+            ([hint(" ↩ ", "keep "), hint(" esc ", "clear ")].concat(), "")
+        } else {
+            (
+                [
+                    hint(" a ", "take "),
+                    hint(" o ", "other step "),
+                    hint(" d ", "leave "),
+                    hint(" c ", "session "),
+                    hint(" / ", "search "),
+                ]
+                .concat(),
+                "j/k move",
+            )
+        };
+        let block = crate::section_block(t)
             .title(" Supervisor ".fg(t.fg).bold())
-            .title_bottom(Line::from(hints).centered())
-            .style(style::Style::new().bg(t.panel).fg(t.fg));
+            .title_bottom(
+                crate::page_footer(hints, around, rect.width.saturating_sub(2), t).left_aligned(),
+            );
         frame.render_widget(Paragraph::new(lines).block(block), rect);
     }
 }
@@ -337,10 +360,10 @@ fn watch_lines(
         None => lines.push("   Loading…".fg(t.muted).into()),
         Some(Err(e)) => lines.push(
             format!(
-                "   Couldn't load it: {} · r tries again",
+                "   Couldn't load it: {} · trying again",
                 fit(e, inner.saturating_sub(36))
             )
-            .fg(t.needs)
+            .fg(t.blocked)
             .into(),
         ),
         Some(Ok(w)) if w.prs.is_empty() && w.on => {
@@ -349,9 +372,12 @@ fn watch_lines(
         Some(Ok(w)) => {
             for pr in &w.prs {
                 let color = match pr.state {
-                    PrState::Red | PrState::Conflicting => t.needs,
+                    // State colors, as Backlog's Pull requests tab has them
+                    // (rule 4): red and conflicting are stuck, not asks.
+                    PrState::Red | PrState::Conflicting => t.blocked,
                     PrState::Green => t.done,
-                    PrState::Pending | PrState::Unknown => t.muted,
+                    PrState::Pending => t.working,
+                    PrState::Unknown => t.muted,
                 };
                 let whose = match (pr.item, &pr.branch) {
                     (Some(i), _) => format!("#{}", numbers.get(&i).copied().unwrap_or(i)),
@@ -584,6 +610,15 @@ mod tests {
             .join("\n");
         assert!(text.contains("#7"), "{text}");
         assert!(!text.contains("#231"), "{text}");
+        // Red is stuck's color, not an ask's (rule 4).
+        let t = &crate::theme::VALKYRIE;
+        let lines = watch_lines(Some(&watch), &numbers, 80, 1_000, t);
+        let state = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| s.content.contains("red"))
+            .expect("the red PR's state");
+        assert_eq!(state.style.fg, Some(t.blocked));
     }
 
     #[test]

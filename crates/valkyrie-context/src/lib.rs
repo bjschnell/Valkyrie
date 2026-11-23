@@ -333,6 +333,8 @@ impl Store {
             && let Some(old) = d.supersedes
             && let Some((_, o)) = files.get(&old)
             && o.status == Superseded
+            // Its own accept, taken back half-way (`Reopen`): not another's.
+            && o.superseded_by != Some(id)
         {
             bail!(
                 "#{id} replaces #{old}, which #{} already replaced; reject it, or propose it again against #{0}",
@@ -342,6 +344,7 @@ impl Store {
         let mut accepting = false;
         let mut confirming = false;
         let mut reworded = false;
+        let mut reopening = false;
         // A pin changes where it's shown, not what it says: it isn't a
         // confirmation, so `updated` (which stands in for one) stays.
         // Nor is where it applies (ADR-0014 §2).
@@ -376,6 +379,15 @@ impl Store {
                 confirming = true;
             }
             (ReviewAction::Confirm, Active) => confirming = true,
+            (ReviewAction::Reopen, Active | Rejected) => {
+                reopening = d.status == Active;
+                d.status = Proposed;
+                // Only an active decision is pinned; a proposal waits unpinned.
+                d.pinned = false;
+            }
+            // A retire taken back: in use again, but not confirmed, so a flag
+            // that it may be out of date comes back with the next check.
+            (ReviewAction::Reopen, Retired) => d.status = Active,
             (ReviewAction::Pin | ReviewAction::Unpin, Active) => {
                 // A skill is an index line read when needed, and a policy's body
                 // is settings for its hook: neither has a body to put in the block.
@@ -449,6 +461,7 @@ impl Store {
                     ReviewAction::Reject => "reject",
                     ReviewAction::Retire => "retire",
                     ReviewAction::Restore => "restore",
+                    ReviewAction::Reopen => "reopen",
                     ReviewAction::Confirm => "confirm",
                     ReviewAction::Pin => "pin",
                     ReviewAction::Unpin => "unpin",
@@ -499,6 +512,23 @@ impl Store {
         // check (`promote::Store::heal_promotions`) marks them.
         if accepting {
             let _ = self.promote_notes(root, &d);
+        }
+        // An accept taken back: what it replaced holds again, and what it
+        // promoted is live again.
+        if reopening {
+            if let Some(old) = d.supersedes
+                && let Some((path, o)) = files.get(&old)
+                && o.status == Superseded
+                && o.superseded_by == Some(id)
+            {
+                let mut o = o.clone();
+                o.status = Active;
+                o.superseded_by = None;
+                o.updated = now;
+                self.write(root, &o, Some(path))?;
+            }
+            // Best-effort, as promoting is: the decision is already written.
+            let _ = self.demote_notes(root, &d);
         }
         Ok(d)
     }
@@ -811,6 +841,42 @@ impl Store {
         self.mark_project(root)?;
         write_atomic(&path, &format!("{all}\n"))?;
         Ok(Some(blocks + 1))
+    }
+
+    /// Records a `ship` block on `branch`, pushed with no pull request, at `head`
+    /// (#88) and says whether it's the first for that head. The block asks once
+    /// per pushed head: an agent that heard it and still stops (waiting on CI,
+    /// not finished, its pull request refused) is let through until it pushes
+    /// again. Branches not blocked for [`FAILURE_DAYS`] are forgotten.
+    pub fn record_ship_block(
+        &self,
+        root: &Path,
+        branch: &str,
+        head: &str,
+        now: u64,
+    ) -> Result<bool> {
+        let path = self.base.join(project::key(root)).join("ship-block.json");
+        let mut all = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let map = all
+            .as_object_mut()
+            .context("ship-block.json isn't an object")?;
+        map.retain(|_, v| {
+            now.saturating_sub(v["at"].as_u64().unwrap_or(0)) <= FAILURE_DAYS * 86_400
+        });
+        if map.get(branch).and_then(|v| v["head"].as_str()) == Some(head) {
+            return Ok(false);
+        }
+        map.insert(
+            branch.to_owned(),
+            serde_json::json!({"head": head, "at": now}),
+        );
+        self.mark_project(root)?;
+        write_atomic(&path, &format!("{all}\n"))?;
+        Ok(true)
     }
 
     fn ci_fixes(&self, root: &Path) -> serde_json::Value {
@@ -1819,6 +1885,82 @@ mod tests {
     }
 
     #[test]
+    fn reopening_an_accepted_replacement_gives_the_old_one_its_place_back() {
+        let f = Fixture::new("reopen-supersede");
+        f.store
+            .decide(&f.new_decision("Old"), by("human"), 1)
+            .unwrap();
+        f.store
+            .review(&f.repo, 1, &ReviewAction::Pin, None, None, 1)
+            .unwrap();
+        let mut new = f.new_decision("New");
+        new.supersedes = Some(1);
+        let proposal = f.store.decide(&new, by("codex"), 2).unwrap();
+        let accepted = f
+            .store
+            .review(&f.repo, proposal.id, &ReviewAction::Accept, None, None, 3)
+            .unwrap();
+        assert!(accepted.pinned, "it took the old one's pin");
+        // Read before the accept: refused, it changed since.
+        assert!(
+            f.store
+                .review(&f.repo, 2, &ReviewAction::Reopen, Some(2), None, 4)
+                .is_err()
+        );
+        let d = f
+            .store
+            .review(&f.repo, 2, &ReviewAction::Reopen, Some(3), None, 4)
+            .unwrap();
+        assert_eq!((d.status, d.pinned), (DecisionStatus::Proposed, false));
+        let all = f.store.load(&f.repo);
+        assert_eq!(
+            (all[0].status, all[0].superseded_by, all[0].pinned),
+            (DecisionStatus::Active, None, true)
+        );
+        // Accepted again, it replaces the old one again.
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Accept, None, None, 5)
+            .unwrap();
+        // A reopen that stopped half-way (the old one still replaced by this
+        // one) doesn't keep it from being accepted again.
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Reopen, None, None, 6)
+            .unwrap();
+        let mut old = f.store.load(&f.repo)[0].clone();
+        old.status = DecisionStatus::Superseded;
+        old.superseded_by = Some(2);
+        let (path, _) = f.store.files(&f.repo).remove(&1).unwrap();
+        f.store.write(&f.repo, &old, Some(&path)).unwrap();
+        f.store
+            .review(&f.repo, 2, &ReviewAction::Accept, None, None, 7)
+            .unwrap();
+        let all = f.store.load(&f.repo);
+        assert_eq!(all[0].status, DecisionStatus::Superseded);
+        assert_eq!(all[1].status, DecisionStatus::Active);
+    }
+
+    #[test]
+    fn reopen_takes_back_an_accept_or_a_reject_only() {
+        let f = Fixture::new("reopen");
+        let mut p = f.new_decision("P");
+        p.propose = true;
+        f.store.decide(&p, by("claude"), 1).unwrap();
+        let r = |id, a: ReviewAction, now| f.store.review(&f.repo, id, &a, None, None, now);
+        // Proposed already: nothing to take back.
+        assert!(r(1, ReviewAction::Reopen, 2).is_err());
+        r(1, ReviewAction::Reject, 2).unwrap();
+        let d = r(1, ReviewAction::Reopen, 3).unwrap();
+        assert_eq!((d.status, d.updated), (DecisionStatus::Proposed, 3));
+        r(1, ReviewAction::Accept, 4).unwrap();
+        r(1, ReviewAction::Retire, 5).unwrap();
+        // Retired: in use again, without counting as a confirmation.
+        let d = r(1, ReviewAction::Reopen, 6).unwrap();
+        assert_eq!((d.status, d.fresh.confirmed), (DecisionStatus::Active, 4));
+        // In use: nothing to take back but an accept.
+        assert!(r(1, ReviewAction::Reject, 7).is_err());
+    }
+
+    #[test]
     fn review_follows_the_lifecycle() {
         let f = Fixture::new("life");
         f.store
@@ -2336,6 +2478,23 @@ mod tests {
         );
         let later = 3 + FAILURE_DAYS * 86_400 + 1;
         assert_eq!(record("ccc", later), Some(1), "forgotten after a while");
+    }
+
+    #[test]
+    fn ship_blocks_once_per_branch_head() {
+        let f = Fixture::new("ship-block");
+        let record = |branch, head, at| {
+            f.store
+                .record_ship_block(&f.repo, branch, head, at)
+                .unwrap()
+        };
+        assert!(record("fix/a", "aaa", 1));
+        assert!(!record("fix/a", "aaa", 2), "same head: once");
+        assert!(record("fix/b", "aaa", 3), "another branch has its own");
+        assert!(record("fix/a", "bbb", 4), "a new push asks again");
+        assert!(!record("fix/a", "bbb", 5));
+        let later = 4 + FAILURE_DAYS * 86_400 + 1;
+        assert!(record("fix/a", "bbb", later), "forgotten after a while");
     }
 
     #[test]

@@ -837,6 +837,7 @@ const REVIEWED: Record<ReviewAction["a"], string> = {
   reject: "Rejected",
   retire: "Retired",
   restore: "Restored",
+  reopen: "Reopened",
   confirm: "Confirmed",
   pin: "Pinned",
   unpin: "Unpinned",

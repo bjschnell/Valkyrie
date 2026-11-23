@@ -54,7 +54,7 @@ impl History {
         }
     }
 
-    /// Whether the load failed, so `r` can ask again.
+    /// Whether the load failed, so the page's live reload asks again.
     pub(crate) fn failed(&self) -> bool {
         self.failed.is_some()
     }
@@ -138,7 +138,7 @@ impl History {
             };
             match (&self.versions, &self.failed) {
                 (_, Some(e)) => lines.push(
-                    crate::fit(&format!("Couldn't load it: {e} · r tries again"), room)
+                    crate::fit(&format!("Couldn't load it: {e} · trying again"), room)
                         .fg(t.needs)
                         .into(),
                 ),
