@@ -1547,6 +1547,25 @@ impl App {
         let _ = out.flush();
     }
 
+    /// An attached session's bar, and a toast on the row over it.
+    fn draw_session_bar(&self, frame: &mut ratatui::Frame, view: &Attached, body: Rect, bar: Rect) {
+        self.bar_cols.set(bar.width);
+        let panel = style::Style::new().bg(self.settings.theme.panel);
+        // A toast takes its own row over the bar for its few seconds, never the
+        // bar's own line, where the hints would push it off (rule 9, backlog #203).
+        if let Some(toast) = self.toast()
+            && bar.y > body.y
+        {
+            let row = Rect::new(body.x, bar.y - 1, body.width, 1);
+            frame.render_widget(ratatui::widgets::Clear, row);
+            frame.render_widget(
+                Paragraph::new(Line::from(self.toast_line(toast))).style(panel),
+                row,
+            );
+        }
+        frame.render_widget(Paragraph::new(self.bar(view).line).style(panel), bar);
+    }
+
     /// Over a section's page, the row above its keys: a toast, else what a key
     /// said, as at home (rule 9: never the hint line).
     fn draw_said(&self, frame: &mut ratatui::Frame) {
@@ -5404,27 +5423,7 @@ impl App {
                         dim(frame, main, self.settings.theme);
                         self.draw_reviews(frame, main, cursor);
                     }
-                    self.bar_cols.set(bar.width);
-                    let line = self.bar(view).line;
-                    // A toast takes its own row over the bar for its few seconds,
-                    // never the bar's own line (rule 9, backlog #203).
-                    if let Some(toast) = self.toast()
-                        && bar.y > body.y
-                    {
-                        let row = Rect::new(body.x, bar.y - 1, body.width, 1);
-                        let spans = self.toast_line(toast);
-                        frame.render_widget(ratatui::widgets::Clear, row);
-                        frame.render_widget(
-                            Paragraph::new(Line::from(spans))
-                                .style(style::Style::new().bg(self.settings.theme.panel)),
-                            row,
-                        );
-                    }
-                    frame.render_widget(
-                        Paragraph::new(line)
-                            .style(style::Style::new().bg(self.settings.theme.panel)),
-                        bar,
-                    );
+                    self.draw_session_bar(frame, view, body, bar);
                 }
                 None => {
                     self.draw_home(frame, body, bar);
@@ -12596,6 +12595,50 @@ mod tests {
             "the row over the keys: {rows:#?}"
         );
         assert!(rows[19].contains("j/k move"), "the keys stay: {rows:#?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backlog #203: at 80 columns with hints on, the hints fill the session's
+    /// bar, so a toast takes the row over it instead of falling off the end.
+    #[tokio::test]
+    async fn a_toast_over_a_narrow_session_bar_is_seen() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir =
+            std::env::temp_dir().join(format!("valkyrie-tui-bar-toast-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.settings = Settings::default();
+        app.settings.hints = true;
+        app.sessions = vec![info(1)];
+        let mut view = Attached::new(1, "proj1".into(), None);
+        view.apply(update(true, vec![row(0, "inside session 1")]));
+        app.view = Some(view);
+        let screen = |app: &App| -> Vec<String> {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|f| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(f.area());
+                    app.draw_session_bar(f, app.view.as_ref().unwrap(), body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(80)
+                .map(|r| r.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        let before = screen(&app);
+        app.show_ping(Ping::notice("hi from another pane", None));
+        let rows = screen(&app);
+        assert!(
+            rows[22].contains("hi from another pane"),
+            "the row over the bar: {rows:#?}"
+        );
+        assert_eq!(rows[23], before[23], "the bar keeps its hints");
+        assert!(!rows[23].contains("hi from"), "{rows:#?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
