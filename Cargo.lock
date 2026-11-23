@@ -6890,6 +6890,7 @@ dependencies = [
  "jiff",
  "pulldown-cmark",
  "ratatui",
+ "serde",
  "serde_json",
  "tokio",
  "unicode-width",

@@ -5643,3 +5643,11 @@ html[data-vt="glide"]::view-transition-group(*) {
   color: var(--needs);
   font-size: var(--text-md);
 }
+
+/* A theme pack's module draws here in place of the rain (#191): its own canvas,
+   at the strength its theme.toml asks for (`web.pack-opacity`). */
+.pack-layer {
+  inset: auto;
+  opacity: var(--pack-opacity, 0.6);
+  overflow: hidden;
+}

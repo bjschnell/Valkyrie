@@ -12,7 +12,7 @@ import { answeringLabel } from "../lib/answering";
 import { age } from "../lib/time";
 import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "../store";
 import { stepChoices } from "../lib/step";
-import { hasRain, useLook } from "../lib/theme";
+import { useLook } from "../lib/theme";
 import { Chevron, Gear, Plus } from "./icons";
 import { useDesktop } from "./Terminal";
 import { ConnectionPill, StateIcon } from "./bits";
@@ -21,7 +21,7 @@ import { isRecord, RecordRow, useAttention } from "./Attention";
 import { sessionKind } from "../lib/attention";
 import { NotifyHint } from "./Notify";
 import { QuotaMeter } from "./Quota";
-import { Rain } from "./Rain";
+import { Backdrop } from "./Backdrop";
 import { Mark, Wordmark } from "./Logo";
 import { usePageKeys } from "../lib/pageKeys";
 import { TutorButton } from "./Tutor";
@@ -122,7 +122,7 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
 
   return (
     <div className="page">
-      {hasRain(look) && <Rain key={look} />}
+      <Backdrop look={look} />
       <header className="topbar">
         <h1 className="sr-only">Sessions</h1>
         <div className="brand">

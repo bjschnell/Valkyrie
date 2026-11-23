@@ -11,6 +11,8 @@ valkyrie-context.workspace = true
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 tokio.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 base64 = "0.23"
 unicode-width = "0.2"
 arboard = { version = "3.7", features = ["wayland-data-control"] }
@@ -19,7 +21,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 
 [dev-dependencies]
-serde_json.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]

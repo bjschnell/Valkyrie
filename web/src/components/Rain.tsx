@@ -6,7 +6,7 @@ const HEX = "0123456789ABCDEF";
 const CELL = 16;
 const FRAME_MS = 60;
 
-const pick = (from: string) => from[Math.floor(Math.random() * from.length)];
+const pick = (from: string[]) => from[Math.floor(Math.random() * from.length)];
 
 /**
  * Elder Futhark runes as strokes in a unit cell, x right and y down: drawn rather
@@ -52,7 +52,7 @@ function drawRune(ctx: CanvasRenderingContext2D, x: number, y: number) {
  * It falls under reduced motion too, as in the TUI: picking a look with rain asks
  * for it, so it keeps falling while cards wait. It stops while the tab is hidden.
  */
-export function Rain() {
+export function Rain({ glyphs: own }: { glyphs?: string } = {}) {
   const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -64,8 +64,9 @@ export function Rain() {
     const head = css.getPropertyValue("--rain-head").trim() || "#fff";
     const trail = css.getPropertyValue("--rain-trail").trim() || "#888";
     const kind = css.getPropertyValue("--rain-glyphs").trim();
-    const runes = kind === "runes";
-    const glyphs = kind === "hex" ? HEX : GLYPHS;
+    const runes = !own && kind === "runes";
+    // A theme pack's own glyphs, else the look's set.
+    const glyphs = own ? [...own] : [...(kind === "hex" ? HEX : GLYPHS)];
     const glyph = (color: string, x: number, y: number) => {
       if (runes) {
         ctx.strokeStyle = color;
@@ -146,7 +147,7 @@ export function Rain() {
       window.removeEventListener("resize", size);
       document.removeEventListener("visibilitychange", start);
     };
-  }, []);
+  }, [own]);
 
   return <canvas ref={ref} className="rain" aria-hidden="true" />;
 }

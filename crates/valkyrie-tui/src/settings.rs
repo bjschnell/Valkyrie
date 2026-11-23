@@ -8,7 +8,7 @@
 
 use crate::keys::Keymap;
 use crate::ping::Noise;
-use crate::theme::{DRACULA, THEMES, Theme};
+use crate::theme::{DRACULA, Theme};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -306,7 +306,7 @@ impl Settings {
              # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
              {}",
             self.theme.name,
-            names(THEMES.iter().map(|t| t.name)),
+            names(crate::theme::all().iter().map(|t| t.name)),
             self.value(Field::SessionColors),
             self.tabs.name(),
             names(TabStyle::ALL.iter().map(|s| s.name())),
@@ -467,7 +467,11 @@ impl Settings {
     /// Steps `field` to its next value (`by` 1) or its previous (`by` -1).
     pub fn cycle(&mut self, field: Field, by: isize) {
         match field {
-            Field::Theme => self.theme = *step(THEMES, self.theme.name, by, |t: &&Theme| t.name),
+            Field::Theme => {
+                self.theme = *step(crate::theme::all(), self.theme.name, by, |t: &&Theme| {
+                    t.name
+                })
+            }
             Field::Tabs => self.tabs = *step(TabStyle::ALL, self.tabs.name(), by, |s| s.name()),
             Field::TabSide => {
                 self.tab_side = *step(TabSide::ALL, self.tab_side.name(), by, |s| s.name())
@@ -729,7 +733,7 @@ mod tests {
         for &field in Field::ALL {
             let mut s = start;
             let n = match field {
-                Field::Theme => THEMES.len(),
+                Field::Theme => crate::theme::all().len(),
                 Field::Tabs => TabStyle::ALL.len(),
                 Field::TabSide => TabSide::ALL.len(),
                 Field::Sound => Noise::ALL.len() + 1,

@@ -4,14 +4,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCached } from "../cache";
 import { entries, rank, type Entry } from "../lib/palette";
-import { LOOK_TEXT, LOOKS, setLook, useLook } from "../lib/theme";
+import { lookList, lookText, setLook, useLook, useLooksVersion } from "../lib/theme";
 import { allDocs, decide, setStatus, useApp } from "../store";
 import { PAGES } from "./Nav";
 
 /** Drawn at once; typing narrows the rest in. */
 const SHOWN = 80;
 
-const LOOK_LIST = LOOKS.map((key) => ({ key, ...LOOK_TEXT[key] }));
 
 /** What each row is, said on its right. */
 const GROUP: Record<Entry["group"], string> = {
@@ -30,7 +29,7 @@ function run(d: Entry["do"], onShortcuts: () => void) {
   if ("sheet" in d) onShortcuts();
   else if ("go" in d) {
     if (location.hash !== d.go) location.hash = d.go;
-  } else if ("look" in d) setLook(d.look as (typeof LOOKS)[number]);
+  } else if ("look" in d) setLook(d.look);
   else if ("decision" in d) decide(d.decision, "accept");
   else setStatus(d.item, "open");
 }
@@ -46,6 +45,7 @@ export function Palette({ onClose, onShortcuts }: { onClose: () => void; onShort
   // What the Docs page last loaded, at once, then the daemon's (it marks none read).
   const docs = useCached("docs", allDocs).data?.docs;
   const look = useLook();
+  const looksVersion = useLooksVersion();
   const [query, setQuery] = useState("");
   // The row picked, by its key: rows the daemon adds while it's open (a new
   // proposal at the top) must not slide another action under Enter.
@@ -61,10 +61,10 @@ export function Palette({ onClose, onShortcuts }: { onClose: () => void; onShort
         orders,
         docs: docs ?? [],
         pages: PAGES,
-        looks: LOOK_LIST,
+        looks: lookList().map((key) => ({ key, ...lookText(key) })),
         look,
       }),
-    [sessions, queue, proposals, items, orders, docs, look],
+    [sessions, queue, proposals, items, orders, docs, look, looksVersion],
   );
   const shown = useMemo(() => rank(all, query).slice(0, SHOWN), [all, query]);
   const pick = Math.max(0, shown.findIndex((e) => e.key === sel));

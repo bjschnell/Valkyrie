@@ -28,6 +28,8 @@ import { OfflineBanner } from "./components/states";
 import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
 import { close, connect, open, useApp } from "./store";
+import { getJson } from "./lib/api";
+import { setPacks, type Pack } from "./lib/theme";
 
 /** Alt on most keyboards, Option on a Mac's. */
 const ALT = MAC ? "Option" : "Alt";
@@ -179,6 +181,14 @@ export function App() {
 
   useEffect(() => {
     if (token) connect();
+  }, [token]);
+
+  // This machine's theme packs: they need the device's token.
+  useEffect(() => {
+    if (!token) return;
+    getJson<Pack[]>(token, "/api/themes").then(setPacks, () => {
+      // An older `valk web`, or none: the built-in looks are all there is.
+    });
   }, [token]);
 
   // A session's page and its review both keep it open (its screen has the prompt).
