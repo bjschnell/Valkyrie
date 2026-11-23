@@ -4,6 +4,7 @@
 //! program sees exactly what the user's terminal sends. For that to be correct the
 //! outer terminal mirrors the program's input modes (app cursor, bracketed paste…).
 
+mod avatar;
 mod backlog;
 mod batch;
 mod blocks;
@@ -3596,6 +3597,22 @@ impl App {
         self.queue.len() + self.to_decide() + self.filed().len()
     }
 
+    /// What a pack's avatar shows: formed while something needs you, gathering
+    /// since the longest-running agent started, else latent.
+    fn avatar_mood(&self) -> avatar::Mood {
+        if self.need_you() > 0 {
+            return avatar::Mood::Formed;
+        }
+        self.sessions
+            .iter()
+            .filter(|s| is_running(s))
+            .map(|s| s.status.since_ms)
+            .min()
+            .map_or(avatar::Mood::Latent, |since_ms| avatar::Mood::Gathering {
+                since_ms,
+            })
+    }
+
     /// The sessions the Inbox lists under Running, then Quiet: each one not
     /// already in Needs you, so every session is drawn once. Tab order within each.
     fn others(&self) -> Vec<&SessionInfo> {
@@ -5753,7 +5770,20 @@ impl App {
                 .map(|r| r.inner(inside))
                 .collect();
             let screen = frame.area();
+            // A pack's avatar takes the rows the rain may use, read before it falls.
+            let avatar = avatar::of(t).and_then(|a| {
+                let mut free: Vec<Vec<bool>> = regions
+                    .iter()
+                    .map(|r| rain::free_rows(frame.buffer_mut(), r.intersection(screen)))
+                    .collect();
+                let i = avatar::pick(&regions, &free)?;
+                Some((a, regions[i].intersection(screen), free.swap_remove(i)))
+            });
             rain::draw(frame.buffer_mut(), screen, &regions, now, colors);
+            if let Some((a, region, free)) = avatar {
+                let mood = self.avatar_mood();
+                avatar::draw(frame.buffer_mut(), screen, (region, &free), now, t, a, mood);
+            }
         }
 
         let (notice_line, toast_cols) = self.notice_line(notice_area.width);

@@ -3,6 +3,8 @@
 //! the theme. Colors it names exactly (256-color or RGB) are drawn as they are.
 
 use ratatui::style::Color;
+use std::sync::OnceLock;
+use valkyrie_proto::themes::{self, Pack};
 use valkyrie_proto::{AgentState, TermColors};
 
 pub struct Theme {
@@ -827,11 +829,146 @@ impl Theme {
     }
 
     pub fn by_name(name: &str) -> Option<&'static Theme> {
-        THEMES
+        all()
             .iter()
             .copied()
             .find(|t| t.name.eq_ignore_ascii_case(name.trim()))
     }
+
+    /// A theme from a pack's theme.toml (see `valkyrie_proto::themes`). It needs
+    /// `bg`, `fg` and `accent`; the rest default from those, and `rain.glyphs`
+    /// gives it rain. `None` when a required color is missing or isn't `#rrggbb`.
+    pub fn from_pack(pack: &Pack) -> Option<Theme> {
+        let color = |key: &str| {
+            pack.get(key)
+                .and_then(themes::rgb)
+                .map(|[r, g, b]| Color::Rgb(r, g, b))
+        };
+        let bg = color("bg")?;
+        let fg = color("fg")?;
+        let accent = color("accent")?;
+        let or = |key: &str, default: Color| color(key).unwrap_or(default);
+        let muted = or("muted", mix(fg, bg, 0.55));
+        let border = or("border", mix(bg, fg, 0.2));
+        let needs = or("needs", DRACULA.needs);
+        let blocked = or("blocked", DRACULA.blocked);
+        let done = or("done", DRACULA.done);
+        let working = or("working", accent);
+        let base = [
+            or("panel", mix(bg, fg, 0.04)),
+            blocked,
+            done,
+            needs,
+            accent,
+            accent,
+            working,
+            mix(fg, bg, 0.1),
+        ];
+        let mut ansi = [Color::Reset; 16];
+        let given: Vec<Color> = pack
+            .get("ansi")
+            .map(themes::list)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|c| themes::rgb(c).map(|[r, g, b]| Color::Rgb(r, g, b)))
+            .collect();
+        for i in 0..16 {
+            ansi[i] = given.get(i).copied().unwrap_or(if i < 8 {
+                base[i]
+            } else if i == 8 {
+                muted
+            } else if i == 15 {
+                fg
+            } else {
+                mix(base[i - 8], Color::Rgb(255, 255, 255), 0.25)
+            });
+        }
+        let rain = pack.get("rain.glyphs").map(|glyphs| {
+            let trail: Vec<Color> = pack
+                .get("rain.trail")
+                .map(themes::list)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|c| themes::rgb(c).map(|[r, g, b]| Color::Rgb(r, g, b)))
+                .collect();
+            let first = trail.first().copied().unwrap_or(accent);
+            Rain {
+                glyphs: leak(rain_glyphs(glyphs)),
+                head: or("rain.head", fg),
+                trail: [
+                    first,
+                    trail.get(1).copied().unwrap_or(mix(first, bg, 0.45)),
+                    trail.get(2).copied().unwrap_or(mix(first, bg, 0.75)),
+                ],
+            }
+        });
+        Some(Theme {
+            name: leak(pack.name.clone()),
+            bg,
+            panel: or("panel", mix(bg, fg, 0.04)),
+            strip: or("strip", mix(bg, Color::Rgb(0, 0, 0), 0.4)),
+            card: or("card", mix(bg, fg, 0.08)),
+            selection: or("selection", mix(bg, accent, 0.25)),
+            border,
+            fg,
+            muted,
+            accent,
+            needs,
+            blocked,
+            done,
+            working,
+            rain,
+            ansi,
+        })
+    }
+}
+
+/// The built-in themes, then the packs on this machine whose names aren't taken.
+/// Read once: a new pack shows up the next time valk starts.
+pub fn all() -> &'static [&'static Theme] {
+    // Tests see the built-ins alone, whatever is installed where they run.
+    if cfg!(test) {
+        return THEMES;
+    }
+    static ALL: OnceLock<Vec<&'static Theme>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = THEMES.to_vec();
+        for pack in themes::load() {
+            if all.iter().any(|t| t.name.eq_ignore_ascii_case(&pack.name)) {
+                continue;
+            }
+            if let Some(theme) = Theme::from_pack(&pack) {
+                all.push(Box::leak(Box::new(theme)));
+            }
+        }
+        all
+    })
+}
+
+/// A pack's rain: one of the built-in sets by name, or its own glyphs, keeping
+/// only those one column wide so a column of rain stays a column.
+fn rain_glyphs(value: &str) -> String {
+    match value {
+        "code" => CODE.to_owned(),
+        "hex" => HEX.to_owned(),
+        "runes" => RUNES.to_owned(),
+        own => {
+            let kept: String = own
+                .chars()
+                .filter(|&c| unicode_width::UnicodeWidthChar::width(c) == Some(1))
+                .collect();
+            if kept.is_empty() {
+                CODE.to_owned()
+            } else {
+                kept
+            }
+        }
+    }
+}
+
+/// Packs are read once and live as long as valk does, like the built-in themes.
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
 }
 
 /// The one word for a state, everywhere the TUI says it (spec: Marks and color).
@@ -884,6 +1021,64 @@ mod tests {
         }
         assert_eq!(Theme::by_name(" Cyberpunk\n").unwrap().name, "cyberpunk");
         assert!(Theme::by_name("nope").is_none());
+    }
+
+    fn pack(toml: &[(&str, &str)]) -> Pack {
+        Pack {
+            name: "mine".into(),
+            dir: std::path::PathBuf::new(),
+            values: toml
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_pack_needs_its_three_colors_and_defaults_the_rest() {
+        assert!(Theme::from_pack(&pack(&[("bg", "#000000"), ("fg", "#ffffff")])).is_none());
+        assert!(
+            Theme::from_pack(&pack(&[
+                ("bg", "#000000"),
+                ("fg", "white"),
+                ("accent", "#ff00ff")
+            ]))
+            .is_none()
+        );
+        let t = Theme::from_pack(&pack(&[
+            ("bg", "#07050d"),
+            ("fg", "#efe6ff"),
+            ("accent", "#b46bff"),
+        ]))
+        .unwrap();
+        assert_eq!(t.name, "mine");
+        assert_eq!(t.accent, hex(0xb46bff));
+        assert_eq!(t.needs, DRACULA.needs);
+        assert_ne!(t.muted, t.fg);
+        assert!(t.rain.is_none());
+        assert_eq!(t.ansi[15], t.fg);
+    }
+
+    #[test]
+    fn a_pack_brings_its_rain_and_colors() {
+        let t = Theme::from_pack(&pack(&[
+            ("bg", "#07050d"),
+            ("fg", "#efe6ff"),
+            ("accent", "#b46bff"),
+            ("needs", "#ffe36e"),
+            ("ansi", "#000000 #ff0000"),
+            ("rain.glyphs", "ｱｲ01あ"),
+            ("rain.trail", "#c03ae0"),
+        ]))
+        .unwrap();
+        assert_eq!(t.needs, hex(0xffe36e));
+        assert_eq!((t.ansi[0], t.ansi[1]), (hex(0x000000), hex(0xff0000)));
+        let rain = t.rain.unwrap();
+        // The wide あ is dropped: a column of rain stays one column.
+        assert_eq!(rain.glyphs, "ｱｲ01");
+        assert_eq!(rain.trail[0], hex(0xc03ae0));
+        assert_eq!(rain.head, t.fg);
+        assert_eq!(rain_glyphs("runes"), RUNES);
     }
 
     #[test]

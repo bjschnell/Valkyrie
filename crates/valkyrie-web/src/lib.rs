@@ -12,6 +12,7 @@ pub mod proof;
 pub mod push;
 pub mod review;
 pub mod tailscale;
+pub mod themes;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -246,6 +247,8 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/dirs", get(dirs_route))
         .route("/api/review/{session}", get(review_route))
         .route("/api/upload", post(upload))
+        .route("/api/themes", get(themes_route))
+        .route("/themes/{key}/{name}/{*rest}", get(theme_file))
         .route("/ws", get(ws))
         .fallback(get(asset))
         .layer(axum::middleware::from_fn_with_state(
@@ -444,6 +447,52 @@ async fn sessions(app: &App) -> Result<Vec<valkyrie_proto::SessionInfo>> {
 
 fn failed(status: StatusCode, e: impl std::fmt::Display) -> Response {
     (status, e.to_string()).into_response()
+}
+
+/// The theme packs on this machine (see `themes`).
+async fn themes_route(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    if device(&app, &headers).is_none() {
+        return unpaired();
+    }
+    match tokio::task::spawn_blocking(themes::list).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => failed(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// A file of a pack's module, under this run's key (see `themes`).
+async fn theme_file(Path((key, name, rest)): Path<(String, String, String)>) -> Response {
+    let found = tokio::task::spawn_blocking({
+        let rest = rest.clone();
+        move || themes::file(&key, &name, &rest)
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(bytes) = found else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type(&rest)),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    // A subresource of the app; opened on its own, it may do nothing.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; sandbox"),
+    );
+    response
 }
 
 /// Where a new session might start (DESIGN §8.8).
@@ -909,6 +958,10 @@ fn content_type(path: &str) -> &'static str {
         "webmanifest" => "application/manifest+json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
+        "webp" => "image/webp",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "wasm" => "application/wasm",
         "ico" => "image/x-icon",
         "woff2" => "font/woff2",
         "txt" => "text/plain; charset=utf-8",

@@ -30,6 +30,8 @@ import { OfflineBanner } from "./components/states";
 import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
 import { close, connect, open, useApp } from "./store";
+import { getJson } from "./lib/api";
+import { setPacks, type Pack } from "./lib/theme";
 
 type Route =
   | { page: "inbox" }
@@ -183,6 +185,15 @@ export function App() {
   useEffect(() => {
     if (token) connect();
   }, [token]);
+
+  // This machine's theme packs: they need the device's token. Again on every
+  // connect: a restarted `valk web` serves pack modules under a new key.
+  useEffect(() => {
+    if (!token || status !== "open") return;
+    getJson<Pack[]>(token, "/api/themes").then(setPacks, () => {
+      // An older `valk web`, or none: the built-in looks are all there is.
+    });
+  }, [token, status]);
 
   // A session's page and its review both keep it open (its screen has the prompt).
   const openId = at.page === "session" || at.page === "review" ? at.id : null;

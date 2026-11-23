@@ -6531,3 +6531,11 @@ html.with-tabs .composer-phone {
 .start-sheet.phone .start-row .composer-chip {
   background: color-mix(in srgb, var(--fg) 8%, var(--raised));
 }
+
+/* A theme pack's module draws here in place of the rain (#191): its own canvas,
+   at the strength its theme.toml asks for (`web.pack-opacity`). */
+.pack-layer {
+  inset: auto;
+  opacity: var(--pack-opacity, 0.6);
+  overflow: hidden;
+}

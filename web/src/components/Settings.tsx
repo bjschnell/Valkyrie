@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { LOOKS, LOOK_TEXT, hasRain, setLook, useLook } from "../lib/theme";
+import { lookList, lookText, setLook, useLook, useLooksVersion } from "../lib/theme";
 import { proposalPopups, setProposalPopups } from "../lib/proposals";
 import { AddDeviceSettings } from "./AddDevice";
 import { Back, Check } from "./icons";
 import { NotifySettings } from "./Notify";
-import { Rain } from "./Rain";
+import { Backdrop } from "./Backdrop";
 import { usePageKeys } from "../lib/pageKeys";
 
 const home = () => {
@@ -14,13 +14,15 @@ const home = () => {
 /** The look, notifications and adding a device: what used to be three icons in the inbox's bar. */
 export function Settings() {
   const look = useLook();
+  // A pack arriving adds to the list.
+  useLooksVersion();
 
   // q or Esc goes back, when you aren't typing.
   usePageKeys("settings", { q: home, Escape: home });
 
   return (
     <div className="page">
-      {hasRain(look) && <Rain key={look} />}
+      <Backdrop look={look} />
       <header className="topbar">
         <button className="icon-btn" aria-label="Back" onClick={home}>
           <Back />
@@ -34,11 +36,11 @@ export function Settings() {
         <section>
           <h2 className="section-title">Look</h2>
           <div className="list" role="radiogroup" aria-label="Look">
-            {LOOKS.map((l) => (
+            {lookList().map((l) => (
               <button key={l} className="row" role="radio" aria-checked={look === l} onClick={() => setLook(l)}>
                 <span className="row-main">
-                  <span className="row-name">{LOOK_TEXT[l].name}</span>
-                  <span className="row-sub">{LOOK_TEXT[l].about}</span>
+                  <span className="row-name">{lookText(l).name}</span>
+                  <span className="row-sub">{lookText(l).about}</span>
                 </span>
                 <span className="look-check">{look === l && <Check />}</span>
               </button>

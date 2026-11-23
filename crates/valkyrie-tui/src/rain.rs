@@ -10,7 +10,7 @@ use ratatui::style::Modifier;
 
 use crate::theme::Rain;
 
-fn mix(mut x: u64) -> u64 {
+pub(crate) fn mix(mut x: u64) -> u64 {
     // splitmix64's finalizer.
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -30,10 +30,9 @@ pub fn draw(buf: &mut Buffer, screen: Rect, regions: &[Rect], now_ms: u64, color
     let height = screen.height as u64;
     for region in regions {
         let region = region.intersection(screen);
+        let free = free_rows(buf, region);
         for y in region.top()..region.bottom() {
-            let blank = (region.left()..region.right())
-                .all(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == " "));
-            if !blank {
+            if !free[(y - region.y) as usize] {
                 continue;
             }
             for x in region.left()..region.right() {
@@ -54,9 +53,19 @@ pub fn draw(buf: &mut Buffer, screen: Rect, regions: &[Rect], now_ms: u64, color
     }
 }
 
+/// Which rows of `region` are blank all the way across, so rain may fall there.
+pub fn free_rows(buf: &Buffer, region: Rect) -> Vec<bool> {
+    (region.top()..region.bottom())
+        .map(|y| {
+            (region.left()..region.right())
+                .all(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == " "))
+        })
+        .collect()
+}
+
 /// What column `x` shows at row `y`: a glyph and, for the trail, its shade (an
 /// index into `Rain::trail`); `None` is the head. Or nothing.
-fn drop_at(
+pub(crate) fn drop_at(
     x: u16,
     y: u16,
     height: u64,

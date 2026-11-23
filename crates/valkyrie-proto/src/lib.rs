@@ -21,6 +21,7 @@ pub mod repos;
 pub mod screen;
 pub mod search;
 pub mod supervisor;
+pub mod themes;
 pub mod wiki;
 
 use serde::{Deserialize, Serialize};
