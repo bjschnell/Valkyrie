@@ -8,6 +8,7 @@ import { QuotaMeter } from "./Quota";
 import { useRepos } from "./Repos";
 import { isKnown, isScanned } from "../lib/repos";
 import type { RepoEdit, RepoList } from "../proto";
+import { HANDOFF_KEY, type Handoff } from "./Composer";
 
 type Agent = "claude" | "codex" | "shell";
 
@@ -40,6 +41,16 @@ function remember(last: Last): void {
   }
 }
 
+function takeHandoff(): Handoff | null {
+  try {
+    const v = sessionStorage.getItem(HANDOFF_KEY);
+    sessionStorage.removeItem(HANDOFF_KEY);
+    return v ? (JSON.parse(v) as Handoff) : null;
+  } catch {
+    return null;
+  }
+}
+
 const back = () => (history.length > 1 ? history.back() : (location.hash = "#/"));
 
 /**
@@ -48,14 +59,16 @@ const back = () => (history.length > 1 ? history.back() : (location.hash = "#/")
  * working at once.
  */
 export function Launcher() {
+  // Several lines from the home composer (#275), once.
+  const [handoff] = useState(takeHandoff);
   const token = useApp((s) => s.token);
   const status = useApp((s) => s.status);
-  const [agent, setAgent] = useState<Agent>(() => lastUsed().agent ?? "claude");
-  const [folder, setFolder] = useState(() => lastUsed().folder ?? "");
+  const [agent, setAgent] = useState<Agent>(() => (handoff?.agent as Agent | undefined) ?? lastUsed().agent ?? "claude");
+  const [folder, setFolder] = useState(() => handoff?.folder ?? lastUsed().folder ?? "");
   const [name, setName] = useState("");
   // Not remembered: the next folder may not be a repository.
-  const [worktree, setWorktree] = useState(false);
-  const [message, setMessage] = useState("");
+  const [worktree, setWorktree] = useState(!!handoff);
+  const [message, setMessage] = useState(handoff?.message ?? "");
   const [places, setPlaces] = useState<Places | null>(null);
   const [browsing, setBrowsing] = useState<Listing | null>(null);
   const [busy, setBusy] = useState(false);

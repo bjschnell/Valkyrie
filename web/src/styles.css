@@ -5643,3 +5643,424 @@ html[data-vt="glide"]::view-transition-group(*) {
   color: var(--needs);
   font-size: var(--text-md);
 }
+
+/* Home composer (#275) ------------------------------------------------- */
+/* What the pane beside the Inbox shows with nothing picked, and what a phone
+   pins over its tab bar at inbox zero. Tokens only: every look skins it. */
+
+.new-row-slot {
+  margin: var(--space-2) 0 var(--space-1);
+  border-radius: var(--radius-md);
+}
+
+.new-row {
+  border-radius: var(--radius-md);
+  color: var(--fg);
+}
+
+.new-row svg {
+  color: var(--accent);
+}
+
+.new-row .row-name {
+  font-weight: var(--weight-semibold);
+}
+
+.new-row-key,
+.composer-hint {
+  padding: 1px var(--space-15);
+  border-radius: var(--radius-xs);
+  background: var(--raised);
+  color: var(--faint);
+  font: var(--text-xs) var(--mono);
+}
+
+.home-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: var(--space-6) var(--space-6) 0;
+}
+
+.home-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: 660px;
+  margin: 0 auto;
+  padding-bottom: var(--space-6);
+}
+
+.home-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-15);
+  text-align: center;
+}
+
+.home-title {
+  margin: 0;
+  font: var(--type-title);
+}
+
+.home-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.home-composer {
+  position: relative;
+  width: 100%;
+}
+
+.composer-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-35);
+  padding: var(--space-4) var(--space-4) var(--space-3) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.composer-box:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.composer-box.finding {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.composer-line {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+textarea.composer-text {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  overflow-y: auto;
+  scrollbar-width: none;
+  background: none;
+  color: var(--fg);
+  font: 400 var(--text-xl) / 1.5 var(--font);
+  resize: none;
+  outline: none;
+}
+
+.composer-text::placeholder {
+  color: var(--faint);
+}
+
+.composer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.composer-gap {
+  flex: 1;
+}
+
+.composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-15);
+}
+
+/* A chip is a native select under its label: one tap to change, the keyboard's too. */
+.composer-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px var(--space-25);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--soft);
+  font: 500 var(--text-sm) var(--mono);
+  white-space: nowrap;
+}
+
+.composer-chip:first-child {
+  color: var(--fg);
+}
+
+.composer-chip:focus-within {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.composer-chip select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.composer-chip.none {
+  color: var(--faint);
+}
+
+.composer-batch {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.composer-file kbd,
+.composer-start kbd {
+  margin-left: var(--space-1);
+  font: var(--text-xs) var(--mono);
+  opacity: 0.7;
+}
+
+.composer-go {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.composer-go:disabled {
+  color: var(--faint);
+}
+
+.composer-found {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-05);
+  padding: var(--space-15);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: var(--page);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.composer-found-none {
+  padding: var(--space-2) var(--space-3);
+  color: var(--faint);
+  font-size: var(--text-sm);
+}
+
+.composer-hit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-25);
+  padding: 9px var(--space-3);
+  border-radius: var(--radius-sm);
+  text-align: left;
+  color: var(--fg);
+}
+
+.composer-hit.hi {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* Blocked: shown, not startable. Faint is the only state it has. */
+.composer-hit.blocked {
+  color: var(--faint);
+  cursor: default;
+}
+
+.composer-ref,
+.ready-ref {
+  flex: none;
+  min-width: 56px;
+  color: var(--muted);
+  font: var(--text-xs) var(--mono);
+}
+
+.composer-hit-title,
+.ready-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-hit-state,
+.ready-meta {
+  flex: none;
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.composer-hit-key {
+  flex: none;
+  color: var(--accent);
+  font: var(--text-xs) var(--mono);
+}
+
+.ready {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-05);
+}
+
+.ready-head {
+  display: flex;
+  align-items: baseline;
+  padding: 0 var(--space-3) var(--space-15);
+}
+
+.ready-title {
+  flex: 1;
+  margin: 0;
+  font: var(--type-label);
+  color: var(--muted);
+}
+
+.ready-all {
+  font-size: var(--text-sm);
+}
+
+.ready-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-15) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+}
+
+.ready-row:focus-within {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.ready-start {
+  flex: none;
+  background: var(--raised);
+  color: var(--fg);
+}
+
+.ready.compact {
+  margin-top: var(--space-4);
+}
+
+.ready.compact .ready-head {
+  padding: 0 var(--space-1) var(--space-15);
+}
+
+.ready.compact .ready-row {
+  padding: var(--space-15) var(--space-1);
+}
+
+.ready.compact .ready-ref {
+  min-width: 48px;
+}
+
+.supervisor-line {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) 0 var(--space-5);
+  color: var(--faint);
+  font: var(--text-xs) var(--mono);
+}
+
+.supervisor-line a {
+  color: var(--muted);
+}
+
+.supervisor-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.supervisor-dot.on {
+  background: var(--working);
+}
+
+/* Phone: pinned over the tab bar at inbox zero. */
+.composer-phone {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-25);
+  background: color-mix(in srgb, var(--page) 92%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+html.with-tabs .composer-phone {
+  bottom: calc(env(safe-area-inset-bottom) + 62px);
+}
+
+.composer-phone .composer-chips {
+  padding: 0 var(--space-1);
+}
+
+.composer-phone .composer-chip {
+  padding: var(--space-1) 9px;
+  font-size: var(--text-xs);
+}
+
+.composer-pill {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-15) var(--space-15) var(--space-15) var(--space-4);
+  border-radius: 22px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.composer-pill:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+/* 16px: a smaller field makes iOS zoom the page on focus. */
+.composer-phone .composer-text {
+  align-self: center;
+  font-size: var(--text-lg);
+  min-height: 24px;
+}
+
+.composer-phone .composer-go {
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+}
+
+.composer-phone .composer-found {
+  border-radius: var(--radius-lg);
+  max-height: 40dvh;
+  overflow-y: auto;
+}
+
+/* Room under the list for the pinned composer. */
+.inbox.with-composer {
+  padding-bottom: 140px;
+}
+
+/* A # search lists items itself: the ready ones aren't drawn twice (decision #77, rule 3). */
+.home-center:has(.composer-box.finding) .ready {
+  display: none;
+}
+
+.page:has(.composer-phone .composer-found) .ready {
+  display: none;
+}

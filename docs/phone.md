@@ -66,6 +66,19 @@ them, `Alt-1` to `Alt-9` jump to one, `Alt-n` goes to whoever needs you, `Alt-p`
 to the one you were last on and `Alt-h` home. They work while you type in a
 terminal too.
 
+With nothing picked in the Inbox, the pane beside it asks "What's next?": a box
+to start work, the top three backlog items ready to start, and a line on what the
+supervisor watches. New session, the list's top row, opens it, and so do `n` and
+Esc. The box only takes the keyboard when you ask (`n`, `/` or a click), and Esc
+hands it back with your text kept. One line and Enter starts an agent on it in
+its own worktree, in the repo the line names or the one you used last, on the
+agent and model that repo last ran; the chips under the box change either.
+Ctrl+Enter (Cmd+Enter) files the line to the backlog instead. `#` finds an item by
+number or title: a ready one starts, one with a session opens it, a blocked one
+shows greyed out. Several lines (Shift+Enter, or a paste) open the New session
+screen with them in it. On a phone the box sits over the tab bar while nothing
+needs you; otherwise the + starts a session.
+
 Ctrl+K (Cmd+K on a Mac) opens the command palette: type to jump to any session,
 page, doc or backlog item, or to run an action: start a session, add a backlog
 item, accept what an agent proposed, switch the theme. While a terminal has the
