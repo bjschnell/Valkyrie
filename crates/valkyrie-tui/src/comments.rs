@@ -401,7 +401,11 @@ fn state_color(s: CommentState, t: &Theme) -> Color {
 /// When, from seconds, in local time.
 fn when(secs: u64, tz: &TimeZone) -> String {
     jiff::Timestamp::from_second(secs as i64)
-        .map(|ts| ts.to_zoned(tz.clone()).strftime("%b %-d %H:%M").to_string())
+        .map(|ts| {
+            ts.to_zoned_datetime(tz.clone())
+                .strftime("%b %-d %H:%M")
+                .to_string()
+        })
         .unwrap_or_default()
 }
 

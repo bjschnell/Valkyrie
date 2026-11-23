@@ -778,9 +778,9 @@ fn repo_of(project: &std::path::Path) -> String {
     )
 }
 
-fn zoned(ms: u64, tz: &TimeZone) -> Option<jiff::Zoned> {
+fn zoned(ms: u64, tz: &TimeZone) -> Option<jiff::ZonedDateTime> {
     let ts = jiff::Timestamp::from_millisecond(i64::try_from(ms).ok()?).ok()?;
-    Some(ts.to_zoned(tz.clone()))
+    Some(ts.to_zoned_datetime(tz.clone()))
 }
 
 /// `40 min`, `9 h`, `2 days`.
@@ -803,7 +803,7 @@ fn day_label(ms: u64, tz: &TimeZone) -> String {
     let Some(z) = zoned(ms, tz) else {
         return "Unknown day".into();
     };
-    let today = jiff::Zoned::now().with_time_zone(tz.clone()).date();
+    let today = jiff::ZonedDateTime::now().with_time_zone(tz.clone()).date();
     match today.since(z.date()).map(|s| s.get_days()) {
         Ok(0) => "Today".into(),
         Ok(1) => "Yesterday".into(),
