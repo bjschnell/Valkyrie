@@ -91,7 +91,7 @@ export function HistoryView({ find = false }: { find?: boolean }) {
   const past = useCached("past", pastSessions);
   const log = useCached("supervisor-log", supervisorLog);
   // An answer in the Inbox adds to what the supervisor did: read it again then.
-  const pending = useApp((s) => s.launches.length + s.orders.length + s.queue.filter((q) => q.flag?.step).length);
+  const pending = useApp((s) => s.launches.length + s.queue.filter((q) => q.flag?.step).length);
   const first = useRef(true);
   const reloadLog = log.reload;
   useEffect(() => {

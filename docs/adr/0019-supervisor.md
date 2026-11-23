@@ -1,6 +1,6 @@
 # ADR-0019: The supervisor watches work after its session stops, proposes the next step, and learns which steps to take on its own
 
-Status: accepted (2026-11-11); phases 1–8 shipped (#69, #75, #76, #77, #78, #80, #107, #121, #215); §10 amended 2026-11-18 (#236)
+Status: accepted (2026-11-11); phases 1–8 shipped (#69, #75, #76, #77, #78, #80, #107, #121, #215); §10 amended 2026-11-18 (#236); the build order (§1 *unordered work*, §2 `order`) removed 2026-11-23 (§11, #285)
 Date: 2026-11-04
 Amends: DESIGN §7 (what the supervisor is), [ADR-0013](0013-learned-policies.md) §7 (what it leaves to the supervisor)
 
@@ -61,10 +61,11 @@ All three cases split the same way. **Detecting** the problem is deterministic: 
     - **What it never does** is §4's list: merging, shipping, accepting, reopening and dropping stay the user's, and Valkyrie already refuses them from any agent. The merge guard applies to everything it prompts.
     - **Every prompt is logged.** Each one is a `supervisor` line in the target's event log and a line in the project's `supervisor-prompts.jsonl` (90 days), shown under "What it did" as `supervisor session to api: "…"`. These lines are never learned into a policy: free text has no trigger and action to repeat.
     - **Claude only, for now.** It's started as `claude --append-system-prompt <role> <opening>`. Codex and other agents need their own system-prompt flag, so they're a separate item (ADR-0022 §3).
+11. **The build order is removed** (backlog #285, decided 2026-11-23). This withdraws §1's *unordered work* watcher, §2's `order` step and the model call for it, `valk todo plan`, and every client's view of a proposal. After three weeks the user's own daemon had made one build order, on 2026-11-18, from a burst of items. Nobody answered it. Five days later, 26 of its 31 items had shipped and one had been dropped, and only 11 of its steps had changed anything at all. While a proposal waited, the watcher wouldn't make another for that repository, so the stale one stayed on the board and the Inbox for good. Context case 1 still happens, but it gets answered somewhere else. Agents set `after #N` on the items they file, as they did for the TUI redesign's T1–T8, and the order is right when the items are written down, not proposed afterwards. `valk todo next`, the `launch` offer and the merge order (§9) are rules over those fields, and they're what the user acts on. Priority hardly carries any order (267 of 299 items are p2), so a proposal that mostly changed priorities had little to change. Decision #47 is moot: no build order is left to apply, by hand or by a policy. If a reorder is wanted again, it should come from the agent filing the items, or as a one-off `valk todo edit`, not as a standing proposal that goes stale.
 
 ## Phases
 1. **The conflict watcher** (backlog #69): `gh pr view` also reads `mergeable,baseRefName`, and the poll flags *conflicting* next to *red*.
-2. **Build order and proposals** (backlog #75, #76): the *unordered work* watcher, `valk todo plan` and `order`, which is the case the user hits most. A flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
+2. **Build order and proposals** (backlog #75, #76): the *unordered work* watcher, `valk todo plan` and `order` (removed by §11), which is the case the user hits most. A flagged session offers its action (TUI, web), and the reminder push (§5). This is a wire change, so `web/src/proto.ts` changes with it (decision #42). The `merge-base`, `ci-fix` and `rerun` templates; the flake call.
 3. **Learning** (#77): `supervisor.jsonl`, policy proposals from accepted steps, automatic steps, health.
 4. **Dispatch** (#78): the *item ready* watcher, `launch`, `max_running`, and the blocker call. Fitting the flake model, once `supervisor.jsonl` holds enough labelled examples.
 5. **Sessions with a PR and no item** (#80): the branch watch (§7), the PR author guard, and `via` in the records with health's comparison.

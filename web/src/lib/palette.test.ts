@@ -49,7 +49,6 @@ const sources = (over: Partial<Sources> = {}): Sources => ({
   needs: [],
   proposals: [],
   items: [],
-  orders: [],
   docs: [],
   pages: [
     { label: "Backlog", hash: "#/backlog" },

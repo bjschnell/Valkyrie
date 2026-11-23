@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 pub use agent::{AgentState, AgentStatus, AskKind, Flag, QueueItem, Step, StepAction};
 pub use backlog::{
     Item, ItemChange, ItemFacts, ItemKind, ItemLaunch, ItemNote, ItemStatus, KeptItem, LaunchOffer,
-    NewItem, OrderApplied, OrderProposal, OrderStep, Priority, ShippedItem, order,
+    NewItem, Priority, ShippedItem, order,
 };
 pub use context::{
     AutoMode, Decision, DecisionKind, DecisionStatus, Freshness, NewDecision, Provenance,
@@ -50,7 +50,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 51;
+pub const PROTOCOL: u32 = 52;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -505,25 +505,6 @@ pub enum ClientMsg {
         req: ReqId,
         id: u32,
     },
-    /// Asks the model for a build order of `cwd`'s repository's open items
-    /// (ADR-0019 §2, protocol 24), replacing any it has waiting. Refused while
-    /// `valk decisions auto` is off, or past the hourly limit. Replies `Order`.
-    PlanOrder {
-        req: ReqId,
-        cwd: PathBuf,
-    },
-    /// Accepts or declines a repository's build order: the user only. `accept`
-    /// with `items` applies only those items' changes; with `None`, all of them.
-    /// Either answer clears it. Refused if `id` isn't the one waiting. Replies
-    /// `OrderApplied` (empty when declined).
-    AnswerOrder {
-        req: ReqId,
-        project: PathBuf,
-        id: u64,
-        accept: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        items: Option<Vec<u32>>,
-    },
     /// Starts or leaves the repository's ready item the supervisor offers
     /// (ADR-0019 §2 `launch`, protocol 27): the user only, and only the offer
     /// waiting (`id`). `launch` starts it as the board's Launch would; false leaves
@@ -536,8 +517,8 @@ pub enum ClientMsg {
         launch: bool,
     },
     /// What the supervisor did over the last 90 days, newest first (backlog
-    /// #180, protocol 43): steps you answered, steps policies took, build orders
-    /// answered. Read-only. Replies `SupervisorLog`.
+    /// #180, protocol 43): steps you answered and steps policies took.
+    /// Read-only. Replies `SupervisorLog`.
     SupervisorLog {
         req: ReqId,
     },
@@ -922,11 +903,6 @@ pub enum ServerMsg {
     /// whenever one changes (DESIGN §8.12).
     Items {
         items: Vec<Item>,
-        /// Build orders waiting on the user, one per repository at most
-        /// (protocol 24).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        orders: Vec<OrderProposal>,
-
         /// Ready items the supervisor offers to start, one per repository at most
         /// (protocol 27).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1053,19 +1029,9 @@ pub enum Reply {
     },
     Items {
         items: Vec<Item>,
-        /// Build orders waiting on the user (protocol 24).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        orders: Vec<OrderProposal>,
-
         /// Ready items the supervisor offers to start (protocol 27).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         launches: Vec<LaunchOffer>,
-    },
-    Order {
-        order: Box<OrderProposal>,
-    },
-    OrderApplied {
-        applied: OrderApplied,
     },
     /// What `SupervisorLog` asked for, and whether the supervisor is on.
     SupervisorLog {

@@ -32,7 +32,6 @@ export type PageKey =
   | "supervisor"
   | "doc"
   | "item"
-  | "order"
   | "session"
   | "review";
 
@@ -113,7 +112,6 @@ export const PAGE_KEYS = {
     a: "Write an item down",
     q: "Back to the inbox",
   },
-  order: { q: "Back to the backlog", Escape: "Back to the backlog" },
   decisions: {
     j: "Pick the next, previous one",
     k: "Pick the next, previous one",
@@ -153,7 +151,6 @@ const TITLE: Record<PageKey, string> = {
   supervisor: "Supervisor",
   doc: "Docs",
   item: "Item",
-  order: "Build order",
   session: "Session",
   review: "Review",
 };

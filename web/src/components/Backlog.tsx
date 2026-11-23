@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { editPatch } from "../lib/optimistic";
-import { GROUPS, agentFiled, base, boardStep, byGroup, firstLane, cardActions, itemRef, rowState, tree, changesSomething, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, itemNo, liveSession, MODEL_CHOICES, noteOrigin, orderHref, orderSize, ofKind, ordersShown, pieces, planScope, prLink, priority, progress, repoChoices, startAgent, startModel, stepChanges, type Group, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
+import { GROUPS, agentFiled, base, boardStep, byGroup, firstLane, cardActions, itemRef, rowState, tree, editChange, factsLine, inRepo, kindCounts, kindFilter, launchModel, itemNo, liveSession, MODEL_CHOICES, noteOrigin, ofKind, pieces, prLink, priority, progress, repoChoices, startAgent, startModel, type Group, type KindFilter, type Lane, type RepoFilter } from "../lib/backlog";
 import { age } from "../lib/time";
-import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type OrderProposal, type Priority } from "../proto";
-import { addItem, setStatuses, answerOrder, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, planOrder, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
+import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type Priority } from "../proto";
+import { addItem, setStatuses, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
 import { RepoSelect } from "./Repos";
 import { Back, Chevron, Clip } from "./icons";
 import { useDesktop, useMedia } from "./Terminal";
@@ -63,7 +63,6 @@ const EDGE: Record<Lane, string> = {
  */
 export function Backlog({ beside = false }: { beside?: boolean } = {}) {
   const all = useApp((s) => s.items);
-  const orders = useApp((s) => s.orders);
   const sessions = useApp((s) => s.sessions);
   const boot = useApp((s) => s.boot);
   const [showDone, setShowDone] = useState(false);
@@ -99,8 +98,6 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
   const items = inThisRepo.filter((i) => ofKind(i, kind));
   const { filed, groups } = byGroup(items, sessions, boot, all);
   const open = items.length - groups.done.length;
-  // A build order covers a repository's every open item, whatever kind is shown.
-  const repoOpen = inThisRepo.filter((i) => i.status === "open" || i.status === "proposed").length;
   // Only items with a branch can be found merged.
   const mergeable = items.some((i) => (i.status === "open" || agentFiled(i)) && i.branch && i.project);
   const [shipping, setShipping] = useState(false);
@@ -128,20 +125,6 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
       setShipping(false);
     }
   };
-
-  // A build order (ADR-0019 §2): asked of a model, so it can take a minute.
-  const scope = planScope(repo, inThisRepo);
-  const [planning, setPlanning] = useState(false);
-  const plan = async () => {
-    if (!scope) return;
-    setPlanning(true);
-    try {
-      await planOrder(scope);
-    } finally {
-      setPlanning(false);
-    }
-  };
-  const shownOrders = ordersShown(orders, repo);
 
   // The board's lanes (#266), each a tree of rows; Done shows its newest few.
   const side = useMedia(LANES_SIDE);
@@ -197,16 +180,6 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
         <div className="title">
           <h1 className="title-name">Backlog</h1>
         </div>
-        {repoOpen > 1 && (
-          <button
-            className="ghost"
-            disabled={planning || !scope}
-            title={scope ? "A model proposes what to do first; nothing changes until you accept" : "Pick a repository first"}
-            onClick={() => void plan()}
-          >
-            {planning ? "Planning…" : "Plan order"}
-          </button>
-        )}
         {mergeable && (
           <button
             className={`ghost ${ready ? "item-sure" : ""}`}
@@ -254,9 +227,6 @@ export function Backlog({ beside = false }: { beside?: boolean } = {}) {
             </select>
           </div>
         )}
-        {shownOrders.map((o) => (
-          <OrderBanner key={`${o.project}:${o.id}`} order={o} />
-        ))}
         {filed.length > 0 && <FiledTray items={filed} />}
         {open === 0 && kind !== null && (
           <div className="calm backlog-calm">
@@ -445,130 +415,6 @@ function FiledTray({ items }: { items: Item[] }) {
         </>
       )}
     </section>
-  );
-}
-
-/**
- * A build order waiting on the user, as one line above the board: a big backlog's
- * order is a page of its own (`OrderPage`), not a wall over the cards.
- */
-function OrderBanner({ order }: { order: OrderProposal }) {
-  return (
-    <section className="order-card order-banner" aria-label={`Build order for ${base(order.project)}`}>
-      <div className="order-head">
-        <div className="order-title">Build order for {base(order.project)}</div>
-        <div className="order-why">
-          {orderSize(order)} · {order.trigger}
-        </div>
-      </div>
-      <button className="ghost" onClick={() => (location.hash = orderHref(order.project))}>
-        Review
-      </button>
-    </section>
-  );
-}
-
-/** A repository's build order on a page of its own, or a note that none waits. */
-export function OrderPage({ project }: { project: string }) {
-  const orders = useApp((s) => s.orders);
-  const items = useApp((s) => s.items);
-  const order = orders.find((o) => o.project === project);
-  const back = () => (location.hash = "#/backlog");
-
-  usePageKeys("order", { q: back, Escape: back });
-
-  return (
-    <div className="page">
-      <header className="topbar">
-        <button className="icon-btn" aria-label="Back" onClick={back}>
-          <Back />
-        </button>
-        <div className="title">
-          <h1 className="title-name">Build order for {base(project)}</h1>
-          {order && (
-            <div className="title-sub">
-              {orderSize(order)} · {order.trigger}
-            </div>
-          )}
-        </div>
-      </header>
-      <main className="inbox backlog order-page">
-        {order ? (
-          // A replaced proposal starts over: its ticks were for other steps.
-          <OrderReview key={order.id} order={order} items={items} onDone={back} />
-        ) : (
-          <div className="calm backlog-calm">
-            <div className="calm-title">No build order waits here</div>
-            <div className="calm-sub">It was answered, or replaced by a newer one. Plan order on the backlog asks for one.</div>
-            <button className="ghost" onClick={back}>
-              Back to the backlog
-            </button>
-          </div>
-        )}
-      </main>
-    </div>
-  );
-}
-
-/**
- * A build order's steps: each item in the order proposed, why, and what accepting
- * it changes. Untick an item to leave it as it is; nothing changes until Accept,
- * and Decline changes nothing (decision #47).
- */
-function OrderReview({ order, items, onDone }: { order: OrderProposal; items: Item[]; onDone: () => void }) {
-  const [skip, setSkip] = useState<number[]>([]);
-  const [busy, setBusy] = useState(false);
-  const changing = order.steps.filter((s) => changesSomething(s));
-  const ticked = changing.filter((s) => !skip.includes(s.item)).map((s) => s.item);
-  const toggle = (id: number) => setSkip((k) => (k.includes(id) ? k.filter((i) => i !== id) : [...k, id]));
-  const all = ticked.length === changing.length;
-  const answer = async (accept: boolean) => {
-    setBusy(true);
-    try {
-      if (await answerOrder(order, accept, accept && skip.length ? ticked : undefined)) onDone();
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <>
-      <ol className="order-steps">
-        {order.steps.map((step, n) => {
-          const item = items.find((i) => i.id === step.item);
-          const changes = stepChanges(step, item, items);
-          const can = changesSomething(step);
-          return (
-            <li key={step.item} className={can && skip.includes(step.item) ? "order-skipped" : ""}>
-              <label className="order-step">
-                {can ? (
-                  <input type="checkbox" checked={!skip.includes(step.item)} disabled={busy} onChange={() => toggle(step.item)} />
-                ) : (
-                  <span className="order-nobox" />
-                )}
-                <span className="order-n">{n + 1}.</span>
-                <span className="order-id">#{item?.number ?? step.item}</span>
-                <span className="order-name">{item?.title ?? "(gone)"}</span>
-                {changes && <span className="order-change">{changes}</span>}
-              </label>
-              {step.reason && <div className="order-reason">{step.reason}</div>}
-            </li>
-          );
-        })}
-      </ol>
-      <div className="order-actions order-bar">
-        {changing.length > 1 && (
-          <button className="ghost order-all" disabled={busy} onClick={() => setSkip(all ? changing.map((s) => s.item) : [])}>
-            {all ? "Untick all" : "Tick all"}
-          </button>
-        )}
-        <button className="ghost" disabled={busy} onClick={() => void answer(false)}>
-          Decline
-        </button>
-        <button className="primary" disabled={busy || (changing.length > 0 && ticked.length === 0)} onClick={() => void answer(true)}>
-          {changing.length === 0 ? "Clear" : all ? "Accept all" : `Accept ${ticked.length}`}
-        </button>
-      </div>
-    </>
   );
 }
 

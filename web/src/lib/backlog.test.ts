@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { GROUPS, agentFiled, appliedSummary, boardStep, byGroup, firstLane, itemRef, rowState, tree, changesSomething, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, orderHref, orderSize, ordersShown, planScope, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, stepChanges, takenOnly, waitingOn, wouldShip } from "./backlog";
-import type { AgentState, Item, LaunchOffer, OrderProposal, SessionInfo } from "../proto";
+import { GROUPS, agentFiled, boardStep, byGroup, firstLane, itemRef, rowState, tree, inRepo, kindCounts, kindFilter, ofKind, launchesOn, launchesShown, repoChoices, cardActions, byLane, editChange, factsLine, lane, liveSession, noteOrigin, itemNo, pieces, progress, prLink, shippedSummary, startAgent, startModel, launchModel, takenOnly, waitingOn, wouldShip } from "./backlog";
+import type { AgentState, Item, LaunchOffer, SessionInfo } from "../proto";
 
 const item = (over: Partial<Item> = {}): Item => ({
   id: 1,
@@ -265,13 +265,11 @@ describe("per-repository numbers", () => {
     expect(itemNo(items, 99)).toBe(99);
   });
 
-  it("shows numbers in what ships, what a build order changes and what it applied", () => {
+  it("shows numbers in what ships", () => {
     const shipped = [{ id: 40, number: 3, title: "", branch: "fix/a", against: "origin/main" }];
     expect(shippedSummary(shipped, [{ id: 41, number: 1, title: "", why: "no commits of its own" }])).toBe(
       "Shipped #3 · #1 no commits of its own (as of the last fetch)",
     );
-    expect(stepChanges({ item: 40, reason: "", blocked_by: [41] }, items[0], items)).toBe("after #1");
-    expect(appliedSummary(true, { changed: [40], skipped: [[41, "done"]] }, items)).toBe("Changed #3; #1 left: done");
   });
 });
 
@@ -432,40 +430,6 @@ describe("launch offer", () => {
     expect(launchesShown([offer("/a"), offer("/b")], null)).toHaveLength(2);
     expect(launchesOn(offer("/a"))).toBe("claude");
     expect(launchesOn(offer("/a", "opus"))).toBe("claude · opus");
-  });
-});
-
-describe("build order", () => {
-  const order = (project: string): OrderProposal => ({ id: 1, project, made: 0, trigger: "you asked", steps: [] });
-
-  it("is asked for the shown repository, else the only one with open items", () => {
-    const items = [item({ id: 1, project: "/a" }), item({ id: 2, project: "/a" }), item({ id: 3, project: "/b", status: "shipped" })];
-    expect(planScope("/b", items)).toBe("/b");
-    expect(planScope("", items)).toBeNull();
-    expect(planScope(null, items)).toBe("/a");
-    expect(planScope(null, [...items, item({ id: 4, project: "/c" })])).toBeNull();
-    expect(ordersShown([order("/a"), order("/b")], "/b").map((o) => o.project)).toEqual(["/b"]);
-    expect(ordersShown([order("/a"), order("/b")], null)).toHaveLength(2);
-  });
-
-  it("sizes a build order for its banner and links its page", () => {
-    const o = order("/home/me/my app");
-    o.steps = [{ item: 1, reason: "" }, { item: 2, reason: "", priority: "p1" }, { item: 3, reason: "", blocked_by: [1] }];
-    expect(orderSize(o)).toBe("3 items, 2 to change");
-    o.steps = [{ item: 1, reason: "" }];
-    expect(orderSize(o)).toBe("1 item, nothing to change");
-    expect(orderHref("/home/me/my app")).toBe("#/backlog/order/%2Fhome%2Fme%2Fmy%20app");
-    expect(decodeURIComponent(orderHref("/a/#b").slice("#/backlog/order/".length))).toBe("/a/#b");
-  });
-
-  it("says what each step changes and what accepting did", () => {
-    const it1 = item({ id: 1, priority: "p2", blocked_by: [5] });
-    expect(stepChanges({ item: 1, reason: "", priority: "p1", blocked_by: [2, 5] }, it1)).toBe("p2→p1, after #2");
-    expect(stepChanges({ item: 1, reason: "" }, it1)).toBe("");
-    expect(changesSomething({ item: 1, reason: "" })).toBe(false);
-    expect(changesSomething({ item: 1, reason: "", blocked_by: [] })).toBe(true);
-    expect(appliedSummary(true, { changed: [3, 2], skipped: [[1, "edited since"]] })).toBe("Changed #3 #2; #1 left: edited since");
-    expect(appliedSummary(false, { changed: [] })).toBe("Build order declined: nothing changed");
   });
 });
 

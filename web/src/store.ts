@@ -29,7 +29,6 @@ import type {
   ItemFacts,
   Modes,
   NewItem,
-  OrderProposal,
   LaunchOffer,
   Quota,
   QueueItem,
@@ -45,7 +44,7 @@ import type {
 import { applyChat, type Chat } from "./lib/chat";
 import { choiceKeys, findChoices, promptContext, type Choice } from "./lib/choices";
 import { upload } from "./lib/api";
-import { appliedSummary, itemNo, shippedSummary, wouldShip } from "./lib/backlog";
+import { itemNo, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
 import { editPatch, landed, overlay, statusDone, type Change, type Lists } from "./lib/optimistic";
@@ -105,8 +104,6 @@ interface State {
   unreadDocs: number;
   /** The backlog (DESIGN §8.12), as the daemon pushes it. */
   items: Item[];
-  /** Build orders waiting on the user (ADR-0019 §2), pushed with the items. */
-  orders: OrderProposal[];
   /** Ready items the supervisor offers to start (ADR-0019 §2), pushed with the items. */
   launches: LaunchOffer[];
   /** The plan's quota (protocol 30), pushed with the queue. */
@@ -154,7 +151,6 @@ export const useApp = create<State>(() => ({
   proposalPushes: 0,
   unreadDocs: 0,
   items: [],
-  orders: [],
   launches: [],
   quota: null,
   boot: 0,
@@ -423,7 +419,7 @@ function onPush(msg: ServerMsg): void {
     case "items":
       popProposals(msg.items);
       raw = { ...raw, items: msg.items };
-      set({ orders: msg.orders ?? [], launches: msg.launches ?? [] });
+      set({ launches: msg.launches ?? [] });
       show();
       break;
     case "quota":
@@ -1359,45 +1355,6 @@ export async function shipMerged(only: number[]): Promise<void> {
     if (reply.t === "shipped") toast(shippedSummary(reply.shipped, reply.kept));
   } catch (e) {
     toast((e as Error).message);
-  }
-}
-
-/** Asks for a build order of `cwd`'s repository; it arrives with the items. A model
- * works it out, so this can take a minute. */
-export async function planOrder(cwd: string): Promise<boolean> {
-  if (!conn) return false;
-  try {
-    const reply = await conn.request({ t: "plan_order", cwd });
-    if (reply.t === "order")
-      toast(`Build order ready: ${reply.order.steps.length} items`);
-    return true;
-  } catch (e) {
-    toast((e as Error).message);
-    return false;
-  }
-}
-
-/** Accepts (only `items`' changes, or all) or declines a build order, toasting what changed. */
-export async function answerOrder(
-  order: OrderProposal,
-  accept: boolean,
-  items?: number[],
-): Promise<boolean> {
-  if (!conn) return false;
-  try {
-    const reply = await conn.request({
-      t: "answer_order",
-      project: order.project,
-      id: order.id,
-      accept,
-      items,
-    });
-    if (reply.t === "order_applied")
-      toast(appliedSummary(accept, reply.applied, get().items));
-    return true;
-  } catch (e) {
-    toast((e as Error).message);
-    return false;
   }
 }
 

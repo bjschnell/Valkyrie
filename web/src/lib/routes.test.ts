@@ -18,6 +18,11 @@ describe("moved", () => {
     expect(moved("#/docs/p1a2b")).toBe(docHash("p1a2b"));
   });
 
+  it("sends a build order's old page to the backlog, since build orders are gone (#285)", () => {
+    expect(moved("#/backlog/order/%2Fhome%2Fme%2Fvalk")).toBe(HASH.backlog);
+    expect(moved("#/backlog/order/")).toBe(HASH.backlog);
+  });
+
   it("leaves pages that haven't moved alone", () => {
     for (const h of ["", "#/", "#/history", "#/backlog", "#/backlog/3", "#/s/4", "#/memory/docs", "#/settings"]) {
       expect(moved(h)).toBeNull();
