@@ -14,7 +14,8 @@ import { answer, answerAll, kill, refreshUnreadDocs, takeStep, useApp } from "..
 import { stepChoices } from "../lib/step";
 import { hasRain, useLook } from "../lib/theme";
 import { Chevron, Gear, Plus } from "./icons";
-import { useDesktop } from "./Terminal";
+import { useDesktop, useWide } from "./Terminal";
+import { Composer, focusComposer, ReadyList } from "./Composer";
 import { ConnectionPill, StateIcon } from "./bits";
 import { EmptyState } from "./states";
 import { isRecord, RecordRow, useAttention } from "./Attention";
@@ -30,8 +31,9 @@ const go = (id: number) => {
   location.hash = `#/s/${id}`;
 };
 
-/** Home: who needs you, with the answers right on the card, then every session. */
-export function Inbox({ beside, pane }: { beside?: number | null; pane?: string | null } = {}) {
+/** Home: who needs you, with the answers right on the card, then every session.
+ * `home`: the pane beside it shows the home composer (#275). */
+export function Inbox({ beside, pane, home = false }: { beside?: number | null; pane?: string | null; home?: boolean } = {}) {
   const queue = useApp((s) => s.queue);
   const sessions = useApp((s) => s.sessions);
   const status = useApp((s) => s.status);
@@ -43,6 +45,8 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
   }, [status]);
   const look = useLook();
   const desktop = useDesktop();
+  // With a pane beside the list, New session is its top row and opens the composer there.
+  const wide = useWide();
   const working = sessions.filter(
     (s) => s.exited === null && s.status.state === "working",
   ).length;
@@ -61,8 +65,9 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
   const rows = sessions.map((s, i) => ({ s, n: i + 1 })).filter(({ s }) => !queued.has(s.id));
   const running = rows.filter(({ s }) => s.exited === null && s.status.state === "working");
   const quiet = rows.filter(({ s }) => !(s.exited === null && s.status.state === "working"));
-  // What j/k move through, in the order they're drawn: keys, `s<id>` for a session.
-  const order = [...needs.map((a) => a.key), ...[...running, ...quiet].map(({ s }) => `s${s.id}`)];
+  // What j/k move through, in the order they're drawn: `new` for New session,
+  // keys, `s<id>` for a session.
+  const order = [...(wide ? ["new"] : []), ...needs.map((a) => a.key), ...[...running, ...quiet].map(({ s }) => `s${s.id}`)];
   const selected = order[sel] ?? null;
 
   // n starts a session; j/k pick a card or row, Enter opens it (or a record's
@@ -75,28 +80,42 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
   };
   const sessionOf = (key: string | null) => (key?.startsWith("s") ? Number(key.slice(1)) : null);
   const open = () => {
+    if (selected === "new") return void (location.hash = "#/new");
     const id = sessionOf(selected);
     if (id !== null) return go(id);
     const rec = records.find((r) => r.key === selected);
     if (rec?.kind === "filed") location.hash = HASH.backlog;
     else if (rec) setOpened(rec.key);
   };
+  // Esc puts nothing back in the pane: the composer, with the keys still the list's.
   const close = () => {
     setOpened(null);
     setSel(-1);
+    if (wide && opened === null && location.hash !== "#/new") location.hash = "#/new";
+  };
+  // n is the composer beside the list, or the launcher without the room for one.
+  const compose = () => {
+    if (!wide) return void (location.hash = "#/new");
+    // Already showing: just the keyboard. Otherwise it takes it once it's drawn.
+    if (home) return focusComposer();
+    focusComposer();
+    location.hash = "#/new";
   };
   const to = (hash: string) => () => (location.hash = hash);
+  // A phone at inbox zero pins the composer over the tab bar; with anything
+  // waiting only the + shows (#275).
+  const phoneHome = !wide && !desktop && needs.length === 0;
   // Beside an open session, the keys are that session's.
   usePageKeys(
     "inbox",
     {
-      n: to("#/new"),
+      n: compose,
       b: to("#/backlog"),
       d: to(HASH.memory),
       a: to(HASH.history),
       h: to(HASH.history),
       s: to(HASH.supervisor),
-      "/": to(HASH.search),
+      "/": () => (home ? focusComposer() : (location.hash = HASH.search)),
       ",": to("#/settings"),
       j: () => pick(sel + 1),
       k: () => pick(sel - 1),
@@ -145,7 +164,22 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
         )}
       </header>
 
-      <main className="inbox">
+      <main className={`inbox ${phoneHome ? "with-composer" : ""}`}>
+        {wide && (
+          <div className={`row-slot new-row-slot ${selected === "new" ? "picked" : ""}`} data-pick>
+            <button
+              className={`row new-row ${selected === "new" ? "picked" : ""} ${home ? "current" : ""}`}
+              aria-current={home || undefined}
+              onClick={() => (location.hash = "#/new")}
+            >
+              <Plus />
+              <span className="row-main">
+                <span className="row-name">New session</span>
+              </span>
+              <kbd className="new-row-key">n</kbd>
+            </button>
+          </div>
+        )}
         <section>
           <h2 className="section-title">
             Needs you <span className="count">{needs.length}</span>
@@ -199,6 +233,8 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
           )}
         </section>
 
+        {phoneHome && <ReadyList compact />}
+
         <div className="quiet">
           <QuotaMeter quiet />
           <NotifyHint />
@@ -231,6 +267,7 @@ export function Inbox({ beside, pane }: { beside?: number | null; pane?: string 
           </section>
         )}
       </main>
+      {phoneHome && <Composer phone />}
     </div>
   );
 }
