@@ -3460,15 +3460,20 @@ impl App {
     /// Under 100 columns the others are a letter. Also where each name is.
     fn strip_line(&self, width: u16, now: u64) -> (Line<'static>, Vec<(u16, u16, Section)>) {
         let t = self.settings.theme;
-        let mut spans = vec![match &t.rain {
-            Some(colors) => rain::glitch(" ᛒ ", now, colors.glyphs).fg(t.accent).bold(),
-            None => " ᛒ ".fg(t.accent).bold(),
-        }];
+        // The rune as an accent chip, then the name where there's room (#286).
+        let rune = match &t.rain {
+            Some(colors) => rain::glitch(" ᛒ ", now, colors.glyphs),
+            None => " ᛒ ".to_string(),
+        };
+        let mut spans = vec![rune.fg(t.bg).bg(t.accent).bold()];
         let narrow = width < 100;
+        if !narrow {
+            spans.push(" VALKYRIE".fg(t.accent).bold());
+        }
         let here = self.section();
         let mut places = Vec::new();
         for section in Section::ALL {
-            spans.push(if narrow { "  " } else { "   " }.into());
+            spans.push(if narrow { " " } else { "  " }.into());
             let from = Line::from(spans.clone()).width() as u16;
             let on = section == here;
             let name = match (narrow && !on, section) {
@@ -3476,14 +3481,18 @@ impl App {
                 (true, s) => s.name()[..1].to_string(),
                 (false, s) => s.name().to_string(),
             };
-            spans.push(if on {
-                name.fg(t.fg).bold().underlined()
+            // The one on screen is a chip on the selection color.
+            let chip = |s: Span<'static>| if on { s.bg(t.selection) } else { s };
+            spans.push(chip(" ".into()));
+            spans.push(chip(if on {
+                name.fg(t.fg).bold()
             } else {
                 name.fg(t.dim())
-            });
+            }));
             if section == Section::Inbox && self.need_you() > 0 {
-                spans.push(format!(" {}", self.need_you()).fg(t.needs).bold());
+                spans.push(chip(format!(" {}", self.need_you()).fg(t.needs).bold()));
             }
+            spans.push(chip(" ".into()));
             let to = Line::from(spans.clone()).width() as u16;
             places.push((from, to, section));
         }
@@ -3545,6 +3554,21 @@ impl App {
             spans.push("  [ ]".fg(t.accent).bold());
         }
         (Line::from(spans), places)
+    }
+
+    /// The Inbox frame's title: ` Inbox · 2 need you `, or all clear.
+    fn inbox_title(&self) -> Line<'static> {
+        let t = self.settings.theme;
+        let need = self.need_you();
+        Line::from(vec![
+            " Inbox".fg(t.fg).bold(),
+            " · ".fg(t.dim()),
+            if need == 0 {
+                "all clear ".fg(t.muted)
+            } else {
+                format!("{need} need{} you ", if need == 1 { "s" } else { "" }).fg(t.needs)
+            },
+        ])
     }
 
     /// The strip's right end, longest first: the host, how many are running and
@@ -5714,6 +5738,8 @@ impl App {
                 Hit::Section(section),
             ));
         }
+        // The strip is a bar on the panel color, not loose text (backlog #286).
+        frame.render_widget(Block::new().style(style::Style::new().bg(t.panel)), header);
         frame.render_widget(Paragraph::new(left.clone()), header);
         // On the right, the plan's quota and a newer release, each only where it
         // clears the counts on the left; the quota first, it's the one to act on.
@@ -5746,7 +5772,10 @@ impl App {
             frame.render_widget(Paragraph::new(right).right_aligned(), header);
         }
 
-        let (lists, preview) = crate::list_and_detail(frame, main, t);
+        // Each pane in a quiet frame, a column apart (backlog #286); the detail
+        // draws its own.
+        let (lists, split) = list_detail_areas(main);
+        let preview = split.map(|(_, detail)| detail);
         self.home_cols.set(main.width);
         let inbox_area = lists;
         let in_proposals = self.proposal().is_some();
@@ -5754,7 +5783,11 @@ impl App {
             // Narrow: the selected session's detail is the screen; Esc goes back.
             self.draw_preview(frame, inbox_area);
         } else {
-            self.draw_inbox(frame, inbox_area, now, spin);
+            // No padding: the rows draw their own margin, the ▌ in it.
+            let block = frame_block(self.inbox_title(), t).padding(Padding::ZERO);
+            let inner = block.inner(inbox_area);
+            frame.render_widget(block, inbox_area);
+            self.draw_inbox(frame, inner, now, spin);
         }
 
         if let Some(area) = preview {
@@ -6056,7 +6089,7 @@ impl App {
     fn draw_composer(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
         let now = now_ms();
-        let area = area.inner(Margin::new(3, 0));
+        let area = area.inner(Margin::new(2, 0));
         let width = area.width as usize;
         let need = self.need_you();
         let mut lines = vec![
@@ -6128,17 +6161,13 @@ impl App {
     }
 
     /// The Inbox: Needs you, Running, Quiet, each session once (spec: Inbox). A
-    /// group shows only while it has rows; a muted label and count heads it.
+    /// group shows only while it has rows; its state's mark, name and count head
+    /// it, then a hairline to the frame (backlog #286). `area` is inside the frame.
     fn draw_inbox(&self, frame: &mut ratatui::Frame, area: Rect, now: u64, spin: usize) {
         let t = self.settings.theme;
         let others = self.others();
         let running = others.iter().take_while(|s| is_running(s)).count();
-        // Groups are labels, not boxes (rule 8); a row above the first one.
-        let inner = Rect {
-            y: area.y + 1,
-            height: area.height.saturating_sub(1),
-            ..area
-        };
+        let inner = area;
 
         if self.need_you() == 0 && others.is_empty() {
             let calm = if t.rain.is_some() {
@@ -6190,11 +6219,21 @@ impl App {
             if !lines.is_empty() {
                 lines.push((None, Line::default()));
             }
+            // Color means state (rule 4): the group's, on its mark and name.
+            let (mark, color) = match name {
+                "Needs you" => ("●", t.needs),
+                "Running" => ("◐", t.working),
+                _ => ("○", t.muted),
+            };
+            let head = format!(" {mark} {name} {n} ");
+            let rule = width.saturating_sub(head.chars().count() + 1);
             lines.push((
                 None,
                 Line::from(vec![
-                    format!(" {name} ").fg(t.dim()).bold(),
+                    format!(" {mark} {name} ").fg(color).bold(),
                     n.to_string().fg(t.dim()),
+                    " ".into(),
+                    "─".repeat(rule).fg(t.border),
                 ]),
             ));
         };
@@ -6341,7 +6380,16 @@ impl App {
     fn draw_preview(&self, frame: &mut ratatui::Frame, area: Rect) {
         let t = self.settings.theme;
         if self.row() == Some(InboxRow::Compose) {
-            return self.draw_composer(frame, area);
+            let block = frame_block(
+                Line::from(vec![
+                    " + ".fg(t.accent).bold(),
+                    "New session ".fg(t.fg).bold(),
+                ]),
+                t,
+            );
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            return self.draw_composer(frame, inner);
         }
         if let Some(d) = self.proposal() {
             let title = Line::from(vec![
@@ -6370,7 +6418,7 @@ impl App {
                     format!("and {offers} for the supervisor: s opens them").fg(t.muted),
                 ));
             }
-            let block = bare(title, t);
+            let block = frame_block(title, t);
             let inner = block.inner(area);
             frame.render_widget(block, area);
             self.draw_proposal_text(frame, inner, d, lines);
@@ -6410,7 +6458,7 @@ impl App {
                         .collect(),
                 ),
             };
-            let block = bare(Line::from(format!(" {title} ").fg(t.fg).bold()), t);
+            let block = frame_block(Line::from(format!(" {title} ").fg(t.fg).bold()), t);
             let inner = block.inner(area);
             frame.render_widget(block, area);
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
@@ -6444,11 +6492,11 @@ impl App {
             name,
             format!(" #{} ", session.id).fg(t.muted),
         ]);
-        // Boxed only over a session, where it's a dialog; at home, a bare column.
+        // The accent panel over a session, where it's a dialog; at home, a quiet frame.
         let block = if focused {
             panel(title, t, true)
         } else {
-            bare(title, t)
+            frame_block(title, t)
         };
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -7745,13 +7793,19 @@ fn fit(text: &str, max: usize) -> String {
     out
 }
 
-/// A column with its title on top and no border: the home detail (rule 8, a box
-/// is a dialog).
-fn bare(title: Line<'static>, t: &Theme) -> Block<'static> {
-    Block::new()
+/// A quiet frame around a home pane: rounded, in the border color, its title on
+/// the top edge. Not a dialog: nothing behind it dims and the footer stays
+/// (decision #86, amending rule 8).
+fn frame_block(title: Line<'static>, t: &Theme) -> Block<'static> {
+    // `╭─ Inbox ─…`: a step of rule before the title, off the corner.
+    let mut spans = vec!["─".fg(t.border)];
+    spans.extend(title.spans);
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style::Style::new().fg(t.border))
         .style(style::Style::new().bg(t.bg).fg(t.fg))
-        .title(title)
-        .padding(Padding::new(1, 1, 0, 0))
+        .title(Line::from(spans))
+        .padding(Padding::horizontal(1))
 }
 
 /// A section page's footer (spec: One key grammar): at most five hints for the
@@ -7809,21 +7863,31 @@ pub(crate) fn list_and_detail(
     area: Rect,
     t: &Theme,
 ) -> (Rect, Option<Rect>) {
+    let (list, split) = list_detail_areas(area);
+    let Some((rule, detail)) = split else {
+        return (list, None);
+    };
+    let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
+    frame.render_widget(Paragraph::new(bar), rule);
+    (list, Some(detail))
+}
+
+/// `list_and_detail`'s areas without drawing: the list, and the column between
+/// and the detail when there's room for one.
+fn list_detail_areas(area: Rect) -> (Rect, Option<(Rect, Rect)>) {
     let list = match area.width {
         0..100 => return (area, None),
         100..140 => 56,
         140..200 => 62,
         _ => 72,
     };
-    let [list, rule, detail] = Layout::horizontal([
+    let [list, between, detail] = Layout::horizontal([
         Constraint::Length(list),
         Constraint::Length(1),
         Constraint::Max(110),
     ])
     .areas(area);
-    let bar = vec![Line::from("│".fg(t.border)); rule.height as usize];
-    frame.render_widget(Paragraph::new(bar), rule);
-    (list, Some(detail))
+    (list, Some((between, detail)))
 }
 
 /// Dims what's under a dialog (rule 8: a box is a dialog, and what's behind it
@@ -9684,7 +9748,7 @@ mod tests {
         let wide = strip(&app, 120);
         assert!(wide.contains("ᛒ") && wide.contains("Inbox 1"), "{wide}");
         assert!(
-            wide.contains("Inbox 1   Backlog   Memory   History"),
+            wide.contains("VALKYRIE   Inbox 1    Backlog    Memory    History"),
             "{wide}"
         );
         assert!(
@@ -9694,7 +9758,11 @@ mod tests {
         );
         // Narrow, the others are a letter; the one on screen keeps its name.
         let narrow = strip(&app, 80);
-        assert!(narrow.contains("Inbox 1  B  M  H"), "{narrow}");
+        assert!(narrow.contains("Inbox 1   B   M   H"), "{narrow}");
+        assert!(
+            !narrow.contains("VALKYRIE"),
+            "no room for the name: {narrow}"
+        );
 
         // `g b` from home: the backlog, which the strip now names in full.
         app.on_input(b"gb".to_vec()).await;
@@ -9818,7 +9886,11 @@ mod tests {
         let (mut app, _listener) = idle_app(&dir).await;
         app.sessions = vec![info(1)];
         let rows = home_screen(&app, 80);
-        assert!(!rows.iter().any(|r| r.contains('│')), "no detail at 80");
+        assert_eq!(
+            rows[1].matches('╭').count(),
+            1,
+            "no detail at 80: {rows:#?}"
+        );
         app.selected = 1;
         app.on_input(b"\r".to_vec()).await;
         assert!(app.narrow_detail(), "Enter shows the detail, not attaches");
@@ -9910,11 +9982,11 @@ mod tests {
         }
     }
 
-    /// Color is state, in every theme (spec: Marks and color): home draws no box,
-    /// no filled chip (the logo aside, until the strip replaces it), a single rule
-    /// between list and detail, and stuck-ish states share the stuck color.
+    /// Color is state, in every theme (spec: Marks and color): home frames its
+    /// panes quietly but draws no dialog's box and dims nothing, no filled chip
+    /// below the strip, and stuck-ish states share the stuck color.
     #[tokio::test]
-    async fn home_has_no_boxes_or_chips_in_any_theme() {
+    async fn home_frames_its_panes_but_never_a_dialog_in_any_theme() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let dir = std::env::temp_dir().join(format!("valkyrie-tui-skin-{}", std::process::id()));
@@ -9956,8 +10028,8 @@ mod tests {
                     for x in 0..width {
                         let cell = &buffer[(x, y)];
                         assert!(
-                            !"╭╮╰╯┌┐└┘".contains(cell.symbol()),
-                            "{} {width}: a box at {x},{y}",
+                            !"┌┐└┘".contains(cell.symbol()),
+                            "{} {width}: a dialog's box at {x},{y}",
                             theme.name
                         );
                         assert_ne!(
@@ -9967,13 +10039,86 @@ mod tests {
                         );
                     }
                 }
-                // From 100 the detail sits beside the list, behind one rule.
-                let rules = (0..width)
-                    .filter(|&x| (2..18).all(|y| buffer[(x, y)].symbol() == "│"))
-                    .count();
-                assert_eq!(rules, usize::from(width >= 100), "{} {width}", theme.name);
+                // From 100 the detail sits beside the list, each in a quiet
+                // frame on the border color (decision #86), nothing dimmed.
+                let corners: Vec<u16> = (0..width)
+                    .filter(|&x| buffer[(x, 1)].symbol() == "╭")
+                    .collect();
+                assert_eq!(corners.len(), 2, "{} {width}", theme.name);
+                for x in corners {
+                    assert_eq!(buffer[(x, 1)].fg, theme.border, "{}", theme.name);
+                }
+                assert!(
+                    (0..width).all(|x| !buffer[(x, 3)].modifier.contains(Modifier::DIM)),
+                    "{} {width}: frames aren't a dialog",
+                    theme.name
+                );
             }
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backlog #286: the strip is a bar with the rune and the open section as
+    /// chips, the Inbox frame says how many need you, and each group's head is
+    /// its state's mark and color, then a hairline.
+    #[tokio::test]
+    async fn home_marks_its_groups_and_brands_its_strip() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-brand-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.settings = Settings::default();
+        let t = app.settings.theme;
+        let mut working = info(2);
+        working.status.state = AgentState::Working;
+        app.sessions = vec![info(1), working, info(3)];
+        let mut q = queued(1);
+        q.status.state = AgentState::NeedsInput;
+        app.queue = vec![q];
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let [body, bar] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                    .areas(frame.area());
+                app.draw_home(frame, body, bar);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row = |y: u16| -> String { (0..140).map(|x| buffer[(x, y)].symbol()).collect() };
+        let at = |y: u16, s: &str| -> u16 {
+            let r = row(y);
+            r[..r.find(s).unwrap_or_else(|| panic!("{s:?} in {r:?}"))]
+                .chars()
+                .count() as u16
+        };
+
+        // The strip: a bar, the rune an accent chip, the open section a chip.
+        assert!(row(0).starts_with(" ᛒ  VALKYRIE"), "{}", row(0));
+        assert_eq!(buffer[(1, 0)].bg, t.accent, "the rune's chip");
+        assert_eq!(
+            buffer[(at(0, "Inbox"), 0)].bg,
+            t.selection,
+            "the open section"
+        );
+        assert_eq!(
+            buffer[(at(0, "Backlog"), 0)].bg,
+            t.panel,
+            "the rest on the bar"
+        );
+
+        // The Inbox frame says how many need you.
+        assert!(row(1).starts_with("╭─ Inbox · 1 needs you"), "{}", row(1));
+
+        // Each group's head: its mark and name in its state's color, a hairline.
+        let rows: Vec<String> = (0..24).map(row).collect();
+        let head = |name: &str| rows.iter().position(|r| r.contains(name)).unwrap() as u16;
+        for (name, mark, color) in [("Needs you", "●", t.needs), ("Running", "◐", t.working)] {
+            let y = head(name);
+            assert!(row(y).contains(&format!("{mark} {name}")), "{}", row(y));
+            assert_eq!(buffer[(at(y, name), y)].fg, color, "{name}");
+            assert!(row(y).contains("──────"), "a hairline: {}", row(y));
+        }
+        assert!(row(head("Quiet")).contains("○ Quiet"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -10414,7 +10559,7 @@ mod tests {
             "● Cart totals now update as items change\n  ⎿  2 files changed, 64 insertions, 9 deletions".into(),
         ));
         let text = render(&app, "demo-4");
-        assert!(text.contains("cart totals update live") && text.contains("Inbox 2"));
+        assert!(text.contains("cart totals update") && text.contains("Inbox 2"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -12950,7 +13095,7 @@ mod tests {
         app.on_input(b"/".to_vec()).await;
         app.on_input(b"fix the tests".to_vec()).await;
         let narrow = home_screen(&app, 80);
-        assert!(!narrow.iter().any(|r| r.contains('│')), "one pane");
+        assert_eq!(narrow[1].matches('╭').count(), 1, "one pane: {narrow:#?}");
         assert!(narrow[2].contains("› fix the tests"), "{narrow:#?}");
         assert!(
             narrow[3].contains("web · claude"),
