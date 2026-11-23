@@ -3632,7 +3632,7 @@ impl App {
         let t = self.settings.theme;
         let host = remote().map_or_else(valkyrie_proto::hostname, str::to_string);
         let running = self.sessions.iter().filter(|s| is_running(s)).count();
-        let clock = jiff::Zoned::now().strftime("%H:%M").to_string();
+        let clock = jiff::ZonedDateTime::now().strftime("%H:%M").to_string();
         [
             vec![format!(" {host} · {running} running · {clock} ").fg(t.muted)],
             vec![format!(" {running} running · {clock} ").fg(t.muted)],

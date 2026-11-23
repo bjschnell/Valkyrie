@@ -616,7 +616,7 @@ pub fn now_secs() -> u64 {
 fn date(at: u64) -> String {
     jiff::Timestamp::from_second(at as i64)
         .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y-%m-%d")
                 .to_string()
         })
