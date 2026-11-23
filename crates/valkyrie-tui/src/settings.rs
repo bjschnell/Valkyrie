@@ -79,8 +79,9 @@ pub struct Settings {
     /// Each tab is one row, its state's icon and its name, with no program or
     /// state word: the peek still has those.
     pub minimal_tabs: bool,
-    /// The bar under a session shows its keys. Tab mode, menus and renames show
-    /// theirs either way.
+    /// The bar under a session shows its keys. Off (the default), it shows one
+    /// chip that opens the key sheet. Tab mode, menus and renames show theirs
+    /// either way.
     pub hints: bool,
     /// Pings make a sound, `noise`; off is `none` in the panel. `noise` stays as
     /// it was, so `sound = on` brings it back.
@@ -144,7 +145,7 @@ impl Default for Settings {
             tabs: TabStyle::Underline,
             tab_side: TabSide::Top,
             minimal_tabs: false,
-            hints: true,
+            hints: false,
             sound: true,
             desktop: true,
             proposals: true,

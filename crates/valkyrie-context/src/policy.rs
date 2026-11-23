@@ -419,11 +419,21 @@ pub fn reason(ship: &Ship, state: &str, branch: &str) -> String {
         None => "Run the project's checks (format, lint, tests: what its CI runs).".to_owned(),
         Some((checks, _)) => format!("Run `{checks}`."),
     };
+    // Pushed with no pull request, the branch may be up only to run CI (#88):
+    // this block comes once per pushed head, so the agent can stand down.
+    let wait = match state {
+        "no-pr" => {
+            " If the work isn't finished (you pushed to run CI, or you're waiting on \
+             something), say so in a line and stop; you won't be asked again until you \
+             push."
+        }
+        _ => "",
+    };
     format!(
         "Valkyrie policy {names}, accepted by the user: work isn't done until it's \
          shipped to `{until}`. Branch `{branch}` {left}. {checks} If they pass, {steps}. \
-         If they fail and you can't fix them, stop and say why. Never merge, and never \
-         push to the default branch.",
+         If they fail and you can't fix them, stop and say why.{wait} Never merge, and \
+         never push to the default branch.",
         names = names(&ship.sources()),
         until = ship.until.0.as_str(),
         steps = ship.until.0.steps(),

@@ -90,7 +90,7 @@ pub fn create(dir: &Path, branch: &str, name: Option<&str>) -> Result<Made> {
         let (branch, path) = made.context("no free branch name")?;
         (branch, path, false)
     } else {
-        valid(&checkout, branch)?;
+        valid(branch)?;
         let path = place(branch);
         if path.exists() {
             bail!("{} already exists", path.display());
@@ -146,7 +146,7 @@ pub fn remove(
     if let Err(why) = take_whole(repo, path) {
         return (false, format!("kept {shown}: {why}"));
     }
-    let Some(branch) = branch.filter(|b| valid(repo, b).is_ok()) else {
+    let Some(branch) = branch.filter(|b| valid(b).is_ok()) else {
         return (true, format!("took away {shown}"));
     };
     // `-d` asks whether the branch is merged into its upstream or this `HEAD`, and
@@ -214,7 +214,7 @@ fn take_whole(repo: &Path, path: &Path) -> std::result::Result<(), String> {
 /// conversation by that path. `checkout` is any checkout of the repository. A
 /// branch only on the remote is checked out as git does by default, tracking it.
 pub(crate) fn regrow(checkout: &Path, path: &Path, branch: &str) -> Result<()> {
-    valid(checkout, branch)?;
+    valid(branch)?;
     if path.exists() {
         bail!("{} already exists", path.display());
     }
@@ -282,10 +282,13 @@ pub(crate) fn knows_branch(dir: &Path, branch: &str) -> bool {
 }
 
 /// Refuses what git couldn't name a branch, and what it would read as an option or
-/// expand (`-f`, `@{-1}`) rather than take as a name.
-pub(crate) fn valid(checkout: &Path, branch: &str) -> Result<()> {
+/// expand (`-f`, `@{-1}`) rather than take as a name. Asked outside any
+/// repository: the name alone decides, and a session's folder may be gone by
+/// now (backlog #278).
+pub(crate) fn valid(branch: &str) -> Result<()> {
     let reference = format!("refs/heads/{branch}");
-    if branch.starts_with('-') || git(checkout, &["check-ref-format", &reference]).is_err() {
+    let anywhere = std::env::temp_dir();
+    if branch.starts_with('-') || git(&anywhere, &["check-ref-format", &reference]).is_err() {
         bail!("{branch:?} is not a valid branch name");
     }
     Ok(())
@@ -649,7 +652,7 @@ pub fn branch_merged(repo: &Path, branch: &str) -> std::result::Result<String, S
     if !project::in_git(repo) {
         return Err(format!("{} is not a git repository", repo.display()));
     }
-    if valid(repo, branch).is_err() {
+    if valid(branch).is_err() {
         return Err(format!("{branch:?} is not a valid branch name"));
     }
     let named = named_tips(repo, true);
@@ -1010,6 +1013,16 @@ mod tests {
         git(&repo.main(), &["branch", "old-work"]).unwrap();
         let at = create(&repo.main(), "old-work", None).unwrap().start;
         assert_eq!(at, repo.0.join("app-old-work"));
+    }
+
+    /// The name alone decides: a session whose folder was deleted can still
+    /// name its branch (backlog #278).
+    #[test]
+    fn a_branch_name_is_judged_without_a_folder() {
+        assert!(valid("feat/276-tui-home-composer").is_ok());
+        for bad in ["bad..name", "-f", "@{-1}", "a b", ""] {
+            assert!(valid(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

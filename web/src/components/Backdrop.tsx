@@ -84,7 +84,8 @@ function PackLayer({ base, glyphs, onFail }: { base: string; glyphs: string | nu
     const fit = () => {
       const r = page.getBoundingClientRect();
       const pane = document.querySelector(".split-pane");
-      const open = pane && !pane.querySelector(".split-empty");
+      // The home pane (#275) shows through, like the rain behind it; a session or a card does not.
+      const open = pane && !pane.querySelector(".home-pane, .split-empty");
       const right = open ? r.right : innerWidth;
       Object.assign(el.style, { left: `${r.left}px`, top: "0px", width: `${right - r.left}px`, height: `${innerHeight}px` });
     };

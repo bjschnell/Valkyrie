@@ -14,7 +14,7 @@ valk wiki rm daemon         # delete a page
 From the apps:
 
 - **Web app:** the **Wiki** tab in **Memory** (`#/memory/wiki`). Pick a repository to see its pages, stale ones marked, and tap one to read it. **Map this repo** (or **Explore again**) and **Refresh N stale** start the agent. Each asks for a second tap, since it starts an agent, then opens the new session.
-- **TUI:** `W` on the home screen opens the wiki of the selected session's repository, or the one the TUI started in. `↩` reads a page. `e` maps the repository, `S` rewrites the stale pages, and each one waits for `↩` to confirm.
+- **TUI:** `W` on the home screen opens the wiki of the selected session's repository, or the one the TUI started in. `↩` reads a page, `/` searches the list. `s` maps the repository, `S` rewrites the stale pages, and each one waits for `↩` to confirm.
 
 Starting it again while the agent is still running opens that session instead of starting a second one.
 

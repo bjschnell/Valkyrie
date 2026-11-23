@@ -381,6 +381,7 @@ impl Registry {
             ReviewAction::Confirm
                 | ReviewAction::Retire
                 | ReviewAction::Restore
+                | ReviewAction::Reopen
                 | ReviewAction::Edit { .. }
         ) {
             self.stale
