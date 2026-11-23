@@ -59,7 +59,7 @@ pub fn file(key_given: &str, name: &str, rest: &str) -> Option<Vec<u8>> {
         return None;
     }
     let rel = Path::new(rest);
-    if rest.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+    if !servable(rest) || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
         return None;
     }
     let root = themes::dir().join(name).join("web").canonicalize().ok()?;
@@ -69,6 +69,16 @@ pub fn file(key_given: &str, name: &str, rest: &str) -> Option<Vec<u8>> {
         return None;
     }
     std::fs::read(path).ok()
+}
+
+/// What a module loads: scripts, data, styles, images and fonts. Never a page or
+/// an SVG, which would run in the app's origin if opened directly.
+pub fn servable(rest: &str) -> bool {
+    let ext = rest.rsplit_once('.').map_or("", |(_, e)| e);
+    matches!(
+        ext,
+        "js" | "mjs" | "json" | "css" | "png" | "webp" | "jpg" | "jpeg" | "gif" | "woff2" | "wasm"
+    )
 }
 
 /// The web app's CSS variables for `pack`: what its theme.toml names, derived as
@@ -141,13 +151,31 @@ fn vars(pack: &Pack) -> Option<BTreeMap<String, String>> {
         if let Some(var) = key.strip_prefix("web.")
             && !var.is_empty()
             && var.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            // A value can't close the rule it's set in.
-            && !value.contains(['{', '}', ';', '<'])
+            && css_value_safe(value)
         {
             out.insert(format!("--{var}"), value.clone());
         }
     }
     Some(out)
+}
+
+/// A value that stays inside its own declaration: none of `{ } ; < \\ " '`, no
+/// comment, and its brackets balanced, so one pack's slip can't swallow the next
+/// rule (the web app checks the same before writing them).
+fn css_value_safe(value: &str) -> bool {
+    if value.contains(['{', '}', ';', '<', '\\', '"', '\'']) || value.contains("/*") {
+        return false;
+    }
+    let mut stack = Vec::new();
+    for c in value.chars() {
+        match c {
+            '(' => stack.push(')'),
+            '[' => stack.push(']'),
+            ')' | ']' if stack.pop() != Some(c) => return false,
+            _ => {}
+        }
+    }
+    stack.is_empty()
 }
 
 fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
@@ -211,6 +239,32 @@ mod tests {
             "a value that escapes its rule is dropped"
         );
         assert!(!i.vars.keys().any(|k| k.contains('}')));
+    }
+
+    #[test]
+    fn a_value_stays_in_its_declaration() {
+        for bad in ["calc(1px", "x /* y", "a\\", "\"x\"", "a)(", "[x)"] {
+            assert!(!css_value_safe(bad), "{bad}");
+        }
+        for good in [
+            "#fff",
+            "0.85",
+            "calc((1px + 2px) * 3)",
+            "var(--mono)",
+            "180 107 255",
+        ] {
+            assert!(css_value_safe(good), "{good}");
+        }
+    }
+
+    #[test]
+    fn only_what_a_module_loads_is_served() {
+        for ok in ["index.js", "a/b.json", "x.webp", "f.woff2", "s.css"] {
+            assert!(servable(ok), "{ok}");
+        }
+        for no in ["page.html", "x.svg", "theme.toml", "noext"] {
+            assert!(!servable(no), "{no}");
+        }
     }
 
     #[test]

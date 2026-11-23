@@ -17,9 +17,25 @@ export interface Pack {
 /** What a pack may be called: safe in a CSS selector and a URL. */
 export const NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
+/**
+ * A value that stays inside its own declaration: none of `{ } ; < \ " '`, no
+ * comment, and its brackets balanced, so one pack's slip can't swallow the next rule.
+ */
+export function cssValueSafe(v: string): boolean {
+  if (/[{};<\\"']|\/\*/.test(v)) return false;
+  const open = "([";
+  const close = ")]";
+  const stack: string[] = [];
+  for (const c of v) {
+    if (open.includes(c)) stack.push(close[open.indexOf(c)]);
+    else if (close.includes(c) && stack.pop() !== c) return false;
+  }
+  return stack.length === 0;
+}
+
 /** The CSS for the packs' looks: one rule each, its variables as they came. */
 export function packCss(list: Pack[]): string {
-  const safe = (v: string) => !/[{};<]/.test(v);
+  const safe = cssValueSafe;
   return list
     .filter((p) => NAME.test(p.name))
     .map((p) => {

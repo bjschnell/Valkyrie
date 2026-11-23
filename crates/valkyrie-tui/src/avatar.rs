@@ -25,6 +25,8 @@ use crate::theme::{Rain, Theme};
 const BANDS: [&str; 5] = [".,:'`", ":;-~=", "=+x*o", "xo*%#", "#%&@8B"];
 /// How long gathering takes to show all of her.
 const GATHER_MS: u64 = 45_000;
+/// The longest a frame may hold, so a loop's length can't overflow.
+const MAX_FRAME_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mood {
@@ -134,7 +136,7 @@ impl Avatar {
         let blink: Vec<(String, u64)> = file
             .blink
             .into_iter()
-            .map(|b| (b.frame, b.ms.max(1)))
+            .map(|b| (b.frame, b.ms.clamp(1, MAX_FRAME_MS)))
             .collect();
         if blink.is_empty() {
             return Err("no blink frames".into());
@@ -186,6 +188,13 @@ pub fn of(theme: &Theme) -> Option<&'static Avatar> {
     ALL.get_or_init(|| {
         valkyrie_proto::themes::load()
             .into_iter()
+            // A pack named like a built-in isn't offered, so its avatar mustn't
+            // show on that built-in: those never react to state.
+            .filter(|pack| {
+                !crate::theme::THEMES
+                    .iter()
+                    .any(|t| t.name.eq_ignore_ascii_case(&pack.name))
+            })
             .filter_map(|pack| {
                 let json = std::fs::read_to_string(pack.dir.join("tui/avatar.json")).ok()?;
                 Avatar::parse(&json).ok().map(|a| (pack.name, a))
@@ -242,7 +251,7 @@ pub fn draw(
             continue;
         }
         for c in 0..size.cols {
-            let cell = frame[(r * size.cols + c) as usize];
+            let cell = frame[r as usize * size.cols as usize + c as usize];
             if cell.glyph == ' ' || cell.level == 0 {
                 continue;
             }
@@ -438,6 +447,20 @@ mod tests {
             Mood::Formed,
         );
         assert!(buf.content().iter().all(|c| c.symbol() == " "));
+    }
+
+    #[test]
+    fn huge_frame_times_are_held_in_bounds() {
+        let json = serde_json::json!({
+            "sizes": [{"rows": 1, "cols": 1, "frames": {"a": {"glyphs": ["-"], "levels": ["9"]}}}],
+            "blink": [{"frame": "a", "ms": u64::MAX}, {"frame": "a", "ms": u64::MAX}],
+        });
+        let avatar = Avatar::parse(&json.to_string()).unwrap();
+        assert!(
+            avatar
+                .frame(&avatar.sizes[0], Mood::Latent, u64::MAX)
+                .is_some()
+        );
     }
 
     #[test]

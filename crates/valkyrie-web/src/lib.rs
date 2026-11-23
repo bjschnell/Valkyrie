@@ -487,6 +487,11 @@ async fn theme_file(Path((key, name, rest)): Path<(String, String, String)>) -> 
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    // A subresource of the app; opened on its own, it may do nothing.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; sandbox"),
+    );
     response
 }
 
@@ -954,6 +959,9 @@ fn content_type(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "webp" => "image/webp",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "wasm" => "application/wasm",
         "ico" => "image/x-icon",
         "woff2" => "font/woff2",
         "txt" => "text/plain; charset=utf-8",

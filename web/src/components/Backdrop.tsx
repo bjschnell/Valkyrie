@@ -27,8 +27,10 @@ interface PackModule {
 /** Behind the page: a pack's module when its look has one, else the rain of a look with rain. */
 export function Backdrop({ look }: { look: Look }) {
   const pack = packOf(look);
-  const [failed, setFailed] = useState(false);
-  if (pack?.base && !failed) return <PackLayer key={look} base={pack.base} glyphs={pack.glyphs} onFail={() => setFailed(true)} />;
+  // The module that failed, by its URL: another pack's, or this one's under a new key, still gets tried.
+  const [failed, setFailed] = useState<string | null>(null);
+  const base = pack?.base;
+  if (base && base !== failed) return <PackLayer key={base} base={base} glyphs={pack.glyphs} onFail={() => setFailed(base)} />;
   return hasRain(look) ? <Rain key={look} glyphs={pack?.glyphs ?? undefined} /> : null;
 }
 
@@ -90,13 +92,18 @@ function PackLayer({ base, glyphs, onFail }: { base: string; glyphs: string | nu
       Object.assign(el.style, { left: `${r.left}px`, top: "0px", width: `${right - r.left}px`, height: `${innerHeight}px` });
     };
     // After the route's page has drawn.
-    const later = () => requestAnimationFrame(fit);
+    let frame = 0;
+    const later = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(fit);
+    };
     fit();
     const watch = new ResizeObserver(fit);
     watch.observe(page);
     window.addEventListener("resize", fit);
     window.addEventListener("hashchange", later);
     return () => {
+      cancelAnimationFrame(frame);
       watch.disconnect();
       window.removeEventListener("resize", fit);
       window.removeEventListener("hashchange", later);

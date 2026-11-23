@@ -17,6 +17,14 @@ describe("packCss", () => {
     expect(css).toBe(':root[data-theme="neon"] {\n  --ok: 1;\n}');
   });
 
+  it("keeps one pack's slip from swallowing the next rule", () => {
+    const css = packCss([
+      pack("neon", { "--a": "calc(1px", "--b": "x /* y", "--c": "a\\", "--d": '"x"', "--e": "calc((1px + 2px) * 3)" }),
+      pack("zed", { "--page": "#000" }),
+    ]);
+    expect(css).toBe(':root[data-theme="neon"] {\n  --e: calc((1px + 2px) * 3);\n}\n:root[data-theme="zed"] {\n  --page: #000;\n}');
+  });
+
   it("knows a pack's name", () => {
     expect(NAME.test("neon")).toBe(true);
     expect(NAME.test("my-look-2")).toBe(true);
