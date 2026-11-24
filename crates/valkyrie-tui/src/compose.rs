@@ -9,7 +9,7 @@ use crate::theme::Theme;
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use std::path::{Path, PathBuf};
-use valkyrie_proto::{AgentState, Item, ItemStatus, SessionId, SessionInfo};
+use valkyrie_proto::{AgentState, Item, ItemStatus, SessionId, SessionInfo, Size, SpawnSpec};
 
 /// What `shift-tab` steps through: an agent, and the model it runs (empty for
 /// the agent's own default).
@@ -30,8 +30,9 @@ pub(crate) struct Composer {
     pub(crate) typing: bool,
     /// The draft, kept when Esc hands the keys back. Lines are `\n`.
     pub(crate) text: String,
-    /// The repository tab picked; `None` is the guess (`Defaults`).
-    pub(crate) repo: Option<PathBuf>,
+    /// The repository tab picked, `Some(None)` for none; `None` is the guess
+    /// (`Defaults`).
+    pub(crate) repo: Option<Option<PathBuf>>,
     /// The agent shift-tab picked, an index into `AGENTS`; `None` is the guess.
     pub(crate) agent: Option<usize>,
     /// The `#` match under the cursor.
@@ -209,15 +210,17 @@ pub(crate) fn repos(known: &[PathBuf], items: &[Item]) -> Vec<PathBuf> {
     out
 }
 
-/// What ↩ starts with: the repository picked, else the one worked in last; the
-/// agent picked, else what that repository's last launch ran (decision #46),
-/// else Claude with its own default model.
+/// What ↩ starts with: the repository picked, else the one a one-line task
+/// names (several lines are named a line each in Start agents), else none
+/// (backlog #292); the agent picked, else what that repository's last launch
+/// ran (decision #46), else Claude with its own default model.
 pub(crate) fn defaults(c: &Composer, repos: &[PathBuf], items: &[Item]) -> Defaults {
-    let repo = c
-        .repo
-        .clone()
-        .filter(|r| repos.contains(r))
-        .or_else(|| repos.first().cloned());
+    let task = c.task();
+    let repo = match &c.repo {
+        Some(picked) => picked.clone().filter(|r| repos.contains(r)),
+        None if task.contains('\n') => None,
+        None => crate::batch::named_repo(task, repos),
+    };
     let (agent, model) = match c.agent {
         Some(i) => AGENTS[i % AGENTS.len()],
         None => last_launch(repo.as_deref(), items),
@@ -253,16 +256,33 @@ pub(crate) fn step_agent(d: &Defaults) -> usize {
     (at + 1) % AGENTS.len()
 }
 
-/// The repository after the one in use.
+/// The repository after the one in use: none comes after the last.
 pub(crate) fn step_repo(d: &Defaults, repos: &[PathBuf]) -> Option<PathBuf> {
-    if repos.is_empty() {
-        return None;
-    }
     let at = d
         .repo
         .as_ref()
         .and_then(|r| repos.iter().position(|p| p == r));
-    Some(repos[at.map_or(0, |i| (i + 1) % repos.len())].clone())
+    repos.get(at.map_or(0, |i| i + 1)).cloned()
+}
+
+/// The session ↩ starts: the agent in a worktree of its own of the repository,
+/// a shell in the repository itself, either in your home folder with no
+/// repository (backlog #292).
+pub(crate) fn spawn_spec(
+    d: &Defaults,
+    task: &str,
+    size: Size,
+    env: Vec<(String, Option<String>)>,
+) -> SpawnSpec {
+    SpawnSpec {
+        command: command(d, task),
+        worktree: (d.repo.is_some() && d.agent != "shell").then(String::new),
+        cwd: Some(d.repo.clone().unwrap_or_else(valkyrie_proto::home_dir)),
+        name: None,
+        size,
+        env,
+        hidden: false,
+    }
 }
 
 /// The command ↩ runs: the agent with its model and the task as its first
@@ -642,17 +662,62 @@ mod tests {
         let repos = vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")];
         let mut c = Composer::default();
         let d = defaults(&c, &repos, &[]);
-        assert_eq!(
-            (d.repo.as_deref(), d.agent, d.model),
-            (Some(Path::new("/r/a")), "claude", "")
-        );
-        c.repo = step_repo(&d, &repos);
+        assert_eq!((d.repo.as_deref(), d.agent, d.model), (None, "claude", ""));
+        c.repo = Some(step_repo(&d, &repos));
         c.agent = Some(step_agent(&d));
         let d = defaults(&c, &repos, &[]);
         assert_eq!(
             (d.repo.as_deref(), d.agent, d.model),
-            (Some(Path::new("/r/b")), "claude", "opus")
+            (Some(Path::new("/r/a")), "claude", "opus")
         );
-        assert_eq!(step_repo(&d, &repos), Some(PathBuf::from("/r/a")));
+        c.repo = Some(step_repo(&d, &repos));
+        let d = defaults(&c, &repos, &[]);
+        assert_eq!(d.repo.as_deref(), Some(Path::new("/r/b")));
+        assert_eq!(step_repo(&d, &repos), None, "then no repository again");
+    }
+
+    // Backlog #292: a task that names no repository starts in none.
+    #[test]
+    fn a_task_starts_in_a_repository_only_when_named_or_picked() {
+        let repos = vec![PathBuf::from("/r/api"), PathBuf::from("/r/web")];
+        let mut c = typing();
+        c.text = "write a haiku".into();
+        assert_eq!(defaults(&c, &repos, &[]).repo, None, "nothing named");
+        c.text = "fix the web badge".into();
+        assert_eq!(
+            defaults(&c, &repos, &[]).repo.as_deref(),
+            Some(Path::new("/r/web")),
+            "named in the task"
+        );
+        c.repo = Some(None);
+        assert_eq!(defaults(&c, &repos, &[]).repo, None, "none picked");
+        c.repo = Some(Some("/r/api".into()));
+        assert_eq!(
+            defaults(&c, &repos, &[]).repo.as_deref(),
+            Some(Path::new("/r/api")),
+            "picked"
+        );
+    }
+
+    #[test]
+    fn no_repository_starts_at_home_without_a_worktree() {
+        let d = |repo: Option<&str>, agent| Defaults {
+            repo: repo.map(PathBuf::from),
+            agent,
+            model: "",
+        };
+        let size = Size { cols: 80, rows: 24 };
+        let s = spawn_spec(&d(None, "claude"), "hi", size, Vec::new());
+        assert_eq!(
+            (s.cwd, s.worktree),
+            (Some(valkyrie_proto::home_dir()), None)
+        );
+        let s = spawn_spec(&d(Some("/r/api"), "claude"), "hi", size, Vec::new());
+        assert_eq!(
+            (s.cwd, s.worktree),
+            (Some(PathBuf::from("/r/api")), Some(String::new()))
+        );
+        let s = spawn_spec(&d(Some("/r/api"), "shell"), "", size, Vec::new());
+        assert_eq!(s.worktree, None, "a shell starts in the repository itself");
     }
 }

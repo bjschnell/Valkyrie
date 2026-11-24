@@ -41,11 +41,12 @@ const ctx = (over: Partial<Context> = {}): Context => ({
 });
 
 describe("rowsFrom", () => {
-  it("gives each line the repo it names, else the last one used", () => {
+  // Backlog #292: a line that names no repo starts in none, and may.
+  it("gives each line the repo it names, else none", () => {
     const rows = rowsFrom("Fix the refill test in api\n\nRelease notes\n", ctx());
-    expect(rows.map((r) => [r.task, r.repo, r.item])).toEqual([
-      ["Fix the refill test in api", "/r/api", null],
-      ["Release notes", "/r/web", null],
+    expect(rows.map((r) => [r.task, r.repo, r.item, r.why])).toEqual([
+      ["Fix the refill test in api", "/r/api", null, null],
+      ["Release notes", null, null, null],
     ]);
   });
 
@@ -66,8 +67,8 @@ describe("rowsFrom", () => {
     expect(rows.map((r) => r.why)).toEqual(["after api#1", "has a session"]);
   });
 
-  it("has no repo to start in when none is known", () => {
-    expect(rowsFrom("anything", ctx({ repos: [], last: null }))[0].why).toBe("no repo");
+  it("starts without a repo when none is known", () => {
+    expect(rowsFrom("anything", ctx({ repos: [], last: null }))[0]).toMatchObject({ repo: null, why: null });
   });
 });
 

@@ -16,7 +16,7 @@ import {
 } from "../lib/compose";
 import { repoChoices } from "../lib/repos";
 import { age } from "../lib/time";
-import { addItem, launchItem, spawn, supervisorLog, supervisorWatch, toast, useApp } from "../store";
+import { addItem, launchItem, startTask, supervisorLog, supervisorWatch, toast, useApp } from "../store";
 import { useCached } from "../cache";
 import { useRepos } from "./Repos";
 import { MAC } from "./Terminal";
@@ -56,7 +56,7 @@ export function setComposerDraft(text: string): void {
   window.dispatchEvent(new CustomEvent(DRAFT_EVENT, { detail: text }));
 }
 
-/** The repo started in last, and what each repo last ran from here (decision #46). */
+/** The repo started in last (what a bare `#7` prefers), and what each repo last ran from here (decision #46). */
 export const lastRepo = () => read<string | null>(REPO_KEY, null);
 export const rememberedRan = () => read<Record<string, Ran>>(RAN_KEY, {});
 
@@ -87,7 +87,8 @@ export function useOffered(): Set<number> {
 /**
  * The home composer (backlog #275): what the Inbox shows when nothing is picked.
  * One box, never focused until asked (`n`, `/`, a click), so the Inbox's keys stay
- * yours. A line and Enter starts a session in its own worktree; ⌘/Ctrl+Enter
+ * yours. A line and Enter starts a session, in its own worktree when it has a
+ * repo (named in the line or picked; none otherwise, backlog #292); ⌘/Ctrl+Enter
  * files it to the backlog; `#` finds an item; several lines go to Start agents.
  * `phone` is the slim one pinned over the tab bar.
  */
@@ -100,7 +101,8 @@ export function Composer({ phone = false }: { phone?: boolean }) {
   const repos = useMemo(() => (list?.repos ?? []).map((r) => r.path), [list]);
 
   const [text, setText] = useState(() => read<string>(DRAFT_KEY, ""));
-  // A repo or agent picked on the chips holds until the box is cleared.
+  // A repo or agent picked on the chips holds until the box is cleared; a repo
+  // picked as "" is none.
   const [pickedRepo, setPickedRepo] = useState<string | null>(null);
   const [pickedRan, setPickedRan] = useState<Ran | null>(null);
   const [busy, setBusy] = useState(false);
@@ -128,7 +130,7 @@ export function Composer({ phone = false }: { phone?: boolean }) {
   }, [text, phone]);
 
   const what = intent(text);
-  const repo = pickedRepo ?? guessRepo(what.kind === "task" ? what.text : text, repos, lastRepo());
+  const repo = pickedRepo === null ? guessRepo(what.kind === "task" ? what.text : text, repos) : pickedRepo || null;
   const ran = pickedRan ?? lastRan(repo, rememberedRan(), items, sessions);
   const found: Found[] = what.kind === "find" ? findItems(what.query, items, sessions, boot) : [];
   useEffect(() => setHi(0), [what.kind === "find" ? what.query : null]);
@@ -150,10 +152,10 @@ export function Composer({ phone = false }: { phone?: boolean }) {
 
   const start = () =>
     run(async () => {
-      if (what.kind !== "task" || !repo) return;
+      if (what.kind !== "task") return;
       try {
-        const id = await spawn(command(ran, what.text), repo, slug(what.text), "");
-        rememberStart(repo, ran);
+        const id = await startTask(command(ran, what.text), repo, slug(what.text));
+        if (repo) rememberStart(repo, ran);
         done();
         navigator.vibrate?.(10);
         location.hash = `#/s/${id}`;
@@ -223,7 +225,7 @@ export function Composer({ phone = false }: { phone?: boolean }) {
   };
 
   const offline = status !== "open";
-  const canStart = !busy && !offline && ((what.kind === "task" && !!repo) || what.kind === "batch");
+  const canStart = !busy && !offline && (what.kind === "task" || what.kind === "batch");
   const primary = what.kind === "batch" ? `Review and start ${what.lines.length}` : "Start";
   const go = () => (what.kind === "batch" ? batch() : void start());
   const mod = MAC ? "⌘" : "Ctrl";
@@ -339,6 +341,7 @@ function Arrow() {
   );
 }
 
+/** The repo a task starts in; `onPick` gets "" for none. */
 export function RepoChip({ repo, list, onPick }: { repo: string | null; list: ReturnType<typeof useRepos>["list"]; onPick: (r: string) => void }) {
   const choices = repoChoices(list, repo);
   if (choices.length === 0) return <span className="composer-chip none">no repo</span>;
@@ -346,13 +349,14 @@ export function RepoChip({ repo, list, onPick }: { repo: string | null; list: Re
     <label className="composer-chip">
       <span className="sr-only">Repository</span>
       <select value={repo ?? ""} onChange={(e) => onPick(e.target.value)}>
+        <option value="">no repo</option>
         {choices.map((c) => (
           <option key={c.repo} value={c.repo}>
             {c.label}
           </option>
         ))}
       </select>
-      <span aria-hidden="true">{repo ? base(repo) : "repo"} ▾</span>
+      <span aria-hidden="true">{repo ? base(repo) : "no repo"} ▾</span>
     </label>
   );
 }

@@ -4,7 +4,7 @@ import { base, itemRef } from "../lib/backlog";
 import { draft, itemRow, lines, pickable, rowsFrom, spoken, summary, taskRow, type Context, type Row } from "../lib/batch";
 import { command, lastRan, slug, type Found, type Ran } from "../lib/compose";
 import { canDictate, dictate, type Dictation } from "../lib/dictation";
-import { launchItem, spawn, toast, useApp } from "../store";
+import { launchItem, startTask, toast, useApp } from "../store";
 import type { Item } from "../proto";
 import { AgentChip, composerDraft, lastRepo, RepoChip, rememberedRan, rememberStart, setComposerDraft, useOffered } from "./Composer";
 import { useRepos } from "./Repos";
@@ -111,7 +111,10 @@ export function StartAgents() {
 
   const change = (key: number, f: (r: Row) => Row) => setRows((rs) => rs.map((r) => (r.key === key ? { ...f(r), failed: null } : r)));
   // Another repo runs what it last ran, as a fresh line there would.
-  const onRepo = (key: number, repo: string) => change(key, (r) => ({ ...r, repo, why: null, ran: lastRan(repo, ctx.remembered, items, sessions) }));
+  const onRepo = (key: number, picked: string) => {
+    const repo = picked || null;
+    change(key, (r) => ({ ...r, repo, why: null, ran: lastRan(repo, ctx.remembered, items, sessions) }));
+  };
   const drop = (key: number) => setRows((rs) => rs.filter((r) => r.key !== key));
   const toggle = (f: Found) => {
     if (f.pick === "blocked") return;
@@ -126,14 +129,14 @@ export function StartAgents() {
     const stay: Row[] = [];
     let n = 0;
     for (const r of rows) {
-      if (r.why || !r.repo) {
+      if (r.why) {
         stay.push(r);
         continue;
       }
       try {
         if (r.item !== null) await launchItem(r.item, r.ran.agent, true, r.ran.model ?? "");
-        else await spawn(command(r.ran, r.task), r.repo, slug(r.task), "");
-        rememberStart(r.repo, r.ran);
+        else await startTask(command(r.ran, r.task), r.repo, slug(r.task));
+        if (r.repo) rememberStart(r.repo, r.ran);
         n++;
       } catch (e) {
         stay.push({ ...r, failed: (e as Error).message });
@@ -347,7 +350,7 @@ export function StartAgents() {
             </div>
             {wide && (
               <p className="start-note">
-                The repo comes from words in the line and the last one you used; the agent from what that repo last ran. Each task gets its own branch and worktree. A line can be a backlog number, like <code>web#7</code>.
+                The repo comes from words in the line, else there's none; the agent from what that repo last ran. A task in a repo gets its own branch and worktree; one with no repo starts in your home folder. A line can be a backlog number, like <code>web#7</code>.
               </p>
             )}
             {!wide && (
