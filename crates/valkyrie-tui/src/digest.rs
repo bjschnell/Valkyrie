@@ -143,6 +143,8 @@ pub(crate) struct Page {
     typing: bool,
     /// A resume asked for and not answered yet: keys wait.
     pub(crate) resuming: bool,
+    /// Where the rows were drawn, for a click (backlog #281).
+    pub(crate) hits: crate::RowHits,
 }
 
 impl Page {
@@ -593,6 +595,7 @@ impl Page {
         // Nearly the whole screen, like the backlog page.
         let rect = crate::section_rect(area);
         frame.render_widget(Clear, rect);
+        self.hits.clear();
 
         let hint = |k: &'static str, w: &'static str| [k.fg(t.accent).bold(), w.fg(t.muted)];
         let first = match self.selected() {
@@ -695,6 +698,7 @@ impl Page {
         let mut lines: Vec<Line> = Vec::new();
         let mut at = 0;
         let mut i = 0;
+        let mut clickable = Vec::new();
         for row in &self.rows {
             match row {
                 Row::Day(day, n) => {
@@ -715,12 +719,16 @@ impl Page {
                             .lift_faint(line)
                             .style(style::Style::new().bg(t.selection));
                     }
+                    clickable.push((lines.len(), i as isize - self.cursor as isize));
                     lines.push(line);
                     i += 1;
                 }
             }
         }
         let skip = (at + 1).saturating_sub(list_area.height as usize);
+        if !self.typing {
+            self.hits.record(list_area, skip, &clickable);
+        }
         frame.render_widget(
             Paragraph::new(lines).scroll((skip.min(u16::MAX as usize) as u16, 0)),
             list_area,
@@ -778,9 +786,9 @@ fn repo_of(project: &std::path::Path) -> String {
     )
 }
 
-fn zoned(ms: u64, tz: &TimeZone) -> Option<jiff::Zoned> {
+fn zoned(ms: u64, tz: &TimeZone) -> Option<jiff::ZonedDateTime> {
     let ts = jiff::Timestamp::from_millisecond(i64::try_from(ms).ok()?).ok()?;
-    Some(ts.to_zoned(tz.clone()))
+    Some(ts.to_zoned_datetime(tz.clone()))
 }
 
 /// `40 min`, `9 h`, `2 days`.
@@ -803,7 +811,7 @@ fn day_label(ms: u64, tz: &TimeZone) -> String {
     let Some(z) = zoned(ms, tz) else {
         return "Unknown day".into();
     };
-    let today = jiff::Zoned::now().with_time_zone(tz.clone()).date();
+    let today = jiff::ZonedDateTime::now().with_time_zone(tz.clone()).date();
     match today.since(z.date()).map(|s| s.get_days()) {
         Ok(0) => "Today".into(),
         Ok(1) => "Yesterday".into(),

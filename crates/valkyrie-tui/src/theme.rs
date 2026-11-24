@@ -70,7 +70,7 @@ pub const DRACULA: Theme = Theme {
     selection: hex(0x44475a),
     border: hex(0x44475a),
     fg: hex(0xf8f8f2),
-    muted: hex(0x6272a4),
+    muted: hex(0x8490b5),
     accent: hex(0xbd93f9),
     needs: hex(0xf1fa8c),
     blocked: hex(0xff5555),
@@ -107,7 +107,7 @@ pub const CYBERPUNK: Theme = Theme {
     selection: hex(0x2b1748),
     border: hex(0x3a2a66),
     fg: hex(0xe6e9ff),
-    muted: hex(0x6a6f9e),
+    muted: hex(0x777ca8),
     accent: hex(0xff2a6d),
     needs: hex(0xf9f002),
     blocked: hex(0xff003c),
@@ -148,7 +148,7 @@ pub const BLACKOUT: Theme = Theme {
     selection: hex(0x221a2c),
     border: hex(0x2c2833),
     fg: hex(0xf0eef5),
-    muted: hex(0x6f6a7d),
+    muted: hex(0x7b7789),
     accent: hex(0xc9a7ff),
     needs: hex(0xfff3a0),
     blocked: hex(0xff8a9e),
@@ -185,7 +185,7 @@ pub const CATPPUCCIN: Theme = Theme {
     selection: hex(0x45475a),
     border: hex(0x45475a),
     fg: hex(0xcdd6f4),
-    muted: hex(0x7f849c),
+    muted: hex(0x9ba1bb),
     accent: hex(0xcba6f7),
     needs: hex(0xf9e2af),
     blocked: hex(0xf38ba8),
@@ -222,7 +222,7 @@ pub const NORD: Theme = Theme {
     selection: hex(0x434c5e),
     border: hex(0x4c566a),
     fg: hex(0xeceff4),
-    muted: hex(0x7b88a1),
+    muted: hex(0x919cb1),
     accent: hex(0x88c0d0),
     needs: hex(0xebcb8b),
     blocked: hex(0xbf616a),
@@ -259,7 +259,7 @@ pub const GRUVBOX: Theme = Theme {
     selection: hex(0x3c3836),
     border: hex(0x504945),
     fg: hex(0xebdbb2),
-    muted: hex(0x928374),
+    muted: hex(0x9b8c7a),
     accent: hex(0xfe8019),
     needs: hex(0xfabd2f),
     blocked: hex(0xfb4934),
@@ -296,7 +296,7 @@ pub const TOKYONIGHT: Theme = Theme {
     selection: hex(0x283457),
     border: hex(0x3b4261),
     fg: hex(0xc0caf5),
-    muted: hex(0x737aa2),
+    muted: hex(0x7a82aa),
     accent: hex(0x7aa2f7),
     needs: hex(0xe0af68),
     blocked: hex(0xf7768e),
@@ -459,7 +459,7 @@ pub const NETRUNNER: Theme = Theme {
     selection: hex(0x1f0a2e),
     border: hex(0x2a2a3d),
     fg: hex(0xf4f4fa),
-    muted: hex(0x6e6e88),
+    muted: hex(0x76768e),
     accent: hex(0x00f0ff),
     needs: hex(0xfff700),
     blocked: hex(0xff1e3c),
@@ -499,8 +499,8 @@ pub const SOLARIZED: Theme = Theme {
     card: hex(0x073642),
     selection: hex(0x0b4552),
     border: hex(0x18505e),
-    fg: hex(0x93a1a1),
-    muted: hex(0x657b83),
+    fg: hex(0xeee8d5),
+    muted: hex(0x809093),
     accent: hex(0x268bd2),
     needs: hex(0xb58900),
     blocked: hex(0xdc322f),
@@ -536,8 +536,8 @@ pub const ONEDARK: Theme = Theme {
     card: hex(0x2c313a),
     selection: hex(0x3e4451),
     border: hex(0x4b5263),
-    fg: hex(0xabb2bf),
-    muted: hex(0x5c6370),
+    fg: hex(0xdcdfe4),
+    muted: hex(0x8d939d),
     accent: hex(0x61afef),
     needs: hex(0xe5c07b),
     blocked: hex(0xe06c75),
@@ -574,7 +574,7 @@ pub const ROSEPINE: Theme = Theme {
     selection: hex(0x403d52),
     border: hex(0x524f67),
     fg: hex(0xe0def4),
-    muted: hex(0x6e6a86),
+    muted: hex(0x88849f),
     accent: hex(0xc4a7e7),
     needs: hex(0xf6c177),
     blocked: hex(0xeb6f92),
@@ -611,7 +611,7 @@ pub const MONOKAI: Theme = Theme {
     selection: hex(0x49483e),
     border: hex(0x5b5a4d),
     fg: hex(0xf8f8f2),
-    muted: hex(0x75715e),
+    muted: hex(0x918e7e),
     accent: hex(0x66d9ef),
     needs: hex(0xe6db74),
     blocked: hex(0xf92672),
@@ -647,8 +647,8 @@ pub const SOLARIZEDLIGHT: Theme = Theme {
     card: hex(0xf5eedb),
     selection: hex(0xe4ddc6),
     border: hex(0xd3cbb7),
-    fg: hex(0x586e75),
-    muted: hex(0x93a1a1),
+    fg: hex(0x073642),
+    muted: hex(0x4f6d73),
     accent: hex(0x268bd2),
     needs: hex(0xb58900),
     blocked: hex(0xdc322f),
@@ -684,8 +684,8 @@ pub const CATPPUCCINLATTE: Theme = Theme {
     card: hex(0xdce0e8),
     selection: hex(0xbcc0cc),
     border: hex(0xacb0be),
-    fg: hex(0x4c4f69),
-    muted: hex(0x7c7f93),
+    fg: hex(0x1e2030),
+    muted: hex(0x55586a),
     accent: hex(0x8839ef),
     needs: hex(0xdf8e1d),
     blocked: hex(0xd20f39),
@@ -722,7 +722,7 @@ pub const GRUVBOXLIGHT: Theme = Theme {
     selection: hex(0xd5c4a1),
     border: hex(0xbdae93),
     fg: hex(0x3c3836),
-    muted: hex(0x7c6f64),
+    muted: hex(0x6a5f57),
     accent: hex(0xaf3a03),
     needs: hex(0xb57614),
     blocked: hex(0x9d0006),
@@ -787,6 +787,17 @@ impl Theme {
         mix(self.fg, self.muted, 0.3)
     }
 
+    /// A recessed well on `surface`, like the session preview's screen: the strip's
+    /// darker shade, or the lifted panel where the strip is the surface itself (the
+    /// pure black themes, whose page can't go any darker).
+    pub fn recessed(&self, surface: Color) -> Color {
+        if self.strip != surface {
+            self.strip
+        } else {
+            self.panel
+        }
+    }
+
     /// The muted text level, between secondary and faint: group labels, hint
     /// labels.
     pub fn dim(&self) -> Color {
@@ -848,14 +859,24 @@ impl Theme {
         let fg = color("fg")?;
         let accent = color("accent")?;
         let or = |key: &str, default: Color| color(key).unwrap_or(default);
-        let muted = or("muted", mix(fg, bg, 0.55));
+        let panel = or("panel", mix(bg, fg, 0.04));
+        let strip = or("strip", mix(bg, Color::Rgb(0, 0, 0), 0.4));
+        let selection = or("selection", mix(bg, accent, 0.25));
+        // Faint text carries ages, ids and hints everywhere: a pack's, given or
+        // not, is lifted until it reads.
+        let muted = readable(
+            or("muted", mix(fg, bg, 0.55)),
+            fg,
+            [bg, panel, strip],
+            selection,
+        );
         let border = or("border", mix(bg, fg, 0.2));
         let needs = or("needs", DRACULA.needs);
         let blocked = or("blocked", DRACULA.blocked);
         let done = or("done", DRACULA.done);
         let working = or("working", accent);
         let base = [
-            or("panel", mix(bg, fg, 0.04)),
+            panel,
             blocked,
             done,
             needs,
@@ -905,10 +926,10 @@ impl Theme {
         Some(Theme {
             name: leak(pack.name.clone()),
             bg,
-            panel: or("panel", mix(bg, fg, 0.04)),
-            strip: or("strip", mix(bg, Color::Rgb(0, 0, 0), 0.4)),
+            panel,
+            strip,
             card: or("card", mix(bg, fg, 0.08)),
-            selection: or("selection", mix(bg, accent, 0.25)),
+            selection,
             border,
             fg,
             muted,
@@ -983,6 +1004,45 @@ pub fn state_word(state: AgentState) -> &'static str {
 }
 
 /// `a` blended toward `b` by `t` (0 is `a`, 1 is `b`). Named colors stay `a`.
+/// WCAG's contrast ratio between two colors, 1 to 21; small text wants 4.5.
+/// Colors that aren't RGB count as passing, since the terminal picks them.
+pub fn contrast(a: Color, b: Color) -> f32 {
+    fn luminance(c: Color) -> Option<f32> {
+        let Color::Rgb(r, g, b) = c else {
+            return None;
+        };
+        let lin = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        Some(0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b))
+    }
+    match (luminance(a), luminance(b)) {
+        (Some(a), Some(b)) => (a.max(b) + 0.05) / (a.min(b) + 0.05),
+        _ => 21.0,
+    }
+}
+
+/// The contrast small text needs (WCAG AA).
+pub const READABLE: f32 = 4.5;
+
+/// `muted` moved toward `fg`, a percent at a time, until faint text reads at
+/// `READABLE` on the page, the panel and the strip, and the selected row's lifted
+/// faint (`dim`) reads on the selection. `fg` itself when nothing short of it does.
+fn readable(muted: Color, fg: Color, surfaces: [Color; 3], selection: Color) -> Color {
+    (0..=100)
+        .map(|i| mix(muted, fg, i as f32 / 100.0))
+        .find(|&c| {
+            surfaces.iter().all(|&s| contrast(c, s) >= READABLE)
+                && contrast(mix(fg, c, 0.6), selection) >= READABLE
+        })
+        .unwrap_or(fg)
+}
+
 fn mix(a: Color, b: Color, t: f32) -> Color {
     match (a, b) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(
@@ -1091,6 +1151,46 @@ mod tests {
             assert_eq!(lifted.spans[1].style.fg, Some(t.fg));
             assert_ne!(t.dim(), t.muted, "{}: muted sits above faint", t.name);
         }
+    }
+
+    /// Faint text (ages, ids, repos, hints) reads at 4.5:1 on every surface it
+    /// sits on, and lifted on a selected row, in every theme; and it stays a step
+    /// below the main text.
+    #[test]
+    fn every_theme_keeps_faint_text_readable() {
+        for t in THEMES {
+            for (on, bg) in [("bg", t.bg), ("panel", t.panel), ("strip", t.strip)] {
+                for (what, c) in [("fg", t.fg), ("muted", t.muted)] {
+                    let r = contrast(c, bg);
+                    assert!(r >= READABLE, "{}: {what} on {on} is {r:.2}:1", t.name);
+                }
+            }
+            let r = contrast(t.dim(), t.selection);
+            assert!(r >= READABLE, "{}: dim on selection is {r:.2}:1", t.name);
+            let step = contrast(t.fg, t.bg) / contrast(t.muted, t.bg);
+            assert!(step >= 1.5, "{}: fg is only {step:.2}x faint", t.name);
+            assert_eq!(
+                readable(t.muted, t.fg, [t.bg, t.panel, t.strip], t.selection),
+                t.muted
+            );
+        }
+    }
+
+    #[test]
+    fn a_packs_faint_color_is_lifted_until_it_reads() {
+        let t = Theme::from_pack(&pack(&[
+            ("bg", "#101010"),
+            ("fg", "#f0f0f0"),
+            ("accent", "#b46bff"),
+            ("muted", "#303030"),
+        ]))
+        .unwrap();
+        assert_ne!(t.muted, hex(0x303030));
+        assert_ne!(t.muted, t.fg);
+        for bg in [t.bg, t.panel, t.strip] {
+            assert!(contrast(t.muted, bg) >= READABLE);
+        }
+        assert!((contrast(hex(0x000000), hex(0xffffff)) - 21.0).abs() < 0.01);
     }
 
     #[test]

@@ -267,7 +267,11 @@ fn link_runs(links: &[markdown::Link]) -> Vec<std::ops::Range<usize>> {
 fn when(created: &str, tz: &TimeZone) -> String {
     created
         .parse::<jiff::Timestamp>()
-        .map(|ts| ts.to_zoned(tz.clone()).strftime("%b %-d %H:%M").to_string())
+        .map(|ts| {
+            ts.to_zoned_datetime(tz.clone())
+                .strftime("%b %-d %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|_| created.to_string())
 }
 

@@ -276,7 +276,7 @@ export function StartAgents() {
     <section className="start-picks" aria-label="Ready in the backlog">
       <div className="start-picks-head">
         <h3>Ready in the backlog</h3>
-        <span>build order</span>
+        <span>next first</span>
       </div>
       {left.length === 0 && <p className="start-none">{picks.length ? "All of them are in the list" : "Nothing ready"}</p>}
       {left.map((f) => (

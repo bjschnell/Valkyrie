@@ -66,6 +66,13 @@
   --radius-lg: 16px;
   --radius-xl: 20px;
   --radius-full: 999px;
+  /* One ring for keyboard focus and the j/k pick (#199): the same width and
+     color everywhere, so a picked row and a focused button read as one idea. */
+  --focus-ring-color: var(--accent);
+  --focus-ring: 2px solid var(--focus-ring-color);
+  --focus-ring-offset: 2px;
+  /* Inside the box, for rows and cards a scrolling list would clip. */
+  --focus-ring-inset: -2px;
   --space-05: 2px;
   --space-1: 4px;
   --space-15: 6px;
@@ -82,7 +89,13 @@
   --shadow-1: 0 6px 20px rgb(0 0 0 / 25%);
   --shadow-2: 0 10px 30px rgb(0 0 0 / 40%);
   --shadow-3: 0 14px 40px rgb(0 0 0 / 45%);
+  /* One motion scale (#198). Fast is press feedback, base is entrances and state
+     colour, slow is something travelling across the screen (a swipe settling, a
+     card gliding). One curve for all of it; only ambient loops keep their own. */
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 100ms;
+  --dur-base: 160ms;
+  --dur-slow: 240ms;
   /* Six steps (#250), sentence case, no uppercase tracked labels. Words a person
      reads are sans; anything a machine made (ids, branches, ages, paths) is mono. */
   --type-title: var(--weight-bold) 28px/1.2 var(--font);
@@ -539,8 +552,8 @@ h1[tabindex="-1"]:focus {
   background: var(--card);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-1);
-  transition: transform 0.22s var(--ease-out);
-  animation: rise 0.28s ease-out;
+  transition: transform var(--dur-slow) var(--ease-out);
+  animation: rise var(--dur-base) var(--ease-out);
   overflow: hidden;
   touch-action: pan-y;
 }
@@ -673,7 +686,9 @@ h1[tabindex="-1"]:focus {
   text-align: left;
   font-size: var(--text-md);
   font-weight: var(--weight-medium);
-  transition: transform 0.08s ease, background 0.15s ease;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
 }
 
 .choice:active {
@@ -691,7 +706,7 @@ h1[tabindex="-1"]:focus {
 }
 
 .choice.selected {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -699,12 +714,12 @@ h1[tabindex="-1"]:focus {
    rest dim, and none take another tap until it goes through or doesn't. */
 .choices.answering .choice {
   opacity: 0.45;
-  transition: opacity 0.12s ease;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 
 .choices.answering .choice.sent {
   opacity: 1;
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -763,7 +778,7 @@ h1[tabindex="-1"]:focus {
   position: relative;
   background: var(--surface);
   touch-action: pan-y;
-  transition: transform 0.2s ease;
+  transition: transform var(--dur-slow) var(--ease-out);
 }
 
 .row-slot > .row:active {
@@ -788,7 +803,7 @@ h1[tabindex="-1"]:focus {
    has slid back over it. */
 .row-slot:not(:has(> .row.dragging)) > .row-close[aria-hidden="true"] {
   visibility: hidden;
-  transition: visibility 0s linear 0.2s;
+  transition: visibility 0s linear var(--dur-slow);
 }
 
 .row:active {
@@ -1278,7 +1293,7 @@ html.with-tabs .offline-banner {
 }
 
 .composer textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .send {
@@ -1290,7 +1305,9 @@ html.with-tabs .offline-banner {
   border-radius: 50%;
   background: var(--accent);
   color: var(--page);
-  transition: opacity 0.15s ease, transform 0.08s ease;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 
 .send:disabled {
@@ -1357,7 +1374,7 @@ html.with-tabs .offline-banner {
   background: var(--card);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-3);
-  animation: rise 0.16s ease-out;
+  animation: rise var(--dur-base) var(--ease-out);
 }
 
 .menu button {
@@ -1458,7 +1475,7 @@ html.with-tabs .offline-banner {
 }
 
 .pair-paste input:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .pair-note {
@@ -1483,7 +1500,9 @@ html.with-tabs .offline-banner {
   transform: translate(-50%, -12px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
 }
 
 .toast.show {
@@ -1513,8 +1532,10 @@ html.with-tabs .offline-banner {
   white-space: nowrap;
 }
 
-.toast-text:hover {
-  text-decoration: underline;
+@media (hover: hover) {
+  .toast-text:hover {
+    text-decoration: underline;
+  }
 }
 
 .toast-action {
@@ -1579,9 +1600,9 @@ html.with-tabs .offline-banner {
 }
 
 /* One primary button per view (#250): the view's own. In an item of a list
-   (a queue card, a proposal, a build order) the main answer is tinted, not
+   (a queue card, a proposal, a ready item) the main answer is tinted, not
    filled, so a list of ten doesn't shout ten times. */
-:is(.card, .order-card, .supervisor-card) .primary {
+:is(.card, .supervisor-card) .primary {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
@@ -1650,7 +1671,7 @@ html.with-tabs .offline-banner {
   border-radius: var(--radius);
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--card)), var(--card) 70%);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
-  animation: rise 0.28s ease-out;
+  animation: rise var(--dur-base) var(--ease-out);
 }
 
 .hint-icon {
@@ -1881,7 +1902,7 @@ html.with-tabs .offline-banner {
 .tool-group-head svg {
   flex: none;
   color: var(--muted);
-  transition: transform 0.15s;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .tool-group.open > .tool-group-head svg {
@@ -2044,10 +2065,13 @@ html.with-tabs .offline-banner {
 
 /* Keyboard selection in the inbox ------------------------------------------- */
 
+/* The j/k pick and keyboard focus are the same ring (#199), drawn inside the
+   row or card so the list's edge doesn't clip it. */
 .card-slot.picked > .card,
-.row.picked {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+.row.picked,
+:is(.row, .card):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-inset);
 }
 
 .chat-done {
@@ -2194,7 +2218,7 @@ html.with-tabs .offline-banner {
 
 .field input:focus,
 .field textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .check-row {
@@ -2408,7 +2432,7 @@ html.with-tabs .offline-banner {
 .file-head svg {
   flex: none;
   color: var(--muted);
-  transition: transform 0.15s;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .file-card.open > .file-head svg {
@@ -2662,8 +2686,10 @@ html.with-tabs .offline-banner {
   white-space: nowrap;
 }
 
-.seg-item:hover {
-  color: var(--fg);
+@media (hover: hover) {
+  .seg-item:hover {
+    color: var(--fg);
+  }
 }
 
 .seg-item.on {
@@ -3611,7 +3637,7 @@ html.with-tabs .offline-banner {
 .section-toggle::after {
   content: "▸";
   margin-left: auto;
-  transition: transform 0.15s;
+  transition: transform var(--dur-base) var(--ease-out);
 }
 
 .section-toggle[aria-expanded="true"]::after {
@@ -3884,144 +3910,12 @@ html.with-tabs .offline-banner {
   border-top: 1px solid var(--divider);
 }
 
-/* A build order waiting on the user (ADR-0019 §2), above the board. */
-.order-card {
-  margin-bottom: var(--space-35);
-  padding: var(--space-3) var(--space-35);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md);
-  background: var(--card);
-}
-
-.order-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-1) var(--space-25);
-  margin-bottom: var(--space-2);
-}
-
-.order-title {
-  font-weight: var(--weight-semibold);
-}
-
-.order-why,
-.order-reason {
-  color: var(--muted);
-  font-size: var(--text-sm);
-}
-
-.order-steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: var(--space-15);
-}
-
-.order-step {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  min-width: 0;
-  cursor: pointer;
-}
-
-.order-nobox {
-  display: inline-block;
-  width: 13px;
-}
-
-.order-id {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.order-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.order-change {
-  color: var(--accent);
-  font-size: var(--text-sm);
-  white-space: nowrap;
-}
-
-.order-reason {
-  margin-left: 21px;
-}
-
-.order-skipped .order-name,
-.order-skipped .order-change {
-  color: var(--muted);
-  text-decoration: line-through;
-}
-
+/* A row of answers under a card: Drop and Keep, Leave and Start. */
 .order-actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-25);
-}
-
-/* On the board a build order is one line; its steps are a page of their own. */
-.order-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--space-25);
-}
-
-.order-banner .order-head {
-  flex: 1;
-  min-width: 0;
-  margin-bottom: 0;
-}
-
-.order-banner .order-why {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.order-page .order-steps {
-  gap: var(--space-25);
-}
-
-/* With the room of a page, a long title wraps instead of losing its end. */
-.order-page .order-step {
-  flex-wrap: wrap;
-}
-
-.order-page .order-name {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.order-n {
-  min-width: 2.2ch;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-/* Accept and Decline stay in reach however long the order runs. */
-.order-bar {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
-  margin: var(--space-35) -14px 0;
-  padding: var(--space-3) var(--space-35);
-  padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--line);
-  background: var(--page);
-}
-
-.order-all {
-  margin-right: auto;
 }
 
 .backlog-filter select,
@@ -4219,12 +4113,12 @@ button.as-text {
   position: relative;
   border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background 120ms;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .md-c:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .md-c.md-picked {
@@ -4602,7 +4496,7 @@ button.as-text {
 
 .memory-filter:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--focus-ring-color);
 }
 
 .decision-card.ended {
@@ -4733,8 +4627,10 @@ a.mem-reached-what {
   text-decoration: none;
 }
 
-a.mem-reached-what:hover {
-  text-decoration: underline;
+@media (hover: hover) {
+  a.mem-reached-what:hover {
+    text-decoration: underline;
+  }
 }
 
 .mem-reached-how {
@@ -5202,7 +5098,7 @@ html.with-tabs .page {
   width: 56px;
   height: 28px;
   border-radius: var(--radius-full);
-  transition: background 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out);
 }
 
 .tab[aria-current="page"] {
@@ -5237,7 +5133,7 @@ html.with-rail .toast {
 /* Motion: page transitions (View Transitions API) and press and hover feedback. */
 ::view-transition-old(root),
 ::view-transition-new(root) {
-  animation-duration: 0.2s;
+  animation-duration: var(--dur-base);
   animation-timing-function: var(--ease-out);
 }
 
@@ -5266,11 +5162,11 @@ html[data-vt="back"]::view-transition-new(root) {
 
 html[data-vt="fade"]::view-transition-old(root) {
   animation-name: vt-fade-out;
-  animation-duration: 0.12s;
+  animation-duration: var(--dur-fast);
 }
 html[data-vt="fade"]::view-transition-new(root) {
   animation-name: vt-fade-in;
-  animation-duration: 0.16s;
+  animation-duration: var(--dur-base);
 }
 
 /* Cards glide to their new place (#186). The names exist only now, so a page
@@ -5286,7 +5182,7 @@ html[data-vt="glide"]::view-transition-new(root) {
   animation: none;
 }
 html[data-vt="glide"]::view-transition-group(*) {
-  animation-duration: 0.22s;
+  animation-duration: var(--dur-slow);
   animation-timing-function: var(--ease-out);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -5332,9 +5228,9 @@ html[data-vt="glide"]::view-transition-group(*) {
 
 :is(.row, .icon-btn, .tab, .rail-item, .rail-new, button.card, .chip) {
   transition:
-    transform 0.12s ease,
-    background-color 0.15s ease,
-    color 0.15s ease;
+    transform var(--dur-fast) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out);
 }
 
 :is(.row, .tab, .rail-item, button.card):active:not(:disabled) {
@@ -5370,8 +5266,22 @@ html[data-vt="glide"]::view-transition-group(*) {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Nothing a key caused animates (#198): while the keyboard drives (lib/input.ts),
+   the row Alt+J lands on, the rail item g i lights, a section Enter opens and the
+   cards of a page a key reached all change at once. A tap or click brings it back. */
+html[data-input="key"]
+  :is(.row, .icon-btn, .tab, .rail-item, .rail-new, button.card, .chip, .nav-icon, .choice,
+    .tool-group-head svg, .file-head svg),
+html[data-input="key"] .section-toggle::after {
+  transition: none;
+}
+
+html[data-input="key"] :is(.card, .hint, .menu) {
+  animation: none;
 }
 
 /* The command palette (#183): a box near the top, over a dimmed page. */
@@ -5386,7 +5296,6 @@ html[data-vt="glide"]::view-transition-group(*) {
   color: var(--fg);
   box-shadow: var(--shadow-3);
   overflow: hidden;
-  animation: palette-in 0.14s var(--ease-out);
 }
 
 .palette::backdrop {
@@ -5484,13 +5393,6 @@ html[data-vt="glide"]::view-transition-group(*) {
   font: var(--text-2xs) var(--mono);
 }
 
-@keyframes palette-in {
-  from {
-    opacity: 0;
-    transform: translateY(-6px) scale(0.98);
-  }
-}
-
 /* The '?' sheet (#189): the palette's box, holding a list of keys. */
 .keys {
   width: min(560px, calc(100vw - 32px));
@@ -5503,7 +5405,6 @@ html[data-vt="glide"]::view-transition-group(*) {
   color: var(--fg);
   box-shadow: var(--shadow-3);
   overflow: hidden;
-  animation: palette-in 0.14s var(--ease-out);
 }
 
 .keys::backdrop {
@@ -5730,7 +5631,7 @@ html[data-vt="glide"]::view-transition-group(*) {
 }
 
 .composer-box:focus-within {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-ring-color) 55%, var(--line));
 }
 
 .composer-box.finding {
@@ -5799,7 +5700,7 @@ textarea.composer-text {
 }
 
 .composer-chip:focus-within {
-  box-shadow: 0 0 0 2px var(--accent);
+  box-shadow: 0 0 0 2px var(--focus-ring-color);
 }
 
 .composer-chip select {
@@ -5940,7 +5841,7 @@ textarea.composer-text {
 }
 
 .ready-row:focus-within {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--focus-ring-color) 10%, transparent);
 }
 
 .ready-start {
@@ -6029,7 +5930,7 @@ html.with-tabs .composer-phone {
 }
 
 .composer-pill:focus-within {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-ring-color) 55%, var(--line));
 }
 
 /* 16px: a smaller field makes iOS zoom the page on focus. */
@@ -6152,10 +6053,12 @@ html.with-tabs .composer-phone {
   line-height: 1;
 }
 
-.start-close:hover,
-.start-drop:hover {
-  background: var(--raised);
-  color: var(--fg);
+@media (hover: hover) {
+  .start-close:hover,
+  .start-drop:hover {
+    background: var(--raised);
+    color: var(--fg);
+  }
 }
 
 .start-body {
@@ -6200,16 +6103,18 @@ html.with-tabs .composer-phone {
   gap: var(--space-2) var(--space-3);
   padding: var(--space-2) var(--space-1) var(--space-2) var(--space-2);
   border-radius: var(--radius-md);
-  outline: none;
 }
 
-.start-row:hover {
-  background: color-mix(in srgb, var(--raised) 50%, transparent);
+@media (hover: hover) {
+  .start-row:hover {
+    background: color-mix(in srgb, var(--raised) 50%, transparent);
+  }
 }
 
 .start-row:focus-visible {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-inset);
 }
 
 /* A phone draws each line as a card: the task, then its chips under it. */
@@ -6307,7 +6212,7 @@ html.with-tabs .composer-phone {
 }
 
 .start-add:focus-within {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--focus-ring-color) 55%, var(--line));
 }
 
 .start-add .start-n {
@@ -6431,9 +6336,18 @@ html.with-tabs .composer-phone {
   cursor: pointer;
 }
 
-.start-pick-row:hover,
 .start-pick-row:focus-within {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--focus-ring-color) 10%, transparent);
+}
+
+@media (hover: hover) {
+  .start-pick-row:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .start-pick-row.blocked:hover {
+    background: none;
+  }
 }
 
 .start-pick-row input {
@@ -6457,9 +6371,6 @@ html.with-tabs .composer-phone {
   cursor: default;
 }
 
-.start-pick-row.blocked:hover {
-  background: none;
-}
 
 .start-foot {
   display: flex;

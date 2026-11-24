@@ -258,8 +258,6 @@ struct App {
     glance: Option<Glance>,
     /// The repositories pickers offer (backlog #240), as the backlog last fetched it.
     repo_list: valkyrie_proto::RepoList,
-    /// Build orders waiting on the user, as last pushed with the items.
-    orders: Vec<valkyrie_proto::OrderProposal>,
     /// Ready items the supervisor offers to start, as last pushed with the items.
     launches: Vec<valkyrie_proto::LaunchOffer>,
     /// The plan's quota, as last pushed (protocol 30).
@@ -514,7 +512,6 @@ impl App {
             newer_rx: None,
             shipping: None,
             ship_busy: false,
-            orders: Vec::new(),
             launches: Vec::new(),
             said: None,
             settings_cursor: None,
@@ -918,19 +915,33 @@ impl App {
             if let Some(cut) = mouse::unfinished(&bytes) {
                 self.partial = bytes.split_off(cut);
             }
-            // At home, the backlog is a section: `g` and the strip's keys first.
             if self.view.is_none() {
-                let Some(rest) = self.section_keys(bytes).await else {
-                    return;
-                };
-                if self.backlog.is_none() {
-                    // The cut-off report stays after these bytes, not before.
-                    let partial = std::mem::take(&mut self.partial);
-                    Box::pin(self.on_input(rest)).await;
-                    self.partial = partial;
-                    return;
+                // At home the backlog is a section: a click is the strip's or a
+                // row's, never keys to the page (backlog #281), and a key goes
+                // to `g` and the strip's keys first. The cut-off report stays
+                // after these bytes, not before.
+                let partial = std::mem::take(&mut self.partial);
+                for input in mouse::split(&bytes) {
+                    match input {
+                        Input::Mouse(m) => self.on_home_mouse(m).await,
+                        // A click or key earlier in the read left the backlog.
+                        Input::Bytes(keys) if self.backlog.is_none() => {
+                            Box::pin(self.on_input(keys)).await;
+                        }
+                        Input::Bytes(keys) => {
+                            let Some(rest) = self.section_keys(keys).await else {
+                                continue;
+                            };
+                            if self.backlog.is_none() {
+                                Box::pin(self.on_input(rest)).await;
+                            } else {
+                                self.backlog_keys(&rest).await;
+                            }
+                        }
+                    }
                 }
-                bytes = rest;
+                self.partial = partial;
+                return;
             }
             return self.backlog_keys(&bytes).await;
         }
@@ -1084,7 +1095,12 @@ impl App {
         if self.docs.is_some() {
             return self.on_docs_mouse(m).await;
         }
-        if self.keys_page.is_some()
+        // A section page's list: a click or the wheel is the j/k and ↩ it takes.
+        if let Some(keys) = self.page_mouse_keys(&m) {
+            return self.page_keys(&keys).await;
+        }
+        if self.backlog.is_some()
+            || self.keys_page.is_some()
             || self.digest.is_some()
             || self.supervisor.is_some()
             || self.wiki.is_some()
@@ -1136,6 +1152,42 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The keys a press or the wheel stands for over the open section page's
+    /// list (backlog #281): ↩ on the selected row, j/k to another, j/k a notch.
+    /// None off the rows, or with no list page open.
+    fn page_mouse_keys(&self, m: &Mouse) -> Option<Vec<u8>> {
+        let hits = if let Some(page) = &self.backlog {
+            &page.hits
+        } else if let Some(page) = &self.prs {
+            &page.hits
+        } else if let Some(page) = &self.memory {
+            &page.hits
+        } else if let Some(page) = &self.digest {
+            &page.hits
+        } else {
+            return None;
+        };
+        match m.kind {
+            MouseKind::Press => hits.click(m.x, m.y),
+            MouseKind::WheelDown => Some(b"j".to_vec()),
+            MouseKind::WheelUp => Some(b"k".to_vec()),
+            _ => None,
+        }
+    }
+
+    /// `keys` to the open section page, as if typed there.
+    async fn page_keys(&mut self, keys: &[u8]) {
+        if self.backlog.is_some() {
+            self.backlog_keys(keys).await;
+        } else if self.prs.is_some() {
+            self.prs_keys(keys).await;
+        } else if self.memory.is_some() {
+            self.memory_keys(keys).await;
+        } else if self.digest.is_some() {
+            self.digest_keys(keys).await;
         }
     }
 
@@ -1590,10 +1642,11 @@ impl App {
         // home (rule 9: never the hint line).
         let t = self.settings.theme;
         let area = frame.area();
-        // Not over the backlog's own dialogs (the launch form, a build order).
-        let dialog = self.backlog.as_ref().is_some_and(|p| {
-            p.order.is_some() || matches!(p.typing, Some(backlog::Typing::Launch(_)))
-        });
+        // Not over the backlog's own dialog (the launch form).
+        let dialog = self
+            .backlog
+            .as_ref()
+            .is_some_and(|p| matches!(p.typing, Some(backlog::Typing::Launch(_))));
         // What a key said goes there too: a refusal, or where an editor's
         // text was kept, is seen on the page that said it (backlog #277).
         let said = match self.toast() {
@@ -3550,7 +3603,7 @@ impl App {
         let t = self.settings.theme;
         let host = remote().map_or_else(valkyrie_proto::hostname, str::to_string);
         let running = self.sessions.iter().filter(|s| is_running(s)).count();
-        let clock = jiff::Zoned::now().strftime("%H:%M").to_string();
+        let clock = jiff::ZonedDateTime::now().strftime("%H:%M").to_string();
         [
             vec![format!(" {host} · {running} running · {clock} ").fg(t.muted)],
             vec![format!(" {running} running · {clock} ").fg(t.muted)],
@@ -3570,10 +3623,10 @@ impl App {
         self.inbox_rows().get(self.selected).copied()
     }
 
-    /// What waits on a decision: proposals, ready items the supervisor offers to
-    /// start, and build orders. One Needs-you row, counting each.
+    /// What waits on a decision: proposals and ready items the supervisor offers
+    /// to start. One Needs-you row, counting each.
     fn to_decide(&self) -> usize {
-        self.proposals.len() + self.launches.len() + self.orders.len()
+        self.proposals.len() + self.launches.len()
     }
 
     /// Backlog items agents filed that nobody has kept or dropped yet, oldest
@@ -4261,7 +4314,7 @@ impl App {
 
     /// What the supervisor waits on you for, from what the app holds.
     fn waiting(&self) -> Vec<supervisor::Wait> {
-        supervisor::waiting(&self.queue, &self.launches, &self.orders, &self.proposals)
+        supervisor::waiting(&self.queue, &self.launches, &self.proposals)
     }
 
     async fn open_supervisor(&mut self) {
@@ -4345,19 +4398,6 @@ impl App {
                     self.say(said);
                     self.refresh().await;
                     self.load_supervisor().await;
-                }
-                supervisor::Do::OpenOrder(project) => {
-                    let Some(order) = self.orders.iter().find(|o| o.project == project).cloned()
-                    else {
-                        self.say("that build order is gone".into());
-                        continue;
-                    };
-                    self.supervisor = None;
-                    self.open_backlog().await;
-                    if let Some(page) = &mut self.backlog {
-                        page.show_order(&order);
-                    }
-                    return;
                 }
                 supervisor::Do::Review {
                     project,
@@ -4856,7 +4896,6 @@ impl App {
 
     async fn open_backlog(&mut self) {
         let mut page = backlog::Page::default();
-        page.orders = self.orders.clone();
         page.launches = self.launches.clone();
         self.backlog = Some(page);
         self.backlog_facts().await;
@@ -4889,7 +4928,6 @@ impl App {
     async fn open_backlog_at(&mut self, id: u32) {
         self.toast = None;
         let mut page = backlog::Page::default();
-        page.orders = self.orders.clone();
         page.launches = self.launches.clone();
         self.backlog = Some(page);
         let at = self.backlog_rows().iter().position(|(_, i)| i.id == id);
@@ -5172,22 +5210,6 @@ impl App {
                     });
                 });
             }
-            Do::Plan(project) => {
-                let Some(tx) = self.said.clone() else {
-                    anyhow::bail!("not ready to ask yet");
-                };
-                let client = self.client.clone();
-                self.say("asking the model for a build order…".into());
-                // Off the event loop: the model can take a minute. The order itself
-                // arrives with the items; only the outcome is said here.
-                tokio::spawn(async move {
-                    let line = match client.plan_order(project).await {
-                        Ok(o) => format!("build order ready ({} items): O opens it", o.steps.len()),
-                        Err(e) => format!("no build order: {e:#}"),
-                    };
-                    let _ = tx.send(line);
-                });
-            }
             Do::AnswerLaunch {
                 project,
                 id,
@@ -5205,29 +5227,6 @@ impl App {
                     self.item_no(item)
                 )),
             },
-            Do::AnswerOrder {
-                project,
-                id,
-                accept,
-                items,
-            } => {
-                let applied = self.client.answer_order(project, id, accept, items).await?;
-                let mut said = match (accept, applied.changed.as_slice()) {
-                    (false, _) => "build order declined: nothing changed".to_owned(),
-                    (true, []) => "nothing changed".to_owned(),
-                    (true, ids) => format!(
-                        "changed {}",
-                        ids.iter()
-                            .map(|i| format!("#{}", self.item_no(*i)))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    ),
-                };
-                for (id, why) in &applied.skipped {
-                    said += &format!("; #{} left: {why}", self.item_no(*id));
-                }
-                self.say(said);
-            }
             Do::Add { kind, text } => {
                 // For the attached tab's repository, else the one the TUI is in.
                 // Another machine's paths can't be looked at here: the daemon
@@ -5289,12 +5288,7 @@ impl App {
             self.reviewing = self.reviewing.zip(last).map(|(i, last)| i.min(last));
             return Ok(true);
         }
-        if let ServerMsg::Items {
-            items,
-            orders,
-            launches,
-        } = msg
-        {
+        if let ServerMsg::Items { items, launches } = msg {
             let new = self.new_proposals.on_items(&items);
             if self.settings.proposals
                 && let Some(ping) = Ping::proposals(&new)
@@ -5304,10 +5298,8 @@ impl App {
             self.items = items;
             self.refresh_numbers();
             if let Some(page) = &mut self.backlog {
-                page.orders = orders.clone();
                 page.launches = launches.clone();
             }
-            self.orders = orders;
             self.launches = launches;
             return Ok(true);
         }
@@ -6298,17 +6290,11 @@ impl App {
         let n = self.to_decide();
         let mut what: Vec<String> = self.proposals.iter().map(|d| d.title.clone()).collect();
         what.extend(self.launches.iter().map(|l| format!("start {}", l.title)));
-        what.extend(
-            self.orders
-                .iter()
-                .map(|o| format!("build order for {}", base_name(&o.project))),
-        );
         let since = self
             .proposals
             .iter()
             .map(|d| d.created)
             .chain(self.launches.iter().map(|l| l.made))
-            .chain(self.orders.iter().map(|o| o.made))
             .min()
             .unwrap_or_default();
         record_row(
@@ -6385,7 +6371,7 @@ impl App {
             let mut lines = lines;
             // The row counts the supervisor's offers too; Enter opens the
             // proposals, so say where the rest are.
-            let offers = self.launches.len() + self.orders.len();
+            let offers = self.launches.len();
             if offers > 0 {
                 lines.push(Line::from(
                     format!("and {offers} for the supervisor: s opens them").fg(t.muted),
@@ -6421,12 +6407,6 @@ impl App {
                     self.launches
                         .iter()
                         .map(|l| Line::from(vec!["start  ".fg(t.muted), l.title.clone().fg(t.fg)]))
-                        .chain(self.orders.iter().map(|o| {
-                            Line::from(vec![
-                                "build order  ".fg(t.muted),
-                                base_name(&o.project).fg(t.fg),
-                            ])
-                        }))
                         .chain([Line::default(), "↩ open the supervisor".fg(t.muted).into()])
                         .collect(),
                 ),
@@ -6489,17 +6469,30 @@ impl App {
         if let Some(summary) = &status.summary {
             head.push(Line::from(summary.clone().fg(t.fg)));
         }
-        head.push(Line::from(
-            format!(
-                "── screen {}",
-                "─".repeat((inner.width as usize).saturating_sub(10))
-            )
-            .fg(t.border),
-        ));
-        let head_height = head.len() as u16 + u16::from(status.summary.is_some()); // room to wrap
+        let head_height = head.len() as u16 + 1 + u16::from(status.summary.is_some()); // a gap, room to wrap
         let [top, screen] =
             Layout::vertical([Constraint::Length(head_height), Constraint::Fill(1)]).areas(inner);
         frame.render_widget(Paragraph::new(head).wrap(Wrap { trim: true }), top);
+
+        // The screen sits in a recessed inset, out to the frame's padding, so an
+        // agent's own prompt reads as its screen and not as more of ours.
+        let surface = if focused { t.panel } else { t.bg };
+        let inset = Rect {
+            x: screen.x.saturating_sub(1).max(area.x + 1),
+            width: (screen.width + 2).min(area.width.saturating_sub(2)),
+            ..screen
+        };
+        if inset.height == 0 {
+            return;
+        }
+        let bg = t.recessed(surface);
+        frame.render_widget(Block::new().style(style::Style::new().bg(bg)), inset);
+        let [label, screen] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(Rect {
+                x: inset.x + 1,
+                width: inset.width.saturating_sub(2),
+                ..inset
+            });
 
         let text = match &self.preview {
             Some((id, text)) if *id == session.id => text.as_str(),
@@ -6511,6 +6504,32 @@ impl App {
             .rposition(|l| !l.trim().is_empty())
             .map_or(0, |i| i + 1);
         let start = end.saturating_sub(screen.height as usize);
+        let shown = end - start;
+        let mut left = vec![
+            "screen".fg(t.dim()).bold(),
+            if session.exited.is_some() {
+                " · ended".fg(t.muted)
+            } else {
+                " · live".fg(t.muted)
+            },
+        ];
+        if shown > 0 {
+            left.push(
+                format!(" · last {shown} line{}", if shown == 1 { "" } else { "s" }).fg(t.muted),
+            );
+        }
+        frame.render_widget(Paragraph::new(Line::from(left)), label);
+        // At home Enter attaches; the peek says what a click does itself.
+        if !focused {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    "↩".fg(t.accent).bold(),
+                    " attach".fg(t.muted),
+                ]))
+                .alignment(ratatui::layout::Alignment::Right),
+                label,
+            );
+        }
         let body: Vec<Line> = lines[start..end]
             .iter()
             .map(|l| Line::from(l.to_string().fg(t.muted)))
@@ -7845,6 +7864,47 @@ pub(crate) fn list_and_detail(
     (list, Some(detail))
 }
 
+/// Where a section page's list rows landed on screen, for the mouse (backlog
+/// #281). Each row is kept with its place against the cursor, so a click turns
+/// into the j/k and ↩ every list already takes (rule 7), and a page's own
+/// handling of a move (facts to load, an armed delete to drop) still runs.
+/// Recorded at each draw; a page showing no list records none.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RowHits(std::cell::RefCell<Vec<(Rect, isize)>>);
+
+impl RowHits {
+    pub(crate) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+
+    /// The rows drawn in `area`, scrolled by `skip` lines: each selectable
+    /// row's line in the list, and its place against the cursor.
+    pub(crate) fn record(&self, area: Rect, skip: usize, rows: &[(usize, isize)]) {
+        let mut hits = self.0.borrow_mut();
+        hits.clear();
+        for &(line, from) in rows {
+            let Some(y) = line.checked_sub(skip) else {
+                continue;
+            };
+            if y < area.height as usize {
+                hits.push((Rect::new(area.x, area.y + y as u16, area.width, 1), from));
+            }
+        }
+    }
+
+    /// The keys a press at `x`,`y` stands for: ↩ on the cursor's row, else the
+    /// j or k that bring the cursor to it.
+    pub(crate) fn click(&self, x: u16, y: u16) -> Option<Vec<u8>> {
+        let hits = self.0.borrow();
+        let &(_, from) = hits.iter().find(|(r, _)| r.contains(Position::new(x, y)))?;
+        Some(match from {
+            0 => b"\r".to_vec(),
+            n if n > 0 => b"j".repeat(n.unsigned_abs()),
+            n => b"k".repeat(n.unsigned_abs()),
+        })
+    }
+}
+
 /// `list_and_detail`'s areas without drawing: the list, and the column between
 /// and the detail when there's room for one.
 fn list_detail_areas(area: Rect) -> (Rect, Option<(Rect, Rect)>) {
@@ -8656,7 +8716,7 @@ enum InboxRow {
     Compose,
     /// A session waiting on you, by its place in the queue.
     Queue(usize),
-    /// Proposals, ready items and build orders, as one row.
+    /// Proposals and ready items, as one row.
     Decide,
     /// Items agents filed, not triaged, as one row.
     Filed,
@@ -9445,7 +9505,6 @@ mod tests {
         let mut items = vec![item(1, "open", "human"), item(2, "proposed", "claude")];
         let push = |items: &[Item]| ServerMsg::Items {
             items: items.to_vec(),
-            orders: vec![],
             launches: vec![],
         };
         app.on_push(push(&items)).unwrap();
@@ -9661,7 +9720,6 @@ mod tests {
                 item(3, "proposed", "/r/web", &[2]),
                 item(4, "open", "/r/web", &[]),
             ],
-            orders: vec![],
             launches: vec![],
         })
         .unwrap();
@@ -10319,6 +10377,29 @@ mod tests {
                 }
                 assert!(text.contains(want), "{} theme lacks {want:?}", theme.name);
             }
+            // The screen is a recessed inset with its own label, not a rule.
+            let row_of = |want: &str| {
+                (0..buffer.area.height).find_map(|y| {
+                    let row: String = (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect();
+                    row.find(want).map(|i| (row[..i].chars().count() as u16, y))
+                })
+            };
+            assert!(!text.contains("── screen"), "{}", theme.name);
+            let (x, y) = row_of("screen · live · last 6 lines").expect(theme.name);
+            assert!(
+                row_of("↩ attach").is_some_and(|(_, ay)| ay == y),
+                "{}",
+                theme.name
+            );
+            let (px, py) = row_of("Do you want to proceed?").unwrap();
+            assert!(py > y, "{}", theme.name);
+            let well = theme.recessed(theme.bg);
+            assert_ne!(well, theme.bg, "{}", theme.name);
+            for (cx, cy) in [(x, y), (px, py), (x - 1, py)] {
+                assert_eq!(buffer[(cx, cy)].bg, well, "{} at {cx},{cy}", theme.name);
+            }
             snapshot(buffer, theme.name);
         }
         std::fs::remove_dir_all(&dir).unwrap();
@@ -10906,7 +10987,6 @@ mod tests {
         // An open item, selected when the page opens.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![Item {
                 parent: None,
                 pr_merged: false,
@@ -11113,7 +11193,6 @@ mod tests {
         use valkyrie_proto::ItemStatus::{Open, Proposed};
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
                 item(2, "Flaky exit test", Proposed),
@@ -11182,7 +11261,6 @@ mod tests {
         // check then offers only those to ship.
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![
                 item(1, "Tab rename eats a letter", Open),
                 item(2, "Flaky exit test", Proposed),
@@ -12834,6 +12912,104 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Backlog #281: the mouse works on a section page. A click on a row moves
+    /// the cursor there, the wheel moves it, and the strip's sections take a
+    /// click from the backlog too, which used to read a click as keys.
+    #[tokio::test]
+    async fn the_mouse_works_on_section_pages() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-pmouse-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        let item = |id: u32| -> Item {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "number": id, "title": format!("item {id}"), "status": "open",
+                "by": "human", "project": "/r/app", "created": 0, "updated": 0,
+            }))
+            .unwrap()
+        };
+        app.on_push(ServerMsg::Items {
+            items: vec![item(1), item(2), item(3)],
+            launches: vec![],
+        })
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        // As `App::draw` does at home: the strip and home, the page over them.
+        let mut draw = |app: &App| -> Vec<String> {
+            terminal
+                .draw(|f| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(f.area());
+                    app.draw_home(f, body, bar);
+                    if let Some(page) = &app.backlog {
+                        let rows = app.backlog_rows();
+                        let t = app.settings.theme;
+                        page.draw(f, &rows, &app.items, &app.sessions, 0, 0, t);
+                    }
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..30)
+                .map(|y| (0..140).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect()
+        };
+        let find = |rows: &[String], s: &str| -> (u16, u16) {
+            rows.iter()
+                .enumerate()
+                .find_map(|(y, r)| r.find(s).map(|i| (r[..i].chars().count() as u16, y as u16)))
+                .unwrap_or_else(|| panic!("{s:?} on {rows:#?}"))
+        };
+        // An SGR press, as the terminal sends it (1-based).
+        let click = |x: u16, y: u16| format!("\x1b[<0;{};{}M", x + 1, y + 1).into_bytes();
+        let cursor = |app: &App| app.backlog.as_ref().unwrap().cursor;
+        let at = |app: &App, id: u32| {
+            app.backlog_rows()
+                .iter()
+                .position(|(_, i)| i.id == id)
+                .unwrap()
+        };
+
+        app.on_input(b"gb".to_vec()).await;
+        let rows = draw(&app);
+        let (x, y) = find(&rows, "item 3");
+        app.on_input(click(x, y)).await;
+        assert_eq!(app.section(), Section::Backlog, "a click isn't keys");
+        assert_eq!(cursor(&app), at(&app, 3), "the click's row is selected");
+
+        // The wheel moves the cursor a row a notch.
+        draw(&app);
+        let before = cursor(&app);
+        app.on_input(b"\x1b[<64;10;10M".to_vec()).await;
+        assert_eq!(cursor(&app), before - 1);
+
+        // On the selected row a click is ↩; elsewhere, the j/k that get there.
+        let rows = draw(&app);
+        let hits = &app.backlog.as_ref().unwrap().hits;
+        let (x, y) = find(&rows, "item 3");
+        assert_eq!(hits.click(x, y), Some(b"j".to_vec()));
+        // The selected row, by its number at the list's left edge.
+        let id = app.backlog_rows()[cursor(&app)].1.id;
+        let y = rows
+            .iter()
+            .position(|r| r.starts_with(&format!("  #{id} ")))
+            .unwrap() as u16;
+        assert_eq!(hits.click(4, y), Some(b"\r".to_vec()));
+        assert_eq!(hits.click(4, 0), None, "the strip is no row");
+
+        // The strip takes a click from the backlog: no more trapped there.
+        // (Inbox: another page would wait on a daemon this one never answers,
+        // backlog #106.)
+        let rows = draw(&app);
+        let x = rows[0]
+            .find("Inbox")
+            .map(|i| rows[0][..i].chars().count() as u16);
+        app.on_input(click(x.expect("Inbox on the strip"), 0)).await;
+        assert_eq!(app.section(), Section::Inbox);
+        assert!(app.backlog.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Backlog #203: at 80 columns with hints on, the hints fill the session's
     /// bar, so a toast takes the row over it instead of falling off the end.
     #[tokio::test]
@@ -13553,7 +13729,6 @@ mod tests {
         };
         app.on_push(ServerMsg::Items {
             launches: Vec::new(),
-            orders: Vec::new(),
             items: vec![waiting],
         })
         .unwrap();

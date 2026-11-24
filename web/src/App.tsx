@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { Backlog, ItemEditor, OrderPage } from "./components/Backlog";
+import { Backlog, ItemEditor } from "./components/Backlog";
 import { DecisionList } from "./components/DecisionList";
 import { HistoryView } from "./components/History";
 import { WikiView } from "./components/Wiki";
@@ -31,6 +31,7 @@ import { Toast } from "./components/Toast";
 import { Rail, TabBar, type NavKey } from "./components/Nav";
 import { close, connect, open, useApp } from "./store";
 import { getJson } from "./lib/api";
+import { keyed } from "./lib/input";
 import { setPacks, type Pack } from "./lib/theme";
 
 type Route =
@@ -46,7 +47,6 @@ type Route =
   | { page: "supervisor" }
   | { page: "doc"; key: string }
   | { page: "item"; id: number | null }
-  | { page: "order"; project: string }
   | { page: "session"; id: number }
   | { page: "review"; id: number };
 
@@ -54,7 +54,7 @@ type Route =
  * `#/s/12` is session 12, `#/s/12/review` its changes, `#/new` the home composer
  * beside the Inbox when there's room (the launcher when there isn't), `#/start` Start agents over the Inbox,
  * `#/settings` settings, `#/backlog` the backlog, `#/backlog/new` and `#/backlog/3`
- * writing an item down and changing item 3, `#/backlog/order/<project>` a repository's build order.
+ * writing an item down and changing item 3.
  * Memory (`#/memory`: decisions) has the tabs `#/memory/skills`, `/policies`, `/habits`, `/notes`, `#/memory/docs`
  * (and `#/memory/docs/12`, one doc by its key, never a path) and `#/memory/wiki`. History
  * (`#/history`: past sessions to resume) has `#/history/summary`, `#/history/search` and
@@ -81,14 +81,6 @@ function route(): Route {
   const d = /^#\/memory\/docs\/([^/]+)$/.exec(hash);
   // A key is digits or `p` and hex, so a hand-typed `%` is just not a doc.
   if (d) return { page: "doc", key: d[1] };
-  const o = /^#\/backlog\/order\/(.+)$/.exec(hash);
-  if (o) {
-    try {
-      return { page: "order", project: decodeURIComponent(o[1]) };
-    } catch {
-      return { page: "backlog" };
-    }
-  }
   const b = /^#\/backlog\/(new|\d+)$/.exec(hash);
   if (b) return { page: "item", id: b[1] === "new" ? null : Number(b[1]) };
   return { page: "inbox" };
@@ -103,7 +95,6 @@ function navKey(r: Route): NavKey | null {
       return "inbox";
     case "backlog":
     case "item":
-    case "order":
       return "backlog";
     case "decisions":
     case "docs":
@@ -147,10 +138,12 @@ export function App() {
       f.id = next.page === "session" && next.id === f.pending ? f.pending : null;
       f.pending = null;
       const swap = () => flushSync(() => setAt(next));
-      // A transition between pages. Stepping between sessions
-      // (Alt+J/K) stays instant; so does a device asking for less motion.
+      // A transition between pages, for a tap or a click. A move a key made
+      // (g i, Enter, Alt+J/K) is instant (#198); so is one on a device asking
+      // for less motion, and stepping between sessions.
       if (
         !document.startViewTransition ||
+        keyed() ||
         matchMedia("(prefers-reduced-motion: reduce)").matches ||
         (from.page === "session" && next.page === "session")
       ) {
@@ -439,7 +432,6 @@ export function App() {
       {at.page === "supervisor" && <SupervisorView />}
       {at.page === "doc" && <DocView key={at.key} docKey={at.key} />}
       {at.page === "item" && <ItemEditor key={at.id ?? "new"} id={at.id} />}
-      {at.page === "order" && <OrderPage key={at.project} project={at.project} />}
       {at.page === "session" && <SessionView id={at.id} />}
       {at.page === "review" && <ReviewView id={at.id} />}
       {chrome}

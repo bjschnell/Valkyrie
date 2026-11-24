@@ -207,8 +207,7 @@ pub struct StepPolicy {
 }
 
 /// The steps that can become a policy, each with the one trigger it answers.
-/// `leave` does nothing to learn, and a build order (`order`) is the user's call
-/// every time (decision #47), so neither is here.
+/// `leave` does nothing to learn, so it isn't here.
 pub const LEARNABLE: &[(StepAction, Trigger)] = &[
     (StepAction::MergeBase, Trigger::Conflicting),
     (StepAction::CiFix, Trigger::Red),

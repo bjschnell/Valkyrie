@@ -675,28 +675,6 @@ export type ItemChange =
   /** Puts a started item back in the backlog and stops its sessions (protocol 28). */
   | { do: "return" };
 
-/** One item's place in a build order: why, and what accepting it changes
- * (`priority` and the whole `blocked_by` list; absent keeps what it has). */
-export interface OrderStep {
-  item: number;
-  reason: string;
-  priority?: Priority;
-  blocked_by?: number[];
-}
-
-/** A build order for one repository's open items (ADR-0019 §2), waiting on the
- * user: accept all, some (`items`) or none. Never applied on its own. */
-export interface OrderProposal {
-  /** Changes when the repository's proposal is replaced. */
-  id: number;
-  project: string;
-  /** Seconds since the epoch; an item edited after it keeps its edit. */
-  made: number;
-  /** What asked for it: `you asked`, `3+ items added within a day`, … */
-  trigger: string;
-  steps: OrderStep[];
-}
-
 /** A ready item the supervisor offers to start (ADR-0019 §2 `launch`, protocol 27):
  * open, nobody on it, its blockers finished (or waived by the model), with room
  * under the repository's `max_running`. One per repository at most. */
@@ -735,12 +713,6 @@ export interface LaunchOffer {
   waived?: number[];
   /** Seconds since the epoch. */
   made: number;
-}
-
-/** What accepting a build order did: items changed, and those left as they were. */
-export interface OrderApplied {
-  changed: number[];
-  skipped?: [number, string][];
 }
 
 /** Requests, without the `req` id the client adds. */
@@ -825,20 +797,10 @@ export type Request =
   | { t: "delete_item"; id: number }
   | { t: "note_item"; id: number; text: string }
   | { t: "item_facts"; id: number }
-  /** Asks the model for a build order of `cwd`'s repository (protocol 24). */
-  | { t: "plan_order"; cwd: string }
   | { t: "supervisor_log" }
   /** Starts the supervisor session, or replies with the one already running (protocol 45). */
   | { t: "supervisor_session"; cwd: string; size: { cols: number; rows: number }; env: [string, string | null][] }
   | { t: "supervisor_watch" }
-  /** The user only: `items` accepts only those items' changes, absent all of them. */
-  | {
-      t: "answer_order";
-      project: string;
-      id: number;
-      accept: boolean;
-      items?: number[];
-    }
   | { t: "take_step"; session: SessionId; seq: number; action: StepAction }
   /** The user only: starts (`launch`) or leaves the repository's ready item;
    * replies `session` when started, `text` when left (protocol 27). */
@@ -906,10 +868,8 @@ export type Reply =
   | { t: "deleted_docs"; docs: DeletedDoc[] }
   /** `note`: what else happened (a worktree taken away, or why it was kept). */
   | { t: "item"; item: Item; note?: string }
-  | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
+  | { t: "items"; items: Item[]; launches?: LaunchOffer[] }
   | { t: "item_facts"; facts: ItemFacts | null }
-  | { t: "order"; order: OrderProposal }
-  | { t: "order_applied"; applied: OrderApplied }
   | { t: "supervisor_log"; entries: SupervisorEntry[]; on: boolean }
   | { t: "supervisor_watch"; prs: WatchedPr[]; polled_at?: number; next_at?: number; on: boolean }
   | { t: "step_taken"; said: string }
@@ -929,8 +889,8 @@ export type ServerMsg =
   | { t: "queue"; items: QueueItem[] }
   /** Every project's decisions waiting on review, oldest first. */
   | { t: "proposals"; items: Decision[] }
-  /** Every backlog item, and the build orders and launch offers waiting on the user. */
-  | { t: "items"; items: Item[]; orders?: OrderProposal[]; launches?: LaunchOffer[] }
+  /** Every backlog item, and the launch offers waiting on the user. */
+  | { t: "items"; items: Item[]; launches?: LaunchOffer[] }
   /** The plan's quota, if anything has said it yet (protocol 30). */
   | { t: "quota"; quota: Quota | null }
   | { t: "clipboard"; session: SessionId; text: string }

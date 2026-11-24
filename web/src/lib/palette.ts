@@ -4,7 +4,7 @@
 // so there it takes Ctrl+Shift+K, which works everywhere.
 
 import { docHash } from "./routes";
-import type { Decision, Doc, Item, OrderProposal, SessionInfo } from "../proto";
+import type { Decision, Doc, Item, SessionInfo } from "../proto";
 import { byPosition, isAscii, type KeyLike } from "./termkeys";
 
 /** Whether a key press opens the palette. `terminal`: a session's terminal has the keyboard. */
@@ -48,7 +48,6 @@ export interface Sources {
   needs: number[];
   proposals: Decision[];
   items: Item[];
-  orders: OrderProposal[];
   docs: Doc[];
   pages: Page[];
   /** Every look, by its key, and the one in use. */
@@ -97,16 +96,6 @@ export function entries(s: Sources): Entry[] {
       sub: `${i.kind} · by ${i.by}`,
       also: "proposal backlog item",
       do: { item: i.id },
-    });
-  }
-  for (const o of s.orders) {
-    out.push({
-      key: `order-${o.id}`,
-      group: "Actions",
-      label: `Review build order: ${base(o.project)}`,
-      sub: o.trigger,
-      also: "proposal backlog",
-      do: { go: `#/backlog/order/${encodeURIComponent(o.project)}` },
     });
   }
   for (const x of s.sessions) {
