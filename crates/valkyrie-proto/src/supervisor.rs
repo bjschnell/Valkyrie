@@ -1,6 +1,6 @@
 //! What the supervisor did (backlog #180, protocol 43): each step it offered and
-//! you answered, or a policy took without asking, and each build order answered,
-//! newest first, for the supervisor page.
+//! you answered, or a policy took without asking, newest first, for the
+//! supervisor page.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

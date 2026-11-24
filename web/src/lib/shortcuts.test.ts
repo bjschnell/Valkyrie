@@ -38,7 +38,7 @@ describe("shortcutsKey", () => {
 describe("sections", () => {
   const pages: PageKey[] = [
     "inbox", "new", "settings", "backlog", "decisions", "docs", "past",
-    "wiki", "supervisor", "doc", "item", "order", "session", "review",
+    "wiki", "supervisor", "doc", "item", "session", "review",
   ];
   it("puts the page's keys first and the global ones last, for every page", () => {
     for (const p of pages) {
@@ -73,7 +73,7 @@ describe("sections", () => {
 describe("palette", () => {
   it("offers the sheet as an action, so a terminal can reach it", () => {
     const list = entries({
-      sessions: [], needs: [], proposals: [], items: [], orders: [], docs: [], pages: [], looks: [], look: "",
+      sessions: [], needs: [], proposals: [], items: [], docs: [], pages: [], looks: [], look: "",
     });
     expect(list.find((e) => e.key === "shortcuts")?.do).toEqual({ sheet: true });
   });

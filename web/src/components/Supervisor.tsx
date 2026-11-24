@@ -21,7 +21,7 @@ const home = () => {
  */
 export function SupervisorView() {
   // An answer in the Inbox changes what it watches: read it again when one lands.
-  const pending = useApp((s) => s.launches.length + s.orders.length + s.queue.filter((q) => q.flag?.step).length);
+  const pending = useApp((s) => s.launches.length + s.queue.filter((q) => q.flag?.step).length);
   const { data: log } = useCached("supervisor-log", supervisorLog);
   const [opening, setOpening] = useState(false);
   const openSession = async () => {

@@ -418,56 +418,6 @@ pub enum ItemChange {
     Return,
 }
 
-/// A build order for one repository's open items (ADR-0019 §2, `order`): what to
-/// do first, why, and the priority and `after #N` changes that make the board
-/// show it. Never applied on its own: the user accepts all of it, some of it, or
-/// none (`ClientMsg::AnswerOrder`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrderProposal {
-    /// Changes whenever the repository's proposal is replaced, so an answer meant
-    /// for an older one is refused.
-    pub id: u64,
-    /// The repository's root.
-    pub project: PathBuf,
-    /// Seconds since the epoch. An item edited after this keeps its edit: the
-    /// proposal's change to it is skipped.
-    pub made: u64,
-    /// What asked for it: `you asked`, `3 items added today`, `a note on #49
-    /// names an order`.
-    pub trigger: String,
-    /// The order, the first first. Items it leaves out keep what they have.
-    pub steps: Vec<OrderStep>,
-}
-
-/// One item's place in an `OrderProposal`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrderStep {
-    pub item: u32,
-    /// One line: why it goes here.
-    pub reason: String,
-    /// The priority to give it; `None` keeps the one it has.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    /// The whole `blocked_by` list to give it; `None` keeps the one it has.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked_by: Option<Vec<u32>>,
-}
-
-impl OrderStep {
-    /// The edit accepting it makes; `None` when it only names a place.
-    pub fn change(&self) -> Option<ItemChange> {
-        (self.priority.is_some() || self.blocked_by.is_some()).then(|| ItemChange::Edit {
-            title: None,
-            body: None,
-            kind: None,
-            cwd: None,
-            priority: self.priority,
-            blocked_by: self.blocked_by.clone(),
-            parent: None,
-        })
-    }
-}
-
 /// A ready item the supervisor offers to start (ADR-0019 §1, §2 `launch`): open,
 /// nobody on it, its blockers shipped or dropped (or the model judged it doesn't
 /// need the one left), with room under the repository's `max_running`. One per
@@ -498,17 +448,6 @@ pub struct LaunchOffer {
     pub waived: Vec<u32>,
     /// Seconds since the epoch.
     pub made: u64,
-}
-
-/// What accepting an `OrderProposal` did.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct OrderApplied {
-    /// Items changed.
-    pub changed: Vec<u32>,
-    /// Items left as they are, and why (edited since, shipped, the change now
-    /// refused).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<(u32, String)>,
 }
 
 /// An item `ShipMerged` shipped.
