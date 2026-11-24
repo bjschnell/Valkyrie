@@ -3,6 +3,8 @@
 //! each other, and handoffs.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -117,8 +119,9 @@ fn agents_only_propose_and_never_review() {
     // an agent gets past the check; ADR-0007 §4 says why that's the agent's
     // sandbox's job.) `line` ends by writing a file, which is how we wait for it.
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -644,23 +647,19 @@ fn skills_are_indexed_patched_learned_and_exported() {
         String::from_utf8(out.stdout).unwrap()
     };
     // The skill itself, from a human: active at once.
+    let (line, go) = common::after_setsid(&format!(
+        "printf '1. Push the tag.\\n' | valk decide --kind skill 'Cut a release' - > {} 2>&1",
+        out.join("human").display()
+    ));
     let mut human = Command::new("setsid");
-    human.args([
-        "-f",
-        "script",
-        "-qec",
-        &format!(
-            "printf '1. Push the tag.\\n' | valk decide --kind skill 'Cut a release' - > {} 2>&1",
-            out.join("human").display()
-        ),
-        "/dev/null",
-    ]);
+    human.args(["-f", "script", "-qec", &line, "/dev/null"]);
     env(&mut human);
     human
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     assert!(human.status().unwrap().success());
+    drop(go);
     assert!(wait_for(&out.join("human")).contains("#1 recorded"));
 
     // Listed by title for agents, its steps a `decisions show` away.
@@ -878,18 +877,18 @@ fn agents_hear_about_their_siblings() {
             .unwrap();
         path
     };
-    // `a` says when its hooks are in, and `b` asks only then: a fixed sleep lost
-    // the race on a loaded CI runner, where each `valk hook` starts slowly.
-    let a_ready = out.join("a-ready");
+    // `b` asks only once the daemon has taken in every hook (see `hooks_in`):
+    // `valk hook` doesn't wait for the daemon to read what it sent, so a script
+    // that has run its hooks says nothing about what the daemon knows.
+    let go = out.join("go");
     let a = script(
         "a",
         format!(
-            "{start}{}{}touch {}\n",
+            "{start}{}{}",
             hook(
                 serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"refactor the auth module","cwd":repo_s})
             ),
             edit("src/auth.rs") + &edit("src/db.rs"),
-            a_ready.display(),
         ),
     );
     let b = script(
@@ -897,7 +896,7 @@ fn agents_hear_about_their_siblings() {
         format!(
             "{start}{}while [ ! -e {} ]; do sleep 0.1; done\n{}{}echo done > {}\n",
             edit("src/auth.rs"),
-            a_ready.display(),
+            go.display(),
             ask("first"),
             ask("second"),
             out.join("b-done").display()
@@ -923,13 +922,12 @@ fn agents_hear_about_their_siblings() {
     // Started as a human would (see agents_only_propose_and_never_review): a session
     // an agent started doesn't have its prompts repeated.
     let human_new = |name: &str, script: &Path| {
+        let (line, _go) = common::after_setsid(&format!(
+            "valk new --name {name} --cwd {repo_s} -- {} > /dev/null",
+            script.display()
+        ));
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec"])
-            .arg(format!(
-                "valk new --name {name} --cwd {repo_s} -- {} > /dev/null",
-                script.display()
-            ))
-            .arg("/dev/null")
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -946,6 +944,28 @@ fn agents_hear_about_their_siblings() {
     human_new("auth-work", &a);
     std::thread::sleep(Duration::from_millis(300));
     human_new("other", &b);
+    // `a`'s start, prompt and two edits, and `b`'s start and edit, as each
+    // session's event log has them.
+    let hooks_in = || {
+        std::fs::read_dir(dir.join("state/valkyrie/sessions"))
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".events.jsonl"))
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .map(|log| log.matches(r#""k":"hook""#).count())
+            .sum::<usize>()
+    };
+    let since = Instant::now();
+    while hooks_in() < 6 {
+        assert!(
+            since.elapsed() < Duration::from_secs(30),
+            "the daemon took in {} of 6 hooks",
+            hooks_in()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::fs::write(&go, "").unwrap();
     wait_for(&out.join("b-done"));
     let first: serde_json::Value = serde_json::from_str(&wait_for(&out.join("first"))).unwrap();
     assert_eq!(
@@ -1158,8 +1178,9 @@ fn decisions_about_rewritten_files_are_flagged() {
     );
     // A human, as in agents_only_propose_and_never_review.
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -1730,10 +1751,20 @@ fn a_file_gets_the_decisions_scoped_to_it_once_a_session() {
         };
         store.decide(&new, human.clone(), 1).unwrap();
     }
+    // With valk on `PATH` the start block names it `valk`, not by its full path:
+    // that path is in its footer many times over, and a long one (a deep
+    // `CARGO_TARGET_DIR`) crowds the constraint's body out of the budget.
+    let path = std::env::join_paths(
+        std::iter::once(Path::new(BIN).parent().unwrap().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ),
+    )
+    .unwrap();
     let hook = |payload: serde_json::Value| -> String {
         let mut c = Command::new(BIN);
         c.args(["context-hook", "claude"])
             .current_dir(&repo)
+            .env("PATH", &path)
             .env("VALK_SESSION", "1")
             .env("VALK_CONTEXT", &base)
             .env("XDG_CONFIG_HOME", dir.join("config"))
@@ -1892,8 +1923,9 @@ fn agent_notes_say_where_they_came_from_and_stay_deleted() {
     .unwrap();
     std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -2111,8 +2143,9 @@ fn agents_search_notes_and_past_sessions_and_each_hit_is_logged() {
     .unwrap();
     std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -2304,14 +2337,13 @@ fn one_note_write_proposes_every_cluster_due() {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
+    let (line, go) = common::after_setsid(&format!(
+        "valk new --cwd {} -- {}",
+        repo.display(),
+        agent.display()
+    ));
     let status = Command::new("setsid")
-        .args([
-            "-f",
-            "script",
-            "-qec",
-            &format!("valk new --cwd {} -- {}", repo.display(), agent.display()),
-            "/dev/null",
-        ])
+        .args(["-f", "script", "-qec", &line, "/dev/null"])
         .current_dir(&repo)
         .env("PATH", &path)
         .env("XDG_STATE_HOME", dir.join("state"))
@@ -2324,6 +2356,7 @@ fn one_note_write_proposes_every_cluster_due() {
         .status()
         .unwrap();
     assert!(status.success());
+    drop(go);
     let a = wait_for(&out.join("a"));
     assert!(a.contains("note #7 written"), "{a}");
 

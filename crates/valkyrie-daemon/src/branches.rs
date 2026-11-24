@@ -9,6 +9,7 @@
 
 use crate::Registry;
 use crate::backlog::pr_summary;
+use crate::lock::Locked;
 use crate::supervise::Watched;
 use crate::work::{self, Pr, PrLookup};
 use std::collections::{BTreeMap, HashSet};
@@ -49,14 +50,13 @@ impl Registry {
     /// Someone else's PR (checked out to review it, say) is never flagged: a
     /// step types into the session. Returns how many sessions it flagged.
     pub(crate) async fn watch_branches(&self, lookup: PrLookup, me: &str) -> usize {
-        if !self.supervisor.lock().unwrap().on() {
+        if !self.supervisor.locked().on() {
             return 0;
         }
         // The sessions `ship_merged_prs` reads a PR for already.
         let covered: HashSet<SessionId> = self
             .backlog
-            .lock()
-            .unwrap()
+            .locked()
             .load()
             .into_iter()
             .filter(|i| matches!(i.status, ItemStatus::Open | ItemStatus::Proposed))
@@ -107,8 +107,7 @@ impl Registry {
             let first = &places[0];
             let cached = self
                 .supervisor
-                .lock()
-                .unwrap()
+                .locked()
                 .no_pr
                 .get(&key)
                 .is_some_and(|(head, at)| *head == first.head && at.elapsed() < NO_PR_FOR);
@@ -123,30 +122,26 @@ impl Registry {
             let url = match &pr {
                 Pr::None => {
                     self.supervisor
-                        .lock()
-                        .unwrap()
+                        .locked()
                         .no_pr
                         .insert(key, (first.head.clone(), Instant::now()));
                     continue;
                 }
                 Pr::Unknown => {
                     let now = crate::session::now_ms() / 1000;
-                    self.watching
-                        .lock()
-                        .unwrap()
-                        .unread_branch(&key.0, &key.1, now);
+                    self.watching.locked().unread_branch(&key.0, &key.1, now);
                     continue;
                 }
                 Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => url.clone(),
             };
-            self.supervisor.lock().unwrap().no_pr.remove(&key);
+            self.supervisor.locked().no_pr.remove(&key);
             // A merge this poll read may have left it conflicting (backlog #215).
             let pr = self.foresee(&url, pr);
             // Watched only while it's the user's own and open, as flags are.
             let mine = matches!(&pr, Pr::Open { author, .. } if author == me);
             if mine || !matches!(pr, Pr::Open { .. }) {
                 let now = crate::session::now_ms() / 1000;
-                self.watching.lock().unwrap().saw(
+                self.watching.locked().saw(
                     &url,
                     key.0.clone(),
                     None,
@@ -160,7 +155,7 @@ impl Registry {
             if let Pr::Merged { base, author, .. } = &pr {
                 // Only the user's own, seen open first: an old merge, or a
                 // colleague's PR checked out to review, is no reason to type.
-                let news = author == me && self.supervisor.lock().unwrap().open_seen.remove(&url);
+                let news = author == me && self.supervisor.locked().open_seen.remove(&url);
                 if news {
                     let own: Vec<SessionId> = places.iter().map(|p| p.session).collect();
                     self.announce_merge(&url, base, &own, &key.0, None);
@@ -168,16 +163,12 @@ impl Registry {
                 continue;
             }
             if let Pr::Closed { .. } = &pr {
-                self.supervisor.lock().unwrap().open_seen.remove(&url);
+                self.supervisor.locked().open_seen.remove(&url);
             }
             if let Pr::Open { author, .. } = &pr
                 && author == me
             {
-                self.supervisor
-                    .lock()
-                    .unwrap()
-                    .open_seen
-                    .insert(url.clone());
+                self.supervisor.locked().open_seen.insert(url.clone());
             }
             let Pr::Open {
                 failed,
@@ -305,7 +296,7 @@ mod tests {
         let no_pr = spawn(&bare, true);
         // The item's own poll reads this one's PR.
         {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: "tracked".into(),
                 cwd: Some(repo.clone()),
@@ -332,7 +323,7 @@ mod tests {
         let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = asked.clone();
         let lookup: PrLookup = Arc::new(move |_, branch| {
-            log.lock().unwrap().push(branch.to_owned());
+            log.locked().push(branch.to_owned());
             let (n, author) = match branch {
                 "feat/mine" => (1, "me"),
                 "feat/theirs" => (2, "someone"),
@@ -350,7 +341,7 @@ mod tests {
         });
         let flagged = registry.watch_branches(lookup.clone(), "me").await;
         assert_eq!(flagged, 1);
-        let mut branches = asked.lock().unwrap().clone();
+        let mut branches = asked.locked().clone();
         branches.sort();
         assert_eq!(
             branches,
@@ -379,7 +370,7 @@ mod tests {
             .unwrap();
         let root = project::root(&repo);
         let now = crate::session::now_ms() / 1000;
-        let answers = registry.context.lock().unwrap().steps(&root, now);
+        let answers = registry.context.locked().steps(&root, now);
         assert_eq!(answers.len(), 1);
         assert_eq!(
             (answers[0].via, answers[0].taken),
@@ -392,12 +383,12 @@ mod tests {
         );
 
         // The branch with no PR isn't asked about again while its commit stays.
-        asked.lock().unwrap().clear();
+        asked.locked().clear();
         registry.watch_branches(lookup.clone(), "me").await;
-        assert!(!asked.lock().unwrap().contains(&"feat/bare".to_owned()));
+        assert!(!asked.locked().contains(&"feat/bare".to_owned()));
         git(&bare, &["commit", "-q", "--allow-empty", "-m", "two"]);
         registry.watch_branches(lookup, "me").await;
-        assert!(asked.lock().unwrap().contains(&"feat/bare".to_owned()));
+        assert!(asked.locked().contains(&"feat/bare".to_owned()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -431,7 +422,7 @@ mod tests {
             false,
         )
         .unwrap();
-        registry.supervisor.lock().unwrap().context_on = Some(|| true);
+        registry.supervisor.locked().context_on = Some(|| true);
         let spawn = |cwd: &Path| {
             let spec = SpawnSpec {
                 command: vec!["sleep".into(), "30".into()],

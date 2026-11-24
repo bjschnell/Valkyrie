@@ -5,6 +5,8 @@
 //! ships in one go once merged.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -149,6 +151,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     // the command is done: printed line by line, a partial file can end in `\n` too.
     let human = |cmd: &str, name: &str| {
         let line = format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}", o = o(name));
+        let (line, _go) = common::after_setsid(&line);
         let status = Command::new("setsid")
             .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
@@ -717,6 +720,7 @@ fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
     );
     let human = |cmd: &str, name: &str| {
         let line = format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}", o = o(name));
+        let (line, _go) = common::after_setsid(&line);
         let status = Command::new("setsid")
             .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
@@ -751,20 +755,37 @@ fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
         wait_for(&out.join("self-adopt")).contains("is for the user, not claude"),
         "an agent can't adopt"
     );
-    // Its prompt reaches the daemon by a hook: adopt once that's in and the
-    // tracker knows it's claude.
-    let start = Instant::now();
-    let adopted = loop {
-        let _ = std::fs::remove_file(out.join("adopt"));
-        human(&format!("valk todo adopt {session} -k bug"), "adopt");
-        let said = wait_for(&out.join("adopt"));
-        if said.starts_with('#') || start.elapsed() > Duration::from_secs(10) {
-            break said;
-        }
-        std::thread::sleep(Duration::from_millis(200));
+    // Its prompt reaches the daemon by a hook, which doesn't wait for the daemon
+    // to read it: adopt once the session's event log has it, which the daemon
+    // writes as it takes the prompt in. Retrying the adopt for a fixed while
+    // gave up on a loaded CI runner (backlog #257).
+    let prompt_in = || {
+        std::fs::read_dir(dir.join("state/valkyrie/sessions"))
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .ends_with(&format!("-{session}.events.jsonl"))
+            })
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .any(|log| {
+                log.lines()
+                    .any(|l| l.contains(r#""k":"hook""#) && l.contains("UserPromptSubmit"))
+            })
     };
+    let start = Instant::now();
+    while !prompt_in() {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "the daemon never took in session {session}'s prompt"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    human(&format!("valk todo adopt {session} -k bug"), "adopt");
     assert_eq!(
-        adopted,
+        wait_for(&out.join("adopt")),
         format!(
             "#1 fix the login redirect loop (repo, branch fix/login-loop): session {session} is on it\n"
         )
@@ -858,8 +879,9 @@ fn agents_drop_and_reword_only_their_own_items() {
     );
     let human = |cmd: &str, name: &str| {
         let line = run(cmd, name);
+        let (line, _go) = common::after_setsid(line.trim_end());
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line.trim_end(), "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))

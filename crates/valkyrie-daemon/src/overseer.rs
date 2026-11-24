@@ -9,6 +9,7 @@
 
 use crate::Registry;
 use crate::context::Peer;
+use crate::lock::Locked;
 use crate::session::Session;
 use anyhow::{Result, bail};
 use std::fmt::Write as _;
@@ -67,13 +68,13 @@ impl Registry {
     ) -> Result<Reply> {
         self.vouch(peer, "starting the supervisor session")?;
         // One at a time, so two starts can't both find none and each spawn one.
-        let _one = self.overseer_start.lock().unwrap();
+        let _one = self.overseer_start.locked();
         if let Some(s) = self.overseer() {
             return Ok(Reply::Session {
                 info: Box::new(s.info()),
             });
         }
-        if !self.supervisor.lock().unwrap().on() {
+        if !self.supervisor.locked().on() {
             bail!("the supervisor is off: `valk supervise on` first");
         }
         let mut command = crate::backlog::agent_command("claude", "", OPENING.to_owned());
@@ -115,7 +116,7 @@ impl Registry {
         if from.id == to.id || self.same_tab(from.id, to.id) {
             return Ok(());
         }
-        if !self.supervisor.lock().unwrap().on() {
+        if !self.supervisor.locked().on() {
             return Err("the supervisor is off".to_owned());
         }
         if to.agent_behind().is_none() {
@@ -149,12 +150,7 @@ impl Registry {
             session: info.name,
             text,
         };
-        if let Err(e) = self
-            .context
-            .lock()
-            .unwrap()
-            .record_prompt(&root, &record, now)
-        {
+        if let Err(e) = self.context.locked().record_prompt(&root, &record, now) {
             tracing::warn!("couldn't record a supervisor prompt: {e:#}");
         }
     }
@@ -287,7 +283,7 @@ mod tests {
             false,
         )
         .unwrap();
-        *crate::backlog::AGENT_STANDIN.lock().unwrap() = Some(vec!["sleep".into(), "30".into()]);
+        *crate::backlog::AGENT_STANDIN.locked() = Some(vec!["sleep".into(), "30".into()]);
         let size = Size { cols: 40, rows: 10 };
         let start = || registry.supervisor_session(repo.clone(), size, Vec::new(), None);
 
@@ -296,9 +292,9 @@ mod tests {
         assert!(start().is_err());
         caller(None);
         // Nor while the supervisor is off.
-        registry.supervisor.lock().unwrap().set_on(false).unwrap();
+        registry.supervisor.locked().set_on(false).unwrap();
         assert!(format!("{:#}", start().unwrap_err()).contains("supervise on"));
-        registry.supervisor.lock().unwrap().set_on(true).unwrap();
+        registry.supervisor.locked().set_on(true).unwrap();
 
         let Reply::Session { info } = start().unwrap() else {
             panic!("no session");
@@ -361,9 +357,9 @@ mod tests {
         assert!(why.contains("working"), "{why}");
         assert!(registry.overseer_may_type(&me, &shell).is_err());
         // Nor anywhere while the supervisor is off.
-        registry.supervisor.lock().unwrap().set_on(false).unwrap();
+        registry.supervisor.locked().set_on(false).unwrap();
         assert!(registry.overseer_may_type(&me, &idle).is_err());
-        registry.supervisor.lock().unwrap().set_on(true).unwrap();
+        registry.supervisor.locked().set_on(true).unwrap();
 
         // What it typed is on the supervisor page, and only text counts.
         registry.log_overseer_input(&idle, b"From the supervisor: merge main in\r");

@@ -3,6 +3,8 @@
 //! only the user moves the docs folder.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -101,8 +103,9 @@ fn an_agent_writes_and_edits_docs_and_only_the_user_moves_them() {
 
     // A human: on a terminal of its own, outside every session (as in context.rs).
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))

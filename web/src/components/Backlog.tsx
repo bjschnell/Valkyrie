@@ -5,7 +5,7 @@ import { age } from "../lib/time";
 import { ITEM_KINDS, PRIORITIES, type Item, type ItemFacts, type ItemKind, type Priority } from "../proto";
 import { addItem, setStatuses, changeItem, checkMerged, editItem, itemFacts, takeFailedEdit, launchItem, noteItem, removeItem, sendFile, setStatus, shipMerged, toast, useApp } from "../store";
 import { RepoSelect } from "./Repos";
-import { Back, Chevron, Clip } from "./icons";
+import { Back, Chevron, Clip, KindIcon } from "./icons";
 import { useDesktop, useMedia } from "./Terminal";
 import { MicButton } from "./Mic";
 import { usePageKeys } from "../lib/pageKeys";
@@ -527,14 +527,22 @@ function ItemCard({
   return (
     <div className={`item-slot ${picked ? "picked" : ""}`} data-item={item.id} style={depth ? ({ "--depth": depth } as CSSProperties) : undefined}>
       <button className={`row item-row ${picked ? "picked" : ""}`} aria-expanded={expanded} onClick={onToggle}>
-        <span className="item-ref">{itemRef(item)}</span>
+        <span className="item-kind" title={item.kind}>
+          <KindIcon kind={item.kind} />
+        </span>
         <span className="row-main">
           <span className="row-name">{item.title}</span>
           <span className="row-sub">
             <span className={`state-tag state-text-${where.state}`}>{where.word}</span>
-            <span className="tag">
-              {item.kind}
-              {lane !== "done" && <> · {priority(item)}</>}
+            <span className="kind-chip">{item.kind}</span>
+            <span className="tag item-meta">
+              <span className="item-num">{itemRef(item)}</span>
+              {lane !== "done" && (
+                <>
+                  {" · "}
+                  <span className={priority(item) === "p1" ? "item-p1" : undefined}>{priority(item)}</span>
+                </>
+              )}
               {group && !(depth > 0 && up) && <> · {group}</>}
             </span>
           </span>

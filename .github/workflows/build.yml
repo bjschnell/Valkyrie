@@ -45,7 +45,11 @@ jobs:
           ref: ${{ inputs.ref }}
       - name: musl toolchain
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        # A stalled apt mirror fails fast here instead of eating the job timeout.
+        timeout-minutes: 10
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
       # The ref's commit, also for a manual run: `valk upgrade` compares it with
       # what the release's tag points at (build.rs). The channel picks which

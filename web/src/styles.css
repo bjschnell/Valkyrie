@@ -3763,7 +3763,8 @@ html.with-tabs .offline-banner {
   background: none;
 }
 
-.lane-done .item-row .row-sub {
+/* Its ref stays so a done item can still be named. */
+.lane-done .item-row .row-sub > :not(.item-meta) {
   display: none;
 }
 
@@ -3817,6 +3818,40 @@ html.with-tabs .offline-banner {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* An item's kind (#296): a shape at the row's edge and an outlined word. Kinds are
+   words and shapes; color stays for state. */
+.item-kind {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--soft);
+}
+
+.kind-chip {
+  flex: none;
+  padding: 0 var(--space-15);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  font: var(--type-mono);
+  color: var(--fg);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.item-num {
+  color: var(--faint);
+}
+
+.item-p1 {
+  color: var(--fg);
+  font-weight: var(--weight-bold);
 }
 
 .item-slot > .card {
@@ -5075,13 +5110,29 @@ html.with-tabs .page {
   inset: auto 0 0 0;
   z-index: 26;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* One equal column per tab, however many sections there are. */
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   padding: var(--space-15) var(--space-15) calc(env(safe-area-inset-bottom) + var(--space-15));
   background: color-mix(in srgb, var(--surface) 86%, transparent);
   backdrop-filter: blur(16px) saturate(150%);
   -webkit-backdrop-filter: blur(16px) saturate(150%);
   border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
   view-transition-name: tabbar;
+}
+
+/* iOS 26 home-screen apps can stop a fixed bar short of the screen's bottom edge,
+   leaving a strip of page under it. The bar's background runs on past its box so
+   it always reaches the edge. */
+.tabbar::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 120px;
+  background: inherit;
+  pointer-events: none;
 }
 
 .tab {

@@ -2,6 +2,7 @@
 //! is asking. A connection from inside a session running an agent can propose but
 //! never accept, whatever environment it claims.
 
+use crate::lock::Locked;
 use crate::session::Session;
 use crate::{Registry, foreground};
 use anyhow::{Result, bail};
@@ -194,9 +195,9 @@ impl Registry {
     /// What's waiting on review: proposals, then active decisions flagged as
     /// possibly out of date.
     pub(crate) fn refresh_proposals(&self) {
-        let store = self.context.lock().unwrap();
+        let store = self.context.locked();
         let mut items = store.proposals();
-        let stale = self.stale.lock().unwrap();
+        let stale = self.stale.locked();
         let mut flagged: Vec<_> = stale.keys().map(|(root, _)| root.clone()).collect();
         flagged.sort();
         flagged.dedup();
@@ -236,11 +237,7 @@ impl Registry {
             commit: valkyrie_context::project::head(&new.cwd),
             cwd: Some(new.cwd.clone()),
         };
-        let decision = self
-            .context
-            .lock()
-            .unwrap()
-            .decide(&new, provenance, now_secs())?;
+        let decision = self.context.locked().decide(&new, provenance, now_secs())?;
         tracing::info!(
             id = decision.id,
             project = %decision.project.display(),
@@ -281,8 +278,7 @@ impl Registry {
         }
         let note = self
             .context
-            .lock()
-            .unwrap()
+            .locked()
             .note(&new, provenance, None, now_secs())?;
         tracing::info!(
             id = note.id,
@@ -302,7 +298,7 @@ impl Registry {
     pub(crate) fn notes(&self, cwd: Option<&Path>) -> Reply {
         let (mut notes, mut deleted) = (Vec::new(), Vec::new());
         {
-            let store = self.context.lock().unwrap();
+            let store = self.context.locked();
             let roots = match cwd {
                 Some(cwd) => vec![valkyrie_context::project::root(cwd)],
                 None => store.projects(),
@@ -335,8 +331,7 @@ impl Registry {
         let session = caller.session.as_ref().map(|s| s.info().name);
         let tombstone = self
             .context
-            .lock()
-            .unwrap()
+            .locked()
             .rm_note(&root, id, by, session, now_secs())?;
         tracing::info!(id, project = %root.display(), by, "note deleted");
         Ok(Reply::Tombstone { tombstone })
@@ -371,11 +366,10 @@ impl Registry {
         }
         // Before taking the lock: it runs `git`.
         let head = valkyrie_context::project::head(project);
-        let decision =
-            self.context
-                .lock()
-                .unwrap()
-                .review(project, id, action, seen, head, now_secs())?;
+        let decision = self
+            .context
+            .locked()
+            .review(project, id, action, seen, head, now_secs())?;
         if matches!(
             action,
             ReviewAction::Confirm
@@ -384,10 +378,7 @@ impl Registry {
                 | ReviewAction::Reopen
                 | ReviewAction::Edit { .. }
         ) {
-            self.stale
-                .lock()
-                .unwrap()
-                .remove(&(project.to_path_buf(), id));
+            self.stale.locked().remove(&(project.to_path_buf(), id));
         }
         tracing::info!(
             id,
@@ -448,7 +439,7 @@ impl Registry {
         // said once, first.
         let adopted = me
             .take_adopted()
-            .and_then(|item| self.backlog.lock().unwrap().get(item).ok());
+            .and_then(|item| self.backlog.locked().get(item).ok());
         let mut said: Vec<String> = adopted
             .map(|item| valkyrie_context::backlog::adopted(&item))
             .into_iter()
@@ -493,7 +484,7 @@ impl Registry {
     /// The decisions of the project holding `cwd`, or of every project.
     pub(crate) fn decisions(&self, cwd: Option<PathBuf>, peer: Option<Peer>) -> Reply {
         let agent = self.caller(peer).agent.is_some();
-        let store = self.context.lock().unwrap();
+        let store = self.context.locked();
         let decisions = match cwd {
             Some(cwd) => store.load(&valkyrie_context::project::root(&cwd)),
             None => store
@@ -502,7 +493,7 @@ impl Registry {
                 .flat_map(|root| store.load(root))
                 .collect(),
         };
-        let stale = self.stale.lock().unwrap();
+        let stale = self.stale.locked();
         let decisions = decisions
             .into_iter()
             .map(|mut d| {
@@ -523,7 +514,7 @@ impl Registry {
         let _one = self.stale_check.lock().await;
         let roots: Vec<PathBuf> = match only {
             Some(root) => vec![root],
-            None => self.context.lock().unwrap().projects(),
+            None => self.context.locked().projects(),
         };
         // Checked lately, at the same `HEAD`: nothing can have changed but the clock.
         let heads = tokio::task::spawn_blocking(move || {
@@ -538,7 +529,7 @@ impl Registry {
         .await
         .unwrap_or_default();
         let roots: Vec<(PathBuf, Option<String>)> = {
-            let checked = self.stale_checked.lock().unwrap();
+            let checked = self.stale_checked.locked();
             heads
                 .into_iter()
                 .filter(|(r, head)| {
@@ -559,7 +550,7 @@ impl Registry {
         let mut active = Vec::new();
         {
             use valkyrie_context::skill;
-            let store = self.context.lock().unwrap();
+            let store = self.context.locked();
             for (root, _) in &roots {
                 let used = store.skill_use(root);
                 let mut flagged = std::collections::BTreeMap::new();
@@ -624,10 +615,10 @@ impl Registry {
             }
         }
         {
-            let mut stale = self.stale.lock().unwrap();
+            let mut stale = self.stale.locked();
             stale.retain(|(root, _), _| !roots.iter().any(|(r, _)| r == root));
             stale.extend(found);
-            let mut checked = self.stale_checked.lock().unwrap();
+            let mut checked = self.stale_checked.locked();
             for (root, head) in roots {
                 checked.insert(root, (std::time::Instant::now(), head));
             }

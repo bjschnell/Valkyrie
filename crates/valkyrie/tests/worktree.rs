@@ -3,6 +3,8 @@
 //! that's merged, clean and idle, with its branch, and only when the user asks.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -269,6 +271,7 @@ fn prunes_only_merged_clean_idle_worktrees_and_only_for_the_user() {
             "{BIN} --socket {} {cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}",
             socket.display()
         );
+        let (line, _go) = common::after_setsid(&line);
         let status = Command::new("setsid")
             .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)

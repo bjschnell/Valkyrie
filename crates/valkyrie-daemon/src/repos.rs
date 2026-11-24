@@ -2,6 +2,7 @@
 //! backlog's and the wiki's, in the web app and the TUI alike.
 
 use crate::Registry;
+use crate::lock::Locked;
 use anyhow::Result;
 use std::path::PathBuf;
 use valkyrie_context::repos;
@@ -28,8 +29,7 @@ impl Registry {
         let sessions: Vec<PathBuf> = self.listed().iter().map(|s| s.info().cwd).collect();
         let mut folders: Vec<PathBuf> = self
             .backlog
-            .lock()
-            .unwrap()
+            .locked()
             .load()
             .into_iter()
             .filter_map(|i| i.project)
