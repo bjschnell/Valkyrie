@@ -1580,3 +1580,32 @@ async fn hidden_sessions_stay_off_the_lists_and_end_with_their_connection() {
     assert!(client.dump(shown).await.is_ok());
     client.kill(shown).await.unwrap();
 }
+
+/// One daemon per machine on a state dir (backlog #297): a second is refused and
+/// told where the first listens, clients follow the first while it holds the
+/// claim, and once it's gone the state dir is free again.
+#[test]
+fn one_daemon_claims_a_state_dir() {
+    let dir = TempDir(std::env::temp_dir().join(format!("valkyrie-claim-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&*dir);
+    let state = dir.join("state");
+    assert_eq!(valkyrie_proto::claimed_socket(&state), None);
+
+    let first = dir.join("run/before.sock");
+    let claim = valkyrie_daemon::claim(&state, &first).unwrap();
+    assert_eq!(valkyrie_proto::claimed_socket(&state), Some(first.clone()));
+
+    // The hostname changed: a daemon on the new name's socket is refused.
+    let err = valkyrie_daemon::claim(&state, &dir.join("run/after.sock"))
+        .err()
+        .expect("a second claim");
+    assert!(err.to_string().contains("before.sock"), "{err:#}");
+    assert_eq!(valkyrie_proto::claimed_socket(&state), Some(first.clone()));
+
+    // Gone, its file left behind: nobody follows it, and the next daemon claims it.
+    drop(claim);
+    assert_eq!(valkyrie_proto::claimed_socket(&state), None);
+    let next = dir.join("run/after.sock");
+    let _claim = valkyrie_daemon::claim(&state, &next).unwrap();
+    assert_eq!(valkyrie_proto::claimed_socket(&state), Some(next));
+}

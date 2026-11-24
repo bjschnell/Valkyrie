@@ -700,6 +700,17 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             let state = valkyrie_proto::state_dir();
             // Also after an upgrade: the binary the hook runs may be a new one.
             hook::sync_claude(valkyrie_tui::context_enabled());
+            // One daemon per machine on a state dir (backlog #297). An upgrade's new
+            // image already has the sessions: it serves them even if the claim fails.
+            #[cfg(unix)]
+            let _claim = match valkyrie_daemon::claim(&state, &socket) {
+                Ok(claim) => Some(claim),
+                Err(e) if resume_fd.is_some() => {
+                    tracing::warn!("serving without this machine's claim: {e:#}");
+                    None
+                }
+                Err(e) => return Err(e),
+            };
             match resume_fd {
                 #[cfg(unix)]
                 Some(fd) => valkyrie_daemon::resume(fd, &state, &exe).await,
