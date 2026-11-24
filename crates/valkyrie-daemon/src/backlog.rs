@@ -1718,7 +1718,8 @@ mod tests {
         for s in [idle, busy, old, behind] {
             s.kill();
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1847,7 +1848,8 @@ mod tests {
         assert_eq!(get(reworded).status, ItemStatus::Open);
         assert_eq!(get(dropped).status, ItemStatus::Shipped);
         session.kill();
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -1969,7 +1971,8 @@ mod tests {
         );
         assert!(registry.accepted_for(&filer).is_empty(), "said twice");
         filer.kill();
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

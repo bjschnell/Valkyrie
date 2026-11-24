@@ -974,7 +974,8 @@ mod tests {
             s.kill();
         }
         drop(a);
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
