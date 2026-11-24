@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// One repository a picker offers: a main checkout's root, never a worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct KnownRepo {
     pub path: PathBuf,
     /// `~/repos/valkyrie`, as it reads.
@@ -18,6 +19,7 @@ pub struct KnownRepo {
 
 /// A folder whose repositories (one level down) are offered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ScanFolder {
     pub path: PathBuf,
     pub label: String,
@@ -25,6 +27,7 @@ pub struct ScanFolder {
 
 /// What `Repos` replies.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct RepoList {
     /// Most recently worked in first.
     pub repos: Vec<KnownRepo>,
@@ -37,6 +40,7 @@ pub struct RepoList {
 
 /// A change to the list. Paths may start with `~`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum RepoEdit {
     /// Offers this repository (a worktree adds its main checkout), and unhides it.

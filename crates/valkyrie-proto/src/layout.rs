@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const RATIO_SCALE: u16 = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Pane {
     Leaf {
@@ -26,6 +27,7 @@ pub enum Pane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Axis {
     /// Side by side: `a` on the left, `b` on the right, a `│` between.
@@ -36,6 +38,7 @@ pub enum Axis {
 
 /// Where a new pane goes, beside the one it splits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     Up,

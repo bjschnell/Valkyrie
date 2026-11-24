@@ -974,7 +974,7 @@ export async function supervisorWatch(): Promise<{ prs: WatchedPr[]; polled_at?:
   if (!conn) throw new Error("not connected");
   const reply = await conn.request({ t: "supervisor_watch" });
   if (reply.t !== "supervisor_watch") throw new Error("unexpected reply");
-  return { prs: reply.prs, polled_at: reply.polled_at, next_at: reply.next_at, on: reply.on };
+  return { prs: reply.prs, polled_at: reply.polled_at ?? undefined, next_at: reply.next_at ?? undefined, on: reply.on };
 }
 
 /** Opens the supervisor session, starting it if none runs (ADR-0019 §10), in
@@ -1100,7 +1100,7 @@ export async function commentDoc(
   if (!conn) throw new Error("not connected");
   const reply = await conn.request({ t: "comment_doc", key, text, ...(quote ? { quote } : {}) });
   if (reply.t !== "doc_comments") throw new Error("unexpected reply");
-  return { comments: reply.comments, to: reply.to };
+  return { comments: reply.comments, to: reply.to ?? undefined };
 }
 
 /** Closes a comment; returns the doc's comments. */
@@ -1128,7 +1128,7 @@ export async function docHistory(key: string, version?: string): Promise<{ versi
   if (!conn) throw new Error("not connected");
   const reply = await conn.request({ t: "doc_history", key, ...(version ? { version } : {}) });
   if (reply.t !== "doc_history") throw new Error("unexpected reply");
-  return { versions: reply.versions, text: reply.text };
+  return { versions: reply.versions, text: reply.text ?? undefined };
 }
 
 /** Puts a past version back over the version whose hash `base` is. */

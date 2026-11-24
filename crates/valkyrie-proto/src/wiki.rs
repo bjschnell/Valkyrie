@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// One page. In a listing `body` is empty; `WikiPage` fills it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct WikiPage {
     pub slug: String,
     pub title: String,
@@ -30,6 +31,7 @@ pub struct WikiPage {
 
 /// A repository's pages, as `Wiki` replies.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct WikiListing {
     /// The repository the pages are for.
     pub root: PathBuf,

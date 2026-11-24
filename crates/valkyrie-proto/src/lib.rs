@@ -22,6 +22,8 @@ pub mod screen;
 pub mod search;
 pub mod supervisor;
 pub mod themes;
+#[cfg(test)]
+mod ts;
 pub mod wiki;
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +62,7 @@ pub const VOUCH_DESKTOP_PAIRING: &str = "pairing the desktop app";
 /// Which ping sound a `Notify` makes, as the queue's own pings do: `request` for
 /// something that needs you, `done` for something that finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeSound {
     Request,
@@ -72,6 +75,7 @@ pub type SessionId = u32;
 /// What a program is told its terminal looks like: default text and background,
 /// and the 16 ANSI colors (black to bright white), each as RGB.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct TermColors {
     pub fg: [u8; 3],
     pub bg: [u8; 3],
@@ -79,6 +83,7 @@ pub struct TermColors {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Size {
     pub cols: u16,
     pub rows: u16,
@@ -95,6 +100,7 @@ impl Size {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SpawnSpec {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -139,6 +145,7 @@ pub fn login_env() -> Vec<(String, Option<String>)> {
 
 /// A linked worktree as `PruneWorktrees` judged it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Worktree {
     pub path: PathBuf,
     /// `None`: a detached `HEAD`.
@@ -156,6 +163,7 @@ pub struct Worktree {
 
 /// A client that stays connected, as its `Hello` names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ClientBuild {
     /// `tui` or `web`.
     pub kind: String,
@@ -180,6 +188,7 @@ impl ClientBuild {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ConnectedClient {
     pub client: ClientBuild,
     /// It speaks the daemon's protocol and runs the daemon's binary (as far as
@@ -211,6 +220,7 @@ pub fn binary_id() -> Option<(u64, u64)> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SessionInfo {
     pub id: SessionId,
     pub name: String,
@@ -252,6 +262,7 @@ pub struct SessionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
     /// Version check. A daemon older than protocol 2 doesn't know it and hangs up.
@@ -867,6 +878,7 @@ fn yes() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerMsg {
     Ok {
@@ -931,6 +943,7 @@ pub enum ServerMsg {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Reply {
     Done,
@@ -1113,6 +1126,7 @@ pub enum Reply {
 
 /// Where a `Scrollback` page starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ScrollAnchor {
     /// This many lines above the live screen.

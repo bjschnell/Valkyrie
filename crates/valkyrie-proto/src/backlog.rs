@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// What sort of work an item is; it picks the brief its agent starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     Bug,
@@ -49,6 +50,7 @@ impl ItemKind {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
 )]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     P0,
@@ -79,6 +81,7 @@ impl Priority {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
     /// Not done yet, whether or not an agent has started on it.
@@ -110,6 +113,7 @@ impl ItemStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Item {
     /// Numbered from 1 across every project, so `valk todo launch 12` needs no folder.
     /// The key everything stores and sends; what people read and type is `number`.
@@ -277,6 +281,7 @@ pub fn order(items: &[Item]) -> impl Fn(&Item, &Item) -> std::cmp::Ordering + '_
 
 /// What an item was last launched with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ItemLaunch {
     /// `claude` or `codex`.
     pub agent: String,
@@ -286,6 +291,7 @@ pub struct ItemLaunch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ItemNote {
     /// Seconds since the epoch.
     pub at: u64,
@@ -348,6 +354,7 @@ fn is_false(b: &bool) -> bool {
 
 /// What an item's checkout holds, read from git rather than taken from the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ItemFacts {
     pub branch: String,
     /// Commits on it that the repository's own checkout doesn't have.
@@ -362,6 +369,7 @@ pub struct ItemFacts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NewItem {
     /// May be empty: then the body's first line is the title.
     #[serde(default)]
@@ -371,6 +379,7 @@ pub struct NewItem {
     #[serde(default)]
     pub kind: ItemKind,
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub priority: Priority,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<u32>,
@@ -386,6 +395,7 @@ pub struct NewItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum ItemChange {
     /// Rewords it, or moves it to another repository. Only what's given changes,
@@ -424,6 +434,7 @@ pub enum ItemChange {
 /// repository at most. The user starts it or leaves it (`ClientMsg::AnswerLaunch`);
 /// once they've started two this way, a policy can start them without asking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct LaunchOffer {
     /// Changes whenever the repository's offer is replaced, so an answer meant for
     /// an older one is refused.
@@ -452,6 +463,7 @@ pub struct LaunchOffer {
 
 /// An item `ShipMerged` shipped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ShippedItem {
     pub id: u32,
     /// Its number in its repository.
@@ -476,6 +488,7 @@ pub struct ShippedItem {
 
 /// An open item with a branch that `ShipMerged` left open, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct KeptItem {
     pub id: u32,
     /// Its number in its repository; 0 for an item that's gone.

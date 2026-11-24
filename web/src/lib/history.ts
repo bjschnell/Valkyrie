@@ -44,7 +44,7 @@ export function historyStart(w: HistoryWindow, now: number): number | null {
 export type Shown = Outcome | "asks";
 
 export function shownOutcome(e: DigestEntry, asking: (session: number) => boolean): Shown {
-  return e.outcome === "stuck" && e.session !== undefined && asking(e.session) ? "asks" : e.outcome;
+  return e.outcome === "stuck" && e.session != null && asking(e.session) ? "asks" : e.outcome;
 }
 
 export function shownLabel(o: Shown): string {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Working,
@@ -40,6 +41,7 @@ impl AgentState {
 
 /// What a `NeedsInput` session is waiting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AskKind {
     Permission,
@@ -52,6 +54,7 @@ pub enum AskKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct AgentStatus {
     /// Adapter name: `claude`, `codex` or `generic`.
     pub agent: String,
@@ -91,6 +94,7 @@ impl AgentStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct QueueItem {
     pub session: SessionId,
     pub name: String,
@@ -112,6 +116,7 @@ pub struct QueueItem {
 /// A watcher's flag on an idle session (ADR-0019 §1): the reason the queue shows,
 /// and the one step the supervisor proposes for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Flag {
     /// "PR #98 conflicts with main", "CI red on PR #101: windows".
     pub reason: String,
@@ -134,6 +139,7 @@ pub struct Flag {
 /// it was picked, and the other one that would fit, if any. `leave` is always
 /// there besides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Step {
     pub action: StepAction,
     /// One line: "every failed check matches #17", "conflicting".
@@ -145,6 +151,7 @@ pub struct Step {
 /// What the supervisor can do for a flagged session. Each is a fixed template;
 /// no free text reaches an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum StepAction {
     /// Types skill #25's text into the idle session: merge the base in.

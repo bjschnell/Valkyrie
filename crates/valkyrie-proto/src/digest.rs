@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 /// How the digest is grouped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DigestGroup {
     #[default]
@@ -27,6 +28,7 @@ impl DigestGroup {
 
 /// Where a session's work ended up. Declared most urgent first: lists sort by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// Waiting on you: a question, a permission, a supervisor flag, red CI, or
@@ -68,6 +70,7 @@ impl Outcome {
 
 /// One agent session in the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DigestEntry {
     /// Its event log's name (`<created ns>-<id>`): stable across daemon restarts.
     pub key: String,
@@ -105,6 +108,7 @@ pub struct DigestEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Digest {
     /// The window (ms since the epoch).
     pub since_ms: u64,
@@ -120,6 +124,7 @@ pub struct Digest {
 
 /// An agent session that has ended, as the history lists it (backlog #150).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct PastSession {
     /// What the digest says of it; `entry.key` is what `Resume` takes.
     #[serde(flatten)]

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// One thing the supervisor did, or offered and got an answer to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SupervisorEntry {
     /// Seconds since the epoch.
     pub at: u64,
@@ -25,6 +26,7 @@ pub struct SupervisorEntry {
 /// What the PR poll last read of a pull request it watches (backlog #181,
 /// protocol 44).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct WatchedPr {
     pub url: String,
     /// The repository it's in.
@@ -52,6 +54,7 @@ pub struct WatchedPr {
 
 /// An open pull request, as the poll read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
     /// Every check passed and it merges cleanly.

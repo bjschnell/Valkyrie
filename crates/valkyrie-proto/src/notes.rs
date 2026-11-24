@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 /// Where a note stands. Only a live one is ever served.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum NoteStatus {
     #[default]
@@ -34,6 +35,7 @@ impl NoteStatus {
 
 /// One note, as stored in `<state dir>/context/<project>/notes/NNNN.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Note {
     pub id: u32,
     /// The repository it belongs to. Not stored in the file: the directory says.
@@ -71,6 +73,7 @@ pub struct Note {
 /// A note to write, as a client asks for it. Where it came from is the daemon's to
 /// work out, never the client's (ADR-0017 rule 1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NewNote {
     pub cwd: PathBuf,
     pub text: String,
@@ -79,6 +82,7 @@ pub struct NewNote {
     pub replaces: Option<u32>,
     /// Write it even though it matches a deleted note. Only a human may.
     #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub force: bool,
 }
 
@@ -86,6 +90,7 @@ pub struct NewNote {
 /// same note again (ADR-0017 rule 4). The text itself is gone: only hashes of its
 /// words are kept, enough to recognise it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Tombstone {
     pub id: u32,
     #[serde(default)]
@@ -100,6 +105,7 @@ pub struct Tombstone {
 
 /// A project's notes, every status, with its tombstones.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NotesListing {
     pub notes: Vec<Note>,
     pub deleted: Vec<Tombstone>,

@@ -8,6 +8,7 @@ use crate::Size;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ScreenUpdate {
     /// True when `rows` holds every row and the client should discard its old state.
     pub full: bool,
@@ -19,6 +20,7 @@ pub struct ScreenUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Row {
     pub y: u16,
     pub spans: Vec<Span>,
@@ -28,6 +30,7 @@ pub struct Row {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Span {
     pub x: u16,
     pub text: String,
@@ -36,6 +39,7 @@ pub struct Span {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Style {
     #[serde(default, skip_serializing_if = "Color::is_default")]
     pub fg: Color,
@@ -64,6 +68,7 @@ fn is_zero(v: &u8) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Color {
     #[default]
@@ -79,6 +84,7 @@ impl Color {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Cursor {
     pub x: u16,
     pub y: u16,
@@ -87,6 +93,7 @@ pub struct Cursor {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CursorShape {
     #[default]
@@ -98,6 +105,7 @@ pub enum CursorShape {
 /// Terminal modes a client must mirror on its own terminal so that the raw input
 /// bytes it forwards are encoded the way the program expects.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(default)]
 pub struct Modes {
     pub app_cursor: bool,
