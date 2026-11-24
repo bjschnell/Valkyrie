@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 /// Where in a session a hit was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SearchField {
     /// A prompt you gave it.
@@ -34,6 +35,7 @@ impl SearchField {
 
 /// One session that matched, at its best line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SearchHit {
     /// Its event log's name (`<created ns>-<id>`): stable across daemon restarts.
     pub key: String,
@@ -77,6 +79,7 @@ pub struct SearchHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SearchResults {
     pub query: String,
     /// The window searched (ms since the epoch).

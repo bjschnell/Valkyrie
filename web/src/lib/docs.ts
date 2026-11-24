@@ -84,7 +84,7 @@ export function quoteOf(text: string): string {
 }
 
 /** How many comments each quote has, not counting closed ones. */
-export function countByQuote(comments: { quote?: string; state: string }[]): Map<string, number> {
+export function countByQuote(comments: { quote?: string | null; state: string }[]): Map<string, number> {
   const out = new Map<string, number>();
   for (const c of comments) {
     if (!c.quote || c.state === "resolved") continue;

@@ -31,6 +31,8 @@ const CALL_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 /// `~/.ssh/config`. Never anything `ssh` could read as an option, or the shell on
 /// the other side as more than one word.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(type = "string"))]
 #[serde(try_from = "String", into = "String")]
 pub struct Host(String);
 
@@ -193,6 +195,7 @@ fn remote_command(args: &[&str]) -> String {
 /// A host the desktop app and `valk remote` know, with the local port its web
 /// app is forwarded to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Known {
     pub host: Host,
     pub port: u16,
@@ -205,6 +208,7 @@ pub fn hosts_file() -> PathBuf {
 
 /// The hosts file as kept: the hosts, and the next port to hand out.
 #[derive(Default, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 struct HostsFile {
     /// Never handed out again once used: the page on a port keeps that host's
     /// device token, which must never reach another host.

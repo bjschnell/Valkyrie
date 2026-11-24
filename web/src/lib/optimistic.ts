@@ -69,11 +69,11 @@ export function landed(raw: Lists, c: Change): boolean {
  * trimmed, the after-list without repeats and sorted. */
 export function editPatch(change: Extract<ItemChange, { do: "edit" }>): Partial<Item> {
   const patch: Partial<Item> = {};
-  if (change.title !== undefined) patch.title = change.title.trim();
-  if (change.body !== undefined) patch.body = change.body.trim();
-  if (change.kind !== undefined) patch.kind = change.kind;
+  if (change.title != null) patch.title = change.title.trim();
+  if (change.body != null) patch.body = change.body.trim();
+  if (change.kind != null) patch.kind = change.kind;
   if (change.cwd !== undefined) patch.project = change.cwd ?? undefined;
-  if (change.priority !== undefined) patch.priority = change.priority;
+  if (change.priority != null) patch.priority = change.priority;
   if (change.blocked_by !== undefined) patch.blocked_by = [...new Set(change.blocked_by)].sort((a, b) => a - b);
   if (change.parent !== undefined) patch.parent = change.parent || undefined;
   return patch;

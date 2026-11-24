@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// The latest reading, from whichever Claude session last drew its status line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Quota {
     /// When it was read (seconds since the epoch): readings only come while a
     /// Claude session runs, so a client shows how old it is.
@@ -16,6 +17,7 @@ pub struct Quota {
 
 /// One rate-limit window, e.g. the five-hour one or the week.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct QuotaLimit {
     /// Claude Code's own name for it: `five_hour`, `seven_day`, `seven_day_opus`, …
     pub name: String,

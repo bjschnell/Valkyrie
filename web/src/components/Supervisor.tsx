@@ -116,7 +116,7 @@ function Watching({ refresh }: { refresh: number }) {
                 {p.merge_note && <span className="supervisor-merge-note">{p.merge_note}</span>}
               </span>
               <span className="supervisor-repo">
-                {p.item !== undefined ? `#${itemNo(items, p.item)}` : p.branch} · {base(p.project)}
+                {p.item != null ? `#${itemNo(items, p.item)}` : p.branch} · {base(p.project)}
               </span>
             </li>
           ))}

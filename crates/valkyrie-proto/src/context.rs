@@ -9,6 +9,7 @@ use std::path::PathBuf;
 /// a policy picks a template Valkyrie's hooks enforce (ADR-0013), its body
 /// settings, not prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {
     #[default]
@@ -50,6 +51,7 @@ impl DecisionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionStatus {
     /// Waiting on a human; never injected.
@@ -90,6 +92,7 @@ impl DecisionStatus {
 
 /// Where a decision came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Provenance {
     /// `human`, or the agent that proposed it (`claude`, `codex`).
     pub by: String,
@@ -111,6 +114,7 @@ pub struct Provenance {
 /// for the decision's detail (backlog #256, protocol 50). Every serve to one
 /// session is one of these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ServedTo {
     /// What the session was about, as History names it; the log's own session
     /// string when its run is too old or not a known conversation.
@@ -130,6 +134,7 @@ pub struct ServedTo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Decision {
     /// Numbered from 1 within its project.
     pub id: u32,
@@ -171,6 +176,7 @@ pub struct Decision {
 
 /// Whether a decision may be out of date (DESIGN §6.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Freshness {
     /// When a human last said it holds (seconds); 0: when it was made active.
     #[serde(default)]
@@ -191,6 +197,7 @@ pub struct Freshness {
 
 /// A decision as asked for by `valk decide`, the TUI or the web app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NewDecision {
     /// Any directory inside the project.
     pub cwd: PathBuf,
@@ -219,6 +226,7 @@ pub struct NewDecision {
 
 /// Which sessions' corrections are read for decisions (DESIGN §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AutoMode {
     Off,
@@ -259,6 +267,7 @@ impl AutoMode {
 
 /// What a human does to a decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "a", rename_all = "snake_case")]
 pub enum ReviewAction {
     Accept,

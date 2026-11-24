@@ -470,7 +470,7 @@ function ItemCard({
   // Accept, Open, Launch: Launch beside Open while only takes are live (it hands
   // the item over), Accept beside it for an agent's own filed work.
   const actions = cardActions(item, sessions, boot);
-  const pr = prLink(item.pr);
+  const pr = prLink(item.pr ?? undefined);
 
   const act = async (f: () => Promise<unknown>) => {
     setBusy(true);

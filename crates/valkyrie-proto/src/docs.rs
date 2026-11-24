@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 /// What a doc is for. A front matter field, not a folder, so agents never pick one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DocKind {
     Plan,
@@ -34,6 +35,7 @@ impl DocKind {
 /// A doc to write. Who wrote it, and from which session and commit, the daemon
 /// works out itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct NewDoc {
     /// Where the writer is: a doc from inside a repository goes in its folder.
     pub cwd: PathBuf,
@@ -48,6 +50,7 @@ pub struct NewDoc {
 
 /// A doc as listed or read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Doc {
     /// Its `valk-id`; 0 for a file of the user's that hasn't been read through
     /// Valkyrie yet.
@@ -104,6 +107,7 @@ pub struct DocsListing {
 /// One of a doc's past versions (ADR-0021 §4): the file as it was before an edit
 /// replaced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DocVersion {
     /// What `DocHistory` and `RestoreDoc` name it by.
     pub version: String,
@@ -119,6 +123,7 @@ pub struct DocVersion {
 
 /// A doc the user deleted, kept so it can be put back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DeletedDoc {
     /// What `UndeleteDoc` takes.
     pub token: String,
@@ -131,6 +136,7 @@ pub struct DeletedDoc {
 
 /// Where a comment on a doc stands (ADR-0021 §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CommentState {
     /// Not yet told to the session that wrote the doc: it's gone, or hasn't
@@ -147,6 +153,7 @@ pub enum CommentState {
 
 /// A comment the user left on a doc, or on one block of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub struct DocComment {
     /// Its number within the doc, from 1.
     pub id: u32,

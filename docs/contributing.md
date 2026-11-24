@@ -40,3 +40,9 @@ Valkyrie is a Rust workspace:
 
 The web app (`web/`, React + Vite) is built into `web/dist`, which is committed and
 embedded in the binary, so building `valk` needs no Node.
+
+The web app's wire types, `web/src/proto.gen.ts`, are generated from
+`valkyrie-proto`. After changing a message or a type in it, run
+`UPDATE_PROTO_TS=1 cargo test -p valkyrie-proto proto_ts` and commit the file:
+`cargo test` fails while it's stale, and the web typecheck then catches what the
+change broke.

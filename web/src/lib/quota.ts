@@ -39,7 +39,7 @@ export function read(quota: Quota, nowMs: number): Reading {
   const old = nowMs - atMs > FRESH_MS;
   return {
     windows: quota.limits.map((l) => {
-      const resetMs = l.resets_at === undefined ? null : l.resets_at * 1000;
+      const resetMs = l.resets_at == null ? null : l.resets_at * 1000;
       if (resetMs !== null && resetMs <= nowMs)
         return { label: label(l.name), used: 0, level: "reset", resets: null };
       return {

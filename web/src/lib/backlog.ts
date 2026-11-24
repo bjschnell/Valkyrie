@@ -179,7 +179,7 @@ export function tree<T extends { item: Item }>(rows: T[]): (T & { depth: number 
     out.push({ ...r, depth });
     for (const c of rows) if (c.item.parent === r.item.id && c.item.id !== r.item.id) visit(c, depth + 1);
   };
-  for (const r of rows) if (r.item.parent === undefined || !here.has(r.item.parent)) visit(r, 0);
+  for (const r of rows) if (r.item.parent == null || !here.has(r.item.parent)) visit(r, 0);
   return out;
 }
 
