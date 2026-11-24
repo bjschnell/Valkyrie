@@ -878,18 +878,18 @@ fn agents_hear_about_their_siblings() {
             .unwrap();
         path
     };
-    // `a` says when its hooks are in, and `b` asks only then: a fixed sleep lost
-    // the race on a loaded CI runner, where each `valk hook` starts slowly.
-    let a_ready = out.join("a-ready");
+    // `b` asks only once the daemon has taken in every hook (see `hooks_in`):
+    // `valk hook` doesn't wait for the daemon to read what it sent, so a script
+    // that has run its hooks says nothing about what the daemon knows.
+    let go = out.join("go");
     let a = script(
         "a",
         format!(
-            "{start}{}{}touch {}\n",
+            "{start}{}{}",
             hook(
                 serde_json::json!({"hook_event_name":"UserPromptSubmit","prompt":"refactor the auth module","cwd":repo_s})
             ),
             edit("src/auth.rs") + &edit("src/db.rs"),
-            a_ready.display(),
         ),
     );
     let b = script(
@@ -897,7 +897,7 @@ fn agents_hear_about_their_siblings() {
         format!(
             "{start}{}while [ ! -e {} ]; do sleep 0.1; done\n{}{}echo done > {}\n",
             edit("src/auth.rs"),
-            a_ready.display(),
+            go.display(),
             ask("first"),
             ask("second"),
             out.join("b-done").display()
@@ -946,6 +946,28 @@ fn agents_hear_about_their_siblings() {
     human_new("auth-work", &a);
     std::thread::sleep(Duration::from_millis(300));
     human_new("other", &b);
+    // `a`'s start, prompt and two edits, and `b`'s start and edit, as each
+    // session's event log has them.
+    let hooks_in = || {
+        std::fs::read_dir(dir.join("state/valkyrie/sessions"))
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".events.jsonl"))
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .map(|log| log.matches(r#""k":"hook""#).count())
+            .sum::<usize>()
+    };
+    let since = Instant::now();
+    while hooks_in() < 6 {
+        assert!(
+            since.elapsed() < Duration::from_secs(30),
+            "the daemon took in {} of 6 hooks",
+            hooks_in()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::fs::write(&go, "").unwrap();
     wait_for(&out.join("b-done"));
     let first: serde_json::Value = serde_json::from_str(&wait_for(&out.join("first"))).unwrap();
     assert_eq!(
