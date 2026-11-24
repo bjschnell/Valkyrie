@@ -13,6 +13,7 @@
 
 use crate::Registry;
 use crate::backlog::pr_summary;
+use crate::lock::Locked;
 use crate::merge_order::{self, Open};
 use crate::work::Pr;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -388,7 +389,7 @@ impl Registry {
     /// Reads which of each repository's open PRs collide, for the merge order
     /// (backlog #215): local git only, after a pass's reads.
     pub(crate) async fn plan_merges(&self) {
-        let jobs = self.watching.lock().unwrap().unchecked();
+        let jobs = self.watching.locked().unchecked();
         let found = tokio::task::spawn_blocking(move || {
             jobs.into_iter()
                 .filter(|(dir, ..)| dir.is_dir())
@@ -399,19 +400,19 @@ impl Registry {
         })
         .await
         .unwrap_or_default();
-        self.watching.lock().unwrap().learn(found);
+        self.watching.locked().learn(found);
     }
 
     /// `Watching::foresee`, for a read of `url` just made.
     pub(crate) fn foresee(&self, url: &str, pr: Pr) -> Pr {
         let now = crate::session::now_ms() / 1000;
-        self.watching.lock().unwrap().foresee(url, pr, now)
+        self.watching.locked().foresee(url, pr, now)
     }
 
     /// `ClientMsg::SupervisorWatch`.
     pub(crate) fn supervisor_watch(&self) -> anyhow::Result<Reply> {
-        let on = self.supervisor.lock().unwrap().on();
-        Ok(self.watching.lock().unwrap().reply(on))
+        let on = self.supervisor.locked().on();
+        Ok(self.watching.locked().reply(on))
     }
 }
 
@@ -681,7 +682,7 @@ mod tests {
         };
         let (first, second) = (spawn(), spawn());
         for (session, n) in [(&first, 1), (&second, 2)] {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: format!("item {n}"),
                 cwd: Some(dir.clone()),
@@ -707,13 +708,9 @@ mod tests {
         let pass = |lookup: PrLookup| {
             let registry = registry.clone();
             async move {
-                registry.watching.lock().unwrap().begin();
+                registry.watching.locked().begin();
                 registry.ship_merged_prs(lookup).await;
-                registry
-                    .watching
-                    .lock()
-                    .unwrap()
-                    .end(0, Duration::from_secs(300));
+                registry.watching.locked().end(0, Duration::from_secs(300));
             }
         };
         let both_open: PrLookup = Arc::new(|_, url| {
@@ -724,8 +721,7 @@ mod tests {
         // What `plan_merges` would read with git: the two collide.
         registry
             .watching
-            .lock()
-            .unwrap()
+            .locked()
             .learn(vec![(pair("h1", "h2"), vec!["src/a.rs".into()])]);
         assert_eq!(second.info().status.state, AgentState::Idle);
         // #1 merges; GitHub says nothing of #2's mergeability yet.
@@ -737,7 +733,7 @@ mod tests {
             }
         });
         pass(merged.clone()).await;
-        if registry.watching.lock().unwrap().take_rerun() {
+        if registry.watching.locked().take_rerun() {
             pass(merged).await;
         }
         let status = second.info().status;

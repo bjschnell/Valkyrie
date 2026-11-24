@@ -3,6 +3,7 @@
 
 use crate::Registry;
 use crate::context::{Peer, now_secs};
+use crate::lock::Locked;
 use crate::session::Session;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -54,13 +55,13 @@ impl Registry {
 
     pub(crate) fn write_doc(&self, new: NewDoc, peer: Option<Peer>) -> Result<Reply> {
         let author = self.author(peer, Some(&new.cwd));
-        let doc = self.docs.lock().unwrap().write(&new, &author, now_secs())?;
+        let doc = self.docs.locked().write(&new, &author, now_secs())?;
         tracing::info!(id = doc.id, path = doc.path, by = author.by, "doc written");
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
     pub(crate) fn read_doc(&self, which: &str) -> Result<Reply> {
-        let doc = self.docs.lock().unwrap().read(which)?;
+        let doc = self.docs.locked().read(which)?;
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
@@ -74,13 +75,12 @@ impl Registry {
         let author = self.author(peer, None);
         let doc = self
             .docs
-            .lock()
-            .unwrap()
+            .locked()
             .edit(id, base, body, &author, now_secs())?;
         tracing::info!(id, path = doc.path, by = author.by, "doc edited");
         // An edit by the session a comment was told to answers it (ADR-0021 §6).
         if author.session.is_some() || author.conversation.is_some() {
-            let docs = self.docs.lock().unwrap();
+            let docs = self.docs.locked();
             match docs.comments().edited_by(
                 id,
                 author.session.as_deref(),
@@ -108,15 +108,14 @@ impl Registry {
         let author = you();
         let saved = self
             .docs
-            .lock()
-            .unwrap()
+            .locked()
             .save_body(key, base, body, &author, now_secs())?;
         Ok(saved_reply(saved, "doc saved"))
     }
 
     /// A doc's past versions, and one's text when asked.
     pub(crate) fn doc_history(&self, key: &str, version: Option<&str>) -> Result<Reply> {
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let versions = docs.versions(key)?;
         let text = version.map(|v| docs.version_text(key, v)).transpose()?;
         Ok(Reply::DocHistory { versions, text })
@@ -134,8 +133,7 @@ impl Registry {
         let author = you();
         let saved = self
             .docs
-            .lock()
-            .unwrap()
+            .locked()
             .restore(key, base, version, &author, now_secs())?;
         Ok(saved_reply(saved, "doc restored"))
     }
@@ -143,7 +141,7 @@ impl Registry {
     /// The user deletes a doc; the daemon never does on its own (ADR-0021 §4).
     pub(crate) fn delete_doc(&self, key: &str, base: &str, peer: Option<Peer>) -> Result<Reply> {
         self.vouch(peer, "deleting a doc")?;
-        match self.docs.lock().unwrap().delete(key, base, now_secs())? {
+        match self.docs.locked().delete(key, base, now_secs())? {
             Deleted::Done(token) => {
                 tracing::info!(key, token, "doc deleted");
                 Ok(Reply::DocDeleted { token })
@@ -158,21 +156,21 @@ impl Registry {
     /// The docs the user deleted that can still be put back.
     pub(crate) fn deleted_docs(&self) -> Result<Reply> {
         Ok(Reply::DeletedDocs {
-            docs: self.docs.lock().unwrap().deleted(),
+            docs: self.docs.locked().deleted(),
         })
     }
 
     /// Puts a doc the user deleted back.
     pub(crate) fn undelete_doc(&self, token: &str, peer: Option<Peer>) -> Result<Reply> {
         self.vouch(peer, "putting back a deleted doc")?;
-        let doc = self.docs.lock().unwrap().undelete(token)?;
+        let doc = self.docs.locked().undelete(token)?;
         tracing::info!(token, path = doc.path, "doc put back");
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
     /// The comments on the doc with this key; none on one without a `valk-id`.
     pub(crate) fn doc_comments(&self, key: &str) -> Result<Reply> {
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let id = docs.open(key)?.id;
         let comments = match id {
             0 => Vec::new(),
@@ -192,7 +190,7 @@ impl Registry {
         peer: Option<Peer>,
     ) -> Result<Reply> {
         self.vouch(peer, "commenting on a doc")?;
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let origin = docs.origin(key)?;
         let comment = docs.comments().add(origin.id, quote, text, now_secs())?;
         let to = self.author_session(&origin);
@@ -215,7 +213,7 @@ impl Registry {
         peer: Option<Peer>,
     ) -> Result<Reply> {
         self.vouch(peer, "closing a doc comment")?;
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let origin = docs.origin(key)?;
         docs.comments().resolve(origin.id, comment, now_secs())?;
         Ok(Reply::DocComments {
@@ -251,7 +249,7 @@ impl Registry {
         }
         let name = session.info().name;
         let conversation = session.conversation();
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let comments = docs.comments();
         let now = now_secs();
         queued
@@ -271,12 +269,12 @@ impl Registry {
 
     /// The web app's read: by the key a list gave out, writing nothing (ADR-0021 §5).
     pub(crate) fn open_doc(&self, key: &str) -> Result<Reply> {
-        let doc = self.docs.lock().unwrap().open(key)?;
+        let doc = self.docs.locked().open(key)?;
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
     pub(crate) fn docs(&self, count_only: bool) -> Result<Reply> {
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let at = now_secs();
         if count_only {
             return Ok(Reply::Docs {
@@ -298,14 +296,14 @@ impl Registry {
     /// The user opened the Docs list: what agents wrote until now counts as read.
     pub(crate) fn docs_seen(&self, at: u64, peer: Option<Peer>) -> Result<Reply> {
         self.vouch(peer, "marking docs read")?;
-        self.docs.lock().unwrap().seen(at, now_secs())?;
+        self.docs.locked().seen(at, now_secs())?;
         Ok(Reply::Done)
     }
 
     /// Where docs go. Setting it is the user's (ADR-0021 §1): an agent that could
     /// aim it at `~/.ssh` would have the web app serve it.
     pub(crate) fn docs_root(&self, root: Option<PathBuf>, peer: Option<Peer>) -> Result<Reply> {
-        let mut docs = self.docs.lock().unwrap();
+        let mut docs = self.docs.locked();
         let Some(root) = root else {
             let how = if docs.root_is_set() {
                 ""

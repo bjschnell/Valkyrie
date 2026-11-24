@@ -1,6 +1,7 @@
 //! A git worktree of its own for a new session (DESIGN §4.3), so agents working in
 //! one repository at once never edit the same checkout.
 
+use crate::lock::Locked;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -498,7 +499,7 @@ impl crate::Registry {
         }
         let asked = cwd.clone();
         let survey = tokio::task::spawn_blocking(move || survey(&cwd, remote)).await??;
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         // Where each runs now, and where it started: a session made in a worktree
         // still counts once its program has gone elsewhere.
         let sessions: Vec<_> = self

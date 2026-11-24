@@ -1870,7 +1870,10 @@ fn unescape(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Logs to stderr, at `info` unless `RUST_LOG` says otherwise.
+/// Logs to stderr, at `info` unless `RUST_LOG` says otherwise. A line that can't
+/// be written (the disk is full) is dropped: by default the subscriber reports
+/// that with `eprintln!` to the same stderr, which panics, wherever the event was
+/// logged, locks held and all (backlog #228).
 fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1878,6 +1881,7 @@ fn init_logging() {
         )
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .log_internal_errors(false)
         .init();
 }
 

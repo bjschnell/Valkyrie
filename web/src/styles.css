@@ -3763,7 +3763,8 @@ html.with-tabs .offline-banner {
   background: none;
 }
 
-.lane-done .item-row .row-sub {
+/* Its ref stays so a done item can still be named. */
+.lane-done .item-row .row-sub > :not(.item-meta) {
   display: none;
 }
 
@@ -3817,6 +3818,40 @@ html.with-tabs .offline-banner {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* An item's kind (#296): a shape at the row's edge and an outlined word. Kinds are
+   words and shapes; color stays for state. */
+.item-kind {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--soft);
+}
+
+.kind-chip {
+  flex: none;
+  padding: 0 var(--space-15);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  font: var(--type-mono);
+  color: var(--fg);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.item-num {
+  color: var(--faint);
+}
+
+.item-p1 {
+  color: var(--fg);
+  font-weight: var(--weight-bold);
 }
 
 .item-slot > .card {

@@ -452,6 +452,7 @@ mod sys {
 /// memory (its PEB) for its command line and directory.
 #[cfg(windows)]
 mod sys {
+    use crate::lock::Locked;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -484,7 +485,7 @@ mod sys {
 
     fn procs() -> Arc<Vec<Proc>> {
         static LAST: Mutex<Option<(Instant, Arc<Vec<Proc>>)>> = Mutex::new(None);
-        let mut last = LAST.lock().unwrap();
+        let mut last = LAST.locked();
         if let Some((at, procs)) = &*last
             && at.elapsed() < SNAPSHOT_FOR
         {

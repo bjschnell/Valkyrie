@@ -5,6 +5,7 @@
 //! routine, a `ship` habit is proposed for the user to accept: never more.
 
 use crate::Registry;
+use crate::lock::Locked;
 use crate::session::Answered;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -104,7 +105,7 @@ fn learn(
         let overridden = class == reply::Class::Other;
         record_outcome(registry, key, kept, overridden, "reply", now);
     }
-    let store = registry.context.lock().unwrap();
+    let store = registry.context.locked();
     if let Err(e) = store.record_reply(&record, now) {
         tracing::warn!("couldn't record a reply: {e:#}");
         return;
@@ -189,7 +190,7 @@ fn record_outcome(
         how: how.to_owned(),
         via: None,
     };
-    let store = registry.context.lock().unwrap();
+    let store = registry.context.locked();
     if let Err(e) = store.record_outcome(&scope, &record, now) {
         tracing::warn!("couldn't record a policy's outcome: {e:#}");
     }

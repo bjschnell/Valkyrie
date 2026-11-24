@@ -18,6 +18,7 @@
 
 use crate::Registry;
 use crate::context::Peer;
+use crate::lock::Locked;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -251,7 +252,7 @@ fn why(
 impl Registry {
     /// Pushes the launch offers waiting to queue watchers, if they changed.
     pub(crate) fn refresh_launches(&self) {
-        let pending = self.dispatch.lock().unwrap().pending();
+        let pending = self.dispatch.locked().pending();
         self.launches.send_if_modified(|current| {
             let changed = **current != pending;
             if changed {
@@ -271,7 +272,7 @@ impl Registry {
             }
             *out.entry(project::root(&s.info().cwd)).or_default() += 1;
         }
-        let launching = self.launching.lock().unwrap().clone();
+        let launching = self.launching.locked().clone();
         for item in items.iter().filter(|i| launching.contains(&i.id)) {
             if let Some(p) = &item.project {
                 *out.entry(p.clone()).or_default() += 1;
@@ -283,22 +284,22 @@ impl Registry {
     /// One look: per repository, the offer to show, the policy's launch, or the
     /// blocker question to ask.
     pub(crate) async fn dispatch_tick(self: &Arc<Self>) {
-        let items = self.backlog.lock().unwrap().load();
-        if !self.supervisor.lock().unwrap().on() {
+        let items = self.backlog.locked().load();
+        if !self.supervisor.locked().on() {
             let cleared = {
-                let mut book = self.dispatch.lock().unwrap();
+                let mut book = self.dispatch.locked();
                 let had = !book.pending.is_empty();
                 book.pending.clear();
                 had
             };
             if cleared {
-                self.dispatch.lock().unwrap().save();
+                self.dispatch.locked().save();
                 self.refresh_launches();
             }
             return;
         }
         let busy: HashSet<u32> = {
-            let launching = self.launching.lock().unwrap().clone();
+            let launching = self.launching.locked().clone();
             items
                 .iter()
                 .filter(|i| launching.contains(&i.id) || !self.holders(i, None).is_empty())
@@ -311,17 +312,12 @@ impl Registry {
             .filter(|i| i.status == ItemStatus::Open)
             .filter_map(|i| i.project.clone())
             .collect();
-        let max = self
-            .dispatch
-            .lock()
-            .unwrap()
-            .max
-            .unwrap_or_else(max_running);
+        let max = self.dispatch.locked().max.unwrap_or_else(max_running);
         let mut changed = false;
         let mut starts: Vec<LaunchOffer> = Vec::new();
         let mut asks: Vec<(u32, Vec<u32>)> = Vec::new();
         {
-            let mut book = self.dispatch.lock().unwrap();
+            let mut book = self.dispatch.locked();
             // Offers in repositories with nothing open any more.
             let before = book.pending.len();
             book.pending.retain(|o| projects.contains(&o.project));
@@ -408,19 +404,19 @@ impl Registry {
     /// Context setting is on.
     async fn launch_by_policy(self: &Arc<Self>, offer: LaunchOffer) {
         let context_on = {
-            let sup = self.supervisor.lock().unwrap();
+            let sup = self.supervisor.locked();
             sup.context_on.unwrap_or(crate::supervise::context_on)()
         };
         if !context_on {
             return;
         }
         let root = project::root(&offer.project);
-        let decisions = self.context.lock().unwrap().load(&root);
+        let decisions = self.context.locked().load(&root);
         let Some(policy) = policy::step_policy(&decisions, StepAction::Launch, Trigger::Ready)
         else {
             return;
         };
-        self.dispatch.lock().unwrap().automatic.insert(offer.item);
+        self.dispatch.locked().automatic.insert(offer.item);
         match self.start(&offer, Some(policy), None).await {
             Ok(id) => tracing::info!(
                 item = offer.item,
@@ -455,11 +451,11 @@ impl Registry {
             .collect();
         let sig = sig(&item, &waits, items);
         {
-            let mut book = self.dispatch.lock().unwrap();
+            let mut book = self.dispatch.locked();
             if book.asking.contains(&id) {
                 return;
             }
-            if !self.supervisor.lock().unwrap().room() {
+            if !self.supervisor.locked().room() {
                 return;
             }
             book.asking.insert(id);
@@ -490,7 +486,7 @@ impl Registry {
                 }
                 Err(_) => None,
             };
-            let mut book = registry.dispatch.lock().unwrap();
+            let mut book = registry.dispatch.locked();
             book.asking.remove(&id);
             // No answer counts as needing it: waiting stays the safe call.
             let (needs, why) = answer.unwrap_or((true, String::new()));
@@ -516,14 +512,13 @@ impl Registry {
         let Reply::Session { info } = reply else {
             let number = self
                 .backlog
-                .lock()
-                .unwrap()
+                .locked()
                 .get(offer.item)
                 .map_or(offer.item, |i| i.number);
             bail!("starting #{number} gave no session");
         };
         {
-            let mut book = self.dispatch.lock().unwrap();
+            let mut book = self.dispatch.locked();
             book.pending.retain(|o| o.id != offer.id);
             book.save();
         }
@@ -568,12 +563,7 @@ impl Registry {
             features: None,
             via: steps::Via::Item,
         };
-        if let Err(e) = self
-            .context
-            .lock()
-            .unwrap()
-            .record_step(&root, &record, now)
-        {
+        if let Err(e) = self.context.locked().record_step(&root, &record, now) {
             tracing::warn!("couldn't record a launch answer: {e:#}");
         }
         if by.is_none() && taken == StepAction::Launch {
@@ -596,8 +586,7 @@ impl Registry {
         })?;
         let offer = self
             .dispatch
-            .lock()
-            .unwrap()
+            .locked()
             .pending
             .iter()
             .find(|o| o.id == id && o.project == project)
@@ -612,11 +601,11 @@ impl Registry {
                 info: Box::new(info),
             });
         }
-        let found = self.backlog.lock().unwrap().get(offer.item).ok();
+        let found = self.backlog.locked().get(offer.item).ok();
         let updated = found.as_ref().map_or(0, |i| i.updated);
         let number = found.map_or(offer.item, |i| i.number);
         {
-            let mut book = self.dispatch.lock().unwrap();
+            let mut book = self.dispatch.locked();
             book.pending.retain(|o| o.id != id);
             book.left.insert(offer.item, updated);
             book.save();
@@ -810,9 +799,9 @@ mod tests {
         .unwrap();
         // No model call from a test: the blocker question isn't asked.
         crate::extract::set_mode(&registry.host.context_dir, AutoMode::Off).unwrap();
-        registry.supervisor.lock().unwrap().context_on = Some(|| true);
-        registry.dispatch.lock().unwrap().max = Some(2);
-        *crate::backlog::AGENT_STANDIN.lock().unwrap() = Some(vec!["sleep".into(), "30".into()]);
+        registry.supervisor.locked().context_on = Some(|| true);
+        registry.dispatch.locked().max = Some(2);
+        *crate::backlog::AGENT_STANDIN.locked() = Some(vec!["sleep".into(), "30".into()]);
         AS_CALLER.with(|cell| {
             *cell.borrow_mut() = Some(Box::new(|| Caller {
                 agent: None,
@@ -823,7 +812,7 @@ mod tests {
         });
         let ids: Vec<u32> = (1..=4)
             .map(|n| {
-                let b = registry.backlog.lock().unwrap();
+                let b = registry.backlog.locked();
                 let new = NewItem {
                     title: format!("item {n}"),
                     cwd: Some(repo.clone()),
@@ -838,7 +827,7 @@ mod tests {
             })
             .collect();
         let project = project::root(&repo);
-        let offered = || registry.dispatch.lock().unwrap().pending();
+        let offered = || registry.dispatch.locked().pending();
 
         registry.dispatch_tick().await;
         let first = offered();
@@ -897,7 +886,7 @@ mod tests {
         let Reply::Session { info } = started else {
             panic!("{started:?}");
         };
-        let item = registry.backlog.lock().unwrap().get(ids[1]).unwrap();
+        let item = registry.backlog.locked().get(ids[1]).unwrap();
         assert!(item.sessions.contains(&info.id));
         registry.dispatch_tick().await;
         let third = offered();
@@ -916,8 +905,7 @@ mod tests {
         let policies = || {
             registry
                 .context
-                .lock()
-                .unwrap()
+                .locked()
                 .load(&root)
                 .into_iter()
                 .filter(|d| d.kind == DecisionKind::Policy)
@@ -930,8 +918,7 @@ mod tests {
         let now = crate::session::now_ms() / 1000;
         registry
             .context
-            .lock()
-            .unwrap()
+            .locked()
             .review(
                 &root,
                 proposed[0].id,
@@ -942,10 +929,10 @@ mod tests {
             )
             .unwrap();
         registry.dispatch_tick().await;
-        let fourth = registry.backlog.lock().unwrap().get(ids[3]).unwrap();
+        let fourth = registry.backlog.locked().get(ids[3]).unwrap();
         assert!(!fourth.sessions.is_empty(), "the policy didn't start #4");
         assert!(offered().iter().all(|o| o.item != ids[3]));
-        let answers = registry.context.lock().unwrap().steps(&root, now + 1);
+        let answers = registry.context.locked().steps(&root, now + 1);
         let taken: Vec<_> = answers
             .iter()
             .map(|r| (r.session.as_str(), r.taken, r.policy.is_some()))
@@ -972,13 +959,8 @@ mod tests {
             priority: None,
             blocked_by: None,
         };
-        registry
-            .backlog
-            .lock()
-            .unwrap()
-            .change(ids[0], &edit, 2)
-            .unwrap();
-        registry.dispatch.lock().unwrap().automatic.insert(ids[0]);
+        registry.backlog.locked().change(ids[0], &edit, 2).unwrap();
+        registry.dispatch.locked().automatic.insert(ids[0]);
         registry.dispatch_tick().await;
         assert_eq!(offered().first().map(|o| o.item), Some(ids[0]));
         registry.supervise(Some(false), None).unwrap();
@@ -987,12 +969,13 @@ mod tests {
         registry.supervise(Some(true), None).unwrap();
 
         AS_CALLER.with(|cell| *cell.borrow_mut() = None);
-        *crate::backlog::AGENT_STANDIN.lock().unwrap() = None;
+        *crate::backlog::AGENT_STANDIN.locked() = None;
         for s in registry.all() {
             s.kill();
         }
         drop(a);
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

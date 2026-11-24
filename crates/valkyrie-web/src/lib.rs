@@ -825,7 +825,8 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
     let stream = valkyrie_proto::ipc::connect(&socket)
         .await
         .with_context(|| format!("connect {}", socket.display()))?;
-    let (mut from_daemon, mut to_daemon) = tokio::io::split(stream);
+    let (from_daemon, mut to_daemon) = tokio::io::split(stream);
+    let mut from_daemon = DaemonFrames::new(from_daemon);
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(16);
@@ -879,7 +880,7 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                     }
                 }
             }
-            frame = read_frame::<_, serde_json::Value>(&mut from_daemon) => {
+            frame = from_daemon.next() => {
                 match frame? {
                     Some(mut frame) => {
                         stamp_hello(&mut frame);
@@ -896,6 +897,42 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
             }
             _ = ping.tick() => ws.send(Message::Ping(Vec::new().into())).await?,
         }
+    }
+}
+
+/// The daemon's side of the bridge, read in a task of its own. `read_frame` is
+/// two reads, and a `select!` that drops it between them would lose the
+/// stream's place; a channel's `recv` can be dropped safely.
+struct DaemonFrames {
+    rx: tokio::sync::mpsc::Receiver<Result<serde_json::Value>>,
+    _reader: AbortOnDrop,
+}
+
+impl DaemonFrames {
+    fn new<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut r: R) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let reader = tokio::spawn(async move {
+            loop {
+                let frame = match read_frame(&mut r).await {
+                    Ok(Some(frame)) => Ok(frame),
+                    Ok(None) => return,
+                    Err(e) => Err(e),
+                };
+                let failed = frame.is_err();
+                if tx.send(frame).await.is_err() || failed {
+                    return;
+                }
+            }
+        });
+        Self {
+            rx,
+            _reader: AbortOnDrop(reader),
+        }
+    }
+
+    /// The next frame; `None` when the daemon hangs up.
+    async fn next(&mut self) -> Result<Option<serde_json::Value>> {
+        self.rx.recv().await.transpose()
     }
 }
 
@@ -972,6 +1009,40 @@ fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn daemon_frames_survive_a_select_that_keeps_dropping_them() {
+        use tokio::io::AsyncWriteExt;
+        const FRAMES: u64 = 200;
+        let (mut daemon, web) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            for n in 0..FRAMES {
+                let frame = valkyrie_proto::codec::encode(&serde_json::json!({ "n": n })).unwrap();
+                // Arriving a few bytes at a time, so a read often waits mid-frame.
+                for chunk in frame.chunks(3) {
+                    daemon.write_all(chunk).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let mut frames = DaemonFrames::new(web);
+        let got = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut got = Vec::new();
+            loop {
+                // Stands in for the browser, chat and ping arms winning the race.
+                tokio::select! {
+                    frame = frames.next() => match frame.unwrap() {
+                        Some(frame) => got.push(frame["n"].as_u64().unwrap()),
+                        None => return got,
+                    },
+                    _ = tokio::task::yield_now() => {}
+                }
+            }
+        })
+        .await
+        .expect("frames stopped arriving");
+        assert_eq!(got, (0..FRAMES).collect::<Vec<_>>());
+    }
 
     #[test]
     fn hello_tells_the_app_its_protocol_and_hides_the_exe() {

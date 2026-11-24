@@ -15,6 +15,7 @@
 
 use crate::Registry;
 use crate::context::Peer;
+use crate::lock::Locked;
 use crate::work::{Check, GH_TIMEOUT, Pr};
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -351,7 +352,7 @@ impl Registry {
         else {
             return;
         };
-        if !self.supervisor.lock().unwrap().on() {
+        if !self.supervisor.locked().on() {
             return;
         }
         let project = work.dir.clone();
@@ -372,14 +373,13 @@ impl Registry {
         // step to follow, since the flake call can take a while.
         let live: HashMap<SessionId, u64> = self
             .supervisor
-            .lock()
-            .unwrap()
+            .locked()
             .offers
             .keys()
             .filter_map(|&id| Some((id, self.get(id).ok()?.flag()?.0)))
             .collect();
         {
-            let mut sup = self.supervisor.lock().unwrap();
+            let mut sup = self.supervisor.locked();
             sup.offers.retain(|id, o| live.get(id) == Some(&o.seq));
             sup.offers.insert(session, offer.clone());
         }
@@ -422,7 +422,7 @@ impl Registry {
                         said,
                         "a policy took a step"
                     );
-                    let mut sup = self.supervisor.lock().unwrap();
+                    let mut sup = self.supervisor.locked();
                     sup.automatic.insert(key);
                     sup.offers.remove(&session);
                     drop(sup);
@@ -434,7 +434,7 @@ impl Registry {
             }
         }
         offer.step = Some(step);
-        let mut sup = self.supervisor.lock().unwrap();
+        let mut sup = self.supervisor.locked();
         // Only if the flag is still the one this was worked out for.
         if sup.offers.get(&session).is_some_and(|o| o.seq == seq) {
             sup.offers.insert(session, offer);
@@ -469,7 +469,7 @@ impl Registry {
         let features = Features::of(&signals.failures, &signals.changed, &bugs);
         let root = project::root(&project);
         let now = crate::session::now_ms() / 1000;
-        let answers = steps::examples(&self.context.lock().unwrap().steps(&root, now));
+        let answers = steps::examples(&self.context.locked().steps(&root, now));
         if let Some(tree) = flaketree::fit(&answers)
             && let Some((is_flake, why)) = tree.predict(&features)
         {
@@ -490,7 +490,7 @@ impl Registry {
             return (verdict, features);
         }
         let mode = crate::extract::mode(&self.host.context_dir);
-        if mode == AutoMode::Off || !self.supervisor.lock().unwrap().room() {
+        if mode == AutoMode::Off || !self.supervisor.locked().room() {
             return (Verdict::Unsure, features);
         }
         let unsure: Vec<Failure> = signals
@@ -529,7 +529,7 @@ impl Registry {
 
     /// The open bugs in `work`'s repository, title and body.
     fn open_bugs(&self, work: &Watched) -> Vec<Bug> {
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         items
             .into_iter()
             .filter(|i| {
@@ -544,7 +544,7 @@ impl Registry {
     /// The flag `session` shows, with its offer, for its queue row.
     pub(crate) fn flag_of(&self, session: &crate::session::Session, id: SessionId) -> Option<Flag> {
         let (seq, reason) = session.flag()?;
-        let sup = self.supervisor.lock().unwrap();
+        let sup = self.supervisor.locked();
         let offer = sup.offers.get(&id).filter(|o| o.seq == seq);
         Some(Flag {
             reason,
@@ -561,7 +561,7 @@ impl Registry {
     /// spent too, so `gh` isn't asked again for this head.
     async fn rerun_used(&self, pr: &str, head: &str, dir: &Path, failed: &[Check]) -> bool {
         let attempt = {
-            let sup = self.supervisor.lock().unwrap();
+            let sup = self.supervisor.locked();
             if sup.rerun_spent(pr, head) {
                 return true;
             }
@@ -578,7 +578,7 @@ impl Registry {
             .await
             .unwrap_or(false);
         if rerun {
-            let mut sup = self.supervisor.lock().unwrap();
+            let mut sup = self.supervisor.locked();
             sup.reruns.insert(pr.to_owned(), head.to_owned());
             sup.save();
         }
@@ -598,7 +598,7 @@ impl Registry {
         let session = self.get(id)?;
         let shown = session.flag().map(|(s, _)| s);
         let offer = {
-            let mut sup = self.supervisor.lock().unwrap();
+            let mut sup = self.supervisor.locked();
             sup.offers.retain(|_, o| o.seq == seq || shown != Some(seq));
             sup.offers.get(&id).filter(|o| o.seq == seq).cloned()
         };
@@ -630,13 +630,13 @@ impl Registry {
     fn policy_for(&self, offer: &Offer, step: &Step) -> Option<u32> {
         let key = (offer.pr.clone(), step.action, offer.head.clone());
         {
-            let sup = self.supervisor.lock().unwrap();
+            let sup = self.supervisor.locked();
             if !sup.context_on.unwrap_or(context_on)() || sup.automatic.contains(&key) {
                 return None;
             }
         }
         let root = project::root(&offer.project);
-        let decisions = self.context.lock().unwrap().load(&root);
+        let decisions = self.context.locked().load(&root);
         let trigger = offer.trigger();
         policy::step_policy(&decisions, step.action, trigger).or_else(|| {
             if (step.action, trigger) != (StepAction::CiFix, Trigger::Red) {
@@ -681,8 +681,7 @@ impl Registry {
                 let now = crate::session::now_ms() / 1000;
                 let block = self
                     .context
-                    .lock()
-                    .unwrap()
+                    .locked()
                     .record_ci_fix(&root, &offer.pr, now, policy::CI_FIX_LIMIT)
                     .context("couldn't count the ci-fix")?;
                 let Some(block) = block else {
@@ -732,7 +731,7 @@ impl Registry {
                 })
                 .await??;
                 {
-                    let mut sup = self.supervisor.lock().unwrap();
+                    let mut sup = self.supervisor.locked();
                     sup.reruns.insert(offer.pr.clone(), offer.head.clone());
                     sup.save();
                 }
@@ -769,12 +768,7 @@ impl Registry {
             features: offer.features.filter(|_| trigger == Trigger::Red),
             via: offer.via,
         };
-        if let Err(e) = self
-            .context
-            .lock()
-            .unwrap()
-            .record_step(&root, &record, now)
-        {
+        if let Err(e) = self.context.locked().record_step(&root, &record, now) {
             tracing::warn!("couldn't record a supervisor step: {e:#}");
         }
         match by {
@@ -790,7 +784,7 @@ impl Registry {
                     typed: matches!(action, StepAction::MergeBase | StepAction::CiFix),
                     at: Instant::now(),
                 };
-                self.supervisor.lock().unwrap().taken.insert(id, taken);
+                self.supervisor.locked().taken.insert(id, taken);
             }
             None => self.learn(&root, &session.key(), now),
         }
@@ -800,7 +794,7 @@ impl Registry {
     /// Proposes a policy for each step the user's answers in `root` say to take
     /// without asking (ADR-0019 §3).
     pub(crate) fn learn(&self, root: &Path, session: &str, now: u64) {
-        let store = self.context.lock().unwrap();
+        let store = self.context.locked();
         let offers = steps::offers(&store.steps(root, now), &store.load(root), now);
         let mut proposed = false;
         for offer in &offers {
@@ -848,8 +842,7 @@ impl Registry {
     pub(crate) fn judge_steps(&self, url: &str, pr: &Pr) {
         let taken: Vec<(SessionId, Taken)> = self
             .supervisor
-            .lock()
-            .unwrap()
+            .locked()
             .taken
             .iter()
             .filter(|(_, t)| t.pr == url)
@@ -863,7 +856,7 @@ impl Registry {
             let (overridden, how) = match judged {
                 Judged::Wait => continue,
                 Judged::Drop => {
-                    self.supervisor.lock().unwrap().taken.remove(&id);
+                    self.supervisor.locked().taken.remove(&id);
                     tracing::info!(
                         session = id,
                         policy = t.policy,
@@ -873,7 +866,7 @@ impl Registry {
                 }
                 Judged::Outcome { overridden, how } => (overridden, how),
             };
-            self.supervisor.lock().unwrap().taken.remove(&id);
+            self.supervisor.locked().taken.remove(&id);
             let now = crate::session::now_ms() / 1000;
             let record = outcome::Record {
                 at: now,
@@ -892,12 +885,7 @@ impl Registry {
                 how,
                 "judged a policy's step"
             );
-            if let Err(e) = self
-                .context
-                .lock()
-                .unwrap()
-                .record_outcome(&t.root, &record, now)
-            {
+            if let Err(e) = self.context.locked().record_outcome(&t.root, &record, now) {
                 tracing::warn!("couldn't record a policy's outcome: {e:#}");
             }
         }
@@ -909,10 +897,10 @@ impl Registry {
         if let Some(on) = on {
             self.caller(peer)
                 .vouch("turning the supervisor on or off")?;
-            self.supervisor.lock().unwrap().set_on(on)?;
+            self.supervisor.locked().set_on(on)?;
             self.host.changed.notify_one();
         }
-        let on = self.supervisor.lock().unwrap().on();
+        let on = self.supervisor.locked().on();
         Ok(Reply::Text {
             text: if on { "on" } else { "off" }.into(),
         })
@@ -927,7 +915,7 @@ impl Registry {
         roots.sort();
         roots.dedup();
         let mut entries: Vec<SupervisorEntry> = {
-            let store = self.context.lock().unwrap();
+            let store = self.context.locked();
             roots
                 .iter()
                 .flat_map(|root| {
@@ -957,19 +945,19 @@ impl Registry {
         };
         entries.sort_by_key(|e| std::cmp::Reverse(e.at));
         entries.truncate(LOG_SHOWN);
-        let on = self.supervisor.lock().unwrap().on();
+        let on = self.supervisor.locked().on();
         Ok(Reply::SupervisorLog { entries, on })
     }
 
     pub(crate) fn drop_offer(&self, id: SessionId) {
-        self.supervisor.lock().unwrap().offers.remove(&id);
+        self.supervisor.locked().offers.remove(&id);
         self.host.changed.notify_one();
     }
 
     /// The project's recorded checks command (ADR-0016 §3), for the templates.
     fn checks_of(&self, dir: &Path) -> Option<String> {
         let root = valkyrie_context::project::root(dir);
-        let decisions = self.context.lock().unwrap().load(&root);
+        let decisions = self.context.locked().load(&root);
         policy::checks(&decisions).map(|(c, _)| c)
     }
 }
@@ -1179,12 +1167,12 @@ mod tests {
         };
         let (user, admin) = (open("u.sock"), open("a.sock"));
         {
-            let mut sup = user.supervisor.lock().unwrap();
+            let mut sup = user.supervisor.locked();
             sup.reruns.insert("pr/1".into(), "abc".into());
             sup.save();
         }
         {
-            let mut sup = admin.supervisor.lock().unwrap();
+            let mut sup = admin.supervisor.locked();
             sup.reruns.insert("pr/2".into(), "def".into());
             sup.save();
         }
@@ -1192,8 +1180,7 @@ mod tests {
         assert!(
             open("u.sock")
                 .supervisor
-                .lock()
-                .unwrap()
+                .locked()
                 .rerun_spent("pr/1", "abc"),
             "the other daemon's save forgot this one's rerun"
         );
@@ -1347,7 +1334,7 @@ mod tests {
             run,
         };
         let pr = "https://github.com/o/r/pull/1";
-        registry.supervisor.lock().unwrap().attempt = Some(|_, run| if run == 7 { 2 } else { 1 });
+        registry.supervisor.locked().attempt = Some(|_, run| if run == 7 { 2 } else { 1 });
         assert!(!registry.rerun_used(pr, "h1", &dir, &[check(Some(5))]).await);
         assert!(!registry.rerun_used(pr, "h1", &dir, &[check(None)]).await);
         assert!(
@@ -1356,9 +1343,9 @@ mod tests {
                 .await
         );
         // Kept: asked again, `gh` isn't, and a new head starts fresh.
-        registry.supervisor.lock().unwrap().attempt = Some(|_, _| panic!("asked again"));
+        registry.supervisor.locked().attempt = Some(|_, _| panic!("asked again"));
         assert!(registry.rerun_used(pr, "h1", &dir, &[check(Some(7))]).await);
-        registry.supervisor.lock().unwrap().attempt = Some(|_, _| 1);
+        registry.supervisor.locked().attempt = Some(|_, _| 1);
         assert!(!registry.rerun_used(pr, "h2", &dir, &[check(Some(7))]).await);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1391,7 +1378,7 @@ mod tests {
             false,
         )
         .unwrap();
-        registry.supervisor.lock().unwrap().context_on = Some(|| true);
+        registry.supervisor.locked().context_on = Some(|| true);
         let spawn = || {
             let spec = SpawnSpec {
                 command: vec!["sleep".into(), "30".into()],
@@ -1409,7 +1396,7 @@ mod tests {
         };
         let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
         let with_pr = |session: &Arc<crate::session::Session>, n: u32| {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: format!("item {n}"),
                 cwd: Some(dir.clone()),
@@ -1457,8 +1444,7 @@ mod tests {
         let policies = || {
             registry
                 .context
-                .lock()
-                .unwrap()
+                .locked()
                 .load(&root)
                 .into_iter()
                 .filter(|d| d.kind == DecisionKind::Policy)
@@ -1474,7 +1460,7 @@ mod tests {
                 .unwrap();
         }
         let now = crate::session::now_ms() / 1000;
-        let answers = registry.context.lock().unwrap().steps(&root, now);
+        let answers = registry.context.locked().steps(&root, now);
         assert_eq!(answers.len(), 2);
         assert!(answers.iter().all(|r| r.accepted() && r.policy.is_none()));
         // Two sessions: proposed, for the user to accept.
@@ -1489,8 +1475,7 @@ mod tests {
         let id = proposed[0].id;
         registry
             .context
-            .lock()
-            .unwrap()
+            .locked()
             .review(&root, id, &ReviewAction::Accept, None, None, now)
             .unwrap();
 
@@ -1500,7 +1485,7 @@ mod tests {
         let cid = c.info().id;
         let flag = registry.flag_of(&c, cid).unwrap();
         assert!(flag.step.is_none() && !flag.working, "{flag:?}");
-        let answers = registry.context.lock().unwrap().steps(&root, now + 1);
+        let answers = registry.context.locked().steps(&root, now + 1);
         let auto = answers.last().unwrap();
         assert_eq!(
             (auto.taken, auto.policy, auto.pr.as_str()),
@@ -1521,10 +1506,7 @@ mod tests {
         assert_eq!(line["trigger"], "conflicting");
         // Once per head: the same conflict on the same commit isn't merged again.
         registry.ship_merged_prs(conflicting.clone()).await;
-        assert_eq!(
-            registry.context.lock().unwrap().steps(&root, now + 1).len(),
-            3
-        );
+        assert_eq!(registry.context.locked().steps(&root, now + 1).len(), 3);
 
         // The agent takes the step's prompt and stops; the next settled read is
         // clean: handled.
@@ -1548,14 +1530,13 @@ mod tests {
         assert!(
             registry
                 .context
-                .lock()
-                .unwrap()
+                .locked()
                 .outcomes(&root, now + 1)
                 .is_empty()
         );
         hook("Stop");
         registry.ship_merged_prs(clean).await;
-        let outcomes = registry.context.lock().unwrap().outcomes(&root, now + 1);
+        let outcomes = registry.context.locked().outcomes(&root, now + 1);
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
             (
@@ -1579,7 +1560,8 @@ mod tests {
         for s in [a, b, c, d] {
             s.kill();
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The repository's accepted `ci: gh` is the user's ci-fix: CI that goes red
@@ -1611,11 +1593,11 @@ mod tests {
             false,
         )
         .unwrap();
-        registry.supervisor.lock().unwrap().context_on = Some(|| true);
+        registry.supervisor.locked().context_on = Some(|| true);
         let root = project::root(&dir);
         let now = crate::session::now_ms() / 1000;
         let ci = {
-            let store = registry.context.lock().unwrap();
+            let store = registry.context.locked();
             let new = NewDecision {
                 cwd: root.clone(),
                 title: "Checks to run before shipping".into(),
@@ -1651,7 +1633,7 @@ mod tests {
         let url = "https://github.com/o/r/pull/1";
         let s = spawn();
         {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: "item".into(),
                 cwd: Some(dir.clone()),
@@ -1704,7 +1686,7 @@ mod tests {
             flag.step.is_none() && !flag.working,
             "ci-fix waited for the user: {flag:?}"
         );
-        let steps = registry.context.lock().unwrap().steps(&root, now + 1);
+        let steps = registry.context.locked().steps(&root, now + 1);
         assert_eq!(
             steps
                 .iter()
@@ -1713,11 +1695,7 @@ mod tests {
             vec![(StepAction::CiFix, Some(ci))]
         );
         assert_eq!(
-            registry
-                .context
-                .lock()
-                .unwrap()
-                .ci_fix_blocks(&root, url, now + 1),
+            registry.context.locked().ci_fix_blocks(&root, url, now + 1),
             1
         );
         let log = std::fs::read_to_string(
@@ -1740,11 +1718,7 @@ mod tests {
         stop();
         registry.ship_merged_prs(red("h2")).await;
         assert_eq!(
-            registry
-                .context
-                .lock()
-                .unwrap()
-                .ci_fix_blocks(&root, url, now + 1),
+            registry.context.locked().ci_fix_blocks(&root, url, now + 1),
             2
         );
         stop();
@@ -1757,7 +1731,8 @@ mod tests {
         );
         AS_CALLER.with(|cell| *cell.borrow_mut() = None);
         s.kill();
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Best effort: on Windows a just-killed child can still hold the dir.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

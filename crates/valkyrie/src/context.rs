@@ -1114,7 +1114,9 @@ pub(crate) fn reader() -> Option<String> {
 }
 
 /// Asks the daemon what this session's agent should hear about the agents beside
-/// it. Blocking, and quick to give up: a prompt must never wait on Valkyrie.
+/// it. Blocking, and quick to give up: a prompt must never wait long on Valkyrie.
+/// A second, not less: the daemon counts a notice as told once it answers, so a
+/// reply given up on under load is a notice the agent never gets (backlog #155).
 fn siblings() -> Option<String> {
     use std::time::Duration;
     let session = std::env::var("VALK_SESSION").ok()?.parse().ok()?;
@@ -1126,7 +1128,7 @@ fn siblings() -> Option<String> {
         std::path::Path::new(&socket),
         &frame,
         true,
-        Duration::from_millis(300),
+        Duration::from_secs(1),
     )
     .ok()?;
     match serde_json::from_slice(&body).ok()? {
