@@ -16,7 +16,7 @@ export interface Row {
   item: number | null;
   repo: string | null;
   ran: Ran;
-  /** Why it can't start: blocked, already has a session, no repo. */
+  /** Why it can't start: blocked, or already has a session. */
   why: string | null;
   /** Why it didn't start, the last time Start tried. */
   failed: string | null;
@@ -51,10 +51,10 @@ export function itemRow(f: Found, c: Context): Row {
   };
 }
 
-/** A typed task as a row: the repo it names or the last one used, and what that repo last ran. */
+/** A typed task as a row: the repo it names, else none, and what that repo last ran. */
 export function taskRow(task: string, c: Context): Row {
-  const repo = guessRepo(task, c.repos, c.last);
-  return { key: next++, task, item: null, repo, ran: lastRan(repo, c.remembered, c.items, c.sessions), why: repo ? null : "no repo", failed: null };
+  const repo = guessRepo(task, c.repos);
+  return { key: next++, task, item: null, repo, ran: lastRan(repo, c.remembered, c.items, c.sessions), why: null, failed: null };
 }
 
 /**

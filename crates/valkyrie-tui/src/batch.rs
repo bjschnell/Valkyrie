@@ -256,12 +256,10 @@ pub(crate) fn named_repo(task: &str, repos: &[PathBuf]) -> Option<PathBuf> {
         .cloned()
 }
 
+/// The repository after `now`: none comes after the last (backlog #292).
 fn next_repo(now: Option<&Path>, repos: &[PathBuf]) -> Option<PathBuf> {
-    if repos.is_empty() {
-        return now.map(Path::to_path_buf);
-    }
     let at = now.and_then(|r| repos.iter().position(|p| p == r));
-    Some(repos[at.map_or(0, |i| (i + 1) % repos.len())].clone())
+    repos.get(at.map_or(0, |i| i + 1)).cloned()
 }
 
 fn repo_name(repo: Option<&Path>) -> String {
@@ -320,6 +318,10 @@ mod tests {
         assert!(b.keys(b"jj j", &repos()).is_empty());
         assert_eq!(b.cursor, 2, "stops at the last row");
         b.keys(b"k\t", &repos());
+        assert_eq!(b.rows[1].repo.as_deref(), Some(Path::new("/r/web")));
+        b.keys(b"\t\t", &repos());
+        assert_eq!(b.rows[1].repo, None, "no repository after the last");
+        b.keys(b"\t\t", &repos());
         assert_eq!(b.rows[1].repo.as_deref(), Some(Path::new("/r/web")));
         b.keys(b"\x1b[Z", &repos());
         assert_eq!(b.rows[1].defaults().agent, "claude");

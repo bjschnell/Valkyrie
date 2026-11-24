@@ -44,7 +44,7 @@ import type {
 } from "./proto";
 import { applyChat, type Chat } from "./lib/chat";
 import { choiceKeys, findChoices, promptContext, type Choice } from "./lib/choices";
-import { upload } from "./lib/api";
+import { getJson, upload, type Places } from "./lib/api";
 import { appliedSummary, itemNo, shippedSummary, wouldShip } from "./lib/backlog";
 import { shrinkImage } from "./lib/shrink";
 import { newProposals, proposalPopups, proposalToast } from "./lib/proposals";
@@ -1218,6 +1218,30 @@ export async function spawn(
   void refresh();
   reportColors(reply.info.id);
   return reply.info.id;
+}
+
+let home: Promise<string> | null = null;
+
+/** This machine's home folder, where a session with no repository starts. */
+function homeDir(): Promise<string> {
+  const token = useApp.getState().token;
+  if (!token) return Promise.reject(new Error("not signed in"));
+  home ??= getJson<Places>(token, "/api/places").then(
+    (p) => p.home,
+    (e: Error) => {
+      home = null;
+      throw e;
+    },
+  );
+  return home;
+}
+
+/**
+ * Starts a typed task: in a worktree of its own of `repo`, or in the home
+ * folder when it names none (backlog #292). Returns the session's id.
+ */
+export async function startTask(command: string[], repo: string | null, name: string): Promise<SessionId> {
+  return repo ? spawn(command, repo, name, "") : spawn(command, await homeDir(), name, null);
 }
 
 /** Writes down a backlog item; its id. */

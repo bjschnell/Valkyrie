@@ -1743,7 +1743,7 @@ impl App {
                 compose::Composed::Done => self.sync_paste(),
                 compose::Composed::Repo => {
                     let (repos, d) = self.compose_defaults();
-                    self.composer.repo = compose::step_repo(&d, &repos);
+                    self.composer.repo = Some(compose::step_repo(&d, &repos));
                 }
                 compose::Composed::Agent => {
                     let (_, d) = self.compose_defaults();
@@ -1813,21 +1813,7 @@ impl App {
         let mut started: Vec<String> = Vec::new();
         let mut left = Vec::new();
         for mut row in b.rows.drain(..) {
-            let d = row.defaults();
-            let Some(repo) = d.repo.clone() else {
-                row.failed = Some("no repository".into());
-                left.push(row);
-                continue;
-            };
-            let spec = SpawnSpec {
-                command: compose::command(&d, &row.task),
-                cwd: Some(repo),
-                name: None,
-                size,
-                env: spawn_env(),
-                worktree: (d.agent != "shell").then(String::new),
-                hidden: false,
-            };
+            let spec = compose::spawn_spec(&row.defaults(), &row.task, size, spawn_env());
             match self.client.spawn(spec).await {
                 Ok(info) => started.push(info.name),
                 Err(e) => {
@@ -1857,21 +1843,8 @@ impl App {
     /// (a shell starts in the repository itself).
     async fn compose_start(&mut self) {
         let (_, d) = self.compose_defaults();
-        let Some(repo) = d.repo.clone() else {
-            return self.say("no repository to start in: add one in the web app".into());
-        };
-        let task = self.composer.task().to_owned();
         let size = self.session_size().unwrap_or(Size { cols: 80, rows: 24 });
-        let shell = d.agent == "shell";
-        let spec = SpawnSpec {
-            command: compose::command(&d, &task),
-            cwd: Some(repo),
-            name: None,
-            size,
-            env: spawn_env(),
-            worktree: (!shell).then(String::new),
-            hidden: false,
-        };
+        let spec = compose::spawn_spec(&d, self.composer.task(), size, spawn_env());
         match self.client.spawn(spec).await {
             Ok(info) => {
                 self.composer.clear();
@@ -13028,8 +13001,15 @@ mod tests {
             "{foot}"
         );
 
-        // tab: the next repository; ↩ starts the agent there, in a worktree.
-        app.on_input(b"\t".to_vec()).await;
+        // Nothing named, nothing picked: no repository (backlog #292). tab
+        // steps to the first, then the next; ↩ starts the agent there, in a
+        // worktree.
+        assert!(
+            home_screen(&app, 140)
+                .join("\n")
+                .contains("no repository · claude")
+        );
+        app.on_input(b"\t\t".to_vec()).await;
         assert!(home_screen(&app, 140).join("\n").contains("web · claude"));
         app.on_input(b"\r".to_vec()).await;
         let spawn = took(&sent)
@@ -13192,7 +13172,7 @@ mod tests {
         assert!(foot.contains("review and start 3"), "{foot}");
         app.on_input(b"\r".to_vec()).await;
         let b = app.batch.as_ref().expect("Start agents is open");
-        assert_eq!(b.summary(), "3 tasks · api, web");
+        assert_eq!(b.summary(), "3 tasks · no repository, web");
         let screen = home_screen(&app, 120);
         let text = screen.join("\n");
         assert!(
@@ -13225,24 +13205,25 @@ mod tests {
             .into_iter()
             .map(|s| (s.command, s.cwd, s.worktree))
             .collect();
-        let w = || Some(String::new());
+        // A line that names no repository starts at home, no worktree (#292).
+        let home = || Some(valkyrie_proto::home_dir());
         assert_eq!(
             got,
             [
                 (
                     vec!["claude".into(), "Add token expiry".into()],
-                    Some("/r/api".into()),
-                    w()
+                    home(),
+                    None
                 ),
                 (
                     vec!["claude".into(), "Badge count in web".into()],
                     Some("/r/web".into()),
-                    w()
+                    Some(String::new())
                 ),
                 (
                     vec!["codex".into(), "Cache the release build".into()],
-                    Some("/r/api".into()),
-                    w()
+                    home(),
+                    None
                 ),
             ]
         );
@@ -13262,7 +13243,8 @@ mod tests {
                 .contains("couldn't start: web is busy")
         );
 
-        // tab moves it to api; ↩ starts it and the dialog closes, the draft gone.
+        // tab moves it to none, after the last; ↩ starts it and the dialog
+        // closes, the draft gone.
         app.on_input(b"\t\r".to_vec()).await;
         assert!(app.batch.is_none());
         assert_eq!(app.status, "started 1 session");

@@ -34,10 +34,10 @@ export function intent(text: string): Intent {
 
 /**
  * The repository a task is about: one whose name the text says as a word (the
- * longest, when several do, so `valkyrie-web` beats `valkyrie`), else the last
- * one used, else the first offered.
+ * longest, when several do, so `valkyrie-web` beats `valkyrie`), else none: a
+ * task that names no repo isn't put in one (backlog #292).
  */
-export function guessRepo(text: string, repos: string[], last: string | null): string | null {
+export function guessRepo(text: string, repos: string[]): string | null {
   const words = text.toLowerCase();
   let best: string | null = null;
   for (const repo of repos) {
@@ -46,9 +46,7 @@ export function guessRepo(text: string, repos: string[], last: string | null): s
     const at = new RegExp(`(^|[^\\w-])${escape(name)}($|[^\\w-])`);
     if (at.test(words) && (best === null || name.length > base(best).length)) best = repo;
   }
-  if (best) return best;
-  if (last && repos.includes(last)) return last;
-  return repos[0] ?? last;
+  return best;
 }
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

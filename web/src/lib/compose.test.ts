@@ -47,19 +47,19 @@ describe("guessRepo", () => {
   const repos = ["/r/api", "/r/web", "/r/web-admin"];
 
   it("takes a repo the text names as a word", () => {
-    expect(guessRepo("bump axum in api", repos, "/r/web")).toBe("/r/api");
-    expect(guessRepo("Web: badge count", repos, "/r/api")).toBe("/r/web");
+    expect(guessRepo("bump axum in api", repos)).toBe("/r/api");
+    expect(guessRepo("Web: badge count", repos)).toBe("/r/web");
   });
 
   it("prefers the longest name, and doesn't match inside a word", () => {
-    expect(guessRepo("web-admin login", repos, null)).toBe("/r/web-admin");
-    expect(guessRepo("rapid webhooks", repos, "/r/api")).toBe("/r/api");
+    expect(guessRepo("web-admin login", repos)).toBe("/r/web-admin");
+    expect(guessRepo("rapid webhooks", repos)).toBeNull();
   });
 
-  it("falls back to the last one used, then the first offered", () => {
-    expect(guessRepo("something", repos, "/r/web")).toBe("/r/web");
-    expect(guessRepo("something", repos, "/gone")).toBe("/r/api");
-    expect(guessRepo("something", [], "/gone")).toBe("/gone");
+  // Backlog #292: a task that names no repo starts in none.
+  it("is none when the text names no repo", () => {
+    expect(guessRepo("something", repos)).toBeNull();
+    expect(guessRepo("something", [])).toBeNull();
   });
 });
 
