@@ -1,4 +1,6 @@
 // Small inline icons, stroked in the current color.
+import type { ReactNode } from "react";
+import type { ItemKind } from "../proto";
 
 const base = {
   width: 20,
@@ -135,5 +137,36 @@ export const Server = () => (
     <rect x="3" y="4" width="18" height="7" rx="2" />
     <rect x="3" y="13" width="18" height="7" rx="2" />
     <path d="M7 7.5h.01M7 16.5h.01" />
+  </svg>
+);
+
+/** A backlog item's kind as a shape (#296): kinds are words and shapes, never colors. */
+const KIND_PATHS: Record<ItemKind, ReactNode> = {
+  // A beetle.
+  bug: (
+    <>
+      <path d="M9 7.5a3 3 0 016 0" />
+      <rect x="7" y="7.5" width="10" height="13" rx="5" />
+      <path d="M12 12v8.5M3.5 13H7M17 13h3.5M4.5 8.5l2.5 1.5M19.5 8.5L17 10M4.5 19l2.5-2M19.5 19L17 17" />
+    </>
+  ),
+  // A spark.
+  feature: <path d="M12 3l2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4z" />,
+  // A wrench.
+  chore: <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.8-3.8a6 6 0 01-7.9 7.9l-6.9 6.9a2.1 2.1 0 01-3-3l6.9-6.9a6 6 0 017.9-7.9z" />,
+  // A flask.
+  spike: <path d="M9 3h6M10 3v6.5L4.6 18.6A1.6 1.6 0 006 21h12a1.6 1.6 0 001.4-2.4L14 9.5V3M7 15.5h10" />,
+  // An anchor.
+  debt: (
+    <>
+      <circle cx="12" cy="5" r="2" />
+      <path d="M12 7v14M8 11h8M4 13a8 8 0 0016 0" />
+    </>
+  ),
+};
+
+export const KindIcon = ({ kind }: { kind: ItemKind }) => (
+  <svg {...base} width={18} height={18}>
+    {KIND_PATHS[kind]}
   </svg>
 );
