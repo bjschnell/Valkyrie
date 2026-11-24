@@ -114,6 +114,53 @@ pub fn check_handoff(json: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// This machine's claim on a state directory, held for as long as the value lives:
+/// one daemon per machine serves a backlog. Two on one state dir both ship merged
+/// PRs, and the one without the PR's sessions tells nobody (backlog #297).
+#[cfg(unix)]
+pub struct Claim {
+    _file: std::fs::File,
+}
+
+/// Claims `state_dir` on this machine for the daemon on `socket`, and records the
+/// socket for clients to follow (`valkyrie_proto::claimed_socket`). Refused while
+/// another daemon holds it. The lock is close-on-exec: an upgrade's new image
+/// claims it again.
+#[cfg(unix)]
+pub fn claim(state_dir: &Path, socket: &Path) -> Result<Claim> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = valkyrie_proto::claim_path(state_dir);
+    let dir = path.parent().context("claim path has no parent")?;
+    valkyrie_proto::ensure_private_dir(dir)?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut held = String::new();
+            let _ = file.read_to_string(&mut held);
+            anyhow::bail!(
+                "a daemon already serves {} on this machine, on {}; use that one, or stop it first",
+                state_dir.display(),
+                held.trim_end()
+            );
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("lock {}", path.display()));
+        }
+    }
+    let socket = std::path::absolute(socket)?;
+    file.set_len(0)?;
+    file.write_all(socket.as_os_str().as_bytes())?;
+    Ok(Claim { _file: file })
+}
+
 /// An accepted `Upgrade`, carried out by the accept loop so nothing is accepted
 /// meanwhile. `done` only ever receives the error of an exec that failed.
 struct UpgradeRequest {

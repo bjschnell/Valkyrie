@@ -1150,6 +1150,14 @@ pub fn default_socket_path() -> PathBuf {
 /// admin terminal sharing the user's daemon would start unelevated sessions, and a
 /// user's terminal sharing an admin daemon would start elevated ones.
 pub fn daemon_socket(chosen: Option<PathBuf>) -> PathBuf {
+    // The daemon already serving this machine, though the hostname changed since
+    // it started: following it beats starting a second, empty one beside it.
+    #[cfg(unix)]
+    if chosen.is_none()
+        && let Some(live) = claimed_socket(&state_dir())
+    {
+        return live;
+    }
     let user_default = default_socket_path();
     let elevated = elevated();
     #[cfg(windows)]
@@ -1157,6 +1165,52 @@ pub fn daemon_socket(chosen: Option<PathBuf>) -> PathBuf {
         return user_default;
     }
     pick_socket(chosen, elevated, user_default)
+}
+
+/// `<state dir>/run/<machine>.daemon`: the file a daemon holds locked for as long as
+/// it serves `state_dir` on this machine, with its socket path inside. One per
+/// machine, so machines sharing an NFS home each run their own daemon; named by
+/// the machine id rather than the hostname, which can change while a daemon runs
+/// (a boot that renames the machine started a second daemon on the same backlog).
+#[cfg(unix)]
+pub fn claim_path(state_dir: &Path) -> PathBuf {
+    state_dir
+        .join("run")
+        .join(format!("{}.daemon", machine_key()))
+}
+
+/// The socket of the daemon holding this machine's claim on `state_dir`, while one
+/// holds it (`claim_path`).
+#[cfg(unix)]
+pub fn claimed_socket(state_dir: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(claim_path(state_dir)).ok()?;
+    match file.try_lock_shared() {
+        // Nobody holds it: a daemon that's gone. Closing the file lets go of ours.
+        Ok(()) => None,
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut socket = String::new();
+            file.read_to_string(&mut socket).ok()?;
+            let socket = socket.trim_end();
+            (!socket.is_empty()).then(|| PathBuf::from(socket))
+        }
+        Err(std::fs::TryLockError::Error(_)) => None,
+    }
+}
+
+/// What names this machine for `claim_path`: the systemd/D-Bus machine id, which
+/// stays put across renames, else the hostname.
+#[cfg(unix)]
+fn machine_key() -> String {
+    for file in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(id) = std::fs::read_to_string(file) {
+            let id = id.trim();
+            if !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return id.to_string();
+            }
+        }
+    }
+    hostname()
 }
 
 fn pick_socket(chosen: Option<PathBuf>, elevated: bool, user_default: PathBuf) -> PathBuf {
