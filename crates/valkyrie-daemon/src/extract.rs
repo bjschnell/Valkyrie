@@ -10,6 +10,7 @@
 //! review only once it recurs; a skill's rewrite is still proposed.
 
 use crate::Registry;
+use crate::lock::Locked;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -144,7 +145,7 @@ async fn look(
         return false;
     }
     let root = valkyrie_context::project::root(&info.cwd);
-    let known = registry.context.lock().unwrap().load(&root);
+    let known = registry.context.locked().load(&root);
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -207,12 +208,7 @@ async fn look(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        match registry
-            .context
-            .lock()
-            .unwrap()
-            .decide(&new, provenance, now)
-        {
+        match registry.context.locked().decide(&new, provenance, now) {
             Ok(d) => {
                 tracing::info!(session = id, id = d.id, "proposed from a correction");
                 known.push(d);
@@ -255,7 +251,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
         return false;
     };
     let now = now_secs();
-    let before = registry.context.lock().unwrap().failures(&root, now);
+    let before = registry.context.locked().failures(&root, now);
     let (mut moments, waiting): (Vec<_>, Vec<_>) = retro::moments(&tail)
         .into_iter()
         .filter(|m| !before.calls.contains(&m.id))
@@ -270,7 +266,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
         .iter()
         .map(|m| (m.signature, m.id.as_str()))
         .collect();
-    if let Err(e) = registry.context.lock().unwrap().record_failures(
+    if let Err(e) = registry.context.locked().record_failures(
         &root,
         &sigs,
         session.conversation().as_deref(),
@@ -293,7 +289,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
     // The live notes on these failures, and which this session was served: a
     // search before its session started was another session's.
     let (known, priors) = {
-        let store = registry.context.lock().unwrap();
+        let store = registry.context.locked();
         let reader = format!("valk:{id}");
         let served: std::collections::BTreeSet<u32> = store
             .found_served(&root, now)
@@ -375,7 +371,7 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
                 commit: commit.clone(),
                 cwd: Some(info.cwd.clone()),
             };
-            let written = registry.context.lock().unwrap().note(
+            let written = registry.context.locked().note(
                 &new,
                 provenance,
                 Some(retro::sig(m.signature)),
@@ -421,19 +417,14 @@ async fn reflect(registry: &Registry, id: SessionId, mode: AutoMode, command: &[
             commit: None,
             cwd: Some(info.cwd.clone()),
         };
-        let decided = registry
-            .context
-            .lock()
-            .unwrap()
-            .decide(&new, provenance, now);
+        let decided = registry.context.locked().decide(&new, provenance, now);
         match decided {
             Ok(d) => {
                 tracing::info!(session = id, id = d.id, "skill rewritten after a failure");
                 let recorded =
                     registry
                         .context
-                        .lock()
-                        .unwrap()
+                        .locked()
                         .record_proposal(&root, m.signature, d.id, now);
                 if let Err(e) = recorded {
                     tracing::warn!(session = id, "couldn't record the proposal: {e:#}");
@@ -462,7 +453,7 @@ async fn track_use(registry: Arc<Registry>, id: SessionId) {
     // Files, and the store's lock: off the async threads.
     let _ = tokio::task::spawn_blocking(move || {
         let root = valkyrie_context::project::root(&info.cwd);
-        let store = registry.context.lock().unwrap();
+        let store = registry.context.locked();
         let known = store.load(&root);
         let active: Vec<u32> =
             skill::active(&known, &known.iter().map(|d| d.id).collect::<Vec<_>>());
@@ -521,7 +512,7 @@ async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[St
     // The same approval ends several turns (the commit and push it asked for),
     // and is still the last one after a restart: learned from once.
     {
-        let store = registry.context.lock().unwrap();
+        let store = registry.context.locked();
         if store.skill_use(&root).learned.contains(&approval) {
             return false;
         }
@@ -533,7 +524,7 @@ async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[St
             return false;
         }
     }
-    let known = registry.context.lock().unwrap().load(&root);
+    let known = registry.context.locked().load(&root);
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -584,8 +575,7 @@ async fn learn(registry: &Registry, id: SessionId, mode: AutoMode, command: &[St
     };
     let decided = registry
         .context
-        .lock()
-        .unwrap()
+        .locked()
         .decide(&new, provenance, now_secs());
     match decided {
         Ok(d) => {

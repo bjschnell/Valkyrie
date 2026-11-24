@@ -1,6 +1,7 @@
 //! The repository wiki for the TUI and the web app (backlog #210): list and read
 //! pages, and start the agent that writes them, as `valk wiki explore` does.
 
+use crate::lock::Locked;
 use crate::{Registry, backlog::agent_command};
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -20,7 +21,7 @@ impl Registry {
     /// out. Runs `git`: call it off the connection's thread.
     pub(crate) fn wiki(&self, cwd: &Path) -> Reply {
         let root = valkyrie_context::project::root(cwd);
-        let pages = self.context.lock().unwrap().wiki(&root);
+        let pages = self.context.locked().wiki(&root);
         // After the lock: one `git diff` per commit the pages were written at.
         let stale = wiki::staleness(&root, &pages);
         Reply::Wiki {
@@ -37,7 +38,7 @@ impl Registry {
     /// One page in full.
     pub(crate) fn wiki_page(&self, cwd: &Path, page: &str) -> Result<Reply> {
         let root = valkyrie_context::project::root(cwd);
-        let Some(p) = self.context.lock().unwrap().wiki_page(&root, page) else {
+        let Some(p) = self.context.locked().wiki_page(&root, page) else {
             bail!("no wiki page {page:?}");
         };
         let stale = wiki::staleness(&root, std::slice::from_ref(&p));
@@ -69,7 +70,7 @@ impl Registry {
             let info = Box::new(live.info());
             return Ok((Reply::Session { info }, false));
         }
-        let pages = self.context.lock().unwrap().wiki(&root);
+        let pages = self.context.locked().wiki(&root);
         let valk = valkyrie_context::valk_command();
         let brief = {
             let root = root.clone();
@@ -77,7 +78,7 @@ impl Registry {
                 .await??
         };
         #[cfg(test)]
-        BRIEFED.lock().unwrap().replace(brief.clone());
+        BRIEFED.locked().replace(brief.clone());
         // A test starts `sleep`, not an agent: a stand-in of its own, so the
         // dispatch test's can't race it.
         let command = match cfg!(test) {
@@ -166,7 +167,7 @@ mod tests {
         };
         assert!(started);
         assert_eq!((info.name.as_str(), &info.cwd), ("wiki", &listing.root));
-        let brief = BRIEFED.lock().unwrap().clone().unwrap();
+        let brief = BRIEFED.locked().clone().unwrap();
         assert!(brief.starts_with("Explore this repository"), "{brief}");
         // A second press while it runs: the same session, not another agent.
         let (again, started) = registry
@@ -189,8 +190,7 @@ mod tests {
         };
         registry
             .context
-            .lock()
-            .unwrap()
+            .locked()
             .write_wiki(&listing.root, &new, None, 1)
             .unwrap();
         let Reply::Wiki { listing } = registry.wiki(&repo) else {

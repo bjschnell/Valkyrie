@@ -16,6 +16,7 @@
 //! stays, with its commits. `worktree_sweep = off` in `settings.toml` stops it.
 
 use crate::Registry;
+use crate::lock::Locked;
 use crate::worktree::{self, Linked};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -189,7 +190,7 @@ impl Registry {
     /// the checkout off the cards of finished items whose folder is gone. Returns
     /// what it took away, each with why.
     pub(crate) async fn sweep_worktrees(&self, now: u64) -> Vec<String> {
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         let mut done = Vec::new();
         let mut changed = self.clear_gone(&items);
         let mut repos: Vec<PathBuf> = items
@@ -211,7 +212,7 @@ impl Registry {
             for wt in survey.linked {
                 // Read again for each: a survey can take a while, and an item
                 // launched on this checkout meanwhile must count.
-                let items = self.backlog.lock().unwrap().load();
+                let items = self.backlog.locked().load();
                 let mine: Vec<&Item> = items
                     .iter()
                     .filter(|i| {
@@ -300,7 +301,7 @@ impl Registry {
             {
                 continue;
             }
-            match self.backlog.lock().unwrap().cleared(item.id, now_secs()) {
+            match self.backlog.locked().cleared(item.id, now_secs()) {
                 Ok(_) => changed = true,
                 Err(e) => tracing::warn!(id = item.id, "couldn't clear its checkout: {e:#}"),
             }
@@ -311,7 +312,7 @@ impl Registry {
     /// Clears a finished item's checkout once the sweep took it away, with a
     /// note saying so.
     fn swept_card(&self, item: &Item, line: &str) {
-        let backlog = self.backlog.lock().unwrap();
+        let backlog = self.backlog.locked();
         if let Err(e) = backlog.cleared(item.id, now_secs()) {
             tracing::warn!(id = item.id, "couldn't clear its checkout: {e:#}");
             return;
@@ -559,7 +560,7 @@ mod tests {
         let busy = spawn(&["sleep", "30"], &shipped);
         let shell = spawn(&["sh"], &merged);
         let item = |title: &str, status, checkout: &Path, branch: &str| {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: title.into(),
                 cwd: Some(main.clone()),
@@ -595,7 +596,7 @@ mod tests {
         for kept in [&dirty, &open, &fresh] {
             assert!(kept.exists(), "{} went", kept.display());
         }
-        let card = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        let card = |id| registry.backlog.locked().get(id).unwrap();
         assert_eq!(card(gone_id).checkout, None);
         assert_eq!(card(open_id).checkout.as_deref(), Some(open.as_path()));
 

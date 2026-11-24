@@ -5,6 +5,7 @@
 //! model gives nothing, the newest note says it as written.
 
 use crate::Registry;
+use crate::lock::Locked;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,7 +58,7 @@ async fn check(
     calls: &mut VecDeque<Instant>,
 ) -> bool {
     let (mut notes, links, known) = {
-        let store = registry.context.lock().unwrap();
+        let store = registry.context.locked();
         let known = store.load(&root);
         if let Err(e) = store.heal_promotions(&root, &known) {
             tracing::warn!(project = %root.display(), "couldn't promote notes: {e:#}");
@@ -160,7 +161,7 @@ async fn check(
     // The proposal and its link under one lock, so nobody accepts it before the
     // link says which notes it promotes.
     let decided = {
-        let store = registry.context.lock().unwrap();
+        let store = registry.context.locked();
         store.decide(&new, provenance, now).map(|d| {
             let linked = store.record_promotion(&root, (d.id, Some(d.created)), &ids, false, now);
             // So ADR-0011 §6 can tell whether it worked, like the retro's.
@@ -211,8 +212,7 @@ fn record(
 ) -> bool {
     let recorded = registry
         .context
-        .lock()
-        .unwrap()
+        .locked()
         .record_promotion(root, decision, notes, matched, now);
     if let Err(e) = recorded {
         tracing::warn!(project = %root.display(), decision = decision.0, "couldn't record the notes' proposal: {e:#}");

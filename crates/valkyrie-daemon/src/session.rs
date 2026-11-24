@@ -14,6 +14,7 @@
 //! reaches goes to `<ns>-<id>.events.jsonl` next to the transcript, so a recorded
 //! session replays to the same states (DESIGN §14.6).
 
+use crate::lock::Locked;
 use crate::pty::{Pty, StopPipe, open_retrying, pty_size};
 use crate::{chat, foreground};
 use anyhow::{Context, Result};
@@ -122,7 +123,7 @@ struct InputState {
 
 impl InputQueue {
     fn push(&self, data: Vec<u8>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if !state.closed {
             state.bufs.push_back(data);
             self.ready.notify_one();
@@ -130,7 +131,7 @@ impl InputQueue {
     }
 
     fn set(&self, f: impl FnOnce(&mut InputState)) {
-        f(&mut self.state.lock().unwrap());
+        f(&mut self.state.locked());
         self.ready.notify_all();
     }
 }
@@ -373,7 +374,7 @@ impl Session {
         let transcript_path = stem.with_extension("raw");
         let events_path = stem.with_extension("events.jsonl");
 
-        let cell = *host.cell_px.lock().unwrap();
+        let cell = *host.cell_px.locked();
         let pty_system = native_pty_system();
         let pair = open_retrying(|| pty_system.openpty(pty_size(size, cell.unwrap_or((0, 0)))))
             .context("openpty")?;
@@ -427,7 +428,7 @@ impl Session {
         if let Some(cell) = cell {
             screen.set_cell_pixels(cell);
         }
-        screen.set_colors(host.colors.lock().unwrap().clone());
+        screen.set_colors(host.colors.locked().clone());
         let mut state = State {
             screen,
             exited: None,
@@ -538,10 +539,10 @@ impl Session {
                         graphics::Log::new(GRAPHICS_LIMIT),
                     )
                 });
-        if let Some(cell) = *host.cell_px.lock().unwrap() {
+        if let Some(cell) = *host.cell_px.locked() {
             screen.set_cell_pixels(cell);
         }
-        screen.set_colors(host.colors.lock().unwrap().clone());
+        screen.set_colors(host.colors.locked().clone());
         let now = now_ms();
         let log = append_private(&saved.events)?;
         let transcript = append_private(&saved.transcript)?;
@@ -658,7 +659,7 @@ impl Session {
                 .name(format!("pty-x-{}", self.id))
                 .spawn(move || waiter.wait_exit(reap))?;
         }
-        self.start_io(transcript, host.stop.lock().unwrap().clone())
+        self.start_io(transcript, host.stop.locked().clone())
     }
 
     #[cfg(unix)]
@@ -681,13 +682,13 @@ impl Session {
         let handle = std::thread::Builder::new()
             .name(format!("pty-w-{id}"))
             .spawn(move || write_loop(id, writer, queue, writer_stop))?;
-        *self.writer.lock().unwrap() = Some(handle);
+        *self.writer.locked() = Some(handle);
         let reader = self.pty.file()?;
         let session = self.clone();
         let handle = std::thread::Builder::new()
             .name(format!("pty-r-{id}"))
             .spawn(move || session.pump(reader, transcript, stop))?;
-        *self.reader.lock().unwrap() = Some(handle);
+        *self.reader.locked() = Some(handle);
         Ok(())
     }
 
@@ -698,13 +699,13 @@ impl Session {
         let handle = std::thread::Builder::new()
             .name(format!("pty-w-{id}"))
             .spawn(move || write_loop(id, writer, queue))?;
-        *self.writer.lock().unwrap() = Some(handle);
+        *self.writer.locked() = Some(handle);
         let reader = self.pty.reader()?;
         let session = self.clone();
         let handle = std::thread::Builder::new()
             .name(format!("pty-r-{id}"))
             .spawn(move || session.pump(reader, transcript))?;
-        *self.reader.lock().unwrap() = Some(handle);
+        *self.reader.locked() = Some(handle);
         Ok(())
     }
 
@@ -714,7 +715,7 @@ impl Session {
     pub fn stop_io(&self) {
         self.input.set(|state| state.halt = true);
         for thread in [&self.reader, &self.writer] {
-            if let Some(handle) = thread.lock().unwrap().take() {
+            if let Some(handle) = thread.locked().take() {
                 let _ = handle.join();
             }
         }
@@ -729,7 +730,7 @@ impl Session {
     }
 
     pub fn exited(&self) -> bool {
-        self.state.lock().unwrap().exited.is_some()
+        self.state.locked().exited.is_some()
     }
 
     /// SIGKILL now, for a killed session that must not outlive a handoff unreaped.
@@ -752,7 +753,7 @@ impl Session {
     /// Everything the next daemon image needs; call with the reader stopped.
     #[cfg(unix)]
     pub fn save(&self) -> SavedSession {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         SavedSession {
             id: self.id,
             name: self.saved_name(),
@@ -777,8 +778,7 @@ impl Session {
             input: self
                 .input
                 .state
-                .lock()
-                .unwrap()
+                .locked()
                 .bufs
                 .iter()
                 .flatten()
@@ -866,7 +866,7 @@ impl Session {
             tracing::warn!(session = self.id, "transcript write failed: {e}");
         }
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let signals = state.screen.feed(bytes);
         if let Some(update) = state.screen.take_diff() {
             let _ = self.feed.send(Arc::new(ServerMsg::Screen {
@@ -927,7 +927,7 @@ impl Session {
         };
         tracing::info!(session = self.id, ?code, "exited");
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         state.exited = Some(code);
         state.exited_ms = Some(now);
         let _ = self.feed.send(Arc::new(ServerMsg::Exited {
@@ -965,7 +965,7 @@ impl Session {
     /// Returns the reply it completes, when the stop before was short of
     /// shipping and the user answered it.
     pub fn log_work(&self, n: u64, work: Option<Value>) -> Option<Answered> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         // Overtaken by a later turn end, which says where the work is now.
         if !state.pairing.latest(n) {
             return None;
@@ -999,7 +999,7 @@ impl Session {
     /// How blocks turned out since the last call, for the daemon to record:
     /// each with whether the user overrode it, and how that was seen.
     pub fn take_outcomes(&self) -> Vec<valkyrie_context::outcome::Outcome> {
-        self.state.lock().unwrap().pairing.outcomes()
+        self.state.locked().pairing.outcomes()
     }
 
     /// A hook event forwarded by `valk hook <agent>`. Every process in the session
@@ -1011,7 +1011,7 @@ impl Session {
             && (self.adapter.name() == "generic" || self.adapter.name() == adapter.name());
         let events = adapter.normalize(&payload);
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let mut read = None;
         state.log(
             now,
@@ -1069,7 +1069,7 @@ impl Session {
     /// Periodic: screen heuristics once output is quiet (glances in between), then
     /// the tracker's timers.
     pub fn tick(self: &Arc<Self>, now: u64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.exited.is_none() {
             let pid = self.pty.foreground().or(self.pid.map(|p| p as i32));
             if let Some(cwd) = pid.and_then(foreground::cwd) {
@@ -1164,7 +1164,7 @@ impl Session {
     /// else its directory. The agent or program running is shown beside it, from
     /// the status and the command.
     fn display_name(&self, state: &State) -> String {
-        if let Some(name) = self.name.lock().unwrap().clone() {
+        if let Some(name) = self.name.locked().clone() {
             return name;
         }
         if let Some(topic) = &state.topic {
@@ -1198,7 +1198,7 @@ impl Session {
 
     /// A restored session keeps the topic it had, until its agent retitles it.
     pub fn set_topic(&self, topic: Option<String>) {
-        self.state.lock().unwrap().topic = topic;
+        self.state.locked().topic = topic;
     }
 
     /// Where the session is now: the foreground program's directory, else where it
@@ -1209,7 +1209,7 @@ impl Session {
 
     /// The name saved for an upgrade or a restart: older images expect one always.
     fn saved_name(&self) -> String {
-        let name = self.name.lock().unwrap().clone();
+        let name = self.name.locked().clone();
         name.unwrap_or_else(|| default_name(&self.command))
     }
 
@@ -1226,7 +1226,7 @@ impl Session {
     /// failure (an agent that crashed, `valk new -- cargo test`) stays until closed,
     /// `blocked` in the queue.
     pub fn gone(&self) -> bool {
-        match self.state.lock().unwrap().exited {
+        match self.state.locked().exited {
             None => false,
             Some(code) => code == Some(0) || valkyrie_agents::is_shell(&self.command),
         }
@@ -1235,7 +1235,7 @@ impl Session {
     /// Gone for `grace_ms`: long enough that a reboot, which ends every program at
     /// once, would have taken the daemon down too, so the restore list can drop it.
     pub fn removable(&self, now: u64, grace_ms: u64) -> bool {
-        let exited_ms = self.state.lock().unwrap().exited_ms;
+        let exited_ms = self.state.locked().exited_ms;
         self.gone() && exited_ms.is_some_and(|at| now.saturating_sub(at) >= grace_ms)
     }
 
@@ -1247,10 +1247,9 @@ impl Session {
         let name = own_name(name, &self.command);
         let now = now_ms();
         self.state
-            .lock()
-            .unwrap()
+            .locked()
             .log(now, "rename", json!({"name": name}));
-        *self.name.lock().unwrap() = name;
+        *self.name.locked() = name;
         // The queue carries names too.
         self.changed.notify_one();
     }
@@ -1258,7 +1257,7 @@ impl Session {
     /// A client attached: whatever it is showing is now seen.
     pub fn attach(self: &Arc<Self>) {
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let clients = self.clients.fetch_add(1, Ordering::Relaxed) + 1;
         state.log(now, "attach", json!({"clients": clients}));
         if state.tracker.seen() {
@@ -1276,7 +1275,7 @@ impl Session {
     /// the transition it raised, when it changed.
     pub fn flag_blocked(self: &Arc<Self>, summary: &str) -> Option<u64> {
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let status = state.tracker.status();
         let idle = matches!(status.state, AgentState::Idle | AgentState::ReviewReady);
         // Still showing the poll's own flag (nobody has prompted it since), now
@@ -1303,7 +1302,7 @@ impl Session {
     /// The flag the session still shows, with the transition that raised it: the
     /// PR poll's own, and nobody has prompted the session since.
     pub fn flag(&self) -> Option<(u64, String)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let status = state.tracker.status();
         let shows = state.exited.is_none()
             && status.state == AgentState::Blocked
@@ -1314,13 +1313,13 @@ impl Session {
 
     /// Prompts the agent has reported since the session started.
     pub fn prompts(&self) -> u64 {
-        self.state.lock().unwrap().prompts
+        self.state.locked().prompts
     }
 
     /// Whether the agent is sitting between turns: idle, finished, or showing a
     /// flag, not working or waiting on the human.
     pub fn resting(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let status = state.tracker.status();
         state.exited.is_none()
             && (matches!(status.state, AgentState::Idle | AgentState::ReviewReady)
@@ -1333,14 +1332,7 @@ impl Session {
     /// the program takes bracketed paste (else on one line), then Enter after a
     /// moment, so the agent reads the paste as typed text and not as the submit.
     pub fn prompt(&self, text: &str) {
-        let bracketed = self
-            .state
-            .lock()
-            .unwrap()
-            .screen
-            .snapshot()
-            .modes
-            .bracketed_paste;
+        let bracketed = self.state.locked().screen.snapshot().modes.bracketed_paste;
         let paste = if bracketed {
             format!("\x1b[200~{text}\x1b[201~")
         } else {
@@ -1356,22 +1348,19 @@ impl Session {
 
     /// Writes a supervisor step into the session's event log (ADR-0019 §6).
     pub fn log_step(&self, fields: Value) {
-        self.state
-            .lock()
-            .unwrap()
-            .log(now_ms(), "supervisor", fields);
+        self.state.locked().log(now_ms(), "supervisor", fields);
     }
 
     pub fn detach(&self) {
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         let clients = self.clients.fetch_sub(1, Ordering::Relaxed) - 1;
         state.log(now, "detach", json!({"clients": clients}));
     }
 
     pub fn mark_seen(self: &Arc<Self>, seq: u64) {
         let now = now_ms();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.tracker.mark_seen(seq) {
             state.log(now, "seen", json!({"seq": seq}));
             self.changed.notify_one();
@@ -1385,11 +1374,11 @@ impl Session {
         if status.state == AgentState::ReviewReady && !status.seen {
             let session = self.clone();
             std::thread::spawn(move || {
-                let cwd = session.live_cwd(&session.state.lock().unwrap());
+                let cwd = session.live_cwd(&session.state.locked());
                 let Some(stat) = diff_stat(&cwd) else {
                     return;
                 };
-                let mut state = session.state.lock().unwrap();
+                let mut state = session.state.locked();
                 if state.tracker.annotate(status.seq, &stat) {
                     let status = state.tracker.status().clone();
                     state.log(now_ms(), "state", json!({"status": status}));
@@ -1402,7 +1391,7 @@ impl Session {
     /// Subscribe to diffs and get the snapshot they apply on top of, plus the `Exited`
     /// message if the program already ended (its broadcast predates this subscriber).
     pub fn subscribe(&self) -> (Feed, ServerMsg, Option<ServerMsg>, Vec<ServerMsg>) {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let rx = self.feed.subscribe();
         let snapshot = ServerMsg::Screen {
             session: self.id,
@@ -1441,7 +1430,7 @@ impl Session {
 
     pub fn resize(&self, size: Size) {
         let size = size.clamped();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.screen.size() == size {
             return;
         }
@@ -1477,7 +1466,7 @@ impl Session {
     /// Returns whether a signal was sent.
     #[cfg(unix)]
     fn signal_group(&self, pid: u32, sig: libc::c_int) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         if state.exited.is_some() {
             return false;
         }
@@ -1495,13 +1484,13 @@ impl Session {
     }
 
     pub fn text(&self) -> String {
-        self.state.lock().unwrap().screen.text()
+        self.state.locked().screen.text()
     }
 
     /// The attached client's cell size in pixels: answers for image programs, and the
     /// PTY's pixel size.
     pub fn set_cell_pixels(&self, cell: (u16, u16)) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.screen.cell_pixels() == cell {
             return;
         }
@@ -1514,13 +1503,13 @@ impl Session {
 
     /// The colors programs in this session are told their terminal has.
     pub fn set_colors(&self, colors: Option<valkyrie_proto::TermColors>) {
-        self.state.lock().unwrap().screen.set_colors(colors);
+        self.state.locked().screen.set_colors(colors);
     }
 
     /// Starts the restore list off with the conversation a restored agent resumes, so
     /// it is kept even if the daemon stops before the agent's first hook.
     pub fn set_conversation(&self, id: Option<String>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if let Some(id) = &id {
             state.log(now_ms(), "conversation", json!({"id": id}));
         }
@@ -1529,89 +1518,88 @@ impl Session {
 
     /// The agent's own conversation id, once a hook named it.
     pub fn conversation(&self) -> Option<String> {
-        self.state.lock().unwrap().conversation.clone()
+        self.state.locked().conversation.clone()
     }
 
     pub fn activity(&self) -> crate::activity::Activity {
-        self.state.lock().unwrap().activity.clone()
+        self.state.locked().activity.clone()
     }
 
     /// How many tool calls failed since the last retro (see `Activity::failures`).
     pub fn failures(&self) -> u32 {
-        self.state.lock().unwrap().activity.failures()
+        self.state.locked().activity.failures()
     }
 
     pub fn take_failures(&self) -> u32 {
-        self.state.lock().unwrap().activity.take_failures()
+        self.state.locked().activity.take_failures()
     }
 
     /// See `Activity::arm`.
     pub fn arm_retro(&self) {
-        self.state.lock().unwrap().activity.arm()
+        self.state.locked().activity.arm()
     }
 
     /// See `Activity::adopt`.
     pub fn adopt_into_item(&self, item: u32) {
-        self.state.lock().unwrap().activity.adopt(item)
+        self.state.locked().activity.adopt(item)
     }
 
     /// See `Activity::take_adopted`.
     pub fn take_adopted(&self) -> Option<u32> {
-        self.state.lock().unwrap().activity.take_adopted()
+        self.state.locked().activity.take_adopted()
     }
 
     /// See `Activity::accepted`.
     pub fn filed_accepted(&self, item: u32) {
-        self.state.lock().unwrap().activity.accepted(item)
+        self.state.locked().activity.accepted(item)
     }
 
     /// See `Activity::take_accepted`.
     pub fn take_accepted(&self) -> Vec<u32> {
-        self.state.lock().unwrap().activity.take_accepted()
+        self.state.locked().activity.take_accepted()
     }
 
     /// See `Activity::commented`.
     pub fn doc_commented(&self, doc: u32, comment: u32) {
-        self.state.lock().unwrap().activity.commented(doc, comment)
+        self.state.locked().activity.commented(doc, comment)
     }
 
     /// See `Activity::take_comments`.
     pub fn take_comments(&self) -> Vec<(u32, u32)> {
-        self.state.lock().unwrap().activity.take_comments()
+        self.state.locked().activity.take_comments()
     }
 
     /// See `Activity::merged`.
     pub fn merged_news(&self, line: String) {
-        self.state.lock().unwrap().activity.merged(line)
+        self.state.locked().activity.merged(line)
     }
 
     /// See `Activity::take_merged`.
     pub fn take_merged(&self) -> Vec<String> {
-        self.state.lock().unwrap().activity.take_merged()
+        self.state.locked().activity.take_merged()
     }
 
     /// Writes into the event log that the agent was told its PR merged, typed
     /// or saved for its next prompt (backlog #121).
     pub fn log_merged(&self, pr: &str, typed: bool) {
         self.state
-            .lock()
-            .unwrap()
+            .locked()
             .log(now_ms(), "merged", json!({"pr": pr, "typed": typed}));
     }
 
     /// The name the user gave it, if they did.
     pub fn own_name(&self) -> Option<String> {
-        self.name.lock().unwrap().clone()
+        self.name.locked().clone()
     }
 
     /// Whether `text` is news to this session's agent (see `Activity::tell`).
     pub fn tell(&self, text: &str) -> bool {
-        self.state.lock().unwrap().activity.tell(text)
+        self.state.locked().activity.tell(text)
     }
 
     /// Marks this session as an agent's doing; it stays marked.
     pub fn driven_by(&self, agent: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.driven_by.is_none() {
             state.driven_by = Some(agent.to_owned());
         }
@@ -1620,13 +1608,13 @@ impl Session {
     /// Whether the session shows a merge guard confirm (ADR-0015 §1), which only the
     /// user may answer.
     pub fn at_guard_confirm(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         state.guard.on_screen(state.tracker.status().state)
     }
 
     /// Notes typing an agent sent that was dropped, and why.
     pub fn log_refused_input(&self, agent: &str) {
-        self.state.lock().unwrap().log(
+        self.state.locked().log(
             now_ms(),
             "input_refused",
             json!({"agent": agent, "reason": "merge guard confirm"}),
@@ -1636,7 +1624,7 @@ impl Session {
     /// Notes typing the supervisor session sent that was dropped, and why
     /// (ADR-0019 §10).
     pub fn log_refused_supervisor(&self, why: &str) {
-        self.state.lock().unwrap().log(
+        self.state.locked().log(
             now_ms(),
             "input_refused",
             json!({"agent": "supervisor", "reason": why}),
@@ -1645,7 +1633,7 @@ impl Session {
 
     /// Notes a prompt the supervisor session typed in (ADR-0019 §10).
     pub fn log_supervisor_prompt(&self, text: &str) {
-        self.state.lock().unwrap().log(
+        self.state.locked().log(
             now_ms(),
             "supervisor",
             json!({"trigger": "supervisor-session", "action": "prompt", "text": text}),
@@ -1654,13 +1642,13 @@ impl Session {
 
     /// Whether an agent started this session or typed into it.
     pub fn driven(&self) -> bool {
-        self.state.lock().unwrap().driven_by.is_some()
+        self.state.locked().driven_by.is_some()
     }
 
     /// The agent behind this session: the one it runs (following the foreground),
     /// else one that started it or typed into it. `None`: a human's.
     pub fn agent_behind(&self) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         let running = &state.tracker.status().agent;
         if running != "generic" {
             return Some(running.clone());
@@ -1684,7 +1672,7 @@ impl Session {
                 return false;
             }
             let input = self.last_input_ms.load(Ordering::Relaxed);
-            let output = self.state.lock().unwrap().last_output_ms;
+            let output = self.state.locked().last_output_ms;
             if now.saturating_sub(input.max(output)) < quiet_ms {
                 return false;
             }
@@ -1738,7 +1726,7 @@ impl Session {
         if self.hidden {
             return None;
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         if state
             .exited_ms
             .is_some_and(|at| now.saturating_sub(at) >= grace_ms)
@@ -1757,7 +1745,7 @@ impl Session {
     }
 
     pub fn scrollback(&self, anchor: ScrollAnchor) -> Reply {
-        let (from_top, history, rows) = self.state.lock().unwrap().screen.scrollback(anchor);
+        let (from_top, history, rows) = self.state.locked().screen.scrollback(anchor);
         Reply::Scrollback {
             from_top,
             history,
@@ -1766,11 +1754,11 @@ impl Session {
     }
 
     pub fn info(&self) -> SessionInfo {
-        let state = self.state.lock().unwrap();
+        let state = self.state.locked();
         SessionInfo {
             id: self.id,
             name: self.display_name(&state),
-            auto_name: self.name.lock().unwrap().is_none() && state.topic.is_some(),
+            auto_name: self.name.locked().is_none() && state.topic.is_some(),
             command: self.command.clone(),
             cwd: self.live_cwd(&state),
             pid: self.pid,
@@ -1808,7 +1796,7 @@ impl Session {
             };
             (text, expires)
         });
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         // A test runner may count up once a second: only a new text is logged.
         let text = report.as_ref().map(|r| &r.0);
         if live_report(&state.report, now).as_ref() != text {
@@ -1823,7 +1811,7 @@ impl Session {
     /// Sets the note on files this agent shares with another's (`overlap`), and
     /// says whether it changed. Never touches the agent's state.
     pub fn set_overlap(&self, overlap: Option<String>) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.locked();
         if state.overlap == overlap {
             return false;
         }
@@ -1966,7 +1954,7 @@ fn write_loop(id: SessionId, mut writer: File, queue: Arc<InputQueue>, stop: Arc
     let mut failed = false;
     loop {
         let mut buf = {
-            let mut state = queue.state.lock().unwrap();
+            let mut state = queue.state.locked();
             loop {
                 if state.halt {
                     return;
@@ -1977,7 +1965,10 @@ fn write_loop(id: SessionId, mut writer: File, queue: Arc<InputQueue>, stop: Arc
                 if state.closed {
                     return;
                 }
-                state = queue.ready.wait(state).unwrap();
+                state = queue
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
         };
         // After a failure keep draining, so the queue doesn't grow forever.
@@ -2003,7 +1994,7 @@ fn write_loop(id: SessionId, mut writer: File, queue: Arc<InputQueue>, stop: Arc
             if fds[1].revents != 0 {
                 // Handoff: the unwritten rest goes back to the front of the queue.
                 buf.drain(..written);
-                queue.state.lock().unwrap().bufs.push_front(buf);
+                queue.state.locked().bufs.push_front(buf);
                 return;
             }
             match writer.write(&buf[written..]) {
@@ -2029,7 +2020,7 @@ fn write_loop(id: SessionId, mut writer: Box<dyn Write + Send>, queue: Arc<Input
     let mut failed = false;
     loop {
         let buf = {
-            let mut state = queue.state.lock().unwrap();
+            let mut state = queue.state.locked();
             loop {
                 if let Some(buf) = state.bufs.pop_front() {
                     break buf;
@@ -2037,7 +2028,10 @@ fn write_loop(id: SessionId, mut writer: Box<dyn Write + Send>, queue: Arc<Input
                 if state.closed {
                     return;
                 }
-                state = queue.ready.wait(state).unwrap();
+                state = queue
+                    .ready
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
         };
         // After a failure keep draining, so the queue doesn't grow forever.
@@ -2252,6 +2246,50 @@ mod tests {
             vec![(500, false), (1_000, false), (1_250, true)],
             "{scans:?}"
         );
+    }
+
+    /// Backlog #228: a panic while a session's state was locked poisoned it, and
+    /// every later lock of it panicked too, so the daemon dropped each request
+    /// and could not save the session for an upgrade.
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_session_still_answers_and_saves() {
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!("valkyrie-poison-{}", std::process::id()));
+        let host = super::Host {
+            transcript_dir: dir.join("sessions"),
+            hook_exe: "valk".into(),
+            socket: dir.join("o.sock"),
+            changed: Arc::default(),
+            stop: Mutex::new(Arc::new(super::StopPipe::new().unwrap())),
+            cell_px: Mutex::default(),
+            colors: Mutex::default(),
+            context_dir: dir.join("context"),
+        };
+        let spec = valkyrie_proto::SpawnSpec {
+            command: vec!["sh".into(), "-c".into(), "sleep 30".into()],
+            cwd: Some(std::env::temp_dir()),
+            name: None,
+            size: valkyrie_proto::Size { cols: 40, rows: 10 },
+            env: Vec::new(),
+            worktree: None,
+            hidden: false,
+        };
+        let session = super::Session::spawn(1, spec, &host).unwrap();
+        let held = session.clone();
+        let _ = std::thread::spawn(move || {
+            let _state = held.state.lock();
+            panic!("panicked while holding the session's state");
+        })
+        .join();
+        assert!(session.state.is_poisoned());
+
+        session.rename(Some("still here".into()));
+        assert_eq!(session.info().name, "still here");
+        let _ = session.text();
+        assert_eq!(session.save().id, 1);
+        session.kill();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

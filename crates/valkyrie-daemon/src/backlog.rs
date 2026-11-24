@@ -2,6 +2,7 @@
 //! an agent on itself in a worktree of its own.
 
 use crate::context::Peer;
+use crate::lock::Locked;
 use crate::work::{Check, Pr, PrLookup};
 use crate::{Registry, worktree};
 use anyhow::{Result, bail};
@@ -36,8 +37,8 @@ fn now_secs() -> u64 {
 impl Registry {
     pub(crate) fn items(&self) -> Reply {
         Reply::Items {
-            items: self.backlog.lock().unwrap().load(),
-            launches: self.dispatch.lock().unwrap().pending(),
+            items: self.backlog.locked().load(),
+            launches: self.dispatch.locked().pending(),
         }
     }
 
@@ -45,7 +46,7 @@ impl Registry {
     pub(crate) fn refresh_items(&self) {
         // The dispatch watcher looks again: an item may be ready, or taken.
         self.dispatch_kick.notify_one();
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         self.items.send_if_modified(|current| {
             let changed = **current != items;
             if changed {
@@ -78,8 +79,7 @@ impl Registry {
                     .filter(|_| by != "human")
                     .map(|s| (self.boot, s.info().id));
                 self.backlog
-                    .lock()
-                    .unwrap()
+                    .locked()
                     .add_filed(new, &by, filed_by, now_secs())?
             }
             Some((branch, pr)) => {
@@ -95,7 +95,7 @@ impl Registry {
                 }
                 let project = valkyrie_context::project::in_git(&info.cwd)
                     .then(|| valkyrie_context::project::root(&info.cwd));
-                let backlog = self.backlog.lock().unwrap();
+                let backlog = self.backlog.locked();
                 let now = now_secs();
                 let filed = backlog.add_filed(new, &by, Some((self.boot, info.id)), now)?;
                 backlog.taken(filed.id, info.id, self.boot, &[], branch, pr, project, now)?
@@ -130,7 +130,7 @@ impl Registry {
         let caller = self.caller(peer);
         let session = caller.session.as_ref().map(|s| (self.boot, s.info().id));
         let (item, was, was_parent) = {
-            let backlog = self.backlog.lock().unwrap();
+            let backlog = self.backlog.locked();
             let current = backlog.get(id)?;
             let own = caller.agent.is_some() && session.is_some() && current.filed_by == session;
             match &change {
@@ -192,7 +192,7 @@ impl Registry {
     /// the user shipped by hand stays shipped. Returns the parent as it is then,
     /// if changed.
     pub(crate) async fn roll_up(&self, parent: u32, reopened: bool) -> Option<Item> {
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         let p = items.iter().find(|i| i.id == parent)?;
         let children = p.children(&items);
         if children.is_empty() {
@@ -229,12 +229,7 @@ impl Registry {
             }
         } else {
             let open = ItemChange::Status { status };
-            match self
-                .backlog
-                .lock()
-                .unwrap()
-                .change(parent, &open, now_secs())
-            {
+            match self.backlog.locked().change(parent, &open, now_secs()) {
                 Ok(item) => item,
                 Err(e) => {
                     tracing::warn!(parent, "couldn't reopen a group: {e:#}");
@@ -242,7 +237,7 @@ impl Registry {
                 }
             }
         };
-        let noted = self.backlog.lock().unwrap().note(
+        let noted = self.backlog.locked().note(
             parent,
             "valkyrie",
             &text,
@@ -276,7 +271,7 @@ impl Registry {
         if ids.is_empty() {
             return Vec::new();
         }
-        let backlog = self.backlog.lock().unwrap();
+        let backlog = self.backlog.locked();
         ids.into_iter()
             .filter_map(|id| backlog.get(id).ok())
             .filter(|item| item.status == ItemStatus::Open && self.holders(item, None).is_empty())
@@ -292,7 +287,7 @@ impl Registry {
         if item.status == ItemStatus::Shipped && item.checkout.is_some() {
             let (removed, said) = self.take_checkout(&item, true).await?;
             if removed {
-                item = self.backlog.lock().unwrap().cleared(id, now_secs())?;
+                item = self.backlog.locked().cleared(id, now_secs())?;
             }
             note = Some(said);
         }
@@ -330,7 +325,7 @@ impl Registry {
     ) -> Result<Vec<SessionId>> {
         let id = item.id;
         let number = item.number;
-        if self.launching.lock().unwrap().contains(&id) {
+        if self.launching.locked().contains(&id) {
             bail!("#{number} is being launched right now; try again in a moment");
         }
         let holders = self.holders(item, mine);
@@ -396,7 +391,7 @@ impl Registry {
         let Some(session) = caller.session else {
             bail!("take it from inside a valk session");
         };
-        let item = self.backlog.lock().unwrap().get(id)?;
+        let item = self.backlog.locked().get(id)?;
         let info = session.info();
         match item.status {
             ItemStatus::Open => {}
@@ -429,7 +424,7 @@ impl Registry {
             .then(|| valkyrie_context::project::root(&info.cwd));
         // Checked and recorded under one lock, so two takes can't both find it free.
         let item = {
-            let backlog = self.backlog.lock().unwrap();
+            let backlog = self.backlog.locked();
             let item = backlog.get(id)?;
             let from = self.claim(
                 &item,
@@ -497,7 +492,7 @@ impl Registry {
             ..NewItem::default()
         };
         let item = {
-            let backlog = self.backlog.lock().unwrap();
+            let backlog = self.backlog.locked();
             // Checked again under the lock that records it, as a take is.
             if let Some(on) = self.item_of_in(&backlog.load(), id) {
                 bail!("session {id} is already on #{}", on.number);
@@ -537,7 +532,7 @@ impl Registry {
     /// The item live session `id` is on: the one it took or was launched on last,
     /// when several.
     pub(crate) fn item_of(&self, id: SessionId) -> Option<Item> {
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         self.item_of_in(&items, id)
     }
 
@@ -570,7 +565,7 @@ impl Registry {
         if !dry_run {
             self.vouch(peer, "shipping backlog items")?;
         }
-        let all = self.backlog.lock().unwrap().load();
+        let all = self.backlog.locked().load();
         let mut shipped = Vec::new();
         let mut kept = Vec::new();
         let mut judged = Vec::new();
@@ -695,7 +690,7 @@ impl Registry {
     async fn ship_one(&self, judged: &Item) -> Option<Result<(Item, Option<String>)>> {
         let id = judged.id;
         let changed = {
-            let backlog = self.backlog.lock().unwrap();
+            let backlog = self.backlog.locked();
             match backlog.get(id) {
                 Ok(now)
                     if now.status == judged.status
@@ -725,7 +720,7 @@ impl Registry {
     /// offline) changes nothing, and `ship --merged` still covers those. `lookup` asks
     /// about a PR's URL from a directory, and may block. Returns how many shipped.
     pub(crate) async fn ship_merged_prs(&self, lookup: PrLookup) -> usize {
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         let mut shipped = 0;
         let mut changed = false;
         for item in items.iter().cloned() {
@@ -751,7 +746,7 @@ impl Registry {
             // A merge this poll read may have left it conflicting (backlog #215).
             let pr = self.foresee(&url, pr);
             let id = item.id;
-            self.watching.lock().unwrap().saw(
+            self.watching.locked().saw(
                 &url,
                 item.project.clone().unwrap_or_default(),
                 Some(id),
@@ -788,7 +783,7 @@ impl Registry {
                 Pr::None | Pr::Unknown => continue,
             };
             if let Some(closed) = closed {
-                match self.backlog.lock().unwrap().pr_closed(id, &url, closed) {
+                match self.backlog.locked().pr_closed(id, &url, closed) {
                     Ok(Some(_)) => changed = true,
                     Ok(None) => {}
                     Err(e) => tracing::warn!(id, "couldn't record its PR's state: {e:#}"),
@@ -796,12 +791,12 @@ impl Registry {
                 continue;
             }
             // Read again: a piece shipped earlier in this pass may have been its last.
-            let open = open_pieces(&item, &self.backlog.lock().unwrap().load());
+            let open = open_pieces(&item, &self.backlog.locked().load());
             if open > 0 {
                 let text = format!(
                     "PR {url} merged; it ships once its {open} open pieces are shipped or dropped."
                 );
-                let backlog = self.backlog.lock().unwrap();
+                let backlog = self.backlog.locked();
                 match backlog.pr_merged(id, &url) {
                     Ok(Some(_)) => {
                         changed = true;
@@ -834,7 +829,7 @@ impl Registry {
             if let Some(note) = note {
                 text = format!("{text}\n{note}");
             }
-            if let Err(e) = self.backlog.lock().unwrap().note(
+            if let Err(e) = self.backlog.locked().note(
                 id,
                 "valkyrie",
                 &text,
@@ -846,7 +841,7 @@ impl Registry {
             tracing::info!(id, pr = url, "shipped a backlog item: its PR merged");
             shipped += 1;
             // Its sessions are the branch watch's from now on: not news there again.
-            self.supervisor.lock().unwrap().open_seen.remove(&url);
+            self.supervisor.locked().open_seen.remove(&url);
             if let Some(root) = Self::root_of(&item) {
                 self.announce_merge(&url, &base, &own, &root, Some(&item));
             }
@@ -895,7 +890,7 @@ impl Registry {
         peer: Option<Peer>,
     ) -> Result<Reply> {
         self.vouch(peer, "deleting a backlog item")?;
-        let item = self.backlog.lock().unwrap().get(id)?;
+        let item = self.backlog.locked().get(id)?;
         // A session that took it may be on other work: only a launch's counts.
         let running = item.boot == self.boot
             && item
@@ -919,7 +914,7 @@ impl Registry {
             }
             note = Some(said);
         }
-        let item = self.backlog.lock().unwrap().delete(id)?;
+        let item = self.backlog.locked().delete(id)?;
         tracing::info!(id, "backlog item deleted");
         if let Some(parent) = item.parent {
             self.roll_up(parent, false).await;
@@ -987,7 +982,7 @@ impl Registry {
         let by = caller.agent.clone().unwrap_or_else(|| "human".into());
         let mut origin = backlog::NoteOrigin::Brief;
         if caller.agent.is_some() {
-            let item = self.backlog.lock().unwrap().get(id)?;
+            let item = self.backlog.locked().get(id)?;
             let session = caller.session.as_ref().map(|s| s.info().id);
             let on = session.filter(|s| item.boot == self.boot && item.sessions.contains(s));
             origin = match on {
@@ -1002,8 +997,7 @@ impl Registry {
         }
         let item = self
             .backlog
-            .lock()
-            .unwrap()
+            .locked()
             .note(id, &by, text, origin, now_secs())?;
         tracing::info!(id, by, "backlog note left");
         self.refresh_items();
@@ -1015,7 +1009,7 @@ impl Registry {
 
     /// What item `id`'s checkout holds now, from git.
     pub(crate) async fn item_facts(&self, id: u32) -> Result<Reply> {
-        let item = self.backlog.lock().unwrap().get(id)?;
+        let item = self.backlog.locked().get(id)?;
         let facts = match (item.project, item.checkout) {
             (Some(repo), Some(checkout)) => {
                 tokio::task::spawn_blocking(move || worktree::facts(&repo, &checkout)).await?
@@ -1043,7 +1037,7 @@ impl Registry {
         if !matches!(agent, "claude" | "codex") {
             bail!("an item starts claude or codex, not {agent}");
         }
-        let item = self.backlog.lock().unwrap().get(id)?;
+        let item = self.backlog.locked().get(id)?;
         let model = match model {
             Some(model) => model.trim().to_owned(),
             None => item
@@ -1075,7 +1069,7 @@ impl Registry {
             Some(_) => None,
         };
         let (from, _launching) = {
-            let backlog = self.backlog.lock().unwrap();
+            let backlog = self.backlog.locked();
             let from = self.claim(
                 &backlog.get(id)?,
                 mine,
@@ -1083,7 +1077,7 @@ impl Registry {
                 caller.session.as_ref().map(|s| s.info().id),
                 Claim::Launch,
             )?;
-            self.launching.lock().unwrap().insert(id);
+            self.launching.locked().insert(id);
             (from, Launching(self, id))
         };
         let branch = item
@@ -1103,7 +1097,7 @@ impl Registry {
         let mut env = env;
         // The item it's on, for `valk todo show` in the session.
         env.push(("VALK_ITEM".into(), Some(id.to_string())));
-        let items = self.backlog.lock().unwrap().load();
+        let items = self.backlog.locked().load();
         let spec = SpawnSpec {
             command: agent_command(agent, &model, backlog::brief(&item, &items)),
             cwd: Some(cwd),
@@ -1119,19 +1113,14 @@ impl Registry {
             return Ok(reply);
         };
         let checkout = new_worktree.map(|b| (b, checkout_of(info)));
-        self.backlog.lock().unwrap().launched(
-            id,
-            info.id,
-            self.boot,
-            &from,
-            checkout,
-            now_secs(),
-        )?;
+        self.backlog
+            .locked()
+            .launched(id, info.id, self.boot, &from, checkout, now_secs())?;
         let launch = ItemLaunch {
             agent: agent.to_owned(),
             model,
         };
-        self.backlog.lock().unwrap().launched_with(id, launch)?;
+        self.backlog.locked().launched_with(id, launch)?;
         tracing::info!(id, session = info.id, "launched a backlog item");
         self.refresh_items();
         Ok(reply)
@@ -1192,7 +1181,7 @@ pub(crate) static AGENT_STANDIN: std::sync::Mutex<Option<Vec<String>>> =
 
 pub(crate) fn agent_command(agent: &str, model: &str, brief: String) -> Vec<String> {
     #[cfg(test)]
-    if let Some(standin) = AGENT_STANDIN.lock().unwrap().clone() {
+    if let Some(standin) = AGENT_STANDIN.locked().clone() {
         return standin;
     }
     let mut command = vec![agent.to_owned()];
@@ -1238,7 +1227,7 @@ struct Launching<'a>(&'a Registry, u32);
 
 impl Drop for Launching<'_> {
     fn drop(&mut self) {
-        self.0.launching.lock().unwrap().remove(&self.1);
+        self.0.launching.locked().remove(&self.1);
     }
 }
 
@@ -1304,16 +1293,11 @@ mod tests {
             attachments: Vec::new(),
             ..Default::default()
         };
-        let item = registry
-            .backlog
-            .lock()
-            .unwrap()
-            .add(&new, "human", 1)
-            .unwrap();
+        let item = registry.backlog.locked().add(&new, "human", 1).unwrap();
         let take = |steal| registry.claim(&item, Some(3), false, Some(3), Claim::Take { steal });
         assert_eq!(take(false).unwrap(), Vec::<SessionId>::new());
         {
-            registry.launching.lock().unwrap().insert(item.id);
+            registry.launching.locked().insert(item.id);
             let _launching = Launching(&registry, item.id);
             for steal in [false, true] {
                 let refused = take(steal).unwrap_err().to_string();
@@ -1352,7 +1336,7 @@ mod tests {
         };
         let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
         let (merged, closed, unknown, proposed, none) = {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let with_pr = |title: &str, n: u32, filed_by: Option<(u64, SessionId)>| {
                 let by = if filed_by.is_some() {
                     "claude"
@@ -1383,7 +1367,7 @@ mod tests {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&asked);
         let lookup: PrLookup = Arc::new(move |_, pr| {
-            seen.lock().unwrap().push(pr.to_owned());
+            seen.locked().push(pr.to_owned());
             let url = pr.to_owned();
             match pr.rsplit('/').next() {
                 Some("1" | "4") => Pr::merged(url),
@@ -1392,7 +1376,7 @@ mod tests {
             }
         });
         assert_eq!(registry.ship_merged_prs(lookup.clone()).await, 2);
-        let get = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        let get = |id| registry.backlog.locked().get(id).unwrap();
         let item = get(merged);
         assert_eq!(item.status, ItemStatus::Shipped);
         assert!(!item.unaccepted);
@@ -1411,9 +1395,9 @@ mod tests {
         assert!(get(closed).pr_closed);
         assert!(!get(unknown).pr_closed);
         // Only items with a PR are asked about; shipped ones aren't asked again.
-        assert_eq!(asked.lock().unwrap().len(), 4);
+        assert_eq!(asked.locked().len(), 4);
         assert_eq!(registry.ship_merged_prs(lookup).await, 0);
-        assert_eq!(*asked.lock().unwrap(), [1, 2, 3, 4, 2, 3].map(url).to_vec());
+        assert_eq!(*asked.locked(), [1, 2, 3, 4, 2, 3].map(url).to_vec());
         // Reopened on GitHub, the mark goes.
         let reopened: PrLookup = Arc::new(|_, pr| Pr::Open {
             url: pr.to_owned(),
@@ -1447,7 +1431,7 @@ mod tests {
         .unwrap();
         let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
         let (plan, one, two, own, piece) = {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let add = |title: &str, parent| {
                 let new = NewItem {
                     title: title.into(),
@@ -1469,7 +1453,7 @@ mod tests {
             with_pr(piece, 3);
             (plan, one, two, own, piece)
         };
-        let get = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        let get = |id| registry.backlog.locked().get(id).unwrap();
         let merged = |which: &'static [&'static str]| -> PrLookup {
             Arc::new(move |_, pr| match pr.rsplit('/').next() {
                 Some(n) if which.contains(&n) => Pr::merged(pr.to_owned()),
@@ -1493,8 +1477,7 @@ mod tests {
         let set = |id, status| {
             registry
                 .backlog
-                .lock()
-                .unwrap()
+                .locked()
                 .change(id, &ItemChange::Status { status }, 2)
                 .unwrap();
         };
@@ -1557,7 +1540,7 @@ mod tests {
         let (idle, busy, old, behind) = (spawn(), spawn(), spawn(), spawn());
         let url = |n: u32| format!("https://github.com/o/r/pull/{n}");
         let with_pr = |session: &Arc<crate::session::Session>, n: u32, boot: u64| {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: format!("item {n}"),
                 ..Default::default()
@@ -1811,8 +1794,7 @@ mod tests {
         let filed = |title: &str| {
             registry
                 .backlog
-                .lock()
-                .unwrap()
+                .locked()
                 .add_filed(&new(title), "claude", Some((registry.boot, info.id)), 1)
                 .unwrap()
                 .id
@@ -1829,7 +1811,7 @@ mod tests {
         let (r2, s2) = (Arc::clone(&registry), Arc::clone(&session));
         AS_CALLER.with(|c| {
             *c.borrow_mut() = Some(Box::new(move || {
-                let b = r2.backlog.lock().unwrap();
+                let b = r2.backlog.locked();
                 for (id, change) in [(reworded, &open), (dropped, &ship)] {
                     if b.get(id).unwrap().status == ItemStatus::Proposed {
                         b.change(id, change, 2).unwrap();
@@ -1860,7 +1842,7 @@ mod tests {
         let refused = registry.change_item(dropped, drop, None).await;
         assert!(refused.is_err(), "dropped a shipped item: {refused:?}");
         AS_CALLER.with(|c| *c.borrow_mut() = None);
-        let get = |id| registry.backlog.lock().unwrap().get(id).unwrap();
+        let get = |id| registry.backlog.locked().get(id).unwrap();
         assert_eq!(get(reworded).title, "reworded");
         assert_eq!(get(reworded).status, ItemStatus::Open);
         assert_eq!(get(dropped).status, ItemStatus::Shipped);
@@ -1909,8 +1891,7 @@ mod tests {
             let who = if by.is_some() { "claude" } else { "human" };
             registry
                 .backlog
-                .lock()
-                .unwrap()
+                .locked()
                 .add_filed(&new, who, filed_by, 1)
                 .unwrap()
                 .id
@@ -1962,8 +1943,7 @@ mod tests {
         // Taken by the filer before its next prompt: nothing to tell about that one.
         registry
             .backlog
-            .lock()
-            .unwrap()
+            .locked()
             .taken(
                 taken,
                 filer.info().id,
@@ -2009,7 +1989,7 @@ mod tests {
         .unwrap();
         let session = 5;
         let (first, second) = {
-            let backlog = registry.backlog.lock().unwrap();
+            let backlog = registry.backlog.locked();
             let add = |title: &str| {
                 let new = NewItem {
                     title: title.into(),
@@ -2031,16 +2011,14 @@ mod tests {
         // A handoff left on the first, still open, after moving on (backlog #74).
         registry
             .backlog
-            .lock()
-            .unwrap()
+            .locked()
             .note(first, "claude", "done here", backlog::NoteOrigin::Take, 30)
             .unwrap();
         assert_eq!(registry.item_of(session).map(|i| i.id), Some(second));
         // Taking the first again, say to record its PR, is moving back to it.
         registry
             .backlog
-            .lock()
-            .unwrap()
+            .locked()
             .taken(
                 first,
                 session,
@@ -2124,7 +2102,7 @@ mod tests {
                 cwd: Some(main.clone()),
                 ..Default::default()
             };
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let id = b.add(&new, "human", 1).unwrap().id;
             let open = ItemChange::Status {
                 status: ItemStatus::Open,
@@ -2244,7 +2222,7 @@ mod tests {
         )
         .unwrap();
         let id = {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: "a".into(),
                 cwd: Some(main.clone()),
@@ -2268,12 +2246,12 @@ mod tests {
         };
         assert!(kept.is_empty(), "{kept:?}");
         assert_eq!(shipped.len(), 1, "{shipped:?}");
-        let item = registry.backlog.lock().unwrap().get(id).unwrap();
+        let item = registry.backlog.locked().get(id).unwrap();
         let (_, note) = registry.ship_judged(&item).await.unwrap().unwrap();
         let note = note.unwrap_or_default();
         assert!(note.contains("it's on fix/2-next, not fix/1-a"), "{note}");
         assert!(at.join(".git").exists(), "the worktree stays: {note}");
-        let card = registry.backlog.lock().unwrap().get(id).unwrap();
+        let card = registry.backlog.locked().get(id).unwrap();
         assert_eq!(card.status, ItemStatus::Shipped);
         std::fs::remove_dir_all(&dir).unwrap();
     }
