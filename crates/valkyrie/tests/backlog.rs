@@ -5,6 +5,8 @@
 //! ships in one go once merged.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -149,6 +151,7 @@ fn an_item_launches_in_its_own_worktree_and_ships_clean() {
     // the command is done: printed line by line, a partial file can end in `\n` too.
     let human = |cmd: &str, name: &str| {
         let line = format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}", o = o(name));
+        let (line, _go) = common::after_setsid(&line);
         let status = Command::new("setsid")
             .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
@@ -717,6 +720,7 @@ fn the_user_adopts_an_ad_hoc_session_into_the_backlog() {
     );
     let human = |cmd: &str, name: &str| {
         let line = format!("{cmd} > {o}.tmp 2>&1; mv {o}.tmp {o}", o = o(name));
+        let (line, _go) = common::after_setsid(&line);
         let status = Command::new("setsid")
             .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
@@ -875,8 +879,9 @@ fn agents_drop_and_reword_only_their_own_items() {
     );
     let human = |cmd: &str, name: &str| {
         let line = run(cmd, name);
+        let (line, _go) = common::after_setsid(line.trim_end());
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line.trim_end(), "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))

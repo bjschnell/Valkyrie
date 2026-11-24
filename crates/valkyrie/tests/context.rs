@@ -3,6 +3,8 @@
 //! each other, and handoffs.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -117,8 +119,9 @@ fn agents_only_propose_and_never_review() {
     // an agent gets past the check; ADR-0007 §4 says why that's the agent's
     // sandbox's job.) `line` ends by writing a file, which is how we wait for it.
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -644,23 +647,19 @@ fn skills_are_indexed_patched_learned_and_exported() {
         String::from_utf8(out.stdout).unwrap()
     };
     // The skill itself, from a human: active at once.
+    let (line, go) = common::after_setsid(&format!(
+        "printf '1. Push the tag.\\n' | valk decide --kind skill 'Cut a release' - > {} 2>&1",
+        out.join("human").display()
+    ));
     let mut human = Command::new("setsid");
-    human.args([
-        "-f",
-        "script",
-        "-qec",
-        &format!(
-            "printf '1. Push the tag.\\n' | valk decide --kind skill 'Cut a release' - > {} 2>&1",
-            out.join("human").display()
-        ),
-        "/dev/null",
-    ]);
+    human.args(["-f", "script", "-qec", &line, "/dev/null"]);
     env(&mut human);
     human
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     assert!(human.status().unwrap().success());
+    drop(go);
     assert!(wait_for(&out.join("human")).contains("#1 recorded"));
 
     // Listed by title for agents, its steps a `decisions show` away.
@@ -923,13 +922,12 @@ fn agents_hear_about_their_siblings() {
     // Started as a human would (see agents_only_propose_and_never_review): a session
     // an agent started doesn't have its prompts repeated.
     let human_new = |name: &str, script: &Path| {
+        let (line, _go) = common::after_setsid(&format!(
+            "valk new --name {name} --cwd {repo_s} -- {} > /dev/null",
+            script.display()
+        ));
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec"])
-            .arg(format!(
-                "valk new --name {name} --cwd {repo_s} -- {} > /dev/null",
-                script.display()
-            ))
-            .arg("/dev/null")
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -1180,8 +1178,9 @@ fn decisions_about_rewritten_files_are_flagged() {
     );
     // A human, as in agents_only_propose_and_never_review.
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -1924,8 +1923,9 @@ fn agent_notes_say_where_they_came_from_and_stay_deleted() {
     .unwrap();
     std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -2143,8 +2143,9 @@ fn agents_search_notes_and_past_sessions_and_each_hit_is_logged() {
     .unwrap();
     std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let human = |line: &str| {
+        let (line, _go) = common::after_setsid(line);
         let status = Command::new("setsid")
-            .args(["-f", "script", "-qec", line, "/dev/null"])
+            .args(["-f", "script", "-qec", &line, "/dev/null"])
             .current_dir(&repo)
             .env("PATH", &path)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -2336,14 +2337,13 @@ fn one_note_write_proposes_every_cluster_due() {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
+    let (line, go) = common::after_setsid(&format!(
+        "valk new --cwd {} -- {}",
+        repo.display(),
+        agent.display()
+    ));
     let status = Command::new("setsid")
-        .args([
-            "-f",
-            "script",
-            "-qec",
-            &format!("valk new --cwd {} -- {}", repo.display(), agent.display()),
-            "/dev/null",
-        ])
+        .args(["-f", "script", "-qec", &line, "/dev/null"])
         .current_dir(&repo)
         .env("PATH", &path)
         .env("XDG_STATE_HOME", dir.join("state"))
@@ -2356,6 +2356,7 @@ fn one_note_write_proposes_every_cluster_due() {
         .status()
         .unwrap();
     assert!(status.success());
+    drop(go);
     let a = wait_for(&out.join("a"));
     assert!(a.contains("note #7 written"), "{a}");
 
