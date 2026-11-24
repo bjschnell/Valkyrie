@@ -1730,10 +1730,20 @@ fn a_file_gets_the_decisions_scoped_to_it_once_a_session() {
         };
         store.decide(&new, human.clone(), 1).unwrap();
     }
+    // With valk on `PATH` the start block names it `valk`, not by its full path:
+    // that path is in its footer many times over, and a long one (a deep
+    // `CARGO_TARGET_DIR`) crowds the constraint's body out of the budget.
+    let path = std::env::join_paths(
+        std::iter::once(Path::new(BIN).parent().unwrap().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ),
+    )
+    .unwrap();
     let hook = |payload: serde_json::Value| -> String {
         let mut c = Command::new(BIN);
         c.args(["context-hook", "claude"])
             .current_dir(&repo)
+            .env("PATH", &path)
             .env("VALK_SESSION", "1")
             .env("VALK_CONTEXT", &base)
             .env("XDG_CONFIG_HOME", dir.join("config"))
