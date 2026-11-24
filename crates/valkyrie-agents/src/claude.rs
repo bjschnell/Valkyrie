@@ -424,14 +424,28 @@ fn scan(screen: &str) -> Option<Screen> {
         let bottom = lines[..footer].iter().rposition(|l| is_border(l));
         let top = bottom.and_then(|b| lines[..b].iter().rposition(|l| is_border(l)));
         let dialog = &lines[top.map_or(0, |t| t + 1)..bottom.unwrap_or(footer)];
-        let summary = dialog
+        // The question may wrap over several rows: take the run of rows right above
+        // the first option, stopping at a blank row or the header chip / tab bar.
+        let question = dialog
             .iter()
             .position(|l| is_option(l))
-            .and_then(|first| dialog[..first].iter().rev().find(|l| !l.is_empty()))
-            .map(|l| l.trim_start_matches(['│', ' ']))
-            .unwrap_or("Claude is asking a question");
+            .map(|first| {
+                dialog[..first]
+                    .iter()
+                    .rev()
+                    .skip_while(|l| l.is_empty())
+                    .take_while(|l| !l.is_empty() && !l.starts_with(['☐', '←', '✔']))
+                    .map(|l| l.trim_start_matches(['│', ' ']))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let summary = if question.is_empty() {
+            "Claude is asking a question".to_string()
+        } else {
+            question.into_iter().rev().collect::<Vec<_>>().join(" ")
+        };
         return Some(Screen::Prompt {
-            summary: crate::summary::truncate(summary),
+            summary: crate::summary::truncate(&summary),
         });
     }
     if lines.iter().any(|l| is_busy_line(l)) {
@@ -818,6 +832,19 @@ mod tests {
         assert!(
             summary.starts_with("The installer and macOS port are ready."),
             "{summary}"
+        );
+        // A question that wraps over two rows is one summary, not its tail.
+        let wrapped = fixture("claude_question.txt").replace(
+            "How should the release branch go out?",
+            "How should the release branch go out, and what\ngoes with a user-message hit?",
+        );
+        assert_eq!(
+            scan(&wrapped),
+            Some(Screen::Prompt {
+                summary:
+                    "How should the release branch go out, and what goes with a user-message hit?"
+                        .into()
+            })
         );
         // Tool output quoting the footer is not a dialog.
         let quoted = fixture("claude_busy_minutes.txt").replace(
