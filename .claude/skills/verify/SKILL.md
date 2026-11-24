@@ -18,6 +18,7 @@ S=<scratch dir>; mkdir -p $S/state; chmod 700 $S $S/state   # daemon refuses non
 V="env -u VALK_SESSION -u VALK_CONTEXT XDG_STATE_HOME=$S/state ./target/debug/valk --socket $S/d.sock"
 cargo build --bin valk
 $V daemon --dev &                             # foreground dev daemon (ADR-0010)
+until [ -S $S/d.sock ]; do sleep 0.1; done    # else the next call starts a 2nd, detached daemon
 $V web --listen 127.0.0.1:<free port> --url http://127.0.0.1:<port> &   # 8790/8799 may be taken
 $V new --name x -- <script>                   # fake agent: a bash script that prints a screen, then sleeps
 $V dump <id>                                  # the screen the web app parses
@@ -42,4 +43,6 @@ first; if empty, ask the user to connect it). Open `http://127.0.0.1:<port>`, ty
 - Toasts stay in the DOM a few seconds: note the one already showing before you act.
 
 ## Cleanup
-`pkill -f "$S/d.sock"` and kill fake-agent scripts.
+`pkill -f "$S/d.soc[k]"` (the brackets keep it from matching, and killing, your own
+shell), then `rm -rf $S`. A daemon whose socket is gone exits by itself within a few
+seconds, taking its sessions along, so removing `$S` is the backstop if a step dies.

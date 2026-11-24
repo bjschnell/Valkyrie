@@ -626,6 +626,8 @@ async fn serve_forever(
     tokio::spawn(sweep::run(registry.clone()));
     tokio::spawn(dispatch::run(registry.clone()));
     tokio::spawn(tick(registry.clone()));
+    #[cfg(unix)]
+    tokio::spawn(watch_socket(registry.host.socket.clone()));
     tokio::spawn(restore::keep(
         registry.clone(),
         registry.restore_file.clone(),
@@ -1058,6 +1060,52 @@ async fn tick(registry: Arc<Registry>) {
             session.tick(now);
         }
         registry.sweep(now);
+    }
+}
+
+/// How often a daemon checks that its socket is still the one it bound.
+#[cfg(unix)]
+const SOCKET_CHECK: Duration = Duration::from_secs(2);
+
+/// Exits once `socket` is gone, or another file has taken its path, on two checks
+/// in a row. No client can reach this daemon again then, so it would only hold its
+/// sessions, memory and binary for good: test and scratch daemons outliving their
+/// removed directories (backlog #231, #246). An upgrade hands the same listener
+/// across, so the file stays the same; an error other than not-found (a hung or
+/// flaky filesystem) proves nothing and never counts.
+#[cfg(unix)]
+async fn watch_socket(socket: PathBuf) {
+    use std::os::unix::fs::MetadataExt;
+    let id = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
+    let bound = match std::fs::metadata(&socket) {
+        Ok(meta) => id(&meta),
+        Err(e) => {
+            tracing::warn!("not watching {}: {e}", socket.display());
+            return;
+        }
+    };
+    let mut interval = tokio::time::interval(SOCKET_CHECK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut gone = 0;
+    loop {
+        interval.tick().await;
+        let path = socket.clone();
+        let Ok(seen) = tokio::task::spawn_blocking(move || std::fs::metadata(path)).await else {
+            continue;
+        };
+        gone = match seen {
+            Ok(meta) if id(&meta) == bound => 0,
+            Ok(_) => gone + 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => gone + 1,
+            Err(_) => gone,
+        };
+        if gone >= 2 {
+            tracing::warn!(
+                "{} is gone; no client can reach us, exiting",
+                socket.display()
+            );
+            std::process::exit(0);
+        }
     }
 }
 

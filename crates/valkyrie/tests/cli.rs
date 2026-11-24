@@ -84,6 +84,19 @@ fn valk(socket: &Path, state: &Path) -> Command {
     cmd
 }
 
+/// Starts `cmd` as a foreground `valk daemon`, killed when the test ends, once its
+/// socket is bound. A client run before then starts a detached daemon of its own on
+/// that socket, which sometimes won the bind and outlived the test (backlog #231).
+fn start_daemon(mut cmd: Command, socket: &Path) -> KillOnDrop {
+    let daemon = KillOnDrop(cmd.arg("daemon").stderr(Stdio::null()).spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "daemon never bound");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    daemon
+}
+
 fn hook(mut cmd: Command, stdin: &[u8]) -> Output {
     let mut child = cmd
         .args(["hook", "claude"])
@@ -198,22 +211,12 @@ fn statusline_runs_the_users_own_and_tells_the_daemon_the_quota() {
     assert_eq!(out.stdout, b"hud:{}", "{out:?}");
 
     let socket = dir.join("run/s.sock");
-    let _daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "daemon never bound");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let _daemon = start_daemon(valk(&socket, &dir), &socket);
     let out = statusline(valk(&socket, &dir), "cat", payload);
     assert_eq!(out.stdout, payload, "{out:?}");
     // The daemon keeps what it heard, for after a restart.
     let kept = dir.join("valkyrie/quota.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !kept.exists() {
         assert!(Instant::now() < deadline, "quota never kept");
         std::thread::sleep(Duration::from_millis(20));
@@ -235,13 +238,7 @@ fn statusline_runs_the_users_own_and_tells_the_daemon_the_quota() {
 fn hook_reaches_the_daemon_quickly() {
     let dir = temp("e2e");
     let socket = dir.join("run/o.sock");
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = start_daemon(valk(&socket, &dir), &socket);
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
@@ -544,14 +541,9 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .env("CLAUDE_CONFIG_DIR", &claude_dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut cmd = valk(&socket, &dir);
+    cmd.env("CLAUDE_CONFIG_DIR", &claude_dir);
+    let mut daemon = start_daemon(cmd, &socket);
     let spawn = |command: &[&str]| {
         (0..100)
             .find_map(|_| {
@@ -614,13 +606,7 @@ fn daemon_installs_the_hook_and_marks_the_agents_it_hooked() {
 fn ambient_observer_reports_a_typed_claude_once() {
     let dir = temp("ambient-observer");
     let socket = dir.join("run/o.sock");
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = start_daemon(valk(&socket, &dir), &socket);
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
@@ -811,18 +797,7 @@ fn upgrade_keeps_sessions_and_refuses_a_foreign_binary() {
         text
     };
     // The daemon in the foreground, so the test owns and reaps it.
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "daemon did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let mut daemon = start_daemon(valk(&socket, &dir), &socket);
     let wait_dump = |want: &str| {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -978,6 +953,34 @@ fn only_a_dev_daemon_says_so_and_an_upgrade_keeps_its_mode() {
         let text = d.ok(&["upgrade", "--exe", BIN]);
         assert!(text.contains("generation 1"), "{text}");
         assert_eq!(d.dev(), dev, "{name} after the upgrade");
+    }
+}
+
+/// Backlog #231/#246: a daemon whose socket is gone can't be reached again, so it
+/// exits instead of holding its sessions, memory and binary for good. Removing a
+/// test's directory, or an agent's scratch dir, stops whatever daemon ran in it.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "reads /proc")]
+fn a_daemon_exits_once_its_socket_is_gone() {
+    let mut d = Daemon::start("socket-gone");
+    d.ok(&["new", "--", "sleep", "300"]);
+    let session = d.children("sleep");
+    assert_eq!(session.len(), 1, "{session:?}");
+    remove_test_dir(&d.dir);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while d.child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon outlived its socket dir"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Its session goes with it (the PTY hangs up) instead of living on under PID 1.
+    let proc = PathBuf::from(format!("/proc/{}", session[0]));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while proc.exists() {
+        assert!(Instant::now() < deadline, "the session outlived the daemon");
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -1204,13 +1207,7 @@ fn sessions_are_named_after_their_directory_until_renamed() {
     let socket = dir.join("run/o.sock");
     let proj = dir.join("myproj");
     std::fs::create_dir_all(&proj).unwrap();
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = start_daemon(valk(&socket, &dir), &socket);
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
@@ -1289,13 +1286,7 @@ fn sessions_are_named_after_their_directory_until_renamed() {
 fn an_agent_publishes_a_status_that_expires() {
     let dir = temp("status");
     let socket = dir.join("run/o.sock");
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = start_daemon(valk(&socket, &dir), &socket);
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
@@ -1440,13 +1431,7 @@ fn a_closed_stdout_ends_valk_quietly() {
 fn an_agent_drives_the_panes_of_its_tab() {
     let dir = temp("pane");
     let socket = dir.join("run/o.sock");
-    let mut daemon = KillOnDrop(
-        valk(&socket, &dir)
-            .arg("daemon")
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut daemon = start_daemon(valk(&socket, &dir), &socket);
     let new = (0..100)
         .find_map(|_| {
             let out = valk(&socket, &dir)
