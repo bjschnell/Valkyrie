@@ -125,6 +125,7 @@ mod unix {
 
 #[cfg(windows)]
 mod windows {
+    use crate::lock::Locked;
     use std::io::{Read, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::sync::Mutex;
@@ -252,8 +253,7 @@ mod windows {
 
         pub fn resize(&self, size: Size, cell: (u16, u16)) -> std::io::Result<()> {
             self.master
-                .lock()
-                .unwrap()
+                .locked()
                 .as_ref()
                 .ok_or_else(|| std::io::Error::other("pty closed"))?
                 .resize(super::pty_size(size, cell))
@@ -268,8 +268,7 @@ mod windows {
 
         pub fn reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
             self.master
-                .lock()
-                .unwrap()
+                .locked()
                 .as_ref()
                 .ok_or_else(|| std::io::Error::other("pty closed"))?
                 .try_clone_reader()
@@ -278,8 +277,7 @@ mod windows {
 
         pub fn writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
             self.writer
-                .lock()
-                .unwrap()
+                .locked()
                 .take()
                 .ok_or_else(|| std::io::Error::other("pty writer already taken"))
         }
@@ -294,7 +292,7 @@ mod windows {
         /// so waiting for Session::drop would otherwise keep both alive forever.
         /// Drop outside the mutex: ClosePseudoConsole may wait for output to drain.
         pub fn close(&self) {
-            let master = self.master.lock().unwrap().take();
+            let master = self.master.locked().take();
             drop(master);
         }
     }

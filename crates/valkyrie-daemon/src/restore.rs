@@ -6,6 +6,7 @@
 //! start over in the same directory, and other programs are left alone, since running
 //! an arbitrary command again could do harm.
 
+use crate::lock::Locked;
 use crate::session::RestoreEntry;
 use crate::{Registry, spawn_with};
 use anyhow::{Context, Result};
@@ -92,7 +93,7 @@ fn render(registry: &Registry) -> Option<String> {
     let now = crate::session::now_ms();
     // Entries that failed to come back stay for the next restart to try again (a
     // `claude` missing from PATH, a cwd on a mount not up yet).
-    let mut sessions: Vec<RestoreEntry> = registry.unrestored.lock().unwrap().clone();
+    let mut sessions: Vec<RestoreEntry> = registry.unrestored.locked().clone();
     let mut place = HashMap::new();
     for s in registry.all() {
         if let Some(entry) = s.restore_entry(now, EXIT_GRACE_MS) {
@@ -104,8 +105,7 @@ fn render(registry: &Registry) -> Option<String> {
     // ended is still on this list, so it keeps its place in its split.
     let layouts = registry
         .layouts
-        .lock()
-        .unwrap()
+        .locked()
         .clone()
         .into_iter()
         .filter_map(|p| renumber(p, &place))
@@ -197,7 +197,7 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
         match spawn_with(registry, spec, entry.conversation.clone()) {
             Ok(Reply::Session { info }) => {
                 tracing::info!(session = info.id, ?command, "restored");
-                if let Some(session) = registry.sessions.lock().unwrap().get(&info.id) {
+                if let Some(session) = registry.sessions.locked().get(&info.id) {
                     session.set_topic(entry.topic.clone());
                     if entry.supervisor {
                         session.make_supervisor();
@@ -209,7 +209,7 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(name = entry.name, ?command, "restore failed: {e:#}");
-                registry.unrestored.lock().unwrap().push(entry);
+                registry.unrestored.locked().push(entry);
             }
         }
     }
@@ -219,6 +219,6 @@ pub fn restore(registry: &Registry, path: &Path) -> usize {
         .into_iter()
         .filter_map(|p| renumber(p, &ids))
         .collect();
-    *registry.layouts.lock().unwrap() = layouts;
+    *registry.layouts.locked() = layouts;
     restored
 }

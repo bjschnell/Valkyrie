@@ -4,6 +4,7 @@
 //! its own directory, adding its worktree back if that was taken away.
 
 use crate::digest::read_runs;
+use crate::lock::Locked;
 use crate::session::now_ms;
 use crate::{Registry, spawn_with};
 use anyhow::{Context, Result, bail};
@@ -184,7 +185,7 @@ struct Busy(String);
 
 impl Busy {
     fn take(key: &str) -> Result<Busy> {
-        let mut set = RESUMING.lock().unwrap();
+        let mut set = RESUMING.locked();
         anyhow::ensure!(
             set.get_or_insert_with(HashSet::new).insert(key.to_owned()),
             "that session is being resumed already"
@@ -195,7 +196,7 @@ impl Busy {
 
 impl Drop for Busy {
     fn drop(&mut self) {
-        if let Some(set) = RESUMING.lock().unwrap().as_mut() {
+        if let Some(set) = RESUMING.locked().as_mut() {
             set.remove(&self.0);
         }
     }

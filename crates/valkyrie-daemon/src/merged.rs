@@ -6,6 +6,7 @@
 //! is told on its next prompt too: nothing is typed then.
 
 use crate::Registry;
+use crate::lock::Locked;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use valkyrie_context::{backlog, project};
@@ -44,7 +45,7 @@ impl Registry {
         item: Option<&Item>,
     ) {
         let typing = {
-            let sup = self.supervisor.lock().unwrap();
+            let sup = self.supervisor.locked();
             sup.on() && sup.context_on.unwrap_or(crate::supervise::context_on)()
         };
         let mut told = HashSet::new();
@@ -94,6 +95,7 @@ impl Registry {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use crate::lock::Locked;
     use crate::work::{Pr, PrLookup};
     use std::path::Path;
     use std::process::Command;
@@ -139,7 +141,7 @@ mod tests {
             false,
         )
         .unwrap();
-        registry.supervisor.lock().unwrap().context_on = Some(|| true);
+        registry.supervisor.locked().context_on = Some(|| true);
         let state = dir.join("state");
         let told = |s| told(&state, s);
         let spawn = |agent: bool| {
@@ -169,7 +171,7 @@ mod tests {
         );
         let url = "https://github.com/o/r/pull/9";
         let id = {
-            let b = registry.backlog.lock().unwrap();
+            let b = registry.backlog.locked();
             let new = NewItem {
                 title: "the work".into(),
                 cwd: Some(repo.clone()),

@@ -5,6 +5,7 @@
 //! logs the same way.
 
 use crate::Registry;
+use crate::lock::Locked;
 use crate::session::now_ms;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ fn save(path: &Path, presence: &Presence) -> anyhow::Result<()> {
 impl Registry {
     /// You typed into a session (not an agent driving one).
     pub(crate) fn you_typed(&self) {
-        let mut presence = self.presence.lock().unwrap();
+        let mut presence = self.presence.locked();
         if presence.typed(now_ms())
             && let Err(e) = save(&self.presence_file, &presence)
         {
@@ -51,7 +52,7 @@ impl Registry {
         by: DigestGroup,
     ) -> anyhow::Result<Reply> {
         let now = now_ms();
-        let left = self.presence.lock().unwrap().since(now);
+        let left = self.presence.locked().since(now);
         let (since, away) = match (since_ms, left) {
             (Some(since), _) => (since.min(now), false),
             (None, Some(left)) => (left, true),
@@ -194,7 +195,7 @@ impl Registry {
         let now = now_ms();
         let root = project::root(&project);
         let mut reached = {
-            let store = self.context.lock().unwrap();
+            let store = self.context.locked();
             valkyrie_context::served::reached(&store.served(&root, now / 1000), id)
         };
         reached.truncate(MAX_SERVED_TO);
@@ -336,6 +337,7 @@ pub(crate) fn read_runs(
 
 #[cfg(all(test, unix))]
 mod tests {
+    use crate::lock::Locked;
     use serde_json::json;
 
     #[test]
@@ -408,7 +410,7 @@ mod tests {
         );
 
         // Typed long ago, then again now: the digest starts where you left.
-        registry.presence.lock().unwrap().typed(now - 3 * 3_600_000);
+        registry.presence.locked().typed(now - 3 * 3_600_000);
         registry.you_typed();
         let saved = super::load(&super::file(&state));
         assert_eq!(

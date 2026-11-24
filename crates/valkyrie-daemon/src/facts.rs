@@ -5,6 +5,7 @@
 //! accept. Counting only: no model reads anything here.
 
 use crate::Registry;
+use crate::lock::Locked;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -160,7 +161,7 @@ fn learn(registry: &Registry, session: &str, cwd: &Path, seen: facts::Seen) {
         session: session.to_owned(),
         seen,
     };
-    let store = registry.context.lock().unwrap();
+    let store = registry.context.locked();
     if let Err(e) = store.record_fact(&root, &sighting, now) {
         tracing::warn!("couldn't record what ran: {e:#}");
         return;

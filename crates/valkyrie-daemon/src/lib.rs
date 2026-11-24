@@ -15,6 +15,7 @@ mod foreground;
 mod guard;
 mod habit;
 mod history;
+mod lock;
 mod merge_order;
 mod merged;
 mod overlap;
@@ -38,6 +39,7 @@ mod worktree;
 pub use restore::path as restore_path;
 pub use usage::agent_above;
 
+use crate::lock::Locked;
 use anyhow::{Context, Result};
 use pty::StopPipe;
 use serde::{Deserialize, Serialize};
@@ -223,13 +225,13 @@ impl Registry {
         // Moved to `dying` under the sessions lock, so a handoff sees the
         // session in one list or the other.
         let removed = {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.sessions.locked();
             let removed = sessions.remove(&session);
             self.prune_layouts(&sessions);
             if let Some(s) = &removed
                 && !s.exited()
             {
-                let mut dying = self.dying.lock().unwrap();
+                let mut dying = self.dying.locked();
                 dying.retain(|d| d.upgrade().is_some_and(|d| !d.exited()));
                 dying.push(Arc::downgrade(s));
             }
@@ -250,8 +252,7 @@ impl Registry {
         let ours = valkyrie_proto::binary_id();
         let clients = self
             .clients
-            .lock()
-            .unwrap()
+            .locked()
             .values()
             .map(|client| ConnectedClient {
                 current: client.protocol == valkyrie_proto::PROTOCOL
@@ -264,7 +265,7 @@ impl Registry {
 
     /// Every session, in tab order.
     fn all(&self) -> Vec<Arc<Session>> {
-        let mut all: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
+        let mut all: Vec<_> = self.sessions.locked().values().cloned().collect();
         all.sort_by_key(|s| (s.rank(), s.id));
         all
     }
@@ -282,7 +283,7 @@ impl Registry {
     /// lists. A tab down to one pane has none.
     fn layouts(&self) -> Vec<Pane> {
         let listed: HashSet<SessionId> = self.listed().iter().map(|s| s.id).collect();
-        split_only(self.layouts.lock().unwrap().clone(), &listed)
+        split_only(self.layouts.locked().clone(), &listed)
     }
 
     /// Takes sessions the daemon no longer holds out of the stored layouts. Not those
@@ -292,7 +293,7 @@ impl Registry {
     /// made can't be pruned before its session is in.
     fn prune_layouts(&self, sessions: &BTreeMap<SessionId, Arc<Session>>) {
         let held: HashSet<SessionId> = sessions.keys().copied().collect();
-        let mut layouts = self.layouts.lock().unwrap();
+        let mut layouts = self.layouts.locked();
         *layouts = split_only(std::mem::take(&mut *layouts), &held);
     }
 
@@ -345,7 +346,7 @@ impl Registry {
     /// Drops sessions that are gone, once a reboot could no longer need them on the
     /// restore list.
     fn sweep(&self, now: u64) {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.locked();
         let before = sessions.len();
         sessions.retain(|_, s| !s.removable(now, restore::EXIT_GRACE_MS));
         if sessions.len() != before {
@@ -376,8 +377,7 @@ impl Registry {
 
     fn get(&self, id: SessionId) -> Result<Arc<Session>> {
         self.sessions
-            .lock()
-            .unwrap()
+            .locked()
             .get(&id)
             .cloned()
             .with_context(|| format!("no session {id}"))
@@ -488,7 +488,7 @@ pub async fn resume(fd: RawFd, state_dir: &Path, hook_exe: &Path) -> Result<()> 
         let (id, pid) = (saved.id, saved.pid);
         match Session::adopt(saved, &registry.host, generation) {
             Ok(session) => {
-                registry.sessions.lock().unwrap().insert(id, session);
+                registry.sessions.locked().insert(id, session);
             }
             Err(e) => {
                 tracing::error!(session = id, "could not adopt session: {e:#}");
@@ -498,8 +498,8 @@ pub async fn resume(fd: RawFd, state_dir: &Path, hook_exe: &Path) -> Result<()> 
             }
         }
     }
-    *registry.layouts.lock().unwrap() = handoff.layouts;
-    let kept = registry.sessions.lock().unwrap().len();
+    *registry.layouts.locked() = handoff.layouts;
+    let kept = registry.sessions.locked().len();
     tracing::info!(
         generation,
         "resumed on {} with {kept}/{total} sessions",
@@ -609,16 +609,16 @@ async fn serve_forever(
     mut upgrades: mpsc::Receiver<UpgradeRequest>,
 ) -> Result<()> {
     tokio::spawn(publish_queue(registry.clone()));
-    if let Some(turns) = registry.turns_rx.lock().unwrap().take() {
+    if let Some(turns) = registry.turns_rx.locked().take() {
         tokio::spawn(extract::run(registry.clone(), turns));
     }
-    if let Some(written) = registry.notes_written_rx.lock().unwrap().take() {
+    if let Some(written) = registry.notes_written_rx.locked().take() {
         tokio::spawn(promote::run(registry.clone(), written));
     }
-    if let Some(answers) = registry.answers_rx.lock().unwrap().take() {
+    if let Some(answers) = registry.answers_rx.locked().take() {
         tokio::spawn(habit::run(registry.clone(), answers));
     }
-    if let Some(seen) = registry.seen_rx.lock().unwrap().take() {
+    if let Some(seen) = registry.seen_rx.locked().take() {
         tokio::spawn(facts::run(registry.clone(), seen));
     }
     tokio::spawn(watch_stale(registry.clone()));
@@ -668,12 +668,15 @@ async fn serve_forever(
 #[cfg(unix)]
 fn hand_off(registry: &Registry, listener: &Listener, exe: &Path) -> anyhow::Error {
     registry.frozen.store(true, Ordering::SeqCst);
-    let gate = registry.gate.write().unwrap();
+    let gate = registry
+        .gate
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Held until the exec, so no session is added or removed under the snapshot.
-    let sessions_guard = registry.sessions.lock().unwrap();
+    let sessions_guard = registry.sessions.locked();
     let sessions: Vec<Arc<Session>> = sessions_guard.values().cloned().collect();
     let orphans = finish_kills(registry);
-    let stop = registry.host.stop.lock().unwrap().clone();
+    let stop = registry.host.stop.locked().clone();
     stop.set();
     for session in &sessions {
         session.stop_io();
@@ -686,7 +689,7 @@ fn hand_off(registry: &Registry, listener: &Listener, exe: &Path) -> anyhow::Err
     match StopPipe::new() {
         Ok(stop) => {
             let stop = Arc::new(stop);
-            *registry.host.stop.lock().unwrap() = stop.clone();
+            *registry.host.stop.locked() = stop.clone();
             for session in &sessions {
                 if let Err(e) = session.resume_io(stop.clone()) {
                     tracing::error!(session = session.id, "I/O not restarted: {e:#}");
@@ -708,8 +711,7 @@ fn hand_off(registry: &Registry, listener: &Listener, exe: &Path) -> anyhow::Err
 fn finish_kills(registry: &Registry) -> Vec<u32> {
     let dying: Vec<Arc<Session>> = registry
         .dying
-        .lock()
-        .unwrap()
+        .locked()
         .drain(..)
         .filter_map(|s| s.upgrade())
         .filter(|s| !s.exited())
@@ -825,7 +827,7 @@ fn snapshot(
         listener,
         sessions: sessions.iter().map(|s| s.save()).collect(),
         orphans,
-        layouts: registry.layouts.lock().unwrap().clone(),
+        layouts: registry.layouts.locked().clone(),
         dev: registry.dev,
     }
 }
@@ -910,7 +912,10 @@ fn restart(registry: &Registry, exe: &Path) -> anyhow::Error {
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
     };
     registry.frozen.store(true, Ordering::SeqCst);
-    let gate = registry.gate.write().unwrap();
+    let gate = registry
+        .gate
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let started = (|| -> Result<()> {
         restore::save_now(registry)?;
         let state = registry
@@ -1013,7 +1018,7 @@ async fn watch_prs(registry: Arc<Registry>) {
         // so its agent hears now rather than a pass later (backlog #215).
         for _ in 0..2 {
             read_prs(&registry, &lookup, &mut me, every).await;
-            if !registry.watching.lock().unwrap().take_rerun() {
+            if !registry.watching.locked().take_rerun() {
                 break;
             }
         }
@@ -1027,7 +1032,7 @@ async fn read_prs(
     me: &mut Option<String>,
     every: Duration,
 ) {
-    registry.watching.lock().unwrap().begin();
+    registry.watching.locked().begin();
     registry.ship_merged_prs(lookup.clone()).await;
     if me.is_none() {
         *me = tokio::task::spawn_blocking(branches::me)
@@ -1039,7 +1044,7 @@ async fn read_prs(
         registry.watch_branches(lookup.clone(), me).await;
     }
     let now = session::now_ms() / 1000;
-    registry.watching.lock().unwrap().end(now, every);
+    registry.watching.locked().end(now, every);
     registry.plan_merges().await;
 }
 
@@ -1115,12 +1120,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
         };
         if usage::feature(&msg).is_some() {
             let surface = surface.get_or_insert_with(|| {
-                let kind = registry
-                    .clients
-                    .lock()
-                    .unwrap()
-                    .get(&conn)
-                    .map(|c| c.kind.clone());
+                let kind = registry.clients.locked().get(&conn).map(|c| c.kind.clone());
                 usage::surface(kind, peer.as_ref().map(context::Peer::pid))
             });
             if let Some(surface) = surface {
@@ -1133,7 +1133,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 if let Some(client) = client
                     && matches!(client.kind.as_str(), "tui" | "web")
                 {
-                    registry.clients.lock().unwrap().insert(conn, client);
+                    registry.clients.locked().insert(conn, client);
                 }
                 (
                     req,
@@ -1196,7 +1196,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 height,
             } => {
                 if width > 0 && height > 0 {
-                    *registry.host.cell_px.lock().unwrap() = Some((width, height));
+                    *registry.host.cell_px.locked() = Some((width, height));
                     if let Some(s) = session.and_then(|id| registry.get(id).ok()) {
                         s.set_cell_pixels((width, height));
                     }
@@ -1216,7 +1216,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                             s.set_colors(colors);
                         }
                     }
-                    None => *registry.host.colors.lock().unwrap() = colors,
+                    None => *registry.host.colors.locked() = colors,
                 }
                 continue;
             }
@@ -1416,8 +1416,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Ratio { req, a, b, ratio } => {
                 let set = registry
                     .layouts
-                    .lock()
-                    .unwrap()
+                    .locked()
                     .iter_mut()
                     .any(|p| p.set_ratio(a, b, ratio));
                 let result = if set {
@@ -1705,7 +1704,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
         a.end().await;
     }
     for id in owned_hidden {
-        if let Some(s) = registry.sessions.lock().unwrap().remove(&id) {
+        if let Some(s) = registry.sessions.locked().remove(&id) {
             s.kill();
         }
     }
@@ -1718,7 +1717,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
     if notice_viewer {
         registry.notice_viewers.fetch_sub(1, Ordering::Relaxed);
     }
-    registry.clients.lock().unwrap().remove(&conn);
+    registry.clients.locked().remove(&conn);
     writer.abort();
     ended
 }
@@ -1806,7 +1805,7 @@ fn split(
         return Ok(reply);
     };
     {
-        let mut layouts = registry.layouts.lock().unwrap();
+        let mut layouts = registry.layouts.locked();
         if !layouts.iter_mut().any(|p| p.split(at, info.id, side)) {
             let mut pane = Pane::leaf(at);
             pane.split(at, info.id, side);
@@ -1834,7 +1833,10 @@ fn spawn_with(
     spec: valkyrie_proto::SpawnSpec,
     conversation: Option<String>,
 ) -> Result<Reply> {
-    let _gate = registry.gate.read().unwrap();
+    let _gate = registry
+        .gate
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     anyhow::ensure!(
         !registry.frozen.load(Ordering::SeqCst),
         "the daemon is upgrading; try again in a moment"
@@ -1845,7 +1847,7 @@ fn spawn_with(
         session.set_conversation(conversation);
     }
     let info = session.info();
-    registry.sessions.lock().unwrap().insert(id, session);
+    registry.sessions.locked().insert(id, session);
     registry.host.changed.notify_one();
     tracing::info!(session = id, command = ?info.command, "spawned");
     Ok(Reply::Session {
