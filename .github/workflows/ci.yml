@@ -1,9 +1,11 @@
 name: test
 
 on:
-  # Branches only: a tag push runs this through release.yml instead.
+  # Main only: a branch with a pull request is tested by the pull_request event, and
+  # running both doubled the load on the scarce macOS runners. A tag push runs this
+  # through release.yml instead.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_call:
     inputs:
@@ -51,6 +53,9 @@ jobs:
         # Every platform release.yml ships a binary for.
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # Counts from when a runner picks the job up, so a hang fails fast. A job no
+    # macOS runner ever takes is cancelled by GitHub, whatever this says.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 20 || 45 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,6 +101,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 20 || 45 }}
     steps:
       - uses: actions/checkout@v7
         with:
