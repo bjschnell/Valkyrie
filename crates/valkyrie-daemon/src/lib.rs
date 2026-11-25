@@ -29,6 +29,7 @@ mod restore;
 mod session;
 mod supervise;
 mod sweep;
+mod trim;
 mod tutor;
 mod usage;
 mod watching;
