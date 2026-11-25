@@ -7,6 +7,7 @@ mod branches;
 mod chat;
 mod context;
 mod digest;
+mod disk;
 mod dispatch;
 mod docs;
 mod extract;
@@ -261,6 +262,10 @@ struct Registry {
     /// pushed with the queue, and where it's kept.
     quota: watch::Sender<quota::Held>,
     quota_file: PathBuf,
+    /// The disks running low on space (backlog #300), pushed with the queue, and
+    /// the state folder, whose disk is one of those read.
+    disk: watch::Sender<disk::Held>,
+    state_dir: PathBuf,
     /// When you last typed and when you were last gone, for the away digest
     /// (backlog #105), and where it's kept.
     presence: Mutex<valkyrie_context::digest::Presence>,
@@ -628,6 +633,8 @@ fn new_registry(
         dispatch_kick: Notify::new(),
         quota: watch::Sender::new(quota::load(&quota::file(state_dir))),
         quota_file: quota::file(state_dir),
+        disk: watch::Sender::new(disk::Held::default()),
+        state_dir: state_dir.to_path_buf(),
         presence: Mutex::new(digest::load(&digest::file(state_dir))),
         presence_file: digest::file(state_dir),
         supervisor: Mutex::new(supervise::Supervisor::load(restore::per_daemon(
@@ -672,6 +679,7 @@ async fn serve_forever(
     tokio::spawn(watch_stale(registry.clone()));
     tokio::spawn(watch_prs(registry.clone()));
     tokio::spawn(sweep::run(registry.clone()));
+    tokio::spawn(disk::run(registry.clone()));
     tokio::spawn(dispatch::run(registry.clone()));
     tokio::spawn(tick(registry.clone()));
     #[cfg(unix)]
@@ -1602,6 +1610,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::ShipMerged { req, dry_run, only } => {
                 (req, registry.ship_merged(dry_run, only, peer).await)
             }
+            ClientMsg::FreeDisk { req } => (req, Ok(registry.free_disk().await)),
             ClientMsg::PruneWorktrees {
                 req,
                 cwd,
@@ -1960,6 +1969,7 @@ async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
     let mut backlog = registry.items.subscribe();
     let mut launches = registry.launches.subscribe();
     let mut quota = registry.quota.subscribe();
+    let mut disk = registry.disk.subscribe();
     drop(registry);
     let send = async |msg| out.send(Arc::new(msg)).await.is_ok();
     let held = |mut items: Vec<valkyrie_proto::Decision>| {
@@ -1992,6 +2002,12 @@ async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
     if !send(reading(&mut quota)).await {
         return;
     }
+    let disks = |disk: &mut watch::Receiver<disk::Held>| ServerMsg::Disk {
+        low: (**disk.borrow_and_update()).clone(),
+    };
+    if !send(disks(&mut disk)).await {
+        return;
+    }
     loop {
         let msg = tokio::select! {
             changed = rx.changed() => match changed {
@@ -2012,6 +2028,10 @@ async fn forward_queue(registry: Arc<Registry>, agent: bool, out: Out) {
             },
             changed = quota.changed() => match changed {
                 Ok(()) => reading(&mut quota),
+                Err(_) => return,
+            },
+            changed = disk.changed() => match changed {
+                Ok(()) => disks(&mut disk),
                 Err(_) => return,
             },
         };

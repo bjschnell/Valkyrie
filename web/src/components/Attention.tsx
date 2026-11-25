@@ -1,13 +1,13 @@
-// The records in the attention queue (#251): decision proposals, the supervisor's
-// ready items (Decide), and agent-filed backlog items batched
-// per repository (Filed). Each is a row with a square marker that opens into the
+// The records in the attention queue (#251): a disk running low (#300), decision
+// proposals, the supervisor's ready items (Decide), and agent-filed backlog items
+// batched per repository (Filed). Each is a row with a square marker that opens into the
 // card that answers it; sessions keep their round dot and their own card.
 import { useMemo, useState } from "react";
-import { attention, filedLine, type Attn } from "../lib/attention";
+import { attention, bytes, diskLine, filedLine, type Attn } from "../lib/attention";
 import { base, launchesOn } from "../lib/backlog";
 import { HASH } from "../lib/routes";
 import { age } from "../lib/time";
-import { answerLaunch, useApp } from "../store";
+import { answerLaunch, freeDisk, useApp } from "../store";
 import type { LaunchOffer } from "../proto";
 import { ProposalCard } from "./Decisions";
 import { Chevron } from "./icons";
@@ -18,15 +18,19 @@ export function useAttention(): Attn[] {
   const proposals = useApp((s) => s.proposals);
   const launches = useApp((s) => s.launches);
   const items = useApp((s) => s.items);
+  const disk = useApp((s) => s.disk);
   return useMemo(
-    () => attention({ queue, proposals, launches, items }),
-    [queue, proposals, launches, items],
+    () => attention({ queue, proposals, launches, items, disk }),
+    [queue, proposals, launches, items, disk],
   );
 }
 
 export type RecordItem = Exclude<Attn, { kind: "ask" | "stuck" | "done" }>;
 
-export const isRecord = (a: Attn): a is RecordItem => a.kind === "decide" || a.kind === "filed";
+export const isRecord = (a: Attn): a is RecordItem =>
+  a.kind === "decide" || a.kind === "filed" || a.kind === "disk";
+
+const MARK: Record<RecordItem["kind"], string> = { disk: "Disk low", decide: "Decide", filed: "Filed" };
 
 const triage = () => {
   location.hash = HASH.backlog;
@@ -36,6 +40,7 @@ const triage = () => {
 function line(a: RecordItem): { name: string; where: string; ask: string } {
   if (a.kind === "filed")
     return { name: filedLine(a), where: "", ask: a.items.map((i) => i.title).join(" · ") };
+  if (a.kind === "disk") return { name: "Disk low", where: "", ask: diskLine(a.low) };
   switch (a.what) {
     case "decision":
       return {
@@ -74,10 +79,10 @@ export function RecordRow({
       <button
         className={`row attn-row ${picked ? "picked" : ""} ${current ? "current" : ""}`}
         aria-current={current || undefined}
-        aria-expanded={a.kind === "decide" ? shown : undefined}
+        aria-expanded={a.kind !== "filed" ? shown : undefined}
         onClick={a.kind === "filed" ? triage : onToggle}
       >
-        <span className={`attn-mark attn-${a.kind}`} role="img" aria-label={a.kind === "filed" ? "Filed" : "Decide"} />
+        <span className={`attn-mark attn-${a.kind}`} role="img" aria-label={MARK[a.kind]} />
         <span className="row-main">
           <span className="row-name">{name}</span>
           <span className="row-sub">
@@ -88,7 +93,7 @@ export function RecordRow({
         <span className="row-age">{age(a.since, now)}</span>
         {a.kind === "filed" ? <span className="attn-go">Triage</span> : <Chevron />}
       </button>
-      {a.kind === "decide" && shown && <RecordCard a={a} />}
+      {a.kind !== "filed" && shown && <RecordCard a={a} />}
     </div>
   );
 }
@@ -97,6 +102,7 @@ export function RecordRow({
  * Leave for a ready item, Triage for filed items. */
 export function RecordCard({ a }: { a: RecordItem }) {
   if (a.kind === "filed") return <FiledCard a={a} />;
+  if (a.kind === "disk") return <DiskCard a={a} />;
   switch (a.what) {
     case "decision":
       return <ProposalCard d={a.decision} />;
@@ -132,6 +138,43 @@ function LaunchCard({ offer }: { offer: LaunchOffer }) {
         </button>
         <button className="primary" disabled={busy} onClick={() => void act(true)}>
           Start
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** A disk running low: how much is free on each, and Free space, which deletes
+ * every worktree's cargo `target/` nothing built in for an hour. */
+function DiskCard({ a }: { a: Extract<RecordItem, { kind: "disk" }> }) {
+  const [busy, setBusy] = useState(false);
+  const free = async () => {
+    setBusy(true);
+    try {
+      await freeDisk();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="supervisor-card">
+      <div className="supervisor-card-head">
+        <span className="tag">disk</span>
+        <span className="supervisor-card-title">Disk low</span>
+      </div>
+      <ul className="attn-filed-list">
+        {a.low.map((d) => (
+          <li key={d.path}>
+            {bytes(d.free)} free of {bytes(d.total)} <span className="attn-where">{d.path}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="supervisor-card-sub">
+        Agents' worktrees build their own target/, up to 24 GB each. Free space deletes each one nothing built in for an hour.
+      </div>
+      <div className="order-actions">
+        <button className="primary" disabled={busy} onClick={() => void free()}>
+          {busy ? "Freeing…" : "Free space"}
         </button>
       </div>
     </section>

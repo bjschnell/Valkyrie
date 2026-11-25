@@ -262,6 +262,8 @@ struct App {
     launches: Vec<valkyrie_proto::LaunchOffer>,
     /// The plan's quota, as last pushed (protocol 30).
     quota: Option<valkyrie_proto::Quota>,
+    /// The disks running low on space (backlog #300): one Needs-you row.
+    disk: Vec<valkyrie_proto::LowDisk>,
     /// Where a background task (`P`'s model call) reports a line to say.
     said: Option<mpsc::UnboundedSender<String>>,
     /// The backlog page is open (`b`).
@@ -496,6 +498,7 @@ impl App {
             glance: None,
             repo_list: Default::default(),
             quota: None,
+            disk: Vec::new(),
             backlog: None,
             retire_armed: None,
             proposal_scroll: Default::default(),
@@ -2855,6 +2858,10 @@ impl App {
     /// the rest of the sessions, Running before Quiet (spec: Inbox).
     fn inbox_rows(&self) -> Vec<InboxRow> {
         let mut rows = vec![InboxRow::Compose];
+        // First: with the disk full, nothing else gets done.
+        if !self.disk.is_empty() {
+            rows.push(InboxRow::Disk);
+        }
         rows.extend((0..self.queue.len()).map(InboxRow::Queue));
         if self.to_decide() > 0 {
             rows.push(InboxRow::Decide);
@@ -3644,7 +3651,10 @@ impl App {
     /// The one count of what waits on you: every Needs-you row, a batched row
     /// counting its items. The header, the ⌂ and the status line all show it.
     fn need_you(&self) -> usize {
-        self.queue.len() + self.to_decide() + self.filed().len()
+        self.queue.len()
+            + self.to_decide()
+            + self.filed().len()
+            + usize::from(!self.disk.is_empty())
     }
 
     /// What a pack's avatar shows: formed while something needs you, gathering
@@ -4050,6 +4060,7 @@ impl App {
                         self.reviewing = Some(0)
                     }
                     Some(InboxRow::Decide) => self.open_supervisor().await,
+                    Some(InboxRow::Disk) => self.free_disk(),
                     // Triage in the backlog, from the oldest.
                     Some(InboxRow::Filed) => {
                         if let Some(id) = self.filed().first().map(|i| i.id) {
@@ -5307,6 +5318,12 @@ impl App {
             self.quota = quota;
             return Ok(true);
         }
+        if let ServerMsg::Disk { low } = msg {
+            let anchor = self.anchor();
+            self.disk = low;
+            self.restore(anchor);
+            return Ok(true);
+        }
         if let ServerMsg::Notice { text, sound } = msg {
             self.show_ping(Ping::notice(&text, sound));
             return Ok(true);
@@ -5950,6 +5967,7 @@ impl App {
                 }
                 Some(InboxRow::Decide) => hint("↩", "open", HomeKey::Enter),
                 Some(InboxRow::Filed) => hint("↩", "triage", HomeKey::Enter),
+                Some(InboxRow::Disk) => hint("↩", "free space", HomeKey::Enter),
                 Some(_) => {
                     hint("↩", "open", HomeKey::Enter);
                     if asks {
@@ -6226,6 +6244,7 @@ impl App {
                 InboxRow::Queue(q) => inbox_queue_row(&self.queue[q], now, spin, width, t),
                 InboxRow::Decide => self.decide_row(now, width),
                 InboxRow::Filed => self.filed_row(now, width),
+                InboxRow::Disk => self.disk_row(width),
                 InboxRow::Session(id) => {
                     let s = others.iter().find(|s| s.id == id).expect("listed");
                     // A group's label before its first row.
@@ -6307,6 +6326,48 @@ impl App {
         )
     }
 
+    /// The low-disk row: `■ disk low`, then what's free on each.
+    fn disk_row(&self, width: usize) -> Line<'static> {
+        let t = self.settings.theme;
+        let text = self
+            .disk
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} free · {}",
+                    valkyrie_proto::disk::bytes(d.free),
+                    short_path(&d.path)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        record_row(
+            "■".fg(t.blocked),
+            "disk low",
+            vec![text.fg(t.secondary())],
+            String::new(),
+            width,
+            t,
+        )
+    }
+
+    /// Deletes the idle build output of every worktree, off the draw loop: it
+    /// can take a while with tens of gigabytes. Says what it freed.
+    fn free_disk(&mut self) {
+        let Some(said) = self.said.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        self.say("deleting idle build output…".into());
+        tokio::spawn(async move {
+            let line = match client.free_disk().await {
+                Ok(text) => text,
+                Err(e) => format!("couldn't free space: {e:#}"),
+            };
+            let _ = said.send(line);
+        });
+    }
+
     /// The Filed row: `■ 8 filed`, then how many in each repo.
     fn filed_row(&self, now: u64, width: usize) -> Line<'static> {
         let t = self.settings.theme;
@@ -6383,8 +6444,35 @@ impl App {
             self.draw_proposal_text(frame, inner, d, lines);
             return;
         }
-        if let Some(row @ (InboxRow::Decide | InboxRow::Filed)) = self.row() {
+        if let Some(row @ (InboxRow::Decide | InboxRow::Filed | InboxRow::Disk)) = self.row() {
             let (title, lines): (&str, Vec<Line>) = match row {
+                InboxRow::Disk => (
+                    "disk low",
+                    self.disk
+                        .iter()
+                        .map(|d| {
+                            Line::from(vec![
+                                format!(
+                                    "{} free of {}  ",
+                                    valkyrie_proto::disk::bytes(d.free),
+                                    valkyrie_proto::disk::bytes(d.total)
+                                )
+                                .fg(t.fg),
+                                short_path(&d.path).fg(t.muted),
+                            ])
+                        })
+                        .chain([
+                            Line::default(),
+                            "Agents' worktrees build their own target/, up to 24 GB each."
+                                .fg(t.secondary())
+                                .into(),
+                            Line::default(),
+                            "↩ delete every worktree's target/ nothing built in for an hour"
+                                .fg(t.muted)
+                                .into(),
+                        ])
+                        .collect(),
+                ),
                 InboxRow::Filed => (
                     "filed by agents, not triaged",
                     self.filed()
@@ -8714,6 +8802,8 @@ enum Anchor {
 enum InboxRow {
     /// "+ New session": the composer (backlog #276), always the top row.
     Compose,
+    /// A disk running low on space (backlog #300), every such disk as one row.
+    Disk,
     /// A session waiting on you, by its place in the queue.
     Queue(usize),
     /// Proposals and ready items, as one row.
@@ -13689,6 +13779,41 @@ mod tests {
         // Blank space on the bar is no key.
         app.on_input(press(0, 60, y)).await;
         assert!(app.renaming.is_none() && app.kill_armed.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A disk running low is the first Needs-you row, its key frees space, and it
+    /// goes when the daemon says the disk has room again.
+    #[tokio::test]
+    async fn a_low_disk_is_the_first_inbox_row() {
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-disk-{}", std::process::id()));
+        let (mut app, _listener) = idle_app(&dir).await;
+        app.sessions = vec![info(1)];
+        let low = valkyrie_proto::LowDisk {
+            path: "/srv".into(),
+            free: 8_240_000_000,
+            total: 1_800_000_000_000,
+        };
+        app.on_push(ServerMsg::Disk { low: vec![low] }).unwrap();
+        assert_eq!(app.inbox_rows()[1], InboxRow::Disk);
+        assert_eq!(app.need_you(), 1);
+        app.selected = 1;
+        assert_eq!(app.row(), Some(InboxRow::Disk));
+        let rows = home_screen(&app, 120);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("disk low") && r.contains("8.2 GB free")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("8.2 GB free of 1.8 TB")),
+            "{rows:#?}"
+        );
+        let bar = rows.last().unwrap();
+        assert!(bar.trim_start().starts_with("↩ free space"), "{bar}");
+        app.on_push(ServerMsg::Disk { low: Vec::new() }).unwrap();
+        assert!(!app.inbox_rows().contains(&InboxRow::Disk));
+        assert_eq!(app.need_you(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

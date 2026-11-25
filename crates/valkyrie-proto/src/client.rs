@@ -880,6 +880,15 @@ impl Client {
         }
     }
 
+    /// Deletes the idle cargo build output of every worktree (`FreeDisk`); says
+    /// what it freed.
+    pub async fn free_disk(&self) -> Result<String> {
+        match self.request(|req| ClientMsg::FreeDisk { req }).await? {
+            Reply::Text { text } => Ok(text),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Whether the supervisor runs; with `on`, sets it first.
     /// What the supervisor did, newest first, and whether it's on.
     pub async fn supervisor_log(&self) -> Result<(Vec<crate::SupervisorEntry>, bool)> {

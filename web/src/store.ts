@@ -31,6 +31,7 @@ import type {
   NewItem,
   LaunchOffer,
   Quota,
+  LowDisk,
   QueueItem,
   ReviewAction,
   Row,
@@ -108,6 +109,9 @@ interface State {
   launches: LaunchOffer[];
   /** The plan's quota (protocol 30), pushed with the queue. */
   quota: Quota | null;
+  /** The disks running low on space (#300), pushed with the queue, and when this
+   * app first saw one low (ms). */
+  disk: { low: LowDisk[]; since: number };
   /** The daemon's `boot`: an item's session ids only mean something on the same one. */
   boot: number;
   /** The session on screen, its screen, and its exit once it has one. */
@@ -153,6 +157,7 @@ export const useApp = create<State>(() => ({
   items: [],
   launches: [],
   quota: null,
+  disk: { low: [], since: 0 },
   boot: 0,
   openId: null,
   screen: null,
@@ -425,6 +430,12 @@ function onPush(msg: ServerMsg): void {
     case "quota":
       set({ quota: msg.quota });
       break;
+    case "disk": {
+      const was = get().disk;
+      const since = msg.low.length === 0 ? 0 : was.low.length > 0 ? was.since : Date.now();
+      set({ disk: { low: msg.low, since } });
+      break;
+    }
     case "screen":
       if (msg.session === get().openId) showScreen(apply(latest(), msg.update));
       break;
@@ -1377,6 +1388,17 @@ export async function shipMerged(only: number[]): Promise<void> {
       only,
     });
     if (reply.t === "shipped") toast(shippedSummary(reply.shipped, reply.kept));
+  } catch (e) {
+    toast((e as Error).message);
+  }
+}
+
+/** Deletes every worktree's idle cargo build output (#300), toasting what it freed. */
+export async function freeDisk(): Promise<void> {
+  if (!conn) return;
+  try {
+    const reply = await conn.request({ t: "free_disk" });
+    if (reply.t === "text") toast(reply.text);
   } catch (e) {
     toast((e as Error).message);
   }
