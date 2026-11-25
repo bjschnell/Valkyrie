@@ -61,6 +61,11 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
   is locked, has an open item on it, or a program runs in it. A shell left idle
   at its prompt there with no jobs (an agent stopped with Ctrl+C) is closed first. Its branch goes only if it's merged. Turn it off
   with `worktree_sweep = off` in `settings.toml`.
+- A worktree the sweep keeps still loses its cargo `target/` folder (up to
+  24 GB each) once nothing was built there for an hour and its work is done (an
+  agent still sits in it after its pull request merged), or once nothing was
+  built there for 3 days, whatever it's for. The next build makes it again. It
+  stays while cargo builds there or a program runs from it, `valk` included.
 
 ## Which repositories you're offered
 

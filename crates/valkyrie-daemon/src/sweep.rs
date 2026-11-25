@@ -14,9 +14,15 @@
 //!
 //! Never forced, as `worktree::remove` never is: a branch that isn't merged
 //! stays, with its commits. `worktree_sweep = off` in `settings.toml` stops it.
+//!
+//! A worktree that stays loses its cargo `target/` (backlog #230), which grows
+//! to 24 GB, once nothing built in it for an hour and its work is finished (an
+//! agent still sits in it after its pull request merged), or once nothing built
+//! in it for `UNBUILT_SECS`, whatever it's for: the next build makes it again.
 
 use crate::Registry;
 use crate::lock::Locked;
+use crate::trim;
 use crate::worktree::{self, Linked};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +39,9 @@ pub(crate) const STALE_SECS: u64 = 14 * 24 * 60 * 60;
 /// Moved this lately, a worktree may be in use from outside any session in it
 /// (an agent working there by path, an editor), so it waits.
 const RECENT_SECS: u64 = 60 * 60;
+/// Unbuilt this long, a kept worktree's `target/` goes though its work isn't
+/// finished: rebuilding takes minutes, a full disk takes the daemon down.
+pub(crate) const UNBUILT_SECS: u64 = 3 * 24 * 60 * 60;
 /// Ignored files that are only build output or tool state, rebuilt on demand:
 /// anything else ignored (`.env`, a local database, an editor's swap file)
 /// keeps the worktree, since nobody is asked before it would go.
@@ -139,29 +148,13 @@ pub(crate) fn judge(wt: &Linked, items: &[&Item], sessions: &[Seen], now: u64) -
             "has ignored files that aren't build output: {shown}"
         ));
     }
-    let landed = wt.merged || wt.squashed;
-    let idle_for = wt.moved.map(|at| now.saturating_sub(at));
-    if idle_for.is_some_and(|s| s < RECENT_SECS) {
+    if wt
+        .moved
+        .is_some_and(|at| now.saturating_sub(at) < RECENT_SECS)
+    {
         return keep("moved within the hour");
     }
-    // Still on the item's branch: a checkout reused for other work since, or
-    // a detached one, is judged as any other.
-    let finished = items
-        .iter()
-        .find(|i| i.branch.is_some() && i.branch == wt.branch);
-    let why = if let Some(done) = finished {
-        let how = match done.status {
-            ItemStatus::Dropped => "dropped",
-            _ => "shipped",
-        };
-        format!("backlog #{} {how}", done.number)
-    } else if landed && !wt.no_commits {
-        "merged".to_owned()
-    } else if (landed || wt.pushed) && idle_for.is_some_and(|s| s >= STALE_SECS) {
-        let days = idle_for.unwrap_or(0) / (24 * 60 * 60);
-        let held = if landed { "merged" } else { "pushed" };
-        format!("untouched for {days} days, all of it {held}")
-    } else {
+    let Some(why) = finished(wt, items, now) else {
         return keep("not done");
     };
     let mut close = Vec::new();
@@ -177,11 +170,89 @@ pub(crate) fn judge(wt: &Linked, items: &[&Item], sessions: &[Seen], now: u64) -
     Verdict::Go { why, close }
 }
 
+/// Why the work in `wt` is finished, given the backlog items whose checkout it
+/// is (`items`), none of them open: its item shipped or was dropped, it's merged,
+/// or it's abandoned. `None` while it isn't.
+fn finished(wt: &Linked, items: &[&Item], now: u64) -> Option<String> {
+    let landed = wt.merged || wt.squashed;
+    let idle_for = wt.moved.map(|at| now.saturating_sub(at));
+    // Still on the item's branch: a checkout reused for other work since, or
+    // a detached one, is judged as any other.
+    let item = items
+        .iter()
+        .find(|i| i.branch.is_some() && i.branch == wt.branch);
+    if let Some(done) = item {
+        let how = match done.status {
+            ItemStatus::Dropped => "dropped",
+            _ => "shipped",
+        };
+        Some(format!("backlog #{} {how}", done.number))
+    } else if landed && !wt.no_commits {
+        Some("merged".to_owned())
+    } else if (landed || wt.pushed) && idle_for.is_some_and(|s| s >= STALE_SECS) {
+        let days = idle_for.unwrap_or(0) / (24 * 60 * 60);
+        let held = if landed { "merged" } else { "pushed" };
+        Some(format!("untouched for {days} days, all of it {held}"))
+    } else {
+        None
+    }
+}
+
+/// Why the cargo `target/` of `wt`, a worktree the sweep keeps, may go, given
+/// the backlog items whose checkout it is (`items`) and when a build last wrote
+/// there (`built`, seconds), at `now`: a build ran within the hour, or it's
+/// locked or gone, keeps it.
+pub(crate) fn trimmable(wt: &Linked, items: &[&Item], built: u64, now: u64) -> Option<String> {
+    if wt.missing || wt.locked {
+        return None;
+    }
+    let unbuilt = now.saturating_sub(built);
+    if unbuilt < RECENT_SECS {
+        return None;
+    }
+    let open = items
+        .iter()
+        .any(|i| matches!(i.status, ItemStatus::Open | ItemStatus::Proposed));
+    if let Some(why) = finished(wt, items, now).filter(|_| !open) {
+        return Some(why);
+    }
+    (unbuilt >= UNBUILT_SECS).then(|| format!("not built in for {} days", unbuilt / (24 * 60 * 60)))
+}
+
 /// Whether the ignored entry `entry` (`web/node_modules/`, `x.tsbuildinfo`) is
 /// only build output.
 fn rebuilt(entry: &str) -> bool {
     let name = entry.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     REBUILT.contains(&name) || name.ends_with(".tsbuildinfo")
+}
+
+/// Deletes the cargo `target/` of `wt`, a worktree the sweep keeps, when
+/// `trimmable` says it may go; logs what it freed, or why it couldn't.
+async fn trim_kept(wt: &Linked, items: &[&Item], now: u64) {
+    let path = wt.path.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let target = trim::cargo_target(&path)?;
+        let built = trim::last_built(&target)?;
+        Some((target, built))
+    })
+    .await;
+    let Ok(Some((target, built))) = found else {
+        return;
+    };
+    let Some(why) = trimmable(wt, items, built, now) else {
+        return;
+    };
+    let shown = target.display().to_string();
+    let done =
+        tokio::task::spawn_blocking(move || trim::trim(&target, &trim::live_binaries())).await;
+    match done {
+        Ok(Ok(bytes)) => {
+            let freed = trim::shown(bytes);
+            tracing::info!("worktree sweep: deleted {shown}, {freed} ({why})");
+        }
+        Ok(Err(e)) => tracing::info!("worktree sweep: kept {shown} ({why}): {e}"),
+        Err(e) => tracing::warn!("worktree sweep: deleting {shown}: {e}"),
+    }
 }
 
 impl Registry {
@@ -223,6 +294,7 @@ impl Registry {
                     .collect();
                 let sessions = self.seen(now);
                 let Verdict::Go { why, close } = judge(&wt, &mine, &sessions, now) else {
+                    trim_kept(&wt, &mine, now).await;
                     continue;
                 };
                 // Nothing moved or changed there since the survey: else closing
@@ -507,6 +579,38 @@ mod tests {
                 close: vec![2]
             }
         );
+    }
+
+    #[test]
+    fn trims_finished_or_long_unbuilt_targets() {
+        let now = STALE_SECS;
+        let mut wt = linked("/r/app-b");
+        wt.merged = true;
+        // Finished (merged): goes once nothing built for an hour.
+        assert_eq!(trimmable(&wt, &[], now - 60, now), None);
+        assert_eq!(
+            trimmable(&wt, &[], now - RECENT_SECS, now),
+            Some("merged".into())
+        );
+        // Locked or missing: stays.
+        wt.locked = true;
+        assert_eq!(trimmable(&wt, &[], 0, now), None);
+        wt.locked = false;
+        // An open item on it: only once unbuilt for days.
+        let open: Item = serde_json::from_value(serde_json::json!({
+            "id": 1, "number": 7, "title": "t", "status": "open", "branch": "b",
+            "created": 1, "updated": 1
+        }))
+        .unwrap();
+        assert_eq!(trimmable(&wt, &[&open], now - RECENT_SECS, now), None);
+        assert_eq!(
+            trimmable(&wt, &[&open], now - UNBUILT_SECS, now),
+            Some("not built in for 3 days".into())
+        );
+        // Not finished at all: the same.
+        let fresh = linked("/r/app-c");
+        assert_eq!(trimmable(&fresh, &[], now - RECENT_SECS, now), None);
+        assert!(trimmable(&fresh, &[], now - UNBUILT_SECS, now).is_some());
     }
 
     /// The sweep end to end: a shipped item's worktree waits for the program in
