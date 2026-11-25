@@ -66,6 +66,11 @@ same repo never edit one checkout. The worktree goes beside the main checkout as
   agent still sits in it after its pull request merged), or once nothing was
   built there for 3 days, whatever it's for. The next build makes it again. It
   stays while cargo builds there or a program runs from it, `valk` included.
+- When a disk under Valkyrie's state or a repository it knows of runs low (under
+  10 GB or 5% free), the Inbox shows a **Disk low** row at the top of Needs you,
+  in the TUI and the web app, with a toast when it starts. Its one action, Free
+  space, deletes every worktree's cargo `target/` that nothing was built in for an
+  hour, whatever the work, with the same guards.
 
 ## Which repositories you're offered
 

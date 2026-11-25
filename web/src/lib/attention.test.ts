@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attention, filedLine, sessionKind, type Waiting } from "./attention";
+import { attention, bytes, diskLine, filedLine, sessionKind, waitingSessions, type Waiting } from "./attention";
 import type { AgentState, Decision, Item, LaunchOffer, QueueItem } from "../proto";
 
 const q = (session: number, state: AgentState, since: number, flag = false): QueueItem =>
@@ -59,6 +59,20 @@ describe("attention", () => {
       items: [item(1, "/r/api", 0, { status: "open" }), item(2, "/r/api", 0, { filed_by: [1, 2], taken: [2] })],
     });
     expect(got).toEqual([]);
+  });
+});
+
+describe("a low disk", () => {
+  const low = [{ path: "/srv", free: 8_240_000_000, total: 1_800_000_000_000 }];
+  it("is one row, before every session", () => {
+    const got = list({ queue: [q(1, "needs_input", 0)], disk: { low, since: 5 } });
+    expect(got.map((a) => a.key)).toEqual(["disk", "s1"]);
+    expect(waitingSessions(got)).toEqual([1]);
+    expect(list({ disk: { low: [], since: 0 } })).toEqual([]);
+  });
+  it("says what's free", () => {
+    expect(diskLine(low)).toBe("8.2 GB free · /srv");
+    expect([bytes(1_800_000_000_000), bytes(512_000_000)]).toEqual(["1.8 TB", "512 MB"]);
   });
 });
 

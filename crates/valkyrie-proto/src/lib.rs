@@ -10,6 +10,7 @@ pub mod client;
 pub mod codec;
 pub mod context;
 pub mod digest;
+pub mod disk;
 pub mod docs;
 pub mod ipc;
 pub mod layout;
@@ -39,6 +40,7 @@ pub use context::{
     ReviewAction, ServedTo,
 };
 pub use digest::{Digest, DigestEntry, DigestGroup, Outcome, PastSession};
+pub use disk::LowDisk;
 pub use docs::{
     CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, NewDoc,
 };
@@ -52,7 +54,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 52;
+pub const PROTOCOL: u32 = 53;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -633,6 +635,13 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
+    /// Deletes the cargo `target/` of every linked worktree of the repositories
+    /// the daemon knows of that nothing built in for an hour, whatever its work
+    /// (protocol 53): what the Inbox's low-disk row offers. Never one cargo
+    /// builds in or a program runs from. Replies `Text`, saying what it freed.
+    FreeDisk {
+        req: ReqId,
+    },
     /// Judges each linked worktree of `cwd`'s repository for removal (DESIGN §4.3),
     /// and with `remove` takes away those that pass: the user only. Replies
     /// `Worktrees`.
@@ -924,6 +933,11 @@ pub enum ServerMsg {
     /// `Queue` and whenever it changes (protocol 30).
     Quota {
         quota: Option<Quota>,
+    },
+    /// The disks running low on space, none when all have room; pushed to queue
+    /// watchers after the first `Queue` and whenever it changes (protocol 53).
+    Disk {
+        low: Vec<LowDisk>,
     },
     /// The attached session's program copied `text` (OSC 52); the client puts it on
     /// its own clipboard.

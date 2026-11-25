@@ -137,6 +137,7 @@ agent: string, worktree: boolean, size: Size, env: Array<[string, string | null]
  * launch of `agent` ran, `""` is the agent's own default.
  */
 model?: string | null, }
+  | { "t": "free_disk", req: number, }
   | { "t": "prune_worktrees", req: number, cwd: string, 
 /**
  * Count `origin`'s default branch as merged into; false when the client
@@ -749,6 +750,19 @@ waived?: Array<number>,
 made: number, };
 
 /**
+ * A disk running low on space.
+ */
+export type LowDisk = { 
+/**
+ * A folder on it the daemon looked at: its state folder or a repository.
+ */
+path: string, 
+/**
+ * Bytes free for an ordinary user, and the disk's size.
+ */
+free: number, total: number, };
+
+/**
  * Terminal modes a client must mirror on its own terminal so that the raw input
  * bytes it forwards are encoded the way the program expects.
  */
@@ -1338,6 +1352,7 @@ export type ServerMsg = { "t": "ok", req: number, reply: Reply, }
  */
 launches?: Array<LaunchOffer>, }
   | { "t": "quota", quota: Quota | null, }
+  | { "t": "disk", low: Array<LowDisk>, }
   | { "t": "clipboard", session: number, text: string, }
   | { "t": "graphics", session: number, x: number, y: number, data: string, };
 

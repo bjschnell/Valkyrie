@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use valkyrie_context::{backlog, project};
-use valkyrie_proto::{Item, ItemStatus, SessionId};
+use valkyrie_proto::{Item, ItemStatus, Reply, SessionId};
 
 /// Between sweeps: each runs `git status` in every worktree.
 const EVERY: Duration = Duration::from_secs(10 * 60);
@@ -264,16 +264,7 @@ impl Registry {
         let items = self.backlog.locked().load();
         let mut done = Vec::new();
         let mut changed = self.clear_gone(&items);
-        let mut repos: Vec<PathBuf> = items
-            .iter()
-            .filter_map(|i| i.project.clone())
-            .chain(self.all().iter().map(|s| s.started_in().to_path_buf()))
-            .filter(|p| p.is_dir() && project::in_git(p))
-            .map(|p| canonical(&project::root(&p)))
-            .collect();
-        repos.sort();
-        repos.dedup();
-        for repo in repos {
+        for repo in self.known_repos() {
             let asked = repo.clone();
             let Ok(Ok(survey)) =
                 tokio::task::spawn_blocking(move || worktree::survey(&asked, true)).await
@@ -342,6 +333,86 @@ impl Registry {
             self.refresh_items();
         }
         done
+    }
+
+    /// The repositories a backlog item or a live session is in, each by its main
+    /// checkout, once.
+    pub(crate) fn known_repos(&self) -> Vec<PathBuf> {
+        let items = self.backlog.locked().load();
+        let mut repos: Vec<PathBuf> = items
+            .iter()
+            .filter_map(|i| i.project.clone())
+            .chain(self.all().iter().map(|s| s.started_in().to_path_buf()))
+            .filter(|p| p.is_dir() && project::in_git(p))
+            .map(|p| canonical(&project::root(&p)))
+            .collect();
+        repos.sort();
+        repos.dedup();
+        repos
+    }
+
+    /// Deletes the cargo `target/` of every linked worktree of the known
+    /// repositories that nothing built in for an hour, whatever its work
+    /// (`FreeDisk`, the Inbox's low-disk row), then reads the disks again. Says
+    /// what it freed.
+    pub(crate) async fn free_disk(&self) -> Reply {
+        let now = now_secs();
+        let repos = self.known_repos();
+        let freed = tokio::task::spawn_blocking(move || {
+            let live = trim::live_binaries();
+            let (mut bytes, mut trimmed, mut kept) = (0, 0, Vec::new());
+            for repo in repos {
+                let Ok(survey) = worktree::survey(&repo, false) else {
+                    continue;
+                };
+                for wt in survey.linked {
+                    if wt.missing || wt.locked {
+                        continue;
+                    }
+                    let Some(target) = trim::cargo_target(&wt.path) else {
+                        continue;
+                    };
+                    let built = trim::last_built(&target).unwrap_or(0);
+                    if now.saturating_sub(built) < RECENT_SECS {
+                        kept.push(format!("{}: built within the hour", target.display()));
+                        continue;
+                    }
+                    match trim::trim(&target, &live) {
+                        Ok(n) => {
+                            tracing::info!(
+                                "free disk: deleted {}, {}",
+                                target.display(),
+                                trim::shown(n)
+                            );
+                            bytes += n;
+                            trimmed += 1;
+                        }
+                        Err(e) => kept.push(format!("{}: {e}", target.display())),
+                    }
+                }
+            }
+            (bytes, trimmed, kept)
+        })
+        .await;
+        let Ok((bytes, trimmed, kept)) = freed else {
+            return Reply::Text {
+                text: "couldn't free anything".to_owned(),
+            };
+        };
+        self.read_disks().await;
+        let mut text = if trimmed == 0 {
+            "No build output to delete".to_owned()
+        } else {
+            let s = if trimmed == 1 { "" } else { "s" };
+            format!(
+                "Freed {}: deleted target/ in {trimmed} worktree{s}",
+                trim::shown(bytes)
+            )
+        };
+        if !kept.is_empty() {
+            text.push_str(&format!("; kept {}", kept.join("; ")));
+        }
+        Reply::Text { text }
     }
 
     /// The live sessions, each with whether it's a shell idle at its prompt.

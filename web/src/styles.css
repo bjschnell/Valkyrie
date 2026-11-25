@@ -1009,6 +1009,11 @@ html.with-tabs .offline-banner {
   opacity: 0.55;
 }
 
+/* A disk running low (#300) is a state, so it takes the blocked color. */
+.attn-mark.attn-disk {
+  background: var(--blocked);
+}
+
 .attn-records {
   margin-top: var(--space-3);
 }
