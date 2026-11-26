@@ -4626,6 +4626,13 @@ impl App {
             self.beside = Some(Beside { session, page });
             self.relayout();
             self.load_beside().await;
+            // Wikilinks reach every doc, as on the Docs page; listing them marks
+            // nothing read.
+            if let Ok((all, _)) = self.client.docs().await
+                && let Some(b) = &mut self.beside
+            {
+                b.page.named(all);
+            }
         }
         let act = key.and_then(|key| self.beside.as_mut()?.page.read(&key));
         if let Some(act) = act {

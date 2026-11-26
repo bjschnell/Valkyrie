@@ -155,11 +155,22 @@ pub(crate) struct Page {
     /// Beside a session, listing the docs it wrote (backlog #311), not the
     /// whole folder.
     pub(crate) beside: bool,
+    /// What wikilinks resolve against when that isn't the list: beside a
+    /// session, every doc, as on the Docs page.
+    pub(crate) named: Option<Vec<Doc>>,
 }
 
 impl Page {
     /// On the list, no doc or Recently deleted open: where section keys are the
     /// app's.
+    /// Every doc, for wikilinks to resolve against (`named`).
+    pub(crate) fn named(&mut self, docs: Vec<Doc>) {
+        self.named = Some(docs);
+        if let Some(r) = &self.reader {
+            *r.drawn.borrow_mut() = None;
+        }
+    }
+
     /// The list came: a reload that fails can keep it.
     pub(crate) fn listed(&self) -> bool {
         self.listing.is_some()
@@ -1100,12 +1111,14 @@ impl Page {
         if drawn.as_ref().is_some_and(|(w, _)| *w == width) {
             return;
         }
-        let names = Names::new(
-            self.listing
+        let names = Names::new(match &self.named {
+            Some(docs) => docs.as_slice(),
+            None => self
+                .listing
                 .as_ref()
                 .map(|l| l.docs.as_slice())
                 .unwrap_or_default(),
-        );
+        });
         let wiki = |target: &str| names.key(target);
         *drawn = Some((width, markdown::render_with(text, width, t, Some(&wiki))));
         // The links moved: tab starts over.
