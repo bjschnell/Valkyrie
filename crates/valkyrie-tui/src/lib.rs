@@ -9577,6 +9577,64 @@ mod tests {
         (app, listener)
     }
 
+    /// What a fake daemon was sent, in order.
+    type Sent = std::sync::Arc<std::sync::Mutex<Vec<valkyrie_proto::ClientMsg>>>;
+
+    /// An App over a fake daemon that answers every request, so a test can go
+    /// through attach and kill: `List` gets `sessions` (less the ones killed
+    /// since), everything else `Done`. The App starts with those sessions and a
+    /// fixed 120x30 terminal. `idle_app`'s listener never answers, and a request
+    /// to it waits forever.
+    async fn answering_app(dir: &std::path::Path, sessions: Vec<SessionInfo>) -> (App, Sent) {
+        use valkyrie_proto::codec::{read_frame, write_frame};
+        use valkyrie_proto::{ClientMsg, Reply};
+        let _ = std::fs::remove_dir_all(dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(dir).unwrap();
+        // Windows' accept takes `&mut`.
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let sent: Sent = Default::default();
+        let (kept, mut listed) = (sent.clone(), sessions.clone());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = tokio::io::split(stream);
+            while let Ok(Some(msg)) = read_frame::<_, ClientMsg>(&mut rd).await {
+                kept.lock().unwrap().push(msg.clone());
+                // Every request carries a `req`; input and resizes don't.
+                let Some(req) = serde_json::to_value(&msg).unwrap()["req"].as_u64() else {
+                    continue;
+                };
+                let reply = match msg {
+                    ClientMsg::List { .. } => Reply::Sessions {
+                        sessions: listed.clone(),
+                        layouts: Vec::new(),
+                    },
+                    ClientMsg::Kill { session, .. } => {
+                        listed.retain(|s| s.id != session);
+                        Reply::Done
+                    }
+                    _ => Reply::Done,
+                };
+                if write_frame(&mut wr, &ServerMsg::Ok { req, reply })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.fixed_size = Some(Size {
+            cols: 120,
+            rows: 29,
+        });
+        app.sessions = sessions;
+        (app, sent)
+    }
+
     /// An agent's new backlog proposal pops up as a toast that names how to answer
     /// it; `b` in tab mode opens the backlog on it. The setting turns it off.
     #[tokio::test]
@@ -12938,7 +12996,7 @@ mod tests {
         app.on_input(click(x, 28).into_bytes()).await;
         assert_eq!(app.selected, before);
         // The decisions' one row: the first click selects it, the second is Enter,
-        // which opens them to review (a session's would attach, needing a daemon).
+        // which opens them to review (a session's attaches: the test after this).
         screen(&app, &mut terminal);
         let y = rows.iter().position(|r| r.contains("decision")).unwrap() as u16;
         let x = rows[y as usize].find("decision").unwrap() as u16;
@@ -12958,6 +13016,85 @@ mod tests {
         assert_eq!(app.reviewing, Some(0));
         app.on_input(b"\x1b".to_vec()).await;
         assert_eq!((app.reviewing, app.quit), (None, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A second click on a session's row attaches it, as Enter does; back home,
+    /// `x` twice closes the selected one and it leaves the list (backlog #106).
+    #[tokio::test]
+    async fn a_second_click_on_a_session_attaches_and_x_x_closes_one() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use valkyrie_proto::ClientMsg;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-open-{}", std::process::id()));
+        let sessions = ["alpha", "bravo", "charlie"]
+            .into_iter()
+            // Not 1, 2, 3: attach refuses the session running this test (VALK_SESSION).
+            .zip(9001..)
+            .map(|(name, id)| SessionInfo {
+                name: name.into(),
+                ..info(id)
+            })
+            .collect();
+        let (mut app, sent) = answering_app(&dir, sessions).await;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut screen = |app: &App| -> Vec<String> {
+            terminal
+                .draw(|frame| {
+                    let [body, bar] =
+                        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)])
+                            .areas(frame.area());
+                    app.draw_home(frame, body, bar);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            buffer
+                .content()
+                .chunks(buffer.area.width as usize)
+                .map(|row| row.iter().map(|c| c.symbol()).collect())
+                .collect()
+        };
+        let click =
+            |x: u16, y: u16| format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1);
+        let rows = screen(&app);
+        let y = rows.iter().rposition(|r| r.contains("bravo")).unwrap() as u16;
+        let x = rows[y as usize].find("bravo").unwrap() as u16;
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(app.selection().0, Some(9002));
+        assert!(app.view.is_none(), "the first click only selects");
+        screen(&app);
+        app.on_input(click(x, y).into_bytes()).await;
+        assert_eq!(
+            app.view.as_ref().map(|v| v.id),
+            Some(9002),
+            "{}",
+            app.status
+        );
+        assert!(
+            sent.lock().unwrap().iter().any(
+                |m| matches!(m, ClientMsg::AttachPanes { panes, .. } if panes.len() == 1 && panes[0].0 == 9002)
+            ),
+            "it asked the daemon to watch bravo"
+        );
+
+        app.detach().await;
+        assert!(app.view.is_none());
+        screen(&app);
+        assert_eq!(app.selection().0, Some(9002), "home, still on bravo");
+        app.on_input(b"x".to_vec()).await;
+        assert!(
+            app.sessions.iter().any(|s| s.id == 9002),
+            "one x only arms it"
+        );
+        app.on_input(b"x".to_vec()).await;
+        assert!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Kill { session: 9002, .. }))
+        );
+        let left: Vec<_> = app.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(left, ["alpha", "charlie"], "{}", app.status);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
