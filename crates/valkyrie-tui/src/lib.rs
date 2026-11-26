@@ -4627,20 +4627,14 @@ impl App {
         let Some(session) = self.view.as_ref().map(|v| v.id) else {
             return;
         };
-        if !self.beside_shown() {
+        // Open on another pane of the tab, it moves to this one's docs.
+        if self.beside.as_ref().is_none_or(|b| b.session != session) {
             let mut page = docs::Page::default();
             page.beside = true;
             page.numbers = self.items.iter().map(|i| (i.id, i.number)).collect();
             self.beside = Some(Beside { session, page });
             self.relayout();
             self.load_beside().await;
-            // Wikilinks reach every doc, as on the Docs page; listing them marks
-            // nothing read.
-            if let Ok((all, _)) = self.client.docs().await
-                && let Some(b) = &mut self.beside
-            {
-                b.page.named(all);
-            }
         }
         let act = key.and_then(|key| self.beside.as_mut()?.page.read(&key));
         if let Some(act) = act {
@@ -4649,12 +4643,18 @@ impl App {
         }
     }
 
-    /// The docs the session beside wrote, asked for again. Listing them marks
-    /// nothing read: the Docs page does that.
+    /// The docs the session beside wrote, asked for again, and every doc for
+    /// wikilinks to reach, as on the Docs page. Listing them marks nothing
+    /// read: the Docs page does that.
     async fn load_beside(&mut self) {
         let Some(session) = self.beside.as_ref().map(|b| b.session) else {
             return;
         };
+        if let Ok((all, _)) = self.client.docs().await
+            && let Some(b) = &mut self.beside
+        {
+            b.page.named(all);
+        }
         let got = self.client.session_docs(session).await;
         // A live reload that failed keeps the list it had.
         if let Some(b) = &mut self.beside
