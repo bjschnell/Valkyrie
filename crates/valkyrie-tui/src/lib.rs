@@ -31,6 +31,7 @@ mod rain;
 mod search;
 mod settings;
 mod supervisor;
+mod term;
 mod theme;
 mod wiki;
 
@@ -824,7 +825,7 @@ impl App {
         };
         // A dropped image delete would leave its image up; the replay after the
         // snapshot puts back the ones still shown.
-        let mut out = std::io::stdout();
+        let mut out = term::outer();
         let _ = write!(out, "{CLEAR_IMAGES}").and_then(|()| out.flush());
         let attached = match self.session_size() {
             Ok(size) => self.client.attach(id, size).await,
@@ -1201,7 +1202,7 @@ impl App {
             return;
         }
         self.home_captured = true;
-        let mut out = std::io::stdout();
+        let mut out = term::outer();
         let _ = write!(out, "{}{}", mouse::CAPTURE_OFF, mouse::CAPTURE_ON);
         let _ = out.flush();
     }
@@ -1614,7 +1615,7 @@ impl App {
             return;
         };
         self.paste_forced = want;
-        let mut out = std::io::stdout();
+        let mut out = term::outer();
         let _ = write!(out, "\x1b[?2004{final_byte}");
         let _ = out.flush();
     }
@@ -5375,7 +5376,7 @@ impl App {
                 // At the cell the program's cursor was on, then the cursor back where
                 // ratatui left it. Unicode placeholders (yazi, `kitten icat`) are
                 // ordinary cells on the screen; this only delivers the image data.
-                let mut out = std::io::stdout();
+                let mut out = term::outer();
                 let (col, row) = (x + 1 + origin.0, y + 1 + origin.1);
                 write!(out, "\x1b7\x1b[{row};{col}H{data}\x1b8")?;
                 out.flush()?;
@@ -8639,7 +8640,7 @@ fn forced_modes(mut m: Modes, forced: bool) -> Modes {
 /// Mirrors the program's input modes.
 fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
     let flag = |on: bool| if on { 'h' } else { 'l' };
-    let mut out = std::io::stdout();
+    let mut out = term::outer();
     write!(
         out,
         "\x1b[?1{}\x1b[?2004{}\x1b[?1004{}{}",
@@ -8663,7 +8664,7 @@ fn write_modes(m: Modes, shape: Option<CursorShape>) -> Result<()> {
 /// The mouse off, for leaving. Valkyrie takes it on the home screen
 /// (`App::capture_home`) and, while attached, first (`App::update_capture`).
 fn release_mouse() -> Result<()> {
-    let mut out = std::io::stdout();
+    let mut out = term::outer();
     write!(out, "{}", mouse::CAPTURE_OFF)?;
     out.flush()?;
     Ok(())
@@ -8674,8 +8675,8 @@ fn reset_terminal_modes() -> Result<()> {
     write_modes(Modes::default(), None)?;
     release_mouse()?;
     // The session's images must not stay over the home screen (or the shell).
-    write!(std::io::stdout(), "{CLEAR_IMAGES}")?;
-    execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape)?;
+    write!(term::outer(), "{CLEAR_IMAGES}")?;
+    execute!(term::outer(), SetCursorStyle::DefaultUserShape)?;
     Ok(())
 }
 
@@ -13075,6 +13076,13 @@ mod tests {
                 |m| matches!(m, ClientMsg::AttachPanes { panes, .. } if panes.len() == 1 && panes[0].0 == 9002)
             ),
             "it asked the daemon to watch bravo"
+        );
+        // Attached, the mouse's motion too; written where a test can read it,
+        // not to the terminal running the tests (backlog #303).
+        let written = term::take_written();
+        assert!(
+            written.contains(&format!("{}{}", mouse::CAPTURE_ON, mouse::MOTION_ON)),
+            "{written:?}"
         );
 
         app.detach().await;
