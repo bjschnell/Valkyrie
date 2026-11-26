@@ -18,9 +18,10 @@ use std::time::{Duration, Instant};
 use valkyrie_context::project;
 use valkyrie_proto::{ItemStatus, SessionId};
 
-/// How long a branch `gh` found no PR for isn't asked about again while its
-/// commit stays the same. A PR opened from the browser shows up within this.
-const NO_PR_FOR: Duration = Duration::from_secs(30 * 60);
+/// How long a branch `gh` found no PR for, or only a merged or closed one, isn't
+/// asked about again while its commit stays the same (backlog #115). A PR opened
+/// or reopened from the browser shows up within this.
+const QUIET_FOR: Duration = Duration::from_secs(30 * 60);
 
 /// One session's place: what to ask `gh` from, and about.
 struct Place {
@@ -108,9 +109,9 @@ impl Registry {
             let cached = self
                 .supervisor
                 .locked()
-                .no_pr
+                .quiet
                 .get(&key)
-                .is_some_and(|(head, at)| *head == first.head && at.elapsed() < NO_PR_FOR);
+                .is_some_and(|(head, at)| *head == first.head && at.elapsed() < QUIET_FOR);
             if cached {
                 continue;
             }
@@ -121,10 +122,7 @@ impl Registry {
                 .unwrap_or(Pr::Unknown);
             let url = match &pr {
                 Pr::None => {
-                    self.supervisor
-                        .locked()
-                        .no_pr
-                        .insert(key, (first.head.clone(), Instant::now()));
+                    self.quiet(key, &first.head);
                     continue;
                 }
                 Pr::Unknown => {
@@ -134,7 +132,7 @@ impl Registry {
                 }
                 Pr::Open { url, .. } | Pr::Merged { url, .. } | Pr::Closed { url } => url.clone(),
             };
-            self.supervisor.locked().no_pr.remove(&key);
+            self.supervisor.locked().quiet.remove(&key);
             // A merge this poll read may have left it conflicting (backlog #215).
             let pr = self.foresee(&url, pr);
             // Watched only while it's the user's own and open, as flags are.
@@ -160,10 +158,13 @@ impl Registry {
                     let own: Vec<SessionId> = places.iter().map(|p| p.session).collect();
                     self.announce_merge(&url, base, &own, &key.0, None);
                 }
+                self.quiet(key, &first.head);
                 continue;
             }
             if let Pr::Closed { .. } = &pr {
                 self.supervisor.locked().open_seen.remove(&url);
+                self.quiet(key, &first.head);
+                continue;
             }
             if let Pr::Open { author, .. } = &pr
                 && author == me
@@ -211,6 +212,15 @@ impl Registry {
             }
         }
         flagged
+    }
+
+    /// Don't ask `gh` about this branch again while it stays at `head`, for a
+    /// while: its answer (no PR, or one merged or closed) won't change by itself.
+    fn quiet(&self, key: (PathBuf, String), head: &str) {
+        self.supervisor
+            .locked()
+            .quiet
+            .insert(key, (head.to_owned(), Instant::now()));
     }
 }
 
@@ -411,7 +421,12 @@ mod tests {
             git(&repo, &["worktree", "add", "-q", "-b", branch, &path_s]);
             path
         };
-        let (mine, old, theirs) = (wt("feat/mine"), wt("feat/old"), wt("feat/theirs"));
+        let (mine, old, theirs, shut) = (
+            wt("feat/mine"),
+            wt("feat/old"),
+            wt("feat/theirs"),
+            wt("feat/shut"),
+        );
         let (registry, _) = crate::new_registry(
             dir.join("v.sock"),
             &dir.join("state"),
@@ -441,9 +456,18 @@ mod tests {
             s
         };
         let (a, b, c, on_main) = (spawn(&mine), spawn(&old), spawn(&theirs), spawn(&repo));
+        let _closed = spawn(&shut);
         let merged = Arc::new(AtomicBool::new(false));
         let now = merged.clone();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = asked.clone();
         let lookup: PrLookup = Arc::new(move |_, branch| {
+            log.locked().push(branch.to_owned());
+            if branch == "feat/shut" {
+                return Pr::Closed {
+                    url: "https://github.com/o/r/pull/4".into(),
+                };
+            }
             let (n, author) = match branch {
                 "feat/mine" => (1, "me"),
                 "feat/old" => (2, "me"),
@@ -490,14 +514,21 @@ mod tests {
         }
         assert_eq!(told(&on_main), [false]);
         assert!(on_main.take_merged()[0].contains("/pull/1"));
-        // Read merged again: not news.
-        registry.watch_branches(lookup, "me").await;
+        // Merged or closed, a branch isn't asked about again while its commit
+        // stays (backlog #115), and so isn't news again either.
+        asked.locked().clear();
+        registry.watch_branches(lookup.clone(), "me").await;
+        assert!(asked.locked().is_empty(), "{:?}", asked.locked());
         assert_eq!(told(&a), [true]);
         assert!(
             [&b, &c, &on_main]
                 .iter()
                 .all(|s| s.take_merged().is_empty())
         );
+        // A new commit asks again.
+        git(&shut, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        registry.watch_branches(lookup, "me").await;
+        assert_eq!(*asked.locked(), ["feat/shut"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

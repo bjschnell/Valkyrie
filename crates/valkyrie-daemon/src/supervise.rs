@@ -207,10 +207,10 @@ pub(crate) struct Supervisor {
     pub(crate) context_on: Option<fn() -> bool>,
     /// Reads a run's attempt number (`run_attempt`); tests set their own.
     pub(crate) attempt: Option<fn(&Path, u64) -> u32>,
-    /// Branches `gh` found no pull request for, by repository and branch: the
-    /// commit they were at and when, so an idle session's branch isn't asked
-    /// about every poll (`branches`).
-    pub(crate) no_pr: HashMap<(PathBuf, String), (String, Instant)>,
+    /// Branches `gh` found no pull request for, or only a merged or closed one,
+    /// by repository and branch: the commit they were at and when, so an idle
+    /// session's branch isn't asked about every poll (`branches`, backlog #115).
+    pub(crate) quiet: HashMap<(PathBuf, String), (String, Instant)>,
     /// Pull requests the branch watch read open since this daemon started: one
     /// it then reads merged is news to tell its agents (backlog #121), once. One
     /// first read merged merged before anyone was watching.
