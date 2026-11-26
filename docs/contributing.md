@@ -46,3 +46,8 @@ The web app's wire types, `web/src/proto.gen.ts`, are generated from
 `UPDATE_PROTO_TS=1 cargo test -p valkyrie-proto proto_ts` and commit the file:
 `cargo test` fails while it's stale, and the web typecheck then catches what the
 change broke.
+
+What only the web app and `valk web` speak (the Chat view's updates, the app's
+own notices, what `valk web` adds to the hello) is generated the same way from
+`valkyrie-web` into `web/src/web.gen.ts`: after changing one of those types, run
+`UPDATE_WEB_TS=1 cargo test -p valkyrie-web web_ts` and commit the file.

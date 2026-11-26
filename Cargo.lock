@@ -7005,6 +7005,7 @@ dependencies = [
  "similar",
  "tokio",
  "tracing",
+ "ts-rs",
  "valkyrie-context",
  "valkyrie-proto",
 ]

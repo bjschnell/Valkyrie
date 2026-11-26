@@ -39,7 +39,9 @@ const POLL: Duration = Duration::from_millis(600);
 /// How often the daemon is asked where the transcript is (`/clear` moves it).
 const RELOOK_EVERY: u32 = 5;
 
+/// One entry in the Chat view.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "ChatItem"))]
 #[serde(tag = "k", rename_all = "snake_case")]
 pub enum Item {
     /// What you typed.
@@ -47,6 +49,7 @@ pub enum Item {
         id: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         at: Option<String>,
     },
     /// What the agent said.
@@ -54,6 +57,7 @@ pub enum Item {
         id: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         at: Option<String>,
     },
     /// One tool call. Sent again, under the same id, when its result comes in.
@@ -69,6 +73,7 @@ pub enum Item {
         id: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         at: Option<String>,
     },
 }
@@ -85,6 +90,7 @@ impl Item {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "ToolStatus"))]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Running,
@@ -96,16 +102,22 @@ pub enum Status {
 
 /// What opening a card shows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "ToolDetail"))]
 pub struct Detail {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub diff: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub result: Option<String>,
 }
 
@@ -869,6 +881,50 @@ enum Look {
     Stay,
 }
 
+/// A reset replaces the chat; otherwise items are added, or replace the item
+/// with their id (a tool call that finished). Sent as `WebMsg::Chat`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ChatUpdate {
+    pub session: SessionId,
+    pub items: Vec<Item>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(as = "Option<bool>", optional))]
+    pub reset: bool,
+    /// Older items exist that weren't loaded.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(as = "Option<bool>", optional))]
+    pub more: bool,
+    /// No transcript known for this session.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(as = "Option<bool>", optional))]
+    pub missing: bool,
+    /// The session is gone.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(as = "Option<bool>", optional))]
+    pub gone: bool,
+}
+
+impl ChatUpdate {
+    fn added(session: SessionId, items: Vec<Item>) -> ChatUpdate {
+        ChatUpdate {
+            session,
+            items,
+            reset: false,
+            more: false,
+            missing: false,
+            gone: false,
+        }
+    }
+
+    fn reset(session: SessionId, items: Vec<Item>) -> ChatUpdate {
+        ChatUpdate {
+            reset: true,
+            ..ChatUpdate::added(session, items)
+        }
+    }
+}
+
 /// A transcript named but not on disk counts as none: Claude Code names it in its
 /// hooks before it writes it, and opening it would fail on every relook, leaving
 /// the browser with nothing to show. It's opened once it's there.
@@ -880,10 +936,10 @@ fn look(chat: Option<PathBuf>, current: Option<&PathBuf>, told_missing: bool) ->
     }
 }
 
-/// Follows one session's chat for a browser, sending `{"t":"chat",…}` messages to
+/// Follows one session's chat for a browser, sending its updates to
 /// `tx` until it closes. A reset message replaces what the browser has; others add
 /// to it, replacing items with the same id.
-pub async fn follow(socket: PathBuf, session: SessionId, tx: mpsc::Sender<Value>) {
+pub async fn follow(socket: PathBuf, session: SessionId, tx: mpsc::Sender<ChatUpdate>) {
     while !tx.is_closed() {
         match follow_once(&socket, session, &tx).await {
             Ok(()) => return,
@@ -893,7 +949,11 @@ pub async fn follow(socket: PathBuf, session: SessionId, tx: mpsc::Sender<Value>
     }
 }
 
-async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>) -> Result<()> {
+async fn follow_once(
+    socket: &Path,
+    session: SessionId,
+    tx: &mpsc::Sender<ChatUpdate>,
+) -> Result<()> {
     let (client, _pushes) = Client::connect(socket).await?;
     let mut tail: Option<(PathBuf, Tail)> = None;
     let mut told_missing = false;
@@ -904,9 +964,11 @@ async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>
         if n % RELOOK_EVERY == 0 {
             let info = client.list().await?.into_iter().find(|s| s.id == session);
             let Some(info) = info else {
-                tx.send(json!({"t": "chat", "session": session, "reset": true,
-                               "items": [], "gone": true}))
-                    .await?;
+                tx.send(ChatUpdate {
+                    gone: true,
+                    ..ChatUpdate::reset(session, Vec::new())
+                })
+                .await?;
                 return Ok(());
             };
             let current = tail.as_ref().map(|(path, _)| path);
@@ -923,17 +985,21 @@ async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>
                     let mut items = collapse(items);
                     let older = items.len().saturating_sub(INITIAL_ITEMS);
                     items.drain(..older);
-                    tx.send(json!({"t": "chat", "session": session, "reset": true,
-                                   "items": items, "more": older > 0 || t.start > 0}))
-                        .await?;
+                    tx.send(ChatUpdate {
+                        more: older > 0 || t.start > 0,
+                        ..ChatUpdate::reset(session, items)
+                    })
+                    .await?;
                     tail = Some((path, t));
                     continue;
                 }
                 Look::Missing => {
                     told_missing = true;
-                    tx.send(json!({"t": "chat", "session": session, "reset": true,
-                                   "items": [], "missing": true}))
-                        .await?;
+                    tx.send(ChatUpdate {
+                        missing: true,
+                        ..ChatUpdate::reset(session, Vec::new())
+                    })
+                    .await?;
                 }
                 Look::Stay => {}
             }
@@ -947,8 +1013,7 @@ async fn follow_once(socket: &Path, session: SessionId, tx: &mpsc::Sender<Value>
             .await?;
             let items = items?;
             if !items.is_empty() {
-                tx.send(json!({"t": "chat", "session": session, "items": collapse(items)}))
-                    .await?;
+                tx.send(ChatUpdate::added(session, collapse(items))).await?;
             }
             tail = Some((path, t));
         }

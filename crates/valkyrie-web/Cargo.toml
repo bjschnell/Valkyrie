@@ -31,3 +31,5 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [dev-dependencies]
 tokio.workspace = true
+# web/src/web.gen.ts is generated from the types only valk web speaks by a test (src/ts.rs).
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
