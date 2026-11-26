@@ -55,6 +55,66 @@ pub fn url_at(rows: &[Row], cols: u16, x: u16, y: u16) -> Option<String> {
     url_in(&line, at)
 }
 
+/// The doc mentioned at cell (`x`, `y`) of `rows`, by its valk-id (backlog #311):
+/// what `valk doc write` and `write_doc` print ("doc 8 written: …"), a read or an
+/// edit of one (`valk doc read 8`), and "doc #8", as the web app's chat finds them.
+pub fn doc_at(rows: &[Row], x: u16, y: u16) -> Option<u32> {
+    let row = rows.iter().find(|r| r.y == y);
+    // One byte a cell, as `url_at` reads them, so a byte is a column.
+    let line: String = crate::mouse::row_cells(row)
+        .iter()
+        .map(|c| match c.as_bytes() {
+            [b] if b.is_ascii_graphic() => *b as char,
+            _ => ' ',
+        })
+        .collect();
+    doc_in(&line, x as usize)
+}
+
+/// The doc mentioned in `line` over byte `at`.
+fn doc_in(line: &str, at: usize) -> Option<u32> {
+    let lower = line.to_ascii_lowercase();
+    let word_start = |i: usize| i == 0 || !lower.as_bytes()[i - 1].is_ascii_alphanumeric();
+    let digits = |from: usize| {
+        let n = lower[from..].bytes().take_while(u8::is_ascii_digit).count();
+        let after = lower.as_bytes().get(from + n);
+        (n > 0 && n <= 10 && !after.is_some_and(u8::is_ascii_alphanumeric)).then_some(n)
+    };
+    for (start, _) in lower.match_indices("doc ") {
+        // "valk doc read 8" reaches back to "valk"; "doc …" starts here.
+        let (from, rest) = match start.checked_sub(5) {
+            Some(v) if lower[v..].starts_with("valk ") && word_start(v) => (v, start + 4),
+            _ => (start, start + 4),
+        };
+        if !word_start(from) {
+            continue;
+        }
+        let tail = &lower[rest..];
+        let (num, needs) = if from < start {
+            match ["read ", "edit "].iter().find(|v| tail.starts_with(**v)) {
+                Some(v) => (rest + v.len(), None),
+                None => continue,
+            }
+        } else if tail.starts_with('#') {
+            (rest + 1, None)
+        } else {
+            (rest, Some(" written"))
+        };
+        let Some(n) = digits(num) else { continue };
+        let end = num + n;
+        if let Some(needs) = needs
+            && !lower[end..].starts_with(needs)
+        {
+            continue;
+        }
+        let id: u32 = lower[num..end].parse().ok()?;
+        if id > 0 && (from..end).contains(&at) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// The URL in `line` covering byte `at`.
 fn url_in(line: &[u8], at: usize) -> Option<String> {
     if !line.get(at).is_some_and(|&b| url_char(b)) {
@@ -193,6 +253,31 @@ mod tests {
 
     fn at(text: &str, x: usize) -> Option<String> {
         url_at(&[row(0, text, false)], 80, x as u16, 0)
+    }
+
+    #[test]
+    fn finds_the_doc_under_the_click() {
+        let doc = |text: &str, x: usize| doc_at(&[row(0, text, false)], x as u16, 0);
+        let written = "doc 8 written: /home/me/docs/plan.md";
+        assert_eq!(doc(written, 0), Some(8));
+        assert_eq!(doc(written, 4), Some(8));
+        assert_eq!(doc(written, 6), None, "past the mention");
+        let read = "run valk doc read 12 now";
+        assert_eq!(doc(read, 4), Some(12));
+        assert_eq!(doc(read, 19), Some(12));
+        assert_eq!(doc(read, 2), None);
+        assert_eq!(doc("  valk doc edit 3 --base ab -", 10), Some(3));
+        assert_eq!(doc("Wrote it up as doc #9.", 19), Some(9));
+        for text in [
+            "doc 8",
+            "docs 8 written",
+            "doc #0",
+            "undoc #5",
+            "valk doc list 3",
+            "doc #12ab",
+        ] {
+            assert!((0..text.len()).all(|x| doc(text, x).is_none()), "{text}");
+        }
     }
 
     #[test]

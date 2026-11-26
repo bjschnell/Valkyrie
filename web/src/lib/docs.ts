@@ -103,3 +103,28 @@ export function onlyIn(text: string, other: string): Set<number> {
   });
   return out;
 }
+
+/** A run of text, or a mention of a doc by its valk-id (backlog #311). */
+export type DocRef = { t: "text"; v: string } | { t: "doc"; v: string; key: string };
+
+/**
+ * What `valk doc write` and `write_doc` print ("doc 8 written: …"), a read or an
+ * edit of one (`valk doc read 8`), and "doc #8" in what an agent says.
+ */
+const MENTION = /\b(?:valk doc (?:read|edit) (\d{1,10})\b|doc #(\d{1,10})\b|doc (\d{1,10})(?= written\b))/gi;
+
+/** `text` cut where it mentions a doc by id, so each mention can open it. */
+export function docRefs(text: string): DocRef[] {
+  const out: DocRef[] = [];
+  let at = 0;
+  for (const m of text.matchAll(MENTION)) {
+    const id = m[1] ?? m[2] ?? m[3];
+    // An id of 0 is a doc that has none yet: nothing to open.
+    if (!id || Number(id) === 0) continue;
+    if (m.index > at) out.push({ t: "text", v: text.slice(at, m.index) });
+    out.push({ t: "doc", v: m[0], key: String(Number(id)) });
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) out.push({ t: "text", v: text.slice(at) });
+  return out;
+}

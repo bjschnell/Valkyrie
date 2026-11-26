@@ -1,17 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { STATE_LABEL, program } from "../proto";
+import { STATE_LABEL, program, type Doc } from "../proto";
 import { isNegative } from "../lib/choices";
 import { answeringLabel } from "../lib/answering";
 import type { Key } from "../lib/keys";
 import { age } from "../lib/time";
-import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, toast, useApp } from "../store";
-import { Back, Clip, Dots, Grid, Send, Wrap } from "./icons";
+import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, sessionDocs, toast, useApp } from "../store";
+import { Back, Clip, Dots, Grid, Page, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
 import { MicButton } from "./Mic";
 import { ScreenView, useDesktop, useWide } from "./Terminal";
 import { usePageKeys } from "../lib/pageKeys";
 import { sessionDock } from "../lib/sessionDock";
+import { DocOpener } from "./docRefs";
+import { SessionDocs } from "./SessionDocs";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -70,6 +72,28 @@ export function SessionView({ id }: { id: number }) {
   // The keyboard is the session's: you clicked into the terminal at desktop width.
   const [typing, setTyping] = useState(false);
   const live = !exited && info?.exited == null;
+  // The docs this session wrote, and the pane they're read in beside it (#311):
+  // null when it's shut, else the doc on show by key, or null for the list.
+  const [docs, setDocs] = useState<Doc[] | null>(null);
+  const [pane, setPane] = useState<{ reading: string | null } | null>(null);
+  const status = useApp((s) => s.status);
+  const turn = info?.status.state;
+  useEffect(() => setPane(null), [id]);
+  useEffect(() => setDocs(null), [id]);
+  // Asked again as its turns go by, and when the pane opens: a doc it just wrote shows.
+  const paneOpen = pane !== null;
+  useEffect(() => {
+    if (status !== "open") return;
+    let fresh = true;
+    sessionDocs(id).then(
+      (ds) => fresh && setDocs(ds),
+      () => fresh && setDocs((d) => d ?? []),
+    );
+    return () => {
+      fresh = false;
+    };
+  }, [id, status, turn, paneOpen]);
+  const toggleDocs = () => setPane((p) => (p ? null : { reading: docs?.length === 1 ? docs[0].key || null : null }));
   const keyboard = typing && mode === "terminal" && live && desktop;
   const dock = sessionDock(mode, desktop);
   // The chat, a window gone narrow or a program gone: it starts again with a
@@ -105,9 +129,11 @@ export function SessionView({ id }: { id: number }) {
       i: () => (dock.composer ? composer.current?.focus() : live && setTyping(true)),
       t: () => hasChat && choose(mode === "chat" ? "terminal" : "chat"),
       r: () => (location.hash = `#/s/${id}/review`),
+      D: toggleDocs,
       q: () => (location.hash = "#/"),
     },
-    { off: keyboard },
+    // The docs pane, when open, has the keys (SessionDocs).
+    { off: keyboard || paneOpen },
   );
   // Ctrl+D and Ctrl+U page through it (listed by hand in lib/shortcuts.ts).
   useEffect(() => {
@@ -174,6 +200,18 @@ export function SessionView({ id }: { id: number }) {
           </div>
         </div>
         <ConnectionPill />
+        {(paneOpen || (docs?.length ?? 0) > 0) && (
+          <button
+            className={`icon-btn docs-btn ${paneOpen ? "lit" : ""}`}
+            aria-label={`Docs from this session (${docs?.length ?? 0})`}
+            aria-pressed={paneOpen}
+            title="Docs from this session (D)"
+            onClick={toggleDocs}
+          >
+            <Page />
+            <span className="docs-btn-n">{docs?.length ?? 0}</span>
+          </button>
+        )}
         {mode === "terminal" && (
           <button className="icon-btn" aria-label={view === "reflow" ? "Show the grid" : "Reflow"} onClick={toggleView}>
             {view === "reflow" ? <Grid /> : <Wrap />}
@@ -202,11 +240,23 @@ export function SessionView({ id }: { id: number }) {
         </div>
       )}
 
-      {mode === "chat" ? (
-        <ChatView info={info} scroller={scroller} onTerminal={() => choose("terminal")} />
-      ) : (
-        <ScreenView view={view} scroller={scroller} typing={typing} onTyping={setTyping} live={live} />
-      )}
+      <DocOpener.Provider value={(key) => setPane({ reading: key })}>
+        <div className={`session-main ${paneOpen ? "with-docs" : ""}`}>
+          {mode === "chat" ? (
+            <ChatView info={info} scroller={scroller} onTerminal={() => choose("terminal")} />
+          ) : (
+            <ScreenView view={view} scroller={scroller} typing={typing} onTyping={setTyping} live={live} />
+          )}
+          {pane && (
+            <SessionDocs
+              docs={docs}
+              reading={pane.reading}
+              onRead={(key) => setPane({ reading: key })}
+              onClose={() => setPane(null)}
+            />
+          )}
+        </div>
+      </DocOpener.Provider>
 
       {exited && (
         <div className="banner">

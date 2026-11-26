@@ -6506,3 +6506,91 @@ html.with-tabs .composer-phone {
   opacity: var(--pack-opacity, 0.6);
   overflow: hidden;
 }
+
+/* Docs a session wrote, read beside it (#311) ---------------------------- */
+.session-main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.docs-btn {
+  display: flex;
+  gap: 4px;
+  width: auto;
+  padding: 0 var(--space-2);
+}
+
+.docs-btn-n {
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* On a phone it's laid over the conversation; the header and dock stay. */
+.session-docs {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--page);
+}
+
+.session-docs-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.session-docs-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.session-docs-full {
+  flex: none;
+  font-size: var(--text-sm);
+}
+
+.session-docs-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-35);
+  -webkit-overflow-scrolling: touch;
+}
+
+.session-docs-empty {
+  padding: var(--space-3) 0;
+}
+
+.doc-ref {
+  font: inherit;
+}
+
+/* On a desktop it's a column beside the chat or terminal. */
+@media (min-width: 760px) and (pointer: fine) {
+  .session-main.with-docs {
+    flex-direction: row;
+  }
+
+  .session-main.with-docs > :first-child {
+    min-width: 0;
+  }
+
+  .session-docs {
+    position: static;
+    flex: 0 0 min(46%, 640px);
+    border-left: 1px solid var(--line);
+  }
+}

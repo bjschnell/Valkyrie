@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use valkyrie_context::docs::{Author, Deleted, Origin, Saved};
-use valkyrie_proto::{NewDoc, Reply};
+use valkyrie_proto::{NewDoc, Reply, SessionId};
 
 /// The user, writing from the web app. Vouched for, so not an agent; and not
 /// the session `valk web` happens to run in, which would claim the edit.
@@ -273,9 +273,30 @@ impl Registry {
         Ok(Reply::Doc { doc: Box::new(doc) })
     }
 
-    pub(crate) fn docs(&self, count_only: bool) -> Result<Reply> {
+    pub(crate) fn docs(&self, count_only: bool, session: Option<SessionId>) -> Result<Reply> {
+        let writer = match session {
+            Some(id) => {
+                let s = self.get(id)?;
+                let info = s.info();
+                Some(valkyrie_context::docs::Writer {
+                    name: info.name,
+                    conversation: s.conversation(),
+                    since: info.created_unix,
+                })
+            }
+            None => None,
+        };
         let mut docs = self.docs.locked();
         let at = now_secs();
+        if let Some(writer) = writer {
+            let list = docs.written_by(&writer)?;
+            return Ok(Reply::Docs {
+                unread: valkyrie_context::docs::Docs::unread(&list),
+                docs: list,
+                root: docs.root(),
+                at,
+            });
+        }
         if count_only {
             return Ok(Reply::Docs {
                 unread: docs.unread_count()?,

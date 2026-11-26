@@ -91,6 +91,7 @@ export const PAGE_KEYS = {
     i: "Write to the agent",
     t: "Switch between chat and terminal",
     r: "Review its changes",
+    D: "Docs this session wrote, beside it: j and k pick one (in a doc, scroll), Enter reads it, Esc goes back, then closes",
     q: "Back to the inbox",
   },
   review: {
@@ -156,7 +157,7 @@ const TITLE: Record<PageKey, string> = {
 };
 
 /** How a key reads on a keycap. */
-const CAP: Record<string, string[]> = { Escape: ["Esc"], G: ["Shift", "G"] };
+const CAP: Record<string, string[]> = { Escape: ["Esc"], G: ["Shift", "G"], D: ["Shift", "D"] };
 
 /** What the keys do on `page`, and then what they do everywhere. */
 export function sections(page: PageKey, mac: boolean): Section[] {
