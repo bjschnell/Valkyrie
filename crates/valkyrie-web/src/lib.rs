@@ -13,6 +13,8 @@ pub mod push;
 pub mod review;
 pub mod tailscale;
 pub mod themes;
+#[cfg(test)]
+mod ts;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -22,15 +24,15 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use include_dir::{Dir, include_dir};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use valkyrie_proto::ClientMsg;
 use valkyrie_proto::client::DaemonInfo;
 use valkyrie_proto::codec::{read_frame, write_frame};
+use valkyrie_proto::{ClientMsg, SessionId};
 
 /// The built app (`web/dist`, committed, so building `valk` needs no Node).
 static DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../web/dist");
@@ -802,10 +804,35 @@ impl Drop for Presence {
     }
 }
 
-/// One daemon connection per browser connection; frames pass through as JSON,
-/// except the app's own messages, which stay here: `{"t":"visible"}`, and
-/// `{"t":"chat","session":id|null}`, which follows (or stops following) one
-/// session's agent transcript (DESIGN §8.7).
+/// The app's own messages to `valk web`, which never reach the daemon.
+#[derive(Debug, PartialEq, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum WebNotice {
+    /// Whether this app is on screen, which holds back notifications.
+    Visible { visible: bool },
+    /// Follow this session's agent transcript (`null`: stop; DESIGN §8.7).
+    Chat { session: Option<SessionId> },
+}
+
+/// What `valk web` sends the app of its own, beside the daemon's frames.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum WebMsg {
+    /// The followed session's chat (`WebNotice::Chat`).
+    Chat(chat::ChatUpdate),
+}
+
+/// What `valk web` adds to the daemon's hello: the build of the app it serves
+/// (web/src/lib/build.ts), and the protocol that build speaks (lib/protocol.ts).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WebHello {
+    pub web: String,
+    pub app_protocol: u32,
+}
+
 /// The daemon's hello, as the app gets it: with the build this server embeds, the
 /// protocol that build speaks (the app keeps no copy of its own, so the two can't
 /// drift), and without the daemon's binary, which is this machine's business.
@@ -813,13 +840,20 @@ fn stamp_hello(frame: &mut serde_json::Value) {
     if frame["t"] != "ok" || frame["reply"]["t"] != "hello" {
         return;
     }
-    frame["reply"]["web"] = BUILD.as_str().into();
-    frame["reply"]["app_protocol"] = valkyrie_proto::PROTOCOL.into();
+    let stamp = WebHello {
+        web: BUILD.to_string(),
+        app_protocol: valkyrie_proto::PROTOCOL,
+    };
     if let Some(reply) = frame["reply"].as_object_mut() {
         reply.remove("exe");
+        if let Ok(serde_json::Value::Object(stamp)) = serde_json::to_value(stamp) {
+            reply.extend(stamp);
+        }
     }
 }
 
+/// One daemon connection per browser connection; frames pass through as JSON,
+/// except the app's own messages (`WebNotice`), which stay here.
 async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
     let socket = presence.app.socket.clone();
     let stream = valkyrie_proto::ipc::connect(&socket)
@@ -829,7 +863,7 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
     let mut from_daemon = DaemonFrames::new(from_daemon);
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(16);
+    let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<chat::ChatUpdate>(16);
     // Held only to stop the task when replaced or when the browser leaves.
     let mut _chat: Option<AbortOnDrop> = None;
     loop {
@@ -845,19 +879,22 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if value["t"] == "visible" {
-                    presence.set(value["visible"] == true);
-                    continue;
-                }
-                if value["t"] == "chat" {
-                    // The old one stops first, so its messages can't follow the new one's.
-                    _chat = None;
-                    while chat_rx.try_recv().is_ok() {}
-                    if let Some(session) = value["session"].as_u64().and_then(|s| u32::try_from(s).ok()) {
-                        let task = chat::follow(socket.clone(), session, chat_tx.clone());
-                        _chat = Some(AbortOnDrop(tokio::spawn(task)));
+                match serde_json::from_value::<WebNotice>(value.clone()) {
+                    Ok(WebNotice::Visible { visible }) => {
+                        presence.set(visible);
+                        continue;
                     }
-                    continue;
+                    Ok(WebNotice::Chat { session }) => {
+                        // The old one stops first, so its messages can't follow the new one's.
+                        _chat = None;
+                        while chat_rx.try_recv().is_ok() {}
+                        if let Some(session) = session {
+                            let task = chat::follow(socket.clone(), session, chat_tx.clone());
+                            _chat = Some(AbortOnDrop(tokio::spawn(task)));
+                        }
+                        continue;
+                    }
+                    Err(_) => {}
                 }
                 match serde_json::from_value::<ClientMsg>(value.clone()) {
                     Ok(msg) if allowed(&msg) => {
@@ -893,7 +930,8 @@ async fn bridge(mut ws: WebSocket, presence: &mut Presence) -> Result<()> {
                 }
             }
             Some(update) = chat_rx.recv() => {
-                ws.send(Message::Text(update.to_string().into())).await?;
+                let update = serde_json::to_string(&WebMsg::Chat(update))?;
+                ws.send(Message::Text(update.into())).await?;
             }
             _ = ping.tick() => ws.send(Message::Ping(Vec::new().into())).await?,
         }
@@ -1009,6 +1047,39 @@ fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apps_own_messages_keep_their_wire_shape() {
+        // web/src/web.gen.ts is generated from these types; this pins the JSON
+        // the bridge reads and writes to what that file says.
+        let notice = |v: serde_json::Value| serde_json::from_value::<WebNotice>(v).ok();
+        assert_eq!(
+            notice(serde_json::json!({"t": "visible", "visible": true})),
+            Some(WebNotice::Visible { visible: true })
+        );
+        assert_eq!(
+            notice(serde_json::json!({"t": "chat", "session": 7})),
+            Some(WebNotice::Chat { session: Some(7) })
+        );
+        assert_eq!(
+            notice(serde_json::json!({"t": "chat", "session": null})),
+            Some(WebNotice::Chat { session: None })
+        );
+        assert_eq!(notice(serde_json::json!({"t": "list", "req": 1})), None);
+
+        let update = chat::ChatUpdate {
+            session: 3,
+            items: Vec::new(),
+            reset: true,
+            more: false,
+            missing: true,
+            gone: false,
+        };
+        assert_eq!(
+            serde_json::to_value(WebMsg::Chat(update)).unwrap(),
+            serde_json::json!({"t": "chat", "session": 3, "items": [], "reset": true, "missing": true})
+        );
+    }
 
     #[tokio::test]
     async fn daemon_frames_survive_a_select_that_keeps_dropping_them() {
