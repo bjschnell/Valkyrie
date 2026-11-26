@@ -449,7 +449,7 @@ impl App {
     pub(crate) fn update_capture(&mut self) {
         if !self.captured {
             self.captured = true;
-            let mut out = std::io::stdout();
+            let mut out = crate::term::outer();
             let _ = std::io::Write::write_all(
                 &mut out,
                 format!(

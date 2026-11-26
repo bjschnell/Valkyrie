@@ -307,7 +307,7 @@ impl Noise {
 /// returns whether a player worked.
 pub fn play(noise: Noise, kind: Kind) -> Option<std::thread::JoinHandle<bool>> {
     if remote() {
-        let mut out = std::io::stdout();
+        let mut out = crate::term::outer();
         let _ = out.write_all(b"\x07").and_then(|()| out.flush());
         return None;
     }

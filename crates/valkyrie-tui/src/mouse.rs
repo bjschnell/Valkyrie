@@ -351,7 +351,7 @@ fn graphemes(s: &str) -> impl Iterator<Item = &str> {
 
 /// Puts `text` on the outer terminal's clipboard.
 pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
-    let mut out = std::io::stdout();
+    let mut out = crate::term::outer();
     write!(out, "{}", osc52(text))?;
     out.flush()
 }
