@@ -377,8 +377,21 @@ mod tests {
             .collect();
         all.push(d(13, K::Pattern, DecisionStatus::Active, 0));
         all[12].pinned = true;
+        // Size the five bodies from what the fixed text (header, titles, how to
+        // propose) leaves of the budget, filling half of it, so the test doesn't
+        // break each time that text grows.
         for x in &mut all {
-            x.body = "y".repeat(440);
+            x.body.clear();
+        }
+        let fixed = block(Path::new("/r/app"), &all, BUDGET, "valk").len();
+        let room = BUDGET.saturating_sub(fixed);
+        let size = (room / 2 / 5).min(MAX_SHOWN_BODY);
+        assert!(
+            size >= 100,
+            "the fixed text leaves {room} bytes for five bodies"
+        );
+        for x in &mut all {
+            x.body = "y".repeat(size);
         }
         let (text, shown) = laid_out(Path::new("/r/app"), &all, BUDGET, "valk");
         assert!(text.len() <= BUDGET, "{}", text.len());
