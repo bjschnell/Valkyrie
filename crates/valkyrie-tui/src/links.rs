@@ -107,7 +107,10 @@ fn doc_in(line: &str, at: usize) -> Option<u32> {
         {
             continue;
         }
-        let id: u32 = lower[num..end].parse().ok()?;
+        // Ten digits can overflow: that one isn't a doc, but the next may be.
+        let Ok(id) = lower[num..end].parse::<u32>() else {
+            continue;
+        };
         if id > 0 && (from..end).contains(&at) {
             return Some(id);
         }
@@ -268,6 +271,11 @@ mod tests {
         assert_eq!(doc(read, 2), None);
         assert_eq!(doc("  valk doc edit 3 --base ab -", 10), Some(3));
         assert_eq!(doc("Wrote it up as doc #9.", 19), Some(9));
+        assert_eq!(
+            doc("doc #9999999999 or doc #4", 24),
+            Some(4),
+            "past a too-big one"
+        );
         for text in [
             "doc 8",
             "docs 8 written",

@@ -75,19 +75,28 @@ export function SessionView({ id }: { id: number }) {
   // The docs this session wrote, and the pane they're read in beside it (#311):
   // null when it's shut, else the doc on show by key, or null for the list.
   const [docs, setDocs] = useState<Doc[] | null>(null);
+  const [docsFailed, setDocsFailed] = useState<string | null>(null);
   const [pane, setPane] = useState<{ reading: string | null } | null>(null);
   const status = useApp((s) => s.status);
   const turn = info?.status.state;
   useEffect(() => setPane(null), [id]);
-  useEffect(() => setDocs(null), [id]);
+  useEffect(() => {
+    setDocs(null);
+    setDocsFailed(null);
+  }, [id]);
   // Asked again as its turns go by, and when the pane opens: a doc it just wrote shows.
   const paneOpen = pane !== null;
   useEffect(() => {
     if (status !== "open") return;
     let fresh = true;
     sessionDocs(id).then(
-      (ds) => fresh && setDocs(ds),
-      () => fresh && setDocs((d) => d ?? []),
+      (ds) => {
+        if (!fresh) return;
+        setDocs(ds);
+        setDocsFailed(null);
+      },
+      // A list it had stays; with none, the pane says why.
+      (e: Error) => fresh && setDocsFailed(e.message),
     );
     return () => {
       fresh = false;
@@ -250,6 +259,7 @@ export function SessionView({ id }: { id: number }) {
           {pane && (
             <SessionDocs
               docs={docs}
+              failed={docsFailed}
               reading={pane.reading}
               onRead={(key) => setPane({ reading: key })}
               onClose={() => setPane(null)}

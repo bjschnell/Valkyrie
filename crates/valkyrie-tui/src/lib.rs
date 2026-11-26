@@ -1007,6 +1007,7 @@ impl App {
                             && self.renaming.is_none()
                             && self.menu.is_none()
                             && self.reviewing.is_none()
+                            && !self.beside_shown()
                             && find_direct(&keys, &self.settings.keys).is_none() =>
                     {
                         if self.others.is_empty() {
@@ -1251,19 +1252,20 @@ impl App {
         if self.tab_mode {
             return self.tab_keys(&bytes).await;
         }
-        // The docs beside the session have the keyboard, but for tab mode's key.
+        // The docs beside the session have the keyboard, but for the direct
+        // keys, which do what they do everywhere.
         if self.beside_shown() {
-            let toggle = self.settings.keys.get(Action::Tabs).map(Key::bytes);
-            if let Some(toggle) = toggle
-                && let Some(at) = bytes
-                    .windows(toggle.len())
-                    .position(|w| w == toggle.as_slice())
-            {
-                self.beside_keys(&bytes[..at]).await;
+            let Some((i, action, len)) = find_direct(&bytes, &self.settings.keys) else {
+                return self.beside_keys(&bytes).await;
+            };
+            self.beside_keys(&bytes[..i]).await;
+            let after = bytes[i + len..].to_vec();
+            if action == Action::Tabs {
                 self.tab_mode = true;
-                return Box::pin(self.tab_keys(&bytes[at + toggle.len()..])).await;
+                return Box::pin(self.tab_keys(&after)).await;
             }
-            return self.beside_keys(&bytes).await;
+            self.on_direct(action).await;
+            return Box::pin(self.after_direct(&after)).await;
         }
         self.option_hint(&bytes);
         let Some(view) = &mut self.view else { return };
@@ -3207,6 +3209,17 @@ impl App {
     /// items and proposals come pushed. Not while a session is attached over it.
     async fn reload_page(&mut self) {
         self.page_loaded = Instant::now();
+        // The docs beside a session show only while attached, so they reload then.
+        if self.beside_shown()
+            && let Some(b) = &mut self.beside
+        {
+            let acts = b.page.refresh();
+            self.load_beside().await;
+            for act in acts {
+                self.docs_on = DocsOn::Beside;
+                Box::pin(self.docs_do(act)).await;
+            }
+        }
         if self.view.is_some() {
             return;
         }
@@ -3230,14 +3243,6 @@ impl App {
             self.fetch_docs(false).await;
             for act in acts {
                 self.docs_on = DocsOn::Home;
-                Box::pin(self.docs_do(act)).await;
-            }
-        }
-        if let Some(b) = &mut self.beside {
-            let acts = b.page.refresh();
-            self.load_beside().await;
-            for act in acts {
-                self.docs_on = DocsOn::Beside;
                 Box::pin(self.docs_do(act)).await;
             }
         }
@@ -4599,9 +4604,12 @@ impl App {
         self.docs.is_some() && self.view.is_none()
     }
 
-    /// Whether the docs beside a session are on screen: open on the attached one.
+    /// Whether the docs beside a session are on screen: open on a pane of the
+    /// attached tab, whichever pane has focus.
     fn beside_shown(&self) -> bool {
-        matches!((&self.beside, &self.view), (Some(b), Some(v)) if b.session == v.id)
+        self.beside
+            .as_ref()
+            .is_some_and(|b| self.pane_ids().contains(&b.session))
     }
 
     /// The docs page a `docs::Do` answers (`docs_on`).
@@ -9978,8 +9986,13 @@ mod tests {
         app.open_beside(Some("8".into())).await;
         let screen = draw(&app, &mut terminal);
         assert!(screen.contains("Ship the canary first."), "{screen}");
-        // Another session's tab doesn't show them.
+        // Focus on another pane of the same tab keeps them.
+        let docs_pane = app.view.take();
         app.view = Some(Attached::new(2, "other".into(), None));
+        app.others = docs_pane.into_iter().collect();
+        assert!(app.beside_shown(), "still this tab's");
+        // Another session's tab doesn't show them.
+        app.others.clear();
         assert!(!app.beside_shown());
         assert_eq!(app.split_body(full).0, whole);
         let _ = std::fs::remove_dir_all(&dir);

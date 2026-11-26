@@ -63,13 +63,15 @@ pub struct Writer {
 
 impl Writer {
     /// Whether it wrote the doc this front matter is from: by its agent's
-    /// conversation, or for a doc with none, by its name since it started.
+    /// conversation when both are known, else by its name since it started.
+    /// Names repeat (two sessions both called `claude`), so a doc from
+    /// another conversation is never this session's, even by the same name.
     fn wrote(&self, front: &Front) -> bool {
         if front.by.is_empty() || front.by == "human" {
             return false;
         }
         match (&front.conversation, &self.conversation) {
-            (Some(theirs), Some(ours)) if theirs == ours => true,
+            (Some(theirs), Some(ours)) => theirs == ours,
             _ => {
                 front.session.as_deref() == Some(self.name.as_str())
                     && parse_rfc3339(&front.created).is_some_and(|at| at >= self.since)
@@ -1435,6 +1437,15 @@ mod tests {
             .unwrap();
         f.docs
             .write(&f.new_doc("Before", true), &nameless, NOV_9 - 60)
+            .unwrap();
+        // Same name, another conversation, while this one runs: a second
+        // session by the same name, whose docs aren't this one's.
+        let twin = Author {
+            conversation: Some("xyz-9".into()),
+            ..claude()
+        };
+        f.docs
+            .write(&f.new_doc("Twin's", true), &twin, NOV_9 + 120)
             .unwrap();
         let human = Author {
             by: "human".into(),

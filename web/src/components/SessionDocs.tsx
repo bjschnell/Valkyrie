@@ -19,12 +19,15 @@ import { Markdown } from "./Markdown";
  */
 export function SessionDocs({
   docs,
+  failed,
   reading,
   onRead,
   onClose,
 }: {
   /** The session's docs, null while they load. */
   docs: Doc[] | null;
+  /** Why they couldn't be listed, if they couldn't. */
+  failed: string | null;
   /** The doc on show, by key; null for the list. */
   reading: string | null;
   onRead: (key: string | null) => void;
@@ -32,6 +35,8 @@ export function SessionDocs({
 }) {
   const [picked, setPicked] = useState(0);
   const list = docs ?? [];
+  // A reload with fewer docs keeps the highlight on one.
+  useEffect(() => setPicked((p) => Math.min(p, Math.max(0, list.length - 1))), [list.length]);
   // Back from a doc goes to the list only when there's a list to go back to.
   const hasList = list.length > 1 || (list.length === 1 && reading !== list[0].key);
   const back = () => (reading !== null && hasList ? onRead(null) : onClose());
@@ -42,7 +47,12 @@ export function SessionDocs({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if ((e.target as HTMLElement).closest("textarea, input, select, [contenteditable]")) return;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("textarea, input, select, [contenteditable]")) return;
+      // A sheet over the page ('?') has the keys, Esc above all.
+      if (document.querySelector("dialog[open]")) return;
+      // Enter on a focused button or link is that control's.
+      if (e.key === "Enter" && target?.closest("button, a, [role=button]")) return;
       const { list, picked, reading, back, onRead, onClose } = latest.current;
       const at = (n: number) => setPicked(Math.max(0, Math.min(list.length - 1, n)));
       const by = (dy: number) => pane.current?.querySelector(".session-docs-body")?.scrollBy({ top: dy });
@@ -77,7 +87,8 @@ export function SessionDocs({
             <span className="session-docs-title">Docs from this session</span>
           </header>
           <div className="session-docs-body">
-            {docs === null && <Loading rows={3} />}
+            {failed && docs === null && <p className="muted session-docs-empty">Couldn't list them: {failed}</p>}
+            {docs === null && !failed && <Loading rows={3} />}
             {docs !== null && docs.length === 0 && (
               <p className="muted session-docs-empty">
                 This session hasn't written a doc yet. Agents write them with <code>valk doc write</code>.
