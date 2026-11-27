@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Doc } from "../proto";
-import { body, countByQuote, grouped, groupOf, onlyIn, quoteOf, resolver, validKey } from "./docs";
+import { body, countByQuote, docRefs, grouped, groupOf, onlyIn, quoteOf, resolver, validKey } from "./docs";
 
 const doc = (path: string, key: string, title = ""): Doc => ({
   id: /^\d+$/.test(key) ? Number(key) : 0,
@@ -88,5 +88,30 @@ describe("onlyIn", () => {
     expect([...onlyIn(mine, theirs)]).toEqual([2]);
     expect([...onlyIn(theirs, mine)]).toEqual([2]);
     expect([...onlyIn("a\n\n\n", "a")]).toEqual([]);
+  });
+});
+
+describe("docRefs", () => {
+  const docs = (text: string) => docRefs(text).flatMap((r) => (r.t === "doc" ? [[r.v, r.key]] : []));
+  it("finds what writing, reading and editing a doc print", () => {
+    expect(docs("doc 8 written: /home/me/docs/plan.md")).toEqual([["doc 8", "8"]]);
+    expect(docs("run `valk doc read 12` then valk doc edit 12 --base ab -")).toEqual([
+      ["valk doc read 12", "12"],
+      ["valk doc edit 12", "12"],
+    ]);
+    expect(docs("Wrote it up as doc #9.")).toEqual([["doc #9", "9"]]);
+  });
+  it("keeps the rest of the text as it was", () => {
+    const text = "see doc #3 and doc #4, done";
+    expect(docRefs(text).map((r) => r.v).join("")).toBe(text);
+  });
+  it("leaves other numbers and words alone", () => {
+    for (const text of ["doc 8", "docs 8 written", "the 2nd doc", "doc #0", "undoc #5", "valk doc list 3"]) {
+      expect(docs(text), text).toEqual([]);
+    }
+    expect(docRefs("")).toEqual([]);
+  });
+  it("names a doc by its id without leading zeros", () => {
+    expect(docs("doc #007")).toEqual([["doc #007", "7"]]);
   });
 });

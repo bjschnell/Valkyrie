@@ -961,6 +961,14 @@ export async function allDocs(): Promise<{ docs: Doc[]; unread: number; at: numb
   }
 }
 
+/** The docs session `id` wrote, newest first (backlog #311). Throws with the daemon's reason. */
+export async function sessionDocs(id: SessionId): Promise<Doc[]> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "docs", session: id });
+  if (reply.t !== "docs") throw new Error("unexpected reply");
+  return reply.docs;
+}
+
 /** What every agent did since `sinceMs`, or since you were last gone (backlog
  * #105). Throws with the daemon's reason. */
 export async function awayDigest(sinceMs: number | null, by: DigestGroup): Promise<Digest> {

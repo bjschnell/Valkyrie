@@ -36,6 +36,7 @@ decisions. The bar under a session lists these keys, and you can click them.
 | | `r` · `,` | rename the tab · settings |
 | | `m` | minimal tabs: one row each; at the side, a rail of icons that opens under the mouse |
 | | `d` | decisions to review, over the session (`a`/`d` accept/reject) |
+| | `D` | the docs this session wrote, in a column beside its panes: `↩` reads one, `esc` goes back, then closes it, `D` again closes it. A click on a doc the session mentions (`doc 8 written`, `valk doc read 8`, `doc #8`) reads it there too |
 
 **Remapping.** Press `.` on the home screen (or in the settings panel), then `↩`
 and the new key. `⌫` clears a key, `r` puts back its default, and `R` twice puts

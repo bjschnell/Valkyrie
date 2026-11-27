@@ -152,11 +152,30 @@ pub(crate) struct Page {
     trash: Option<Trash>,
     /// The docs a wikilink was followed from, by key and scroll, for esc.
     back: Vec<(String, u16)>,
+    /// Beside a session, listing the docs it wrote (backlog #311), not the
+    /// whole folder.
+    pub(crate) beside: bool,
+    /// What wikilinks resolve against when that isn't the list: beside a
+    /// session, every doc, as on the Docs page.
+    pub(crate) named: Option<Vec<Doc>>,
 }
 
 impl Page {
     /// On the list, no doc or Recently deleted open: where section keys are the
     /// app's.
+    /// Every doc, for wikilinks to resolve against (`named`).
+    pub(crate) fn named(&mut self, docs: Vec<Doc>) {
+        self.named = Some(docs);
+        if let Some(r) = &self.reader {
+            *r.drawn.borrow_mut() = None;
+        }
+    }
+
+    /// The list came: a reload that fails can keep it.
+    pub(crate) fn listed(&self) -> bool {
+        self.listing.is_some()
+    }
+
     pub(crate) fn at_list(&self) -> bool {
         self.reader.is_none() && self.trash.is_none() && !self.search.typing
     }
@@ -872,6 +891,20 @@ impl Page {
         Some(Do::Open(key.to_string()))
     }
 
+    /// Reads the doc with `key`, from the list or from another doc: a click on
+    /// a mention of it in the session beside (backlog #311).
+    pub(crate) fn read(&mut self, key: &str) -> Option<Do> {
+        if self.reader.is_some() {
+            return self.follow(key);
+        }
+        self.trash = None;
+        self.reader = Some(Reader {
+            key: key.to_string(),
+            ..Default::default()
+        });
+        Some(Do::Open(key.to_string()))
+    }
+
     /// The wheel over the doc being read scrolls it.
     pub(crate) fn wheel(&self, down: bool, rows: i32) {
         if let Some(r) = self.reader.as_ref().filter(|r| !r.covered()) {
@@ -913,9 +946,12 @@ impl Page {
     }
 
     pub(crate) fn draw(&self, frame: &mut ratatui::Frame, t: &Theme) {
-        let area = frame.area();
         // Nearly the whole screen, like the backlog and digest pages.
-        let rect = crate::section_rect(area);
+        self.draw_in(frame, crate::section_rect(frame.area()), t);
+    }
+
+    /// The page in `rect`: beside a session, its column.
+    pub(crate) fn draw_in(&self, frame: &mut ratatui::Frame, rect: Rect, t: &Theme) {
         frame.render_widget(Clear, rect);
         match &self.reader {
             Some(r) => self.draw_reader(frame, rect, r, t),
@@ -945,23 +981,26 @@ impl Page {
                     0 => String::new(),
                     n => format!(" · {n} new since you last looked"),
                 };
-                let about = format!(
-                    "{} in {}{unread}",
-                    plural(l.docs.len(), "doc"),
-                    l.root.display()
-                );
+                let about = match self.beside {
+                    true => format!("{} from this session", plural(l.docs.len(), "doc")),
+                    false => format!(
+                        "{} in {}{unread}",
+                        plural(l.docs.len(), "doc"),
+                        l.root.display()
+                    ),
+                };
                 top.push(format!(" {}", fit(&about, inner)).fg(t.fg).into());
                 if let Some((_, title)) = &self.undo {
                     let line = format!(" Deleted “{title}” · z puts it back");
                     top.push(fit(&line, inner).fg(t.accent).into());
                 }
                 if l.docs.is_empty() {
+                    let none = match self.beside {
+                        true => " This session hasn't written a doc yet.",
+                        false => " No docs yet. Agents write them with `valk doc write`.",
+                    };
                     top.push(Line::default());
-                    top.push(
-                        " No docs yet. Agents write them with `valk doc write`."
-                            .fg(t.muted)
-                            .into(),
-                    );
+                    top.push(none.fg(t.muted).into());
                 }
             }
         }
@@ -1072,12 +1111,14 @@ impl Page {
         if drawn.as_ref().is_some_and(|(w, _)| *w == width) {
             return;
         }
-        let names = Names::new(
-            self.listing
+        let names = Names::new(match &self.named {
+            Some(docs) => docs.as_slice(),
+            None => self
+                .listing
                 .as_ref()
                 .map(|l| l.docs.as_slice())
                 .unwrap_or_default(),
-        );
+        });
         let wiki = |target: &str| names.key(target);
         *drawn = Some((width, markdown::render_with(text, width, t, Some(&wiki))));
         // The links moved: tab starts over.

@@ -2,6 +2,7 @@ import { docHash } from "../lib/routes";
 import { useMemo, type HTMLAttributes, type ReactNode } from "react";
 import { parseInline, parseMarkdown } from "../lib/chat";
 import { quoteOf } from "../lib/docs";
+import { DocRefs } from "./docRefs";
 
 /** Where a `[[wikilink]]` goes: a doc's key, or null when no doc goes by that name. */
 export type WikiResolver = (target: string) => string | null;
@@ -157,9 +158,13 @@ function inlines(text: string, wiki?: WikiResolver): ReactNode[] {
         );
       }
       case "text":
-        return part.v;
+        return <DocRefs key={i} text={part.v} />;
       case "code":
-        return <code key={i}>{part.v}</code>;
+        return (
+          <code key={i}>
+            <DocRefs text={part.v} />
+          </code>
+        );
       case "b":
         return <strong key={i}>{part.v}</strong>;
       case "i":

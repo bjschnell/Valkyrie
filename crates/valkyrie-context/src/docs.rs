@@ -50,6 +50,36 @@ pub struct Origin {
     pub conversation: Option<String>,
 }
 
+/// A session, as far as finding the docs it wrote goes (backlog #311).
+#[derive(Debug, Clone, Default)]
+pub struct Writer {
+    pub name: String,
+    /// Its agent's conversation now, if known.
+    pub conversation: Option<String>,
+    /// When the session started, in seconds: a doc by its name from before
+    /// then is another session's that went by the same name.
+    pub since: u64,
+}
+
+impl Writer {
+    /// Whether it wrote the doc this front matter is from: by its agent's
+    /// conversation when both are known, else by its name since it started.
+    /// Names repeat (two sessions both called `claude`), so a doc from
+    /// another conversation is never this session's, even by the same name.
+    fn wrote(&self, front: &Front) -> bool {
+        if front.by.is_empty() || front.by == "human" {
+            return false;
+        }
+        match (&front.conversation, &self.conversation) {
+            (Some(theirs), Some(ours)) => theirs == ours,
+            _ => {
+                front.session.as_deref() == Some(self.name.as_str())
+                    && parse_rfc3339(&front.created).is_some_and(|at| at >= self.since)
+            }
+        }
+    }
+}
+
 /// What the daemon keeps about docs in `<state dir>/docs.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Config {
@@ -244,6 +274,18 @@ impl Docs {
     /// Every doc under the root, newest first. Files without a `valk-id` (the
     /// user's own) are listed with id 0 and a handle for a key.
     pub fn list(&mut self) -> Result<Vec<Doc>> {
+        let docs = self.listed(|_| true)?;
+        self.count = Some((std::time::Instant::now(), Self::unread(&docs)));
+        Ok(docs)
+    }
+
+    /// The docs `writer` wrote, newest first, listed as `list` lists them
+    /// (backlog #311). The Inbox's unread count stays as it was.
+    pub fn written_by(&mut self, writer: &Writer) -> Result<Vec<Doc>> {
+        self.listed(|front| writer.wrote(front))
+    }
+
+    fn listed(&mut self, keep: impl Fn(&Front) -> bool) -> Result<Vec<Doc>> {
         let root = self.real_root()?;
         let seen = self.config.seen;
         // Front matter is the writer's word: a date in the future can't pin a doc
@@ -252,6 +294,7 @@ impl Docs {
         let mut docs: Vec<(u128, Doc)> = self
             .keyed(&root)
             .into_iter()
+            .filter(|(_, c, _)| keep(&c.front))
             .map(|(path, c, key)| {
                 let mut d = doc(&root, &path, &c.front, String::new());
                 d.key = key;
@@ -261,9 +304,7 @@ impl Docs {
             })
             .collect();
         docs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
-        let docs: Vec<Doc> = docs.into_iter().map(|(_, d)| d).collect();
-        self.count = Some((std::time::Instant::now(), Self::unread(&docs)));
-        Ok(docs)
+        Ok(docs.into_iter().map(|(_, d)| d).collect())
     }
 
     /// How many docs are unread, for a poll: the last count while it's fresh
@@ -1368,6 +1409,70 @@ mod tests {
         }
         assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
         assert_eq!(parse_rfc3339("yesterday"), None);
+    }
+
+    #[test]
+    fn a_session_finds_the_docs_it_wrote() {
+        let mut f = Fixture::new("written-by");
+        let mine = f
+            .docs
+            .write(&f.new_doc("Mine", true), &claude(), NOV_9)
+            .unwrap();
+        // Same name, another conversation: an earlier session's.
+        let older = Author {
+            conversation: Some("old-1".into()),
+            ..claude()
+        };
+        f.docs
+            .write(&f.new_doc("Older", true), &older, NOV_9 - 3600)
+            .unwrap();
+        // No conversation known: by name, once the session started.
+        let nameless = Author {
+            conversation: None,
+            ..claude()
+        };
+        let by_name = f
+            .docs
+            .write(&f.new_doc("By name", true), &nameless, NOV_9 + 60)
+            .unwrap();
+        f.docs
+            .write(&f.new_doc("Before", true), &nameless, NOV_9 - 60)
+            .unwrap();
+        // Same name, another conversation, while this one runs: a second
+        // session by the same name, whose docs aren't this one's.
+        let twin = Author {
+            conversation: Some("xyz-9".into()),
+            ..claude()
+        };
+        f.docs
+            .write(&f.new_doc("Twin's", true), &twin, NOV_9 + 120)
+            .unwrap();
+        let human = Author {
+            by: "human".into(),
+            ..claude()
+        };
+        f.docs
+            .write(&f.new_doc("The user's", true), &human, NOV_9)
+            .unwrap();
+
+        let writer = Writer {
+            name: "#4 docs".into(),
+            conversation: Some("abc-123".into()),
+            since: NOV_9 - 1,
+        };
+        let found: Vec<u32> = f
+            .docs
+            .written_by(&writer)
+            .unwrap()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        let mut want = vec![mine.id, by_name.id];
+        let mut got = found.clone();
+        want.sort();
+        got.sort();
+        assert_eq!(got, want, "{found:?}");
+        assert!(f.docs.written_by(&Writer::default()).unwrap().is_empty());
     }
 
     #[test]
