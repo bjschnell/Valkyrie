@@ -1671,7 +1671,12 @@ fn an_agent_drives_the_panes_of_its_tab() {
 /// `web_listen` moves it off the real one's port.
 #[test]
 fn the_daemon_starts_the_web_app_on_localhost_until_it_is_turned_off() {
-    let dir = temp("autoweb");
+    // The default socket is `<state>/valkyrie/run/<hostname>.sock`: under macOS's
+    // long $TMPDIR, with a runner's long hostname, that passes the 104-byte limit
+    // on socket paths and the daemon can't bind. /tmp keeps it short.
+    let dir = PathBuf::from(format!("/tmp/vaw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
     let config = dir.join("config");
     std::fs::create_dir_all(config.join("valkyrie")).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -1692,12 +1697,32 @@ fn the_daemon_starts_the_web_app_on_localhost_until_it_is_turned_off() {
             .env_remove("VALK_WEB_SERVER");
         cmd
     };
-    let mut daemon = KillOnDrop(cmd().arg("daemon").stderr(Stdio::null()).spawn().unwrap());
+    let log = dir.join("daemon.log");
+    let mut daemon = KillOnDrop(
+        cmd()
+            .arg("daemon")
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
     let listening = || std::net::TcpStream::connect(&addr).is_ok();
+    // What the daemon and its web server said, for a failure to explain itself.
+    let said = || {
+        let read = |p: PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+        format!(
+            "daemon: {}\nweb: {}",
+            read(log.clone()),
+            read(dir.join("valkyrie/web/server.log"))
+        )
+    };
     let within = |secs: u64, what: &str, done: &dyn Fn() -> bool| {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while !done() {
-            assert!(Instant::now() < deadline, "{what} within {secs}s");
+            assert!(
+                Instant::now() < deadline,
+                "{what} within {secs}s\n{}",
+                said()
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     };
