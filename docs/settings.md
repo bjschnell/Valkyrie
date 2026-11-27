@@ -19,6 +19,10 @@ Press `,` to open the settings panel. You can change:
   a click on it does. The web app has its own switch, under Settings → Agent proposals
 - analytics (`on`/`off`, off by default): count which features get used, for
   `valk stats` ([usage](usage.md#is-it-helping)). It stays on this machine
+- web server (`on`/`off`, on by default): the daemon keeps the web app running
+  on this machine, on localhost only (port 8790; `web_listen = "127.0.0.1:PORT"`
+  moves it). A service from `valk setup web` runs it instead when there is one.
+  `valk web server on|off` and the web app's Settings change it too
 
 With `theme` colors, a session's background, default text and 16 ANSI colors come
 from the theme. Colors a program picks exactly (256-color or RGB) stay as it drew
@@ -62,4 +66,4 @@ to paired devices.
 Settings are kept in `~/.config/valkyrie/settings.toml`
 (`%APPDATA%\Valkyrie\settings.toml` on Windows), which you can also edit by hand.
 `VALK_THEME`, `VALK_SESSION_COLORS`, `VALK_TABS`, `VALK_TAB_SIDE`, `VALK_TAB_DETAIL`, `VALK_SOUND`, `VALK_DESKTOP`, `VALK_PROPOSALS` and
-`VALK_PROJECT_CONTEXT` and `VALK_ANALYTICS` override it for one run.
+`VALK_PROJECT_CONTEXT`, `VALK_ANALYTICS` and `VALK_WEB_SERVER` override it for one run.

@@ -1664,3 +1664,78 @@ fn an_agent_drives_the_panes_of_its_tab() {
     daemon.wait().unwrap();
     remove_test_dir(&dir);
 }
+
+/// Backlog #316: the daemon serving this machine starts the web app by itself,
+/// on localhost only, and the `web_server` setting turns it off and on again.
+/// The daemon runs on its default socket here (no `VALK_SOCKET`), as yours does;
+/// `web_listen` moves it off the real one's port.
+#[test]
+fn the_daemon_starts_the_web_app_on_localhost_until_it_is_turned_off() {
+    let dir = temp("autoweb");
+    let config = dir.join("config");
+    std::fs::create_dir_all(config.join("valkyrie")).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let settings = config.join("valkyrie/settings.toml");
+    std::fs::write(&settings, format!("web_listen = \"{addr}\"\n")).unwrap();
+    let cmd = || {
+        let mut cmd = Command::new(BIN);
+        cmd.env("XDG_STATE_HOME", &dir)
+            .env("XDG_CONFIG_HOME", &config)
+            .env_remove("VALK_SOCKET")
+            .env_remove("VALK_SESSION")
+            .env_remove("VALK_SESSION_HOOKS")
+            .env_remove("VALK_WEB_SERVER");
+        cmd
+    };
+    let mut daemon = KillOnDrop(cmd().arg("daemon").stderr(Stdio::null()).spawn().unwrap());
+    let listening = || std::net::TcpStream::connect(&addr).is_ok();
+    let within = |secs: u64, what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what} within {secs}s");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let server = || {
+        let out = cmd().args(["web", "server"]).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    within(30, "the web app is up", &|| listening());
+    let check = cmd()
+        .args(["web", "--listen", &addr, "check"])
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "not our valk web: {check:?}");
+    assert!(server().starts_with("on:"), "{}", server());
+
+    std::fs::write(
+        &settings,
+        format!("web_listen = \"{addr}\"\nweb_server = off\n"),
+    )
+    .unwrap();
+    within(15, "the web app stops once turned off", &|| !listening());
+    assert!(server().starts_with("off:"), "{}", server());
+    // It stays off: the daemon doesn't start it again.
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(!listening(), "started again while off");
+
+    std::fs::write(
+        &settings,
+        format!("web_listen = \"{addr}\"\nweb_server = on\n"),
+    )
+    .unwrap();
+    within(15, "the web app is back once turned on", &|| listening());
+
+    // It goes with its daemon, rather than holding the port.
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    within(20, "the web app stops with its daemon", &|| !listening());
+    remove_test_dir(&dir);
+}

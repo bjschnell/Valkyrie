@@ -228,8 +228,11 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
 
 ## Phone and web
 
-`valk web` serves the web app on localhost (port 8790). How your phone reaches it
-is up to you. The app installs and sends notifications only over HTTPS.
+`valk web` serves the web app on localhost (port 8790). The daemon starts it for
+you and keeps it running, on this machine only; `valk web open` opens it paired,
+and `valk web server off` (or the *Web server* setting in valk or the web app)
+turns that off. How your phone reaches it is up to you. The app installs and
+sends notifications only over HTTPS.
 
 ```sh
 valk setup web                                  # with Tailscale
