@@ -14,6 +14,7 @@ import {
 import { useApp } from "../store";
 import { Markdown } from "./Markdown";
 import { Chevron } from "./icons";
+import { DocRefs } from "./docRefs";
 
 /**
  * The session's agent conversation (DESIGN §8.7): what you asked, what it said, and
@@ -187,7 +188,7 @@ function ToolCard({ card }: { card: ToolItem }) {
         <div className="tool-body">
           {body.map((part) => (
             <pre key={part.label} className={`tool-pre ${part.label}`} aria-label={part.label}>
-              {part.label === "diff" ? <Diff text={part.text} /> : part.text}
+              {part.label === "diff" ? <Diff text={part.text} /> : <DocRefs text={part.text} />}
             </pre>
           ))}
         </div>

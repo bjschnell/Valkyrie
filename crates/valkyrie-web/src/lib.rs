@@ -1387,6 +1387,7 @@ mod tests {
         assert!(allowed(&ClientMsg::Docs {
             req: 1,
             count_only: true,
+            session: None,
         }));
         assert!(allowed(&ClientMsg::DocsSeen { req: 1, at: 0 }));
         assert!(allowed(&ClientMsg::OpenDoc {

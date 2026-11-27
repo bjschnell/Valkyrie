@@ -54,7 +54,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 54;
+pub const PROTOCOL: u32 = 55;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -550,7 +550,7 @@ pub enum ClientMsg {
         on: Option<bool>,
     },
     /// Whether the daemon keeps `valk web` running on this machine, bound to
-    /// localhost (backlog #316, protocol 54): `web_server` in `settings.toml`, on
+    /// localhost (backlog #316, protocol 55): `web_server` in `settings.toml`, on
     /// by default. `None` only asks; setting it is for the user only. Replies
     /// `Text`, `on` or `off`.
     WebServer {
@@ -683,11 +683,15 @@ pub enum ClientMsg {
     },
     /// Every doc, newest first, without their text. Replies `Docs`; with
     /// `count_only`, with no docs, just the unread count (the Inbox's poll),
-    /// which the daemon may answer from a count up to 30 s old.
+    /// which the daemon may answer from a count up to 30 s old. With `session`
+    /// (protocol 54, backlog #311), only the docs that session wrote, for its
+    /// side pane; listing them marks nothing read.
     Docs {
         req: ReqId,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         count_only: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<SessionId>,
     },
     /// The web app's read (ADR-0021 §5, protocol 33): a doc by the `key` a list
     /// gave it, never by path, and never writing to the file (a doc with no id

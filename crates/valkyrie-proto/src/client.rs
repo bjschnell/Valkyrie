@@ -582,10 +582,37 @@ impl Client {
             .request(|req| ClientMsg::Docs {
                 req,
                 count_only: false,
+                session: None,
             })
             .await?
         {
             Reply::Docs { docs, root, .. } => Ok((docs, root)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The docs session `id` wrote, newest first (backlog #311). Listing them
+    /// marks nothing read.
+    pub async fn session_docs(&self, id: crate::SessionId) -> Result<crate::DocsListing> {
+        match self
+            .request(|req| ClientMsg::Docs {
+                req,
+                count_only: false,
+                session: Some(id),
+            })
+            .await?
+        {
+            Reply::Docs {
+                docs,
+                root,
+                unread,
+                at,
+            } => Ok(crate::DocsListing {
+                docs,
+                root,
+                unread,
+                at,
+            }),
             other => bail!("unexpected reply: {other:?}"),
         }
     }
@@ -597,6 +624,7 @@ impl Client {
             .request(|req| ClientMsg::Docs {
                 req,
                 count_only: false,
+                session: None,
             })
             .await?
         {

@@ -312,6 +312,11 @@ struct App {
     supervisor: Option<supervisor::Page>,
     /// The Docs page is open (`D` on the home screen).
     docs: Option<docs::Page>,
+    /// The docs a session wrote, read beside its panes (`D` in tab mode, or a
+    /// click on a mention of one; backlog #311).
+    beside: Option<Beside>,
+    /// Which docs page a `docs::Do` answers: home's, or the one beside a session.
+    docs_on: DocsOn,
     /// The repository wiki is open (`W` on the home screen).
     wiki: Option<wiki::Page>,
     /// Memory's Decisions, Skills or Notes tab (`g m`).
@@ -523,6 +528,8 @@ impl App {
             digest: None,
             supervisor: None,
             docs: None,
+            beside: None,
+            docs_on: DocsOn::Home,
             wiki: None,
             memory: None,
             prs: None,
@@ -1000,6 +1007,7 @@ impl App {
                             && self.renaming.is_none()
                             && self.menu.is_none()
                             && self.reviewing.is_none()
+                            && !self.beside_shown()
                             && find_direct(&keys, &self.settings.keys).is_none() =>
                     {
                         if self.others.is_empty() {
@@ -1244,6 +1252,21 @@ impl App {
         if self.tab_mode {
             return self.tab_keys(&bytes).await;
         }
+        // The docs beside the session have the keyboard, but for the direct
+        // keys, which do what they do everywhere.
+        if self.beside_shown() {
+            let Some((i, action, len)) = find_direct(&bytes, &self.settings.keys) else {
+                return self.beside_keys(&bytes).await;
+            };
+            self.beside_keys(&bytes[..i]).await;
+            let after = bytes[i + len..].to_vec();
+            if action == Action::Tabs {
+                self.tab_mode = true;
+                return Box::pin(self.tab_keys(&after)).await;
+            }
+            self.on_direct(action).await;
+            return Box::pin(self.after_direct(&after)).await;
+        }
         self.option_hint(&bytes);
         let Some(view) = &mut self.view else { return };
         view.selection = None;
@@ -1467,6 +1490,16 @@ impl App {
                 b"z" => {
                     self.tab_mode = false;
                     self.toggle_zoom();
+                }
+                // The docs this session wrote, beside it; again, they close.
+                b"D" => {
+                    self.tab_mode = false;
+                    if self.beside_shown() {
+                        self.close_beside();
+                    } else {
+                        self.open_beside(None).await;
+                    }
+                    return;
                 }
                 b"p" => {
                     self.tab_mode = false;
@@ -2701,6 +2734,13 @@ impl App {
                 return self.tab_click(tabs, m).await;
             }
         }
+        // Over the docs beside the session: theirs.
+        if let Some(area) = self.beside_area()
+            && area.contains(Position::new(m.x, m.y))
+        {
+            self.docs_on = DocsOn::Beside;
+            return self.docs_mouse(m).await;
+        }
         // Below the strip: a pane's, a divider's, or the pane menu's.
         let Some(m) = self.pane_mouse(m).await else {
             return;
@@ -2738,6 +2778,9 @@ impl App {
                     let (id, url) = (view.id, links::url_at(view.shown(), view.cols, at.0, at.1));
                     if let Some(url) = url {
                         self.open_link(id, &url);
+                    } else if let Some(doc) = links::doc_at(view.shown(), at.0, at.1) {
+                        // A doc it mentions, read beside it (backlog #311).
+                        self.open_beside(Some(doc.to_string())).await;
                     }
                     return;
                 };
@@ -3030,6 +3073,7 @@ impl App {
             ("r", "rename"),
             ("b", "backlog"),
             ("d", "decisions"),
+            ("D", "its docs, beside it"),
             ("m", "minimal tabs"),
             (",", "settings"),
             ("?", "every key"),
@@ -3165,6 +3209,17 @@ impl App {
     /// items and proposals come pushed. Not while a session is attached over it.
     async fn reload_page(&mut self) {
         self.page_loaded = Instant::now();
+        // The docs beside a session show only while attached, so they reload then.
+        if self.beside_shown()
+            && let Some(b) = &mut self.beside
+        {
+            let acts = b.page.refresh();
+            self.load_beside().await;
+            for act in acts {
+                self.docs_on = DocsOn::Beside;
+                Box::pin(self.docs_do(act)).await;
+            }
+        }
         if self.view.is_some() {
             return;
         }
@@ -3187,6 +3242,7 @@ impl App {
             let acts = page.refresh();
             self.fetch_docs(false).await;
             for act in acts {
+                self.docs_on = DocsOn::Home;
                 Box::pin(self.docs_do(act)).await;
             }
         }
@@ -4548,6 +4604,82 @@ impl App {
         self.docs.is_some() && self.view.is_none()
     }
 
+    /// Whether the docs beside a session are on screen: open on a pane of the
+    /// attached tab, whichever pane has focus.
+    fn beside_shown(&self) -> bool {
+        self.beside
+            .as_ref()
+            .is_some_and(|b| self.pane_ids().contains(&b.session))
+    }
+
+    /// The docs page a `docs::Do` answers (`docs_on`).
+    fn docs_page(&mut self) -> Option<&mut docs::Page> {
+        match self.docs_on {
+            DocsOn::Home => self.docs.as_mut(),
+            DocsOn::Beside => self.beside.as_mut().map(|b| &mut b.page),
+        }
+    }
+
+    /// Opens the docs the attached session wrote beside it, reading `key` if
+    /// given (a click on a mention of it). Open on that session already, it
+    /// stays as it is, but for `key`.
+    async fn open_beside(&mut self, key: Option<String>) {
+        let Some(session) = self.view.as_ref().map(|v| v.id) else {
+            return;
+        };
+        // Open on another pane of the tab, it moves to this one's docs.
+        if self.beside.as_ref().is_none_or(|b| b.session != session) {
+            let mut page = docs::Page::default();
+            page.beside = true;
+            page.numbers = self.items.iter().map(|i| (i.id, i.number)).collect();
+            self.beside = Some(Beside { session, page });
+            self.relayout();
+            self.load_beside().await;
+        }
+        let act = key.and_then(|key| self.beside.as_mut()?.page.read(&key));
+        if let Some(act) = act {
+            self.docs_on = DocsOn::Beside;
+            self.docs_do(act).await;
+        }
+    }
+
+    /// The docs the session beside wrote, asked for again, and every doc for
+    /// wikilinks to reach, as on the Docs page. Listing them marks nothing
+    /// read: the Docs page does that.
+    async fn load_beside(&mut self) {
+        let Some(session) = self.beside.as_ref().map(|b| b.session) else {
+            return;
+        };
+        if let Ok((all, _)) = self.client.docs().await
+            && let Some(b) = &mut self.beside
+        {
+            b.page.named(all);
+        }
+        let got = self.client.session_docs(session).await;
+        // A live reload that failed keeps the list it had.
+        if let Some(b) = &mut self.beside
+            && (got.is_ok() || !b.page.listed())
+        {
+            b.page.loaded(got.map_err(|e| e.to_string()));
+        }
+    }
+
+    fn close_beside(&mut self) {
+        if self.beside.take().is_some() {
+            self.relayout();
+        }
+    }
+
+    /// Keys while the docs beside a session are open.
+    async fn beside_keys(&mut self, bytes: &[u8]) {
+        let Some(b) = &mut self.beside else { return };
+        let acts = b.page.keys(bytes);
+        for act in acts {
+            self.docs_on = DocsOn::Beside;
+            Box::pin(self.docs_do(act)).await;
+        }
+    }
+
     async fn open_docs(&mut self) {
         // Just loaded: the next live reload is a full `PAGE_RELOAD` away.
         self.page_loaded = Instant::now();
@@ -4588,6 +4720,7 @@ impl App {
             return;
         };
         for act in page.keys(bytes) {
+            self.docs_on = DocsOn::Home;
             Box::pin(self.docs_do(act)).await;
         }
     }
@@ -4595,7 +4728,10 @@ impl App {
     /// Does what the Docs page asked.
     async fn docs_do(&mut self, act: docs::Do) {
         match act {
-            docs::Do::Close => self.docs = None,
+            docs::Do::Close => match self.docs_on {
+                DocsOn::Home => self.docs = None,
+                DocsOn::Beside => self.close_beside(),
+            },
             docs::Do::Url(url) => self.open_url(&url),
             docs::Do::Open(key) => {
                 let got = self
@@ -4603,7 +4739,7 @@ impl App {
                     .open_doc(key.clone())
                     .await
                     .map_err(|e| e.to_string());
-                let next = self.docs.as_mut().and_then(|page| page.opened(&key, got));
+                let next = self.docs_page().and_then(|page| page.opened(&key, got));
                 if let Some(next) = next {
                     Box::pin(self.docs_do(next)).await;
                 }
@@ -4614,14 +4750,14 @@ impl App {
                     .doc_comments(key.clone())
                     .await
                     .map_err(|e| e.to_string());
-                if let Some(page) = &mut self.docs {
+                if let Some(page) = self.docs_page() {
                     page.comments(&key, got, false);
                 }
             }
             docs::Do::Comment { key, quote, text } => {
                 match self.client.comment_doc(key.clone(), quote, text).await {
                     Ok((list, to)) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.comments(&key, Ok(list), true);
                         }
                         // As the web app says it.
@@ -4632,7 +4768,7 @@ impl App {
                     }
                     // The comment stays in its box, to send again.
                     Err(e) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.comments(&key, Err(e.to_string()), true);
                         }
                         self.say(format!("couldn't comment: {e}"));
@@ -4642,7 +4778,7 @@ impl App {
             docs::Do::Resolve { key, id } => {
                 match self.client.resolve_comment(key.clone(), id).await {
                     Ok(list) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.comments(&key, Ok(list), false);
                         }
                     }
@@ -4661,7 +4797,7 @@ impl App {
             docs::Do::Save { key, base, body } => self.save_doc(key, base, body, None).await,
             docs::Do::History(key) => {
                 let got = self.client.doc_history(key.clone(), None).await;
-                if let Some(page) = &mut self.docs {
+                if let Some(page) = self.docs_page() {
                     page.history(&key, got.map(|(v, _)| v).map_err(|e| e.to_string()));
                 }
             }
@@ -4672,7 +4808,7 @@ impl App {
                     .await
                 {
                     Ok((_, Some(text))) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.peeked(&key, &version, text);
                         }
                     }
@@ -4683,14 +4819,14 @@ impl App {
             docs::Do::Restore { key, base, version } => {
                 match self.client.restore_doc(key.clone(), base, version).await {
                     Ok((doc, false)) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.changed(&key, doc);
                         }
                         // As the web app says it.
                         self.say("Restored. What it replaced is in its history.".into());
                     }
                     Ok((doc, true)) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.changed(&key, doc);
                         }
                         self.say("It changed since you opened it: this is the new version.".into());
@@ -4701,14 +4837,14 @@ impl App {
             docs::Do::Delete { key, base, title } => {
                 match self.client.delete_doc(key.clone(), base).await {
                     Ok(Ok(token)) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.deleted(&key, token, title.clone());
                         }
                         self.say(format!("Deleted “{title}”: z puts it back."));
-                        self.load_docs().await;
+                        self.reload_docs_page().await;
                     }
                     Ok(Err(now)) => {
-                        if let Some(page) = &mut self.docs {
+                        if let Some(page) = self.docs_page() {
                             page.changed(&key, now);
                         }
                         self.say("It changed since you opened it. This is the new version: d d to delete it.".into());
@@ -4719,17 +4855,16 @@ impl App {
             docs::Do::Undelete(token) => match self.client.undelete_doc(token.clone()).await {
                 Ok(doc) => {
                     let next = self
-                        .docs
-                        .as_mut()
+                        .docs_page()
                         .and_then(|page| page.undeleted(&token, &doc));
                     self.say(format!("Put back as {}.", doc.path));
-                    self.load_docs().await;
+                    self.reload_docs_page().await;
                     if let Some(next) = next {
                         Box::pin(self.docs_do(next)).await;
                     }
                 }
                 Err(e) => {
-                    if let Some(page) = &mut self.docs {
+                    if let Some(page) = self.docs_page() {
                         page.undo_failed(&token);
                     }
                     self.say(format!("couldn't put it back: {e}"));
@@ -4737,7 +4872,7 @@ impl App {
             },
             docs::Do::Deleted => {
                 let got = self.client.deleted_docs().await.map_err(|e| e.to_string());
-                if let Some(page) = &mut self.docs {
+                if let Some(page) = self.docs_page() {
                     page.trash(got);
                 }
             }
@@ -4747,6 +4882,16 @@ impl App {
             },
             docs::Do::Say(text) => self.say(text),
         }
+    }
+
+    /// The list `docs_on` names, loaded again after a delete or a put-back.
+    async fn reload_docs_page(&mut self) {
+        let on = self.docs_on;
+        match on {
+            DocsOn::Home => self.load_docs().await,
+            DocsOn::Beside => self.load_beside().await,
+        }
+        self.docs_on = on;
     }
 
     /// Opens a doc's body (or a proposal's words) in your editor (`$VISUAL`,
@@ -4853,6 +4998,10 @@ impl App {
         };
         match saved {
             Ok((doc, false)) => {
+                // Either page may have it open: each takes only its own doc.
+                if let Some(b) = &mut self.beside {
+                    b.page.saved(&key, doc.clone());
+                }
                 if let Some(page) = &mut self.docs {
                     page.saved(&key, doc);
                 }
@@ -4861,10 +5010,15 @@ impl App {
             // The path first: a narrow bar cuts the end off.
             Ok((theirs, true)) => {
                 let kept = kept();
-                let shown = self
+                let beside = self
+                    .beside
+                    .as_mut()
+                    .is_some_and(|b| b.page.conflict(&key, body.clone(), theirs.clone()));
+                let home = self
                     .docs
                     .as_mut()
                     .is_some_and(|page| page.conflict(&key, body, theirs));
+                let shown = beside || home;
                 let why = if shown {
                     "it changed since you opened it: t, e or s"
                 } else {
@@ -4885,7 +5039,13 @@ impl App {
     /// The wheel scrolls the doc being read; a click on a link in it opens it,
     /// and on a wikilink reads that doc.
     async fn on_docs_mouse(&mut self, m: Mouse) {
-        let Some(page) = &mut self.docs else { return };
+        self.docs_on = DocsOn::Home;
+        self.docs_mouse(m).await;
+    }
+
+    /// The mouse over the docs `docs_on` names.
+    async fn docs_mouse(&mut self, m: Mouse) {
+        let Some(page) = self.docs_page() else { return };
         match m.kind {
             MouseKind::WheelUp | MouseKind::WheelDown => {
                 page.wheel(m.kind == MouseKind::WheelDown, WHEEL_ROWS)
@@ -5432,7 +5592,8 @@ impl App {
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
             match &self.view {
                 Some(view) => {
-                    let (main, tabs) = self.split_body(body);
+                    let (whole, tabs) = self.split_tabs(body);
+                    let (main, docs_area) = self.beside_split(whole);
                     let cursor = !self.tab_mode
                         && self.renaming.is_none()
                         && self.menu.is_none()
@@ -5446,7 +5607,15 @@ impl App {
                         && self.backlog.is_none()
                         && !self.mini_open()
                         && !self.rail_open();
-                    self.draw_panes(frame, main, cursor);
+                    // The docs beside have the keyboard: no cursor in a pane.
+                    let cursor = cursor && docs_area.is_none();
+                    // Covered whole on a narrow screen, the panes aren't drawn.
+                    if docs_area != Some(main) {
+                        self.draw_panes(frame, main, cursor);
+                    }
+                    if let (Some(area), Some(b)) = (docs_area, &self.beside) {
+                        self.draw_beside(frame, area, area != main, &b.page);
+                    }
                     if let Some(tabs) = tabs {
                         self.draw_tabs(frame, tabs);
                     }
@@ -6907,6 +7076,56 @@ struct TabLayout {
 impl App {
     /// The attached session's area and, when shown, the tab strip's, within `body`.
     fn split_body(&self, body: Rect) -> (Rect, Option<Rect>) {
+        let (main, tabs) = self.split_tabs(body);
+        (self.beside_split(main).0, tabs)
+    }
+
+    /// The session's area and the docs column beside it (backlog #311), while
+    /// one is open on the attached session. On a narrow screen the docs take it
+    /// all, and the panes keep their size under them.
+    fn beside_split(&self, main: Rect) -> (Rect, Option<Rect>) {
+        if !self.beside_shown() {
+            return (main, None);
+        }
+        if main.width < BESIDE_MIN_COLS {
+            return (main, Some(main));
+        }
+        let [panes, docs] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .areas(main);
+        (panes, Some(docs))
+    }
+
+    /// The docs beside a session: a hairline to the panes when they share the
+    /// screen (a frame, not a dialog: nothing behind it dims), then the page.
+    fn draw_beside(&self, frame: &mut ratatui::Frame, area: Rect, beside: bool, page: &docs::Page) {
+        let t = self.settings.theme;
+        let area = match beside {
+            true => {
+                let rule = Rect { width: 1, ..area };
+                frame.render_widget(ratatui::widgets::Clear, rule);
+                let line: Vec<Line> = (0..area.height).map(|_| "│".fg(t.dim()).into()).collect();
+                frame.render_widget(Paragraph::new(line), rule);
+                Rect {
+                    x: area.x + 1,
+                    width: area.width.saturating_sub(1),
+                    ..area
+                }
+            }
+            false => area,
+        };
+        page.draw_in(frame, area, t);
+    }
+
+    /// The docs column on screen now, if one is open.
+    fn beside_area(&self) -> Option<Rect> {
+        let full = self.screen().ok()?;
+        let (main, _) = self.split_tabs(Rect::new(0, 0, full.cols, full.rows));
+        self.beside_split(main).1
+    }
+
+    /// The body split into the session's area and, when shown, the tab strip's.
+    fn split_tabs(&self, body: Rect) -> (Rect, Option<Rect>) {
         let side = |at| Layout::horizontal(at).areas::<2>(body);
         let width = match (self.rail(), self.settings.minimal_tabs) {
             (true, _) => RAIL_WIDTH,
@@ -9052,6 +9271,24 @@ struct Editing {
     seen: bool,
 }
 
+/// The docs page beside a session (backlog #311): the docs it wrote, in a column
+/// of its own beside the panes. It has the keyboard while open; esc on its list
+/// closes it.
+struct Beside {
+    session: SessionId,
+    page: docs::Page,
+}
+
+/// Which docs page an action is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocsOn {
+    Home,
+    Beside,
+}
+
+/// Narrower than this, the docs beside a session take its whole area.
+const BESIDE_MIN_COLS: u16 = 100;
+
 /// What's open in your editor, and where what you write goes.
 #[derive(Debug)]
 enum Edited {
@@ -9615,6 +9852,18 @@ mod tests {
                         listed.retain(|s| s.id != session);
                         Reply::Done
                     }
+                    // Session 1 wrote doc 8; the rest wrote none.
+                    ClientMsg::Docs {
+                        session: Some(id), ..
+                    } => Reply::Docs {
+                        docs: (id == 1).then(|| fake_doc(false)).into_iter().collect(),
+                        root: "/docs".into(),
+                        unread: 0,
+                        at: 1,
+                    },
+                    ClientMsg::OpenDoc { key, .. } if key == "8" => Reply::Doc {
+                        doc: Box::new(fake_doc(true)),
+                    },
                     _ => Reply::Done,
                 };
                 if write_frame(&mut wr, &ServerMsg::Ok { req, reply })
@@ -9634,6 +9883,119 @@ mod tests {
         });
         app.sessions = sessions;
         (app, sent)
+    }
+
+    /// Doc 8, as `answering_app` has it: with its text when read.
+    fn fake_doc(text: bool) -> valkyrie_proto::Doc {
+        valkyrie_proto::Doc {
+            id: 8,
+            kind: valkyrie_proto::DocKind::Plan,
+            title: "Rollout plan".into(),
+            path: "repos/app/2026-11-26-rollout-plan.md".into(),
+            key: "8".into(),
+            unread: false,
+            by: "claude".into(),
+            created: "2026-11-26T10:00:00Z".into(),
+            session: Some("app".into()),
+            commit: None,
+            item: None,
+            repo: None,
+            edited: vec![],
+            hash: text.then(|| "abc".into()),
+            text: text
+                .then(|| "---\nvalk-id: 8\n---\n# Rollout\n\nShip the canary first.\n".into()),
+        }
+    }
+
+    /// The docs a session wrote open beside its panes (backlog #311): `D` in tab
+    /// mode, or a click on a mention of one. They take the keyboard, read a doc
+    /// with ↩, and esc goes back to the list, then closes them.
+    #[tokio::test]
+    async fn a_sessions_docs_open_beside_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-beside-{}", std::process::id()));
+        let (mut app, sent) = answering_app(&dir, vec![info(1), info(2)]).await;
+        let mut view = Attached::new(1, "app".into(), None);
+        view.apply(update(true, vec![row(0, "doc 8 written: /docs/x.md")]));
+        app.view = Some(view);
+        let full = Rect::new(0, 0, 120, 29);
+        let whole = app.split_body(full).0;
+
+        app.on_keys(vec![TABS_KEY, b'D']).await;
+        assert!(app.beside_shown() && !app.tab_mode);
+        let (panes, _) = app.split_body(full);
+        let docs = app.beside_area().unwrap();
+        assert!(
+            panes.width < whole.width && docs.x >= panes.right(),
+            "{panes:?} {docs:?}"
+        );
+        assert!(
+            sent.lock().unwrap().iter().any(|m| matches!(
+                m,
+                valkyrie_proto::ClientMsg::Docs {
+                    session: Some(1),
+                    ..
+                }
+            )),
+            "asks for this session's docs only"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let draw = |app: &App, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|frame| {
+                    let b = app.beside.as_ref().unwrap();
+                    app.draw_beside(frame, app.beside_area().unwrap(), true, &b.page);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let screen = draw(&app, &mut terminal);
+        assert!(screen.contains("1 doc from this session"), "{screen}");
+        assert!(screen.contains("Rollout plan"), "{screen}");
+
+        // Keys are the docs', not the program's: ↩ reads it.
+        app.on_keys(b"\r".to_vec()).await;
+        let screen = draw(&app, &mut terminal);
+        assert!(screen.contains("Ship the canary first."), "{screen}");
+        assert!(
+            !sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| matches!(m, valkyrie_proto::ClientMsg::Input { .. })),
+            "nothing typed into the session"
+        );
+        // Esc back to the list, and again closes it; the panes get their room back.
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert!(app.beside_shown());
+        app.on_keys(b"\x1b".to_vec()).await;
+        assert!(app.beside.is_none());
+        assert_eq!(app.split_body(full).0, whole);
+
+        // A mention of it in the session reads it there at once.
+        app.open_beside(Some("8".into())).await;
+        let screen = draw(&app, &mut terminal);
+        assert!(screen.contains("Ship the canary first."), "{screen}");
+        // Focus on another pane of the same tab keeps them.
+        let docs_pane = app.view.take();
+        app.view = Some(Attached::new(2, "other".into(), None));
+        app.others = docs_pane.into_iter().collect();
+        assert!(app.beside_shown(), "still this tab's");
+        // Another session's tab doesn't show them.
+        app.others.clear();
+        assert!(!app.beside_shown());
+        assert_eq!(app.split_body(full).0, whole);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An agent's new backlog proposal pops up as a toast that names how to answer

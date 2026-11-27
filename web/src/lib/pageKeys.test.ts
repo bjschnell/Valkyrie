@@ -23,7 +23,7 @@ describe("the sheet from the table", () => {
     for (const page of Object.keys(PAGE_KEYS) as (keyof typeof PAGE_KEYS)[]) {
       const shown = sections(page, false)[0].shortcuts.flatMap((x) => x.keys.map((k) => k.join("+")));
       for (const key of Object.keys(PAGE_KEYS[page])) {
-        expect(shown).toContain(key === "Escape" ? "Esc" : key === "G" ? "Shift+G" : key);
+        expect(shown).toContain(key === "Escape" ? "Esc" : key === "G" || key === "D" ? `Shift+${key}` : key);
       }
     }
     const inbox = sections("inbox", false)[0].shortcuts;

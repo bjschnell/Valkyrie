@@ -1653,7 +1653,11 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 base,
                 body,
             } => (req, registry.edit_doc(id, &base, &body, peer)),
-            ClientMsg::Docs { req, count_only } => (req, registry.docs(count_only)),
+            ClientMsg::Docs {
+                req,
+                count_only,
+                session,
+            } => (req, registry.docs(count_only, session)),
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
             ClientMsg::SupervisorLog { req } => (req, registry.supervisor_log()),
             ClientMsg::SupervisorWatch { req } => (req, registry.supervisor_watch()),

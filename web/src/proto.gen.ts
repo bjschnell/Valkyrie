@@ -148,7 +148,7 @@ remote: boolean, remove: boolean, }
   | { "t": "write_doc", req: number, doc: NewDoc, }
   | { "t": "read_doc", req: number, which: string, }
   | { "t": "edit_doc", req: number, id: number, base: string, body: string, }
-  | { "t": "docs", req: number, count_only?: boolean, }
+  | { "t": "docs", req: number, count_only?: boolean, session?: number | null, }
   | { "t": "open_doc", req: number, key: string, }
   | { "t": "docs_seen", req: number, at: number, }
   | { "t": "doc_comments", req: number, key: string, }
