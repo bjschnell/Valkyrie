@@ -93,7 +93,7 @@ pub struct Doc {
 }
 
 /// A markdown or text file in a session's repository, as its side pane lists it
-/// (ADR-0021 item 9, protocol 56).
+/// (ADR-0021 item 9, protocol 57).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SessionFile {

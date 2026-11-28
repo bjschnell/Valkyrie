@@ -6,7 +6,8 @@ import { Back, Check } from "./icons";
 import { NotifySettings } from "./Notify";
 import { Backdrop } from "./Backdrop";
 import { usePageKeys } from "../lib/pageKeys";
-import { useApp, webServer } from "../store";
+import { useApp, webServerConfig } from "../store";
+import type { WebServerState } from "../proto";
 
 const home = () => {
   location.hash = "#/";
@@ -84,55 +85,206 @@ function ProposalSettings() {
   );
 }
 
-/** Whether the daemon keeps this web app running on localhost (#316): the
- * daemon's setting, shared with valk's settings panel. Turning it off can stop
- * the server this page came from, so that takes a second tap. */
+/** What each state of the daemon's web server reads as: a name and a line. */
+function runText(s: WebServerState): { name: string; sub: string } {
+  switch (s.run) {
+    case "running":
+      return { name: "Running", sub: `On http://${s.listen}` };
+    case "starting":
+      return { name: "Starting", sub: `On http://${s.listen}, in a few seconds` };
+    case "off":
+      return { name: "Off", sub: "valk web or valk setup web still start it" };
+    case "service":
+      return { name: "Stood aside", sub: "The service from valk setup web runs it" };
+    case "taken":
+      return { name: "Port taken", sub: `Something else listens on ${s.listen}: pick another port` };
+    case "unmanaged":
+      return { name: "Not kept here", sub: "This daemon doesn't start a web server" };
+  }
+}
+
+/** The host part of a listen address and its port: `[::1]:9000` → `::1`, `9000`. */
+function splitListen(listen: string): { host: string; port: string } {
+  const at = listen.lastIndexOf(":");
+  return { host: listen.slice(0, at).replace(/^\[|\]$/g, ""), port: listen.slice(at + 1) };
+}
+
+/** `host` with `port`, bracketed when it's IPv6. */
+function joinListen(host: string, port: string): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+const LOCAL = "127.0.0.1";
+const EVERY = "0.0.0.0";
+/** How often the page asks what the server is doing while it's open. */
+const POLL_MS = 2000;
+
+/** The daemon's web server (#316, #321): on or off, where it listens, the
+ * address phones open, and what it's doing. The daemon's settings, shared with
+ * valk's settings panel. Turning it off, or opening it to every interface,
+ * takes a second tap. */
 function WebServerSettings() {
-  const [on, setOn] = useState<boolean | null>(null);
-  const [arming, setArming] = useState(false);
+  const [state, setState] = useState<WebServerState | null>(null);
+  const [arming, setArming] = useState<"off" | "every" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [port, setPort] = useState("");
+  const [url, setUrl] = useState("");
+  // What the fields were filled from, so a poll doesn't overwrite your typing.
+  const [shown, setShown] = useState<WebServerState | null>(null);
   // Asked once the connection is up: a page opened straight on Settings has none yet.
   const open = useApp((s) => s.status === "open");
+  const apply = (next: Promise<WebServerState>) =>
+    next
+      .then((now) => {
+        setState(now);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(String(e instanceof Error ? e.message : e)));
   useEffect(() => {
     if (!open) return;
-    webServer()
-      .then((now) => {
-        setOn(now);
-        setError(null);
-      })
-      .catch((e: unknown) => setError(String(e instanceof Error ? e.message : e)));
+    void apply(webServerConfig());
+    const timer = setInterval(() => void apply(webServerConfig()), POLL_MS);
+    return () => clearInterval(timer);
   }, [open]);
-  const set = (next: boolean) => {
-    setArming(false);
-    webServer(next)
-      .then((now) => {
-        setOn(now);
-        setError(null);
-      })
-      .catch((e: unknown) => setError(String(e instanceof Error ? e.message : e)));
+  useEffect(() => {
+    if (!state) return;
+    if (shown && shown.listen === state.listen && shown.url === state.url) return;
+    setPort(splitListen(state.listen).port);
+    setUrl(state.url ?? "");
+    setShown(state);
+  }, [state, shown]);
+  const change = (c: { on?: boolean; listen?: string; url?: string }) => {
+    setArming(null);
+    void apply(webServerConfig(c));
   };
-  const tap = () => {
-    if (on === null) return;
-    if (!on) return set(true);
-    if (!arming) return setArming(true);
-    set(false);
+
+  const on = state?.on ?? false;
+  const host = state ? splitListen(state.listen).host : LOCAL;
+  const custom = state !== null && host !== LOCAL && host !== EVERY;
+  const tapOn = () => {
+    if (!state) return;
+    if (!on) return change({ on: true });
+    if (arming !== "off") return setArming("off");
+    change({ on: false });
   };
-  // A row's sub is one line: the prompt goes in its name.
-  const name = arming ? "Tap again to turn it off" : "Start with Valkyrie";
-  const sub = arming
-    ? "This page stops too if the daemon serves it"
-    : "Keeps this app running here, on localhost only";
+  const listenOn = (next: string) => {
+    if (!state || next === host) return;
+    if (next === EVERY && arming !== "every") return setArming("every");
+    change({ listen: joinListen(next, splitListen(state.listen).port) });
+  };
+  const savePort = () => {
+    if (!state || port.trim() === splitListen(state.listen).port) return;
+    change({ listen: joinListen(host, port.trim()) });
+  };
+  const saveUrl = () => {
+    if (!state || url.trim() === (state.url ?? "")) return;
+    change({ url: url.trim() });
+  };
+  const enter = (save: () => void) => (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      save();
+    }
+  };
+  const run = state && runText(state);
+
+  // A row's sub is one line: a prompt goes in its name.
   return (
     <section>
       <h2 className="section-title">Web server</h2>
       <div className="list">
-        <button className="row" role="switch" aria-checked={on === true} disabled={on === null} onClick={tap} onBlur={() => setArming(false)}>
+        <button
+          className="row"
+          role="switch"
+          aria-checked={on}
+          disabled={!state}
+          onClick={tapOn}
+          onBlur={() => setArming(null)}
+        >
           <span className="row-main">
-            <span className="row-name">{name}</span>
-            <span className="row-sub">{error ?? sub}</span>
+            <span className="row-name">{arming === "off" ? "Tap again to turn it off" : "Start with Valkyrie"}</span>
+            <span className="row-sub">
+              {arming === "off" ? "This page stops too if the daemon serves it" : "Keeps this app running on this machine"}
+            </span>
           </span>
           <span className="look-check">{on && <Check />}</span>
         </button>
+        {run && (
+          <div className="row web-run" data-run={state.run} role="status">
+            <span className="row-main">
+              <span className="row-name">{run.name}</span>
+              <span className="row-sub">{error ?? run.sub}</span>
+            </span>
+          </div>
+        )}
+      </div>
+      <h2 className="section-title">Listen on</h2>
+      <div className="list" role="radiogroup" aria-label="Listen on">
+        <button className="row" role="radio" aria-checked={host === LOCAL} disabled={!state} onClick={() => listenOn(LOCAL)}>
+          <span className="row-main">
+            <span className="row-name">This machine</span>
+            <span className="row-sub">Recommended. Tailscale serve or a proxy here forwards to it</span>
+          </span>
+          <span className="look-check">{host === LOCAL && <Check />}</span>
+        </button>
+        <button
+          className="row"
+          role="radio"
+          aria-checked={host === EVERY}
+          disabled={!state}
+          onClick={() => listenOn(EVERY)}
+          onBlur={() => setArming(null)}
+        >
+          <span className="row-main">
+            <span className="row-name">{arming === "every" ? "Tap again to listen on every interface" : "All interfaces"}</span>
+            <span className="row-sub">
+              {arming === "every"
+                ? "Anyone who can reach the port can try to pair"
+                : "For Docker or a proxy on another host, at your own risk"}
+            </span>
+          </span>
+          <span className="look-check">{host === EVERY && <Check />}</span>
+        </button>
+        {custom && (
+          <div className="row" role="radio" aria-checked="true" aria-disabled="true">
+            <span className="row-main">
+              <span className="row-name">{host}</span>
+              <span className="row-sub">Set in settings.toml; pick one above to change it</span>
+            </span>
+            <span className="look-check">
+              <Check />
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="web-fields">
+        <label className="field">
+          <span className="field-label">Port</span>
+          <input
+            inputMode="numeric"
+            value={port}
+            disabled={!state}
+            onChange={(e) => setPort(e.target.value.replace(/\D/g, "").slice(0, 5))}
+            onBlur={savePort}
+            onKeyDown={enter(savePort)}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">Phone URL</span>
+          <input
+            type="url"
+            inputMode="url"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder={state?.default_url ?? ""}
+            value={url}
+            disabled={!state}
+            onChange={(e) => setUrl(e.target.value)}
+            onBlur={saveUrl}
+            onKeyDown={enter(saveUrl)}
+          />
+        </label>
       </div>
     </section>
   );

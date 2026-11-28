@@ -1003,6 +1003,26 @@ impl Client {
         }
     }
 
+    /// The daemon's web server: sets what's `Some`, then says what it's doing
+    /// (see `ClientMsg::WebServerConfig`).
+    pub async fn web_server_config(
+        &self,
+        on: Option<bool>,
+        listen: Option<String>,
+        url: Option<String>,
+    ) -> Result<crate::WebServerState> {
+        let msg = |req| ClientMsg::WebServerConfig {
+            req,
+            on,
+            listen,
+            url,
+        };
+        match self.request(msg).await? {
+            Reply::WebServerState { state } => Ok(state),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Starts the supervisor session, or finds the one already running (see
     /// `ClientMsg::SupervisorSession`).
     pub async fn supervisor_session(

@@ -33,6 +33,7 @@ mod settings;
 mod supervisor;
 mod term;
 mod theme;
+mod webserver;
 mod wiki;
 
 use anyhow::Result;
@@ -306,6 +307,8 @@ struct App {
     mini: Option<mini::Mini>,
     /// The keys page is open (`.` on the home screen).
     keys_page: Option<KeysPage>,
+    /// The web server page is open (Enter on the settings panel's Web server row).
+    web_page: Option<webserver::Page>,
     /// The away digest is open (`w` on the home screen).
     digest: Option<digest::Page>,
     /// The supervisor page is open (`s` on the home screen).
@@ -525,6 +528,7 @@ impl App {
             said: None,
             settings_cursor: None,
             keys_page: None,
+            web_page: None,
             digest: None,
             supervisor: None,
             docs: None,
@@ -662,6 +666,10 @@ impl App {
                     self.refresh().await;
                     if self.page_loaded.elapsed() >= PAGE_RELOAD {
                         self.reload_page().await;
+                    }
+                    // What the web server is doing, while its page is open.
+                    if self.web_page.as_ref().is_some_and(|p| p.editing.is_none()) {
+                        self.load_web(None, None, None).await;
                     }
                     // An editor that ended while you were elsewhere.
                     self.finish_edit().await;
@@ -899,6 +907,9 @@ impl App {
             }
             return;
         }
+        if self.web_page.is_some() {
+            return self.web_page_keys(&bytes).await;
+        }
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
@@ -957,7 +968,7 @@ impl App {
             return self.backlog_keys(&bytes).await;
         }
         if self.settings_cursor.is_some() {
-            return self.settings_keys(&bytes);
+            return self.settings_keys(&bytes).await;
         }
         if self.mini_open() {
             return self.mini_input(bytes).await;
@@ -1037,6 +1048,9 @@ impl App {
         let Some(bytes) = self.section_keys(bytes).await else {
             return;
         };
+        if self.web_page.is_some() {
+            return self.web_page_keys(&bytes).await;
+        }
         if self.keys_page.is_some() {
             return self.keys_page_keys(&bytes);
         }
@@ -1059,7 +1073,7 @@ impl App {
             return self.docs_keys(&bytes).await;
         }
         if self.settings_cursor.is_some() {
-            return self.settings_keys(&bytes);
+            return self.settings_keys(&bytes).await;
         }
         if self.renaming.is_some() {
             return self.rename_keys(&bytes).await;
@@ -1459,7 +1473,7 @@ impl App {
                 b"," => {
                     self.tab_mode = false;
                     self.settings_cursor = Some(0);
-                    return self.settings_keys(keys);
+                    return self.settings_keys(keys).await;
                 }
                 // The strip stays in tab mode, so you see the change and can undo it.
                 b"m" => self.change(Field::TabDetail, 1),
@@ -2575,7 +2589,7 @@ impl App {
 
     /// Keys while the settings panel is open: ↑/↓ pick a setting, ←/→ change it,
     /// Esc (or `,` or `q`) closes. Anything else, mouse reports too, is ignored.
-    fn settings_keys(&mut self, mut keys: &[u8]) {
+    async fn settings_keys(&mut self, mut keys: &[u8]) {
         while let Some(cursor) = self.settings_cursor
             && !keys.is_empty()
         {
@@ -2599,6 +2613,13 @@ impl App {
                 }
                 b"j" | b"\x1b[B" | b"\x1bOB" => self.settings_cursor = Some((cursor + 1).min(last)),
                 b"h" | b"\x1b[D" | b"\x1bOD" => self.change(Field::ALL[cursor], -1),
+                // The web server has a page of its own (backlog #321).
+                b"\r" if Field::ALL[cursor] == Field::WebServer => {
+                    self.settings_cursor = None;
+                    self.web_page = Some(webserver::Page::default());
+                    self.load_web(None, None, None).await;
+                    return;
+                }
                 b"l" | b"\x1b[C" | b"\x1bOC" | b"\r" | b" " => self.change(Field::ALL[cursor], 1),
                 b"\x1b" if whole => self.settings_cursor = None,
                 b"," | b"q" | [0x03] => self.settings_cursor = None,
@@ -2608,6 +2629,58 @@ impl App {
                     return;
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Sets what's `Some` of the daemon's web server and reads back what it's
+    /// doing, for its page. The settings panel's Web server row follows.
+    async fn load_web(&mut self, on: Option<bool>, listen: Option<String>, url: Option<String>) {
+        let asked = tokio::time::timeout(
+            PREVIEW_WAIT * 4,
+            self.client.web_server_config(on, listen, url),
+        )
+        .await;
+        let state = match asked {
+            Ok(Ok(state)) => Ok(state),
+            Ok(Err(e)) => Err(format!("{e:#}")),
+            Err(_) => Err("the daemon didn't answer".into()),
+        };
+        if let Ok(state) = &state {
+            self.settings.web_server = state.on;
+        }
+        if let Some(page) = &mut self.web_page {
+            page.loaded(state);
+        }
+    }
+
+    /// Keys while the web server page is open; Esc goes back to the settings
+    /// panel, on the Web server row.
+    async fn web_page_keys(&mut self, mut keys: &[u8]) {
+        while let Some(page) = &mut self.web_page
+            && !keys.is_empty()
+        {
+            let key = next_key(keys);
+            let whole = key.len() == keys.len();
+            keys = &keys[key.len()..];
+            // Not keys: a legacy mouse report's three bytes, and pasted text.
+            if key == b"\x1b[M" {
+                keys = &keys[keys.len().min(3)..];
+                continue;
+            }
+            if key == b"\x1b[200~" {
+                let end = keys.windows(6).position(|w| w == b"\x1b[201~");
+                keys = &keys[end.map_or(keys.len(), |i| i + 6)..];
+                continue;
+            }
+            match page.key(key, whole) {
+                webserver::Do::Nothing => {}
+                webserver::Do::Close => {
+                    self.web_page = None;
+                    self.settings_cursor = Field::ALL.iter().position(|&f| f == Field::WebServer);
+                    return;
+                }
+                webserver::Do::Set { on, listen, url } => self.load_web(on, listen, url).await,
             }
         }
     }
@@ -5724,6 +5797,10 @@ impl App {
                 dim(frame, area, t);
                 self.draw_keys_page(frame, page);
             }
+            if let Some(page) = &self.web_page {
+                dim(frame, area, t);
+                page.draw(frame, t);
+            }
         })?;
         Ok(())
     }
@@ -7857,7 +7934,7 @@ impl App {
         let t = self.settings.theme;
         let file = &self.settings_file;
         let file = short_path(file);
-        let width = (file.width() as u16 + 6).max(40);
+        let width = (file.width() as u16 + 6).max(48);
         let height = Field::ALL.len() as u16 + 5;
         let area = frame.area();
         let rect = Rect::new(
@@ -7893,16 +7970,23 @@ impl App {
         }
         lines.push(Line::default());
         lines.push(Line::from(format!("  {file}").fg(t.muted)));
-        let hints = Line::from(vec![
+        let mut hints = vec![
             " ↑↓ ".fg(t.accent).bold(),
             "choose ".fg(t.muted),
             " ←→ ".fg(t.accent).bold(),
             "change ".fg(t.muted),
+        ];
+        // The web server's address and URL are on a page of their own.
+        if Field::ALL.get(cursor) == Some(&Field::WebServer) {
+            hints.extend([" ↩ ".fg(t.accent).bold(), "more ".fg(t.muted)]);
+        }
+        hints.extend([
             " . ".fg(t.accent).bold(),
             "keys ".fg(t.muted),
             " esc ".fg(t.accent).bold(),
             "done ".fg(t.muted),
         ]);
+        let hints = Line::from(hints);
         frame.render_widget(ratatui::widgets::Clear, rect);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -12524,6 +12608,77 @@ mod tests {
 
         app.on_input(b"\x1b".to_vec()).await;
         assert_eq!(app.settings_cursor, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_web_server_row_opens_its_page_and_esc_comes_back() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let dir = std::env::temp_dir().join(format!("valkyrie-tui-web-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let socket = dir.join("s.sock");
+        valkyrie_proto::ensure_private_dir(&dir).unwrap();
+        // A daemon that never answers: the page says so and still closes.
+        let _listener = valkyrie_proto::ipc::Listener::bind(&socket).unwrap();
+        let (client, _) = Client::connect(&socket).await.unwrap();
+        let mut app = App::new(client, PathBuf::new());
+        app.settings = Settings::default();
+        app.settings_file = dir.join("valkyrie/settings.toml");
+        app.on_home_key(HomeKey::Settings).await;
+        let row = Field::ALL
+            .iter()
+            .position(|&f| f == Field::WebServer)
+            .unwrap();
+        app.on_input(b"j".repeat(row)).await;
+        app.on_input(b"\r".to_vec()).await;
+        assert_eq!(app.settings_cursor, None);
+        let page = app
+            .web_page
+            .as_ref()
+            .expect("Enter opens the web server page");
+        assert_eq!(page.error.as_deref(), Some("the daemon didn't answer"));
+        // Enter didn't flip the setting, as it does on the other rows.
+        assert!(app.settings.web_server);
+
+        app.web_page
+            .as_mut()
+            .unwrap()
+            .loaded(Ok(valkyrie_proto::WebServerState {
+                on: true,
+                listen: "0.0.0.0:8790".into(),
+                url: None,
+                default_url: "https://thor.tail1.ts.net".into(),
+                run: valkyrie_proto::WebRun::Taken,
+            }));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.web_page
+                    .as_ref()
+                    .unwrap()
+                    .draw(frame, app.settings.theme)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        snapshot(&buffer, "web-server");
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        for want in [
+            "Web server",
+            "port taken",
+            "‹ on ›",
+            "all interfaces",
+            "https://thor.tail1.ts.net (default)",
+            "can try to pair",
+        ] {
+            assert!(screen.contains(want), "{want}: {screen}");
+        }
+
+        app.on_input(b"\x1b".to_vec()).await;
+        assert!(app.web_page.is_none());
+        assert_eq!(app.settings_cursor, Some(row));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

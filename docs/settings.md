@@ -26,8 +26,14 @@ Press `,` to open the settings panel. You can change:
   where anyone who reaches it can try to pair. `web_url` is the address phones
   open (your proxy, tunnel or tailnet name); by default the tailnet name when
   Tailscale runs here. Changing either restarts it. A service from `valk setup
-  web` runs it instead when there is one. `valk web server on|off` and the web
-  app's Settings change it too
+  web` runs it instead when there is one. `valk web server on|off` changes it
+  too. Enter on this row opens the web server page, which the web app has
+  under Settings → Web server: the on/off switch, where it listens (this
+  machine, or all interfaces after a second press, for Docker or a proxy on
+  another host), the port, the phone URL (empty for the default), and what it's
+  doing: running, starting, off, stood aside for the `valk setup web` service,
+  or port taken. A tailnet IP stays a `web_listen` you set in the file; the
+  page shows it and keeps it until you pick another
 
 With `theme` colors, a session's background, default text and 16 ANSI colors come
 from the theme. Colors a program picks exactly (256-color or RGB) stay as it drew

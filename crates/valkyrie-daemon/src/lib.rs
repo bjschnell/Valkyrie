@@ -35,6 +35,7 @@ mod trim;
 mod tutor;
 mod usage;
 mod watching;
+pub mod web;
 mod wiki;
 pub mod work;
 mod worktree;
@@ -1640,6 +1641,12 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
             ClientMsg::Supervise { req, on } => (req, registry.supervise(on, peer)),
             ClientMsg::WebServer { req, on } => (req, registry.web_server(on, peer)),
+            ClientMsg::WebServerConfig {
+                req,
+                on,
+                listen,
+                url,
+            } => (req, registry.web_server_config(on, listen, url, peer)),
             ClientMsg::SupervisorSession {
                 req,
                 cwd,

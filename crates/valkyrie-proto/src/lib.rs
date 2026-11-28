@@ -55,7 +55,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 56;
+pub const PROTOCOL: u32 = 57;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -558,6 +558,21 @@ pub enum ClientMsg {
         req: ReqId,
         on: Option<bool>,
     },
+    /// The daemon's web server page (backlog #321, protocol 56): `web_server`,
+    /// `web_listen` and `web_url` in `settings.toml`, each set when `Some`, then
+    /// what the server is doing. An empty `url` goes back to the default (the
+    /// tailnet name). Setting any of them is for the user only. Replies
+    /// `WebServerState`.
+    WebServerConfig {
+        req: ReqId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on: Option<bool>,
+        /// An address like `127.0.0.1:8790` or `0.0.0.0:8790`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
     /// Starts the supervisor session (ADR-0019 §10, backlog #236, protocol 45):
     /// one Claude session that reads every other agent session and prompts the
     /// idle ones. With one already running, replies with it instead of starting
@@ -694,7 +709,7 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<SessionId>,
     },
-    /// A session's markdown and text files (ADR-0021 item 9, protocol 56): those
+    /// A session's markdown and text files (ADR-0021 item 9, protocol 57): those
     /// its branch and working tree changed, each checked. With `check`, paths
     /// mentioned in its chat or pane; the reply's `passing` names the ones that
     /// pass the same checks. Only the user or that session's own process asks.
@@ -706,7 +721,7 @@ pub enum ClientMsg {
         check: Vec<String>,
     },
     /// One of a session's files by its path in the repository, checked, cleaned
-    /// like a doc's body (ADR-0021 item 9, protocol 56). Replies `SessionFileText`.
+    /// like a doc's body (ADR-0021 item 9, protocol 57). Replies `SessionFileText`.
     ReadSessionFile {
         req: ReqId,
         session: SessionId,
@@ -1105,6 +1120,10 @@ pub enum Reply {
         entries: Vec<SupervisorEntry>,
         on: bool,
     },
+    /// What `WebServerConfig` asked for.
+    WebServerState {
+        state: WebServerState,
+    },
     /// What `SupervisorWatch` asked for: open PRs, red and conflicting first.
     SupervisorWatch {
         prs: Vec<WatchedPr>,
@@ -1176,6 +1195,44 @@ pub enum Reply {
         /// One screenful, `y` from 0.
         rows: Vec<Row>,
     },
+}
+
+/// The daemon's web server (backlog #321): its settings, and what it's doing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WebServerState {
+    /// `web_server`: the daemon keeps one running.
+    pub on: bool,
+    /// `web_listen`, or the default `127.0.0.1:8790`.
+    pub listen: String,
+    /// `web_url`, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// What phones open without `web_url`: the tailnet name when Tailscale runs
+    /// here, else the listen address.
+    pub default_url: String,
+    pub run: WebRun,
+}
+
+/// What the daemon's web server is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum WebRun {
+    /// `web_server` is off.
+    Off,
+    /// About to start, or restarting on a new address.
+    #[default]
+    Starting,
+    /// Serving on `listen`.
+    Running,
+    /// A `valk setup web` service runs the web app instead.
+    Service,
+    /// Something else holds the address: a `valk web` in a terminal, or another
+    /// program on the port.
+    Taken,
+    /// This daemon doesn't keep one (`--dev`, or a socket of its own).
+    Unmanaged,
 }
 
 /// Where a `Scrollback` page starts.
@@ -1504,17 +1561,42 @@ fn setting_in(text: &str, key: &str) -> Option<String> {
 /// the line that set it is rewritten in place, else one is added. Whole or not
 /// at all, as the TUI saves it.
 pub fn set_setting(key: &str, value: &str) -> std::io::Result<()> {
+    set_settings(&[(key, value)])
+}
+
+/// `set_setting` for several keys in one write, so a reader never sees half.
+pub fn set_settings(pairs: &[(&str, &str)]) -> std::io::Result<()> {
+    let Some((first, _)) = pairs.first() else {
+        return Ok(());
+    };
     let dir = config_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("settings.toml");
-    let text = match std::fs::read_to_string(&path) {
+    let mut text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
     };
-    let new = dir.join(format!(".settings.toml.{key}.new"));
-    std::fs::write(&new, set_in(&text, key, value))?;
+    for (key, value) in pairs {
+        text = set_in(&text, key, value);
+    }
+    let new = dir.join(format!(".settings.toml.{first}.new"));
+    std::fs::write(&new, text)?;
     std::fs::rename(&new, &path)
+}
+
+/// Where the daemon's web server listens unless `web_listen` names another
+/// address: the one `valk web` and `valk setup web` default to.
+pub const WEB_LISTEN: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8790);
+
+/// `web_listen` as an address, when it is one with a port.
+pub fn parse_web_listen(value: &str) -> Option<std::net::SocketAddr> {
+    value
+        .trim()
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .filter(|a| a.port() != 0)
 }
 
 fn set_in(text: &str, key: &str, value: &str) -> String {
