@@ -10,6 +10,7 @@ pub mod docs;
 pub mod extract;
 pub mod facts;
 mod file;
+pub mod files;
 pub mod find;
 pub mod flake;
 pub mod flaketree;

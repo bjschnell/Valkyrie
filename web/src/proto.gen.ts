@@ -148,6 +148,8 @@ remote: boolean, remove: boolean, }
   | { "t": "read_doc", req: number, which: string, }
   | { "t": "edit_doc", req: number, id: number, base: string, body: string, }
   | { "t": "docs", req: number, count_only?: boolean, session?: number | null, }
+  | { "t": "session_files", req: number, session: number, check?: Array<string>, }
+  | { "t": "read_session_file", req: number, session: number, path: string, }
   | { "t": "open_doc", req: number, key: string, }
   | { "t": "docs_seen", req: number, at: number, }
   | { "t": "doc_comments", req: number, key: string, }
@@ -431,6 +433,12 @@ by: string,
  * Its size in bytes.
  */
 size: number, };
+
+/**
+ * A path mentioned in chat or a pane that passed the checks: what was written,
+ * and the file it names.
+ */
+export type FileMention = { given: string, path: string, };
 
 /**
  * A watcher's flag on an idle session (ADR-0019 §1): the reason the queue shows,
@@ -1113,6 +1121,8 @@ unread: number,
  * When it was listed, in seconds, for `DocsSeen`.
  */
 at: number, }
+  | { "t": "session_files", files: Array<SessionFile>, passing: Array<FileMention>, }
+  | { "t": "session_file_text", file: SessionFile, text: string, }
   | { "t": "item", item: Item, 
 /**
  * What else happened, for the person who asked (a worktree taken away, or
@@ -1355,6 +1365,24 @@ launches?: Array<LaunchOffer>, }
   | { "t": "disk", low: Array<LowDisk>, }
   | { "t": "clipboard", session: number, text: string, }
   | { "t": "graphics", session: number, x: number, y: number, data: string, };
+
+/**
+ * A markdown or text file in a session's repository, as its side pane lists it
+ * (ADR-0021 item 9, protocol 55).
+ */
+export type SessionFile = { 
+/**
+ * Relative to the repository's top level, with `/` between folders.
+ */
+path: string, 
+/**
+ * In bytes.
+ */
+size: number, 
+/**
+ * When it last changed, in seconds; `None` if the system didn't say.
+ */
+modified?: number | null, };
 
 export type SessionInfo = { id: number, name: string, 
 /**
