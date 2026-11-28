@@ -99,6 +99,9 @@ pub struct Settings {
     /// Which features get used is counted in `usage.jsonl` for `valk stats`
     /// (backlog #176). Off by default; nothing leaves the machine.
     pub analytics: bool,
+    /// The daemon keeps `valk web` running on localhost (backlog #316). The
+    /// daemon reads it, as it reads `context`.
+    pub web_server: bool,
     pub keys: Keymap,
 }
 
@@ -124,6 +127,7 @@ impl PartialEq for Settings {
                 s.context,
                 s.updates,
                 s.analytics,
+                s.web_server,
                 s.keys,
             )
         };
@@ -153,6 +157,7 @@ impl Default for Settings {
             context: true,
             updates: true,
             analytics: false,
+            web_server: true,
             keys: Keymap::default(),
         }
     }
@@ -173,6 +178,7 @@ pub enum Field {
     Context,
     Updates,
     Analytics,
+    WebServer,
 }
 
 impl Field {
@@ -189,6 +195,7 @@ impl Field {
         Field::Context,
         Field::Updates,
         Field::Analytics,
+        Field::WebServer,
     ];
 
     pub fn label(self) -> &'static str {
@@ -205,6 +212,7 @@ impl Field {
             Field::Context => "Context",
             Field::Updates => "Updates",
             Field::Analytics => "Analytics",
+            Field::WebServer => "Web server",
         }
     }
 }
@@ -227,6 +235,7 @@ impl Settings {
             ("context", "VALK_PROJECT_CONTEXT"),
             ("updates", "VALK_UPDATES"),
             ("analytics", "VALK_ANALYTICS"),
+            ("web_server", "VALK_WEB_SERVER"),
         ] {
             if let Ok(value) = std::env::var(var) {
                 settings.set(key, &value);
@@ -263,6 +272,7 @@ impl Settings {
             Field::Context => kept.context = self.context,
             Field::Updates => kept.updates = self.updates,
             Field::Analytics => kept.analytics = self.analytics,
+            Field::WebServer => kept.web_server = self.web_server,
         });
     }
 
@@ -304,6 +314,7 @@ impl Settings {
              context = {}      # agents in Valkyrie sessions get the project's decisions\n\
              updates = {}      # say when a newer release is out (asks GitHub once a day)\n\
              analytics = {}    # count which features get used, for `valk stats` (stays on this machine)\n\
+             web_server = {}   # the daemon keeps the web app running, on localhost only\n\
              # Direct keys, where they differ from the defaults: `.` on the home screen.\n\
              {}",
             self.theme.name,
@@ -322,6 +333,7 @@ impl Settings {
             self.context,
             self.updates,
             self.analytics,
+            self.web_server,
             self.keys.to_toml(),
         )
     }
@@ -407,6 +419,8 @@ impl Settings {
                 "false" | "off" => self.analytics = false,
                 _ => {}
             },
+            // As the daemon reads it: only `false` or `off` turns it off.
+            "web_server" => self.web_server = !matches!(value, "false" | "off"),
             _ => {
                 if let Some(action) = key.strip_prefix("keys.") {
                     self.keys.set(action, value);
@@ -462,6 +476,7 @@ impl Settings {
             Field::Context => on_off(self.context),
             Field::Updates => on_off(self.updates),
             Field::Analytics => on_off(self.analytics),
+            Field::WebServer => on_off(self.web_server),
         }
     }
 
@@ -496,6 +511,7 @@ impl Settings {
             Field::Context => self.context = !self.context,
             Field::Updates => self.updates = !self.updates,
             Field::Analytics => self.analytics = !self.analytics,
+            Field::WebServer => self.web_server = !self.web_server,
         }
     }
 }
@@ -547,7 +563,7 @@ fn step<'a, T>(all: &'a [T], current: &str, by: isize, name_of: impl Fn(&T) -> &
 }
 
 /// The keys `to_toml` writes, or drops when they're back on their defaults.
-const OURS: [&str; 12] = [
+const OURS: [&str; 13] = [
     "theme",
     "session_colors",
     "tabs",
@@ -560,6 +576,7 @@ const OURS: [&str; 12] = [
     "context",
     "updates",
     "analytics",
+    "web_server",
 ];
 
 /// The `key = value` lines of `text` the TUI doesn't own (`max_running`, a
@@ -718,6 +735,20 @@ mod tests {
     }
 
     #[test]
+    fn the_web_server_runs_until_turned_off_as_the_daemon_reads_it() {
+        let mut s = Settings::default();
+        assert!(s.web_server);
+        // `valk web server off` and the web app write it this way.
+        s.apply("web_server = off\n");
+        assert_eq!(s.value(Field::WebServer), "off");
+        let mut back = Settings::default();
+        back.apply(&s.to_toml());
+        assert!(!back.web_server);
+        s.apply("web_server = maybe\n");
+        assert!(s.web_server, "only off turns it off, for the daemon too");
+    }
+
+    #[test]
     fn proposals_pop_up_until_turned_off() {
         let mut s = Settings::default();
         assert!(s.proposals);
@@ -745,7 +776,8 @@ mod tests {
                 | Field::Proposals
                 | Field::Context
                 | Field::Updates
-                | Field::Analytics => 2,
+                | Field::Analytics
+                | Field::WebServer => 2,
             };
             for _ in 0..n {
                 s.cycle(field, 1);

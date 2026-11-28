@@ -1,4 +1,5 @@
 mod alias;
+mod autoweb;
 mod bench;
 mod context;
 mod doc;
@@ -296,6 +297,10 @@ enum Cmd {
         /// machine's tailnet name).
         #[arg(long)]
         url: Option<String>,
+        /// Started by the daemon (`valk web server`): no pairing code, and it
+        /// stops once the setting goes off or the daemon goes away.
+        #[arg(long, hide = true)]
+        managed: bool,
         #[command(subcommand)]
         action: Option<WebCmd>,
     },
@@ -464,6 +469,13 @@ enum WebCmd {
     /// Print where your latest `valk web` said it listens (`valk remote web` on
     /// another machine reads it). Exits 1 when none has.
     Address,
+    /// Whether the daemon keeps the web app running on this machine, on
+    /// localhost only (on by default). `on` or `off` sets it; a service from
+    /// `valk setup web` runs it instead when there is one.
+    Server {
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -711,6 +723,9 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 }
                 Err(e) => return Err(e),
             };
+            if autoweb::applies(&socket, dev) {
+                tokio::spawn(autoweb::keep(exe.clone(), socket.clone()));
+            }
             match resume_fd {
                 #[cfg(unix)]
                 Some(fd) => valkyrie_daemon::resume(fd, &state, &exe).await,
@@ -873,6 +888,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
         Some(Cmd::Web {
             listen,
             url,
+            managed,
             action,
         }) => match action {
             None => {
@@ -886,7 +902,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 let restarted = std::env::var_os(WEB_RESTARTED).is_some();
                 // The daemon must be up, and speak this protocol, before phones arrive.
                 let (client, _) = connect(&socket).await?;
-                let pair = !restarted && client.vouch("pairing a phone").await.is_ok();
+                let pair = !restarted && !managed && client.vouch("pairing a phone").await.is_ok();
                 drop(client);
                 let result = valkyrie_web::run(valkyrie_web::Options {
                     listen,
@@ -894,6 +910,7 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                     url,
                     pair,
                     restarted,
+                    managed,
                 })
                 .await;
                 // Upgraded: carry on as the daemon's binary (else this one's
@@ -947,6 +964,31 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
                 }
                 None => bail!("no valk web has said where it listens"),
             },
+            Some(WebCmd::Server { state }) => {
+                let client = connect(&socket).await?.0;
+                let on = client.web_server(state.map(|s| s == "on")).await?;
+                let place = autoweb::Place::now();
+                let addr = place.listen;
+                let how = if on != "on" {
+                    "the daemon doesn't start the web app; `valk web` or `valk setup web` still do"
+                        .into()
+                } else if service::installed() {
+                    format!("the `{}` service runs the web app", service::DEFAULT_NAME)
+                } else {
+                    let reach = if addr.ip().is_loopback() {
+                        "this machine only".to_string()
+                    } else {
+                        format!("reachable beyond this machine (web_listen = {addr})")
+                    };
+                    let url = place
+                        .url
+                        .map(|u| format!(", opened as {u}"))
+                        .unwrap_or_default();
+                    format!("the daemon keeps the web app running on http://{addr}, {reach}{url}")
+                };
+                println!("{on}: {how}");
+                Ok(())
+            }
             Some(WebCmd::Check) => {
                 use valkyrie_web::proof::Local;
                 match valkyrie_web::proof::check(listen).await? {

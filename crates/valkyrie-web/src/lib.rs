@@ -58,6 +58,34 @@ pub struct Options {
     pub pair: bool,
     /// Restarted as the upgraded binary: no pairing code, whoever started it.
     pub restarted: bool,
+    /// Started by the daemon (backlog #316): no pairing code, and it stops by
+    /// itself once the `web_server` setting goes off or the daemon goes away.
+    pub managed: bool,
+}
+
+/// How often a managed server looks at its setting and its daemon.
+const MANAGED_EVERY: Duration = Duration::from_secs(2);
+/// A managed server outlives its daemon this many looks: long enough for an
+/// upgrade to hand the socket over, short enough not to hold the port for long.
+const MANAGED_ORPHANED: u32 = 5;
+
+/// Ends once a daemon-started server should stop: the setting is off, or its
+/// daemon hasn't answered for a while (it exited, and the next one starts its own).
+async fn managed_until_stopped(socket: PathBuf) -> &'static str {
+    let mut missed = 0;
+    loop {
+        tokio::time::sleep(MANAGED_EVERY).await;
+        if !valkyrie_proto::setting_on("VALK_WEB_SERVER", "web_server") {
+            return "the web server was turned off";
+        }
+        match valkyrie_proto::ipc::connect(&socket).await {
+            Ok(_) => missed = 0,
+            Err(_) => missed += 1,
+        }
+        if missed >= MANAGED_ORPHANED {
+            return "its daemon is gone";
+        }
+    }
 }
 
 /// `run` ends with this once the daemon has been upgraded, or speaks another
@@ -198,6 +226,8 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     if opts.restarted {
         println!("  restarted after an upgrade");
+    } else if opts.managed {
+        println!("  started by the daemon; `valk web pair` adds a device");
     } else if opts.pair {
         print_pairing(&store, &url, false)?;
     } else {
@@ -225,9 +255,19 @@ pub async fn run(opts: Options) -> Result<()> {
     });
     tokio::spawn(notify::run(app.clone()));
     let watch = app.clone();
+    let managed = opts.managed.then(|| app.socket.clone());
     let router = router(app);
     tokio::select! {
         served = axum::serve(listener, router) => Ok(served?),
+        why = async {
+            match managed {
+                Some(socket) => managed_until_stopped(socket).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            println!("valk web stopped: {why}");
+            Ok(())
+        }
         _ = watch.upgraded.notified() => {
             let daemon = watch.upgraded_to.lock().unwrap().take();
             Err(Upgraded { daemon: daemon.context("upgraded with no Hello")? }.into())

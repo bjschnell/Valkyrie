@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { lookList, lookText, setLook, useLook, useLooksVersion } from "../lib/theme";
 import { proposalPopups, setProposalPopups } from "../lib/proposals";
 import { AddDeviceSettings } from "./AddDevice";
@@ -6,6 +6,7 @@ import { Back, Check } from "./icons";
 import { NotifySettings } from "./Notify";
 import { Backdrop } from "./Backdrop";
 import { usePageKeys } from "../lib/pageKeys";
+import { useApp, webServer } from "../store";
 
 const home = () => {
   location.hash = "#/";
@@ -49,6 +50,7 @@ export function Settings() {
         </section>
         <NotifySettings />
         <ProposalSettings />
+        <WebServerSettings />
         <AddDeviceSettings />
       </main>
     </div>
@@ -74,6 +76,60 @@ function ProposalSettings() {
               When an agent files a backlog item, a toast lets you accept or decline it, or tap through to the
               backlog. This browser only.
             </span>
+          </span>
+          <span className="look-check">{on && <Check />}</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Whether the daemon keeps this web app running on localhost (#316): the
+ * daemon's setting, shared with valk's settings panel. Turning it off can stop
+ * the server this page came from, so that takes a second tap. */
+function WebServerSettings() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [arming, setArming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Asked once the connection is up: a page opened straight on Settings has none yet.
+  const open = useApp((s) => s.status === "open");
+  useEffect(() => {
+    if (!open) return;
+    webServer()
+      .then((now) => {
+        setOn(now);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(String(e instanceof Error ? e.message : e)));
+  }, [open]);
+  const set = (next: boolean) => {
+    setArming(false);
+    webServer(next)
+      .then((now) => {
+        setOn(now);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(String(e instanceof Error ? e.message : e)));
+  };
+  const tap = () => {
+    if (on === null) return;
+    if (!on) return set(true);
+    if (!arming) return setArming(true);
+    set(false);
+  };
+  // A row's sub is one line: the prompt goes in its name.
+  const name = arming ? "Tap again to turn it off" : "Start with Valkyrie";
+  const sub = arming
+    ? "This page stops too if the daemon serves it"
+    : "Keeps this app running here, on localhost only";
+  return (
+    <section>
+      <h2 className="section-title">Web server</h2>
+      <div className="list">
+        <button className="row" role="switch" aria-checked={on === true} disabled={on === null} onClick={tap} onBlur={() => setArming(false)}>
+          <span className="row-main">
+            <span className="row-name">{name}</span>
+            <span className="row-sub">{error ?? sub}</span>
           </span>
           <span className="look-check">{on && <Check />}</span>
         </button>

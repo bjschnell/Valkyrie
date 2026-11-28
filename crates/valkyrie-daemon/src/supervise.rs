@@ -906,6 +906,22 @@ impl Registry {
         })
     }
 
+    /// `ClientMsg::WebServer`: whether this machine's daemon keeps `valk web`
+    /// running (backlog #316). Kept in `settings.toml` as `web_server`; `valk
+    /// daemon` reads it there every few seconds, so the change is all it takes.
+    pub(crate) fn web_server(&self, on: Option<bool>, peer: Option<Peer>) -> Result<Reply> {
+        if let Some(on) = on {
+            self.caller(peer)
+                .vouch("turning the web server on or off")?;
+            valkyrie_proto::set_setting(WEB_SERVER, if on { "on" } else { "off" })
+                .context("couldn't save the setting in settings.toml")?;
+        }
+        let on = valkyrie_proto::setting_on("VALK_WEB_SERVER", WEB_SERVER);
+        Ok(Reply::Text {
+            text: if on { "on" } else { "off" }.into(),
+        })
+    }
+
     /// `ClientMsg::SupervisorLog`: what the supervisor did in every repository
     /// the daemon knows, newest first (backlog #180).
     pub(crate) fn supervisor_log(&self) -> Result<Reply> {
@@ -961,6 +977,9 @@ impl Registry {
         policy::checks(&decisions).map(|(c, _)| c)
     }
 }
+
+/// The `settings.toml` key for whether the daemon keeps `valk web` running.
+const WEB_SERVER: &str = "web_server";
 
 /// The most entries `SupervisorLog` answers with.
 const LOG_SHOWN: usize = 300;

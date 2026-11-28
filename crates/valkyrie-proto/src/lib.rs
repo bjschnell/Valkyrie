@@ -55,7 +55,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 55;
+pub const PROTOCOL: u32 = 56;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -550,6 +550,14 @@ pub enum ClientMsg {
         req: ReqId,
         on: Option<bool>,
     },
+    /// Whether the daemon keeps `valk web` running on this machine, bound to
+    /// localhost (backlog #316, protocol 55): `web_server` in `settings.toml`, on
+    /// by default. `None` only asks; setting it is for the user only. Replies
+    /// `Text`, `on` or `off`.
+    WebServer {
+        req: ReqId,
+        on: Option<bool>,
+    },
     /// Starts the supervisor session (ADR-0019 §10, backlog #236, protocol 45):
     /// one Claude session that reads every other agent session and prompts the
     /// idle ones. With one already running, replies with it instead of starting
@@ -686,7 +694,7 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<SessionId>,
     },
-    /// A session's markdown and text files (ADR-0021 item 9, protocol 55): those
+    /// A session's markdown and text files (ADR-0021 item 9, protocol 56): those
     /// its branch and working tree changed, each checked. With `check`, paths
     /// mentioned in its chat or pane; the reply's `passing` names the ones that
     /// pass the same checks. Only the user or that session's own process asks.
@@ -698,7 +706,7 @@ pub enum ClientMsg {
         check: Vec<String>,
     },
     /// One of a session's files by its path in the repository, checked, cleaned
-    /// like a doc's body (ADR-0021 item 9, protocol 55). Replies `SessionFileText`.
+    /// like a doc's body (ADR-0021 item 9, protocol 56). Replies `SessionFileText`.
     ReadSessionFile {
         req: ReqId,
         session: SessionId,
@@ -1467,6 +1475,74 @@ pub fn state_dir() -> PathBuf {
     home_dir().join(".local/state/valkyrie")
 }
 
+/// Whether the on-by-default setting `key` of `settings.toml` is on: only `false`
+/// or `off` turns it off, and `$env`, when set, wins over the file. Read each
+/// time, so a change in the file counts at once.
+pub fn setting_on(env: &str, key: &str) -> bool {
+    let off = |v: &str| matches!(v.trim().trim_matches('"'), "false" | "off");
+    if let Ok(v) = std::env::var(env) {
+        return !off(&v);
+    }
+    !setting(key).is_some_and(|v| off(&v))
+}
+
+/// The value of `key` in `settings.toml`, its quotes taken off: the last line
+/// that sets it wins, as when the TUI reads the file.
+pub fn setting(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(config_dir().join("settings.toml")).ok()?;
+    setting_in(&text, key)
+}
+
+fn setting_in(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|l| l.split('#').next()?.split_once('='))
+        .rfind(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim().trim_matches('"').trim_matches('\'').to_owned())
+}
+
+/// Sets `key` to `value` in `settings.toml`, leaving every other line as it is:
+/// the line that set it is rewritten in place, else one is added. Whole or not
+/// at all, as the TUI saves it.
+pub fn set_setting(key: &str, value: &str) -> std::io::Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("settings.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let new = dir.join(format!(".settings.toml.{key}.new"));
+    std::fs::write(&new, set_in(&text, key, value))?;
+    std::fs::rename(&new, &path)
+}
+
+fn set_in(text: &str, key: &str, value: &str) -> String {
+    let sets = |l: &str| {
+        l.split('#')
+            .next()
+            .and_then(|l| l.split_once('='))
+            .is_some_and(|(k, _)| k.trim() == key)
+    };
+    let mut out = String::new();
+    let mut done = false;
+    for line in text.lines() {
+        if sets(line) {
+            if !done {
+                out.push_str(&format!("{key} = {value}\n"));
+                done = true;
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !done {
+        out.push_str(&format!("{key} = {value}\n"));
+    }
+    out
+}
+
 /// `$XDG_CONFIG_HOME/valkyrie`, falling back to `~/.config/valkyrie`; on Windows
 /// `%APPDATA%\Valkyrie`.
 pub fn config_dir() -> PathBuf {
@@ -1629,6 +1705,23 @@ fn passwd_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn setting_one_key_leaves_the_rest_of_the_file_alone() {
+        let text = "theme = \"nord\"  # mine\nweb_server = on\n# web_server = off\nweb_server = on\nmax_running = 3\n";
+        let set = super::set_in(text, "web_server", "off");
+        assert_eq!(
+            set,
+            "theme = \"nord\"  # mine\nweb_server = off\n# web_server = off\nmax_running = 3\n"
+        );
+        assert_eq!(
+            super::setting_in(&set, "web_server").as_deref(),
+            Some("off")
+        );
+        assert_eq!(super::setting_in(&set, "theme").as_deref(), Some("nord"));
+        assert_eq!(super::set_in("", "web_server", "on"), "web_server = on\n");
+        assert_eq!(super::setting_in("", "web_server"), None);
+    }
+
     #[test]
     fn an_elevated_valk_gets_a_daemon_of_its_own() {
         let user = PathBuf::from("/state/run/host.sock");

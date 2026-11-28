@@ -121,6 +121,7 @@ take?: boolean, branch?: string | null, pr?: string | null, }
   | { "t": "supervisor_log", req: number, }
   | { "t": "supervisor_watch", req: number, }
   | { "t": "supervise", req: number, on: boolean | null, }
+  | { "t": "web_server", req: number, on: boolean | null, }
   | { "t": "supervisor_session", req: number, cwd: string, size: Size, env: Array<[string, string | null]>, }
   | { "t": "take_step", req: number, session: number, seq: number, action: StepAction, }
   | { "t": "take_item", req: number, id: number, branch?: string | null, pr?: string | null, steal?: boolean, }
@@ -1368,7 +1369,7 @@ launches?: Array<LaunchOffer>, }
 
 /**
  * A markdown or text file in a session's repository, as its side pane lists it
- * (ADR-0021 item 9, protocol 55).
+ * (ADR-0021 item 9, protocol 56).
  */
 export type SessionFile = { 
 /**
