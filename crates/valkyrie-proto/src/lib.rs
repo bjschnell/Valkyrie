@@ -1559,10 +1559,8 @@ pub fn set_settings(pairs: &[(&str, &str)]) -> std::io::Result<()> {
 
 /// Where the daemon's web server listens unless `web_listen` names another
 /// address: the one `valk web` and `valk setup web` default to.
-pub const WEB_LISTEN: std::net::SocketAddr = std::net::SocketAddr::new(
-    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-    8790,
-);
+pub const WEB_LISTEN: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8790);
 
 /// `web_listen` as an address, when it is one with a port.
 pub fn parse_web_listen(value: &str) -> Option<std::net::SocketAddr> {

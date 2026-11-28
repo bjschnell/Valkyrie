@@ -14,6 +14,7 @@ import type {
   DigestGroup,
   SupervisorEntry,
   WatchedPr,
+  WebServerState,
   PastSession,
   RepoEdit,
   RepoList,
@@ -987,13 +988,15 @@ export async function supervisorLog(): Promise<{ entries: SupervisorEntry[]; on:
   return { entries: reply.entries, on: reply.on };
 }
 
-/** Whether the daemon keeps the web app running on localhost (backlog #316);
- * `on` sets it first. Throws with the daemon's reason. */
-export async function webServer(on: boolean | null = null): Promise<boolean> {
+/** The daemon's web server page (backlog #321): sets what's given, then says
+ * what the server is doing. Throws with the daemon's reason. */
+export async function webServerConfig(
+  change: { on?: boolean; listen?: string; url?: string } = {},
+): Promise<WebServerState> {
   if (!conn) throw new Error("not connected");
-  const reply = await conn.request({ t: "web_server", on });
-  if (reply.t !== "text") throw new Error("unexpected reply");
-  return reply.text === "on";
+  const reply = await conn.request({ t: "web_server_config", ...change });
+  if (reply.t !== "web_server_state") throw new Error("unexpected reply");
+  return reply.state;
 }
 
 /** The pull requests the supervisor watches, as its poll last read them, and

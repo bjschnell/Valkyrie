@@ -71,11 +71,24 @@ fn check_url(url: &str) -> Result<()> {
 }
 
 /// What the server is doing, from what's in the file now and what the keeper
-/// last said: a change the keeper hasn't acted on yet reads as starting.
+/// last said.
 fn state(reported: Option<Report>) -> WebServerState {
-    let on = valkyrie_proto::setting_on(ON_ENV, ON);
-    let listen = listen_now();
-    let url = url_now();
+    decide(
+        valkyrie_proto::setting_on(ON_ENV, ON),
+        listen_now(),
+        url_now(),
+        reported,
+    )
+}
+
+/// `state` once the file is read: a change the keeper hasn't acted on yet reads
+/// as starting.
+fn decide(
+    on: bool,
+    listen: SocketAddr,
+    url: Option<String>,
+    reported: Option<Report>,
+) -> WebServerState {
     let run = match &reported {
         _ if !on => WebRun::Off,
         None => WebRun::Unmanaged,
@@ -137,6 +150,94 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_the_keeper_has_not_seen_reads_as_starting() {
+        let local = valkyrie_proto::WEB_LISTEN;
+        let every: SocketAddr = "0.0.0.0:8790".parse().unwrap();
+        let reported = |run, listen| {
+            Some(Report {
+                run,
+                listen,
+                url: None,
+                default_url: Some("https://thor.tail1.ts.net".into()),
+            })
+        };
+        let now = decide(true, local, None, reported(WebRun::Running, local));
+        assert_eq!(now.run, WebRun::Running);
+        assert_eq!(now.listen, "127.0.0.1:8790");
+        assert_eq!(now.default_url, "https://thor.tail1.ts.net");
+        // Just moved: starting until the keeper restarts it there.
+        let moved = decide(true, every, None, reported(WebRun::Running, local));
+        assert_eq!(moved.run, WebRun::Starting);
+        let named = decide(
+            true,
+            local,
+            Some("https://v.example".into()),
+            reported(WebRun::Running, local),
+        );
+        assert_eq!(named.run, WebRun::Starting);
+        // Off wins; a service stands in wherever it listens; no keeper, no server.
+        assert_eq!(
+            decide(false, local, None, reported(WebRun::Running, local)).run,
+            WebRun::Off
+        );
+        assert_eq!(
+            decide(true, every, None, reported(WebRun::Service, local)).run,
+            WebRun::Service
+        );
+        assert_eq!(
+            decide(true, local, None, reported(WebRun::Taken, local)).run,
+            WebRun::Taken
+        );
+        let none = decide(true, local, None, None);
+        assert_eq!(none.run, WebRun::Unmanaged);
+        assert_eq!(none.default_url, "http://127.0.0.1:8790");
+    }
+
+    #[tokio::test]
+    async fn only_the_user_changes_the_web_server() {
+        use crate::context::{AS_CALLER, Caller};
+        let dir = std::env::temp_dir().join(format!("valkyrie-webcfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (registry, _) = crate::new_registry(
+            dir.join("v.sock"),
+            &dir.join("state"),
+            std::path::Path::new("/bin/true"),
+            1,
+            0,
+            7,
+            false,
+        )
+        .unwrap();
+        AS_CALLER.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|| Caller {
+                agent: Some("claude".into()),
+                session: None,
+                bridge: false,
+                desktop: false,
+            }))
+        });
+        // Refused before anything is written, so this machine's file is safe.
+        for (on, listen, url) in [
+            (Some(false), None, None),
+            (None, Some("0.0.0.0:8790".to_string()), None),
+            (None, None, Some(String::new())),
+        ] {
+            let e = registry
+                .web_server_config(on, listen, url, None)
+                .unwrap_err();
+            assert!(format!("{e:#}").contains("is for the user"), "{e:#}");
+        }
+        // Asking is anyone's.
+        assert!(matches!(
+            registry.web_server_config(None, None, None, None),
+            Ok(Reply::WebServerState { .. })
+        ));
+        AS_CALLER.with(|cell| *cell.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_phone_url_is_one_the_file_keeps_and_a_phone_opens() {

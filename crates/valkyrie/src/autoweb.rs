@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use valkyrie_daemon::web::{self, Report};
-use valkyrie_proto::WebRun;
 use valkyrie_proto::NoWindow as _;
+use valkyrie_proto::WebRun;
 
 /// The setting, and the environment variable that overrides it for one run.
 pub const KEY: &str = "web_server";
