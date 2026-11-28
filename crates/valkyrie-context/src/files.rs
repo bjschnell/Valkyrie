@@ -3,6 +3,10 @@
 //! The daemon reads a file in a session's repository for the web app or the TUI
 //! only through [`check`], which refuses everything item 9 rules out. Every read,
 //! every listed file and every chat mention that becomes a link goes through it.
+//!
+//! An agent controls the repository it works in, its git config included, so
+//! every git command here runs through [`Repo::git`]: no fsmonitor, no clean or
+//! process filter, no external diff, and a time limit.
 
 use anyhow::{Context, Result, bail};
 use std::io::Read;
@@ -26,26 +30,147 @@ pub struct Checked {
     pub path: PathBuf,
     pub size: u64,
     pub modified: Option<u64>,
+    /// Its device and inode as checked, for the read to compare with what it
+    /// opened (unix).
+    inode: Option<(u64, u64)>,
 }
 
-/// The canonical git top level of the checkout holding `cwd`, refused when it is
-/// the home folder or `/`, as the docs root is.
-pub fn top(cwd: &Path) -> Result<PathBuf> {
-    top_in(cwd, &valkyrie_proto::home_dir())
+/// How long one git command may take.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The checkout a session works in: its canonical top level, and the settings
+/// that keep the repository's own config from running anything.
+#[derive(Debug, Clone)]
+pub struct Repo {
+    pub top: PathBuf,
+    hardening: Vec<String>,
 }
 
-fn top_in(cwd: &Path, home: &Path) -> Result<PathBuf> {
-    let out = git(cwd, &["rev-parse", "--show-toplevel"])
-        .with_context(|| format!("{} is not in a git repository", cwd.display()))?;
-    let top = valkyrie_proto::canonical(Path::new(out.trim_end_matches(['\n', '\r'])))?;
-    let home = valkyrie_proto::canonical(home).ok();
-    if Some(&top) == home.as_ref() || top.parent().is_none() {
-        bail!(
-            "{} is too wide: files are read only from a project's repository",
-            top.display()
-        );
+impl Repo {
+    /// The checkout holding `cwd`, refused when its top level is the home folder,
+    /// `/` or anything above home, as the docs root is, or isn't the nearest
+    /// folder with a `.git` above `cwd` (a `core.worktree` pointed elsewhere).
+    pub fn open(cwd: &Path) -> Result<Repo> {
+        Self::open_in(cwd, &valkyrie_proto::home_dir())
     }
-    Ok(top)
+
+    fn open_in(cwd: &Path, home: &Path) -> Result<Repo> {
+        let cwd = valkyrie_proto::canonical(cwd)?;
+        let mut repo = Repo {
+            top: cwd.clone(),
+            hardening: hardening(&cwd),
+        };
+        let out = repo
+            .git(&["rev-parse", "--show-toplevel"])
+            .with_context(|| format!("{} is not in a git repository", cwd.display()))?;
+        let top = valkyrie_proto::canonical(Path::new(out.trim_end_matches(['\n', '\r'])))?;
+        let home = valkyrie_proto::canonical(home).unwrap_or_else(|_| home.to_path_buf());
+        if top.parent().is_none() || home.starts_with(&top) {
+            bail!(
+                "{} is too wide: files are read only from a project's repository",
+                top.display()
+            );
+        }
+        if top != crate::project::checkout(&cwd) {
+            bail!(
+                "{} isn't the checkout {} is in",
+                top.display(),
+                cwd.display()
+            );
+        }
+        repo.top = top;
+        Ok(repo)
+    }
+
+    /// Runs git in the top level with the repository's command-running settings
+    /// turned off, for at most [`GIT_TIMEOUT`].
+    fn git(&self, args: &[&str]) -> Result<String> {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("git")
+            .no_window()
+            .args(&self.hardening)
+            .args(args)
+            .current_dir(&self.top)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("run git")?;
+        let mut stdout = child.stdout.take().context("git's output")?;
+        // Read beside the wait, so a full pipe can't stall it.
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = (&mut stdout).take(16 << 20).read_to_end(&mut out);
+            out
+        });
+        let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("git {} took too long", args.first().unwrap_or(&""));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let out = reader.join().unwrap_or_default();
+        if !status.success() {
+            bail!("git {} failed", args.join(" "));
+        }
+        String::from_utf8(out).context("git's output isn't UTF-8")
+    }
+}
+
+/// `-c` settings that turn off what a repository's config could make git run
+/// while reading: its fsmonitor, every clean, smudge and process filter it
+/// names, and external diffs. Reading the config itself runs nothing.
+fn hardening(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = [
+        "core.fsmonitor=false",
+        "core.untrackedCache=false",
+        "core.hooksPath=/dev/null",
+        "diff.external=",
+    ]
+    .iter()
+    .flat_map(|c| ["-c".to_string(), (*c).to_string()])
+    .collect();
+    let names = std::process::Command::new("git")
+        .no_window()
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "config",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\.",
+        ])
+        .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut drivers: Vec<&str> = names
+        .lines()
+        .filter_map(|l| l.strip_prefix("filter.")?.rsplit_once('.').map(|(d, _)| d))
+        .collect();
+    drivers.sort_unstable();
+    drivers.dedup();
+    for d in drivers {
+        for key in ["clean", "smudge", "process"] {
+            out.push("-c".into());
+            out.push(format!("filter.{d}.{key}="));
+        }
+    }
+    out
 }
 
 /// `path` relative to `top`, if it is a plain one: no `..`, `.`, root or drive,
@@ -65,7 +190,9 @@ fn relative(top: &Path, path: &str) -> Result<String> {
         match c {
             Component::Normal(p) => {
                 let p = p.to_str().context("the path isn't UTF-8")?;
-                if p.contains('\\') {
+                // A backslash, a control character or a bidi override could make
+                // one name look like another.
+                if p.contains('\\') || crate::shown(p, false) != p {
                     bail!("{path} is not a plain path in the repository");
                 }
                 parts.push(p);
@@ -87,11 +214,46 @@ pub fn readable_kind(rel: &str) -> bool {
         .is_some_and(|e| KINDS.iter().any(|k| e.eq_ignore_ascii_case(k)))
 }
 
-/// The one check (ADR-0021 item 9), on `path` in the repository at `top` (from
-/// [`top`]): a `.md`, `.markdown` or `.txt` file, under `top` with no symlink on
-/// the way, tracked by git or untracked and not ignored, a regular file of at
+/// The one check (ADR-0021 item 9), on `path` in `repo`: a `.md`, `.markdown`
+/// or `.txt` file, under its top level with no symlink on the way, not hard
+/// linked, tracked by git or untracked and not ignored, a regular file of at
 /// most [`MAX_FILE`] bytes.
-pub fn check(top: &Path, path: &str) -> Result<Checked> {
+pub fn check(repo: &Repo, path: &str) -> Result<Checked> {
+    check_all(repo, std::slice::from_ref(&path.to_string()))
+        .pop()
+        .context("no file named")?
+}
+
+/// [`check`] on each of `paths`, asking git about all of them at once.
+pub fn check_all(repo: &Repo, paths: &[String]) -> Vec<Result<Checked>> {
+    let mut out: Vec<Result<Checked>> = paths.iter().map(|p| on_disk(&repo.top, p)).collect();
+    let rels: Vec<&str> = out
+        .iter()
+        .filter_map(|c| c.as_ref().ok().map(|c| c.rel.as_str()))
+        .collect();
+    if rels.is_empty() {
+        return out;
+    }
+    let seen = git_sees(repo, &rels);
+    for c in &mut out {
+        if let Ok(checked) = c {
+            match &seen {
+                Ok(seen) if seen.contains(checked.rel.as_str()) => {}
+                Ok(_) => {
+                    *c = Err(anyhow::anyhow!(
+                        "{}: git ignores it, so it isn't opened",
+                        checked.rel
+                    ))
+                }
+                Err(e) => *c = Err(anyhow::anyhow!("{}: {e}", checked.rel)),
+            }
+        }
+    }
+    out
+}
+
+/// Everything [`check`] asks of the file itself, without git.
+fn on_disk(top: &Path, path: &str) -> Result<Checked> {
     let rel = relative(top, path)?;
     if !readable_kind(&rel) {
         bail!("{rel}: only markdown and text files open here");
@@ -115,16 +277,26 @@ pub fn check(top: &Path, path: &str) -> Result<Checked> {
     if meta.len() > MAX_FILE {
         bail!("{rel}: over {} KB", MAX_FILE / 1024);
     }
+    // A hard link names the same file as one outside the repository could. A
+    // checkout never makes one.
+    #[cfg(unix)]
+    if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
+        bail!("{rel}: hard linked, so it isn't opened");
+    }
     // Belt and braces after the walk: the canonical path is under the canonical
     // top level (decision #69).
     let real = valkyrie_proto::canonical(&at)?;
     if !real.starts_with(top) || real != at {
         bail!("{rel} is outside the repository");
     }
-    if !git_sees(top, &rel)? {
-        bail!("{rel}: git ignores it, so it isn't opened");
-    }
     Ok(Checked {
+        #[cfg(unix)]
+        inode: Some((
+            std::os::unix::fs::MetadataExt::dev(&meta),
+            std::os::unix::fs::MetadataExt::ino(&meta),
+        )),
+        #[cfg(not(unix))]
+        inode: None,
         rel,
         size: meta.len(),
         modified: meta
@@ -136,33 +308,44 @@ pub fn check(top: &Path, path: &str) -> Result<Checked> {
     })
 }
 
-/// Whether git tracks `rel`, or would list it as untracked: not ignored.
-fn git_sees(top: &Path, rel: &str) -> Result<bool> {
-    let out = git(
-        top,
-        &[
-            "--literal-pathspecs",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            rel,
-        ],
-    )?;
-    Ok(out.split('\0').any(|p| p == rel))
+/// Which of `rels` git tracks, or would list as untracked: not ignored.
+fn git_sees(repo: &Repo, rels: &[&str]) -> Result<std::collections::HashSet<String>> {
+    let mut args = vec![
+        "--literal-pathspecs",
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+    ];
+    args.extend_from_slice(rels);
+    let out = repo.git(&args)?;
+    Ok(out
+        .split('\0')
+        .filter(|p| rels.contains(p))
+        .map(str::to_owned)
+        .collect())
 }
 
 /// `path`'s text, after [`check`]: UTF-8, without control characters or bidi
 /// overrides, as a doc's body is cleaned.
-pub fn read(top: &Path, path: &str) -> Result<(Checked, String)> {
-    let checked = check(top, path)?;
+pub fn read(repo: &Repo, path: &str) -> Result<(Checked, String)> {
+    let checked = check(repo, path)?;
     let mut file = open(&checked.path).with_context(|| format!("open {}", checked.rel))?;
-    // The handle, not the path: what was opened is still a small regular file.
+    // The handle, not the path: what was opened is still a small regular file,
+    // and the one checked, so a folder on the way swapped for a symlink since
+    // reaches nothing else.
     let meta = file.metadata()?;
     if !meta.is_file() {
         bail!("{}: not a regular file", checked.rel);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if Some((meta.dev(), meta.ino())) != checked.inode || meta.nlink() > 1 {
+            bail!("{}: it changed while being opened", checked.rel);
+        }
     }
     let mut bytes = Vec::new();
     (&mut file).take(MAX_FILE + 1).read_to_end(&mut bytes)?;
@@ -190,21 +373,26 @@ fn open(path: &Path) -> std::io::Result<std::fs::File> {
 /// The markdown and text files the session's checkout changed: on its branch since
 /// it left `default` (the default branch's name, if known), and changed or
 /// untracked in the working tree. Each passed [`check`]; newest first.
-pub fn list(top: &Path, default: Option<&str>) -> Vec<Checked> {
+pub fn list(repo: &Repo, default: Option<&str>) -> Vec<Checked> {
     let mut names: Vec<String> = Vec::new();
     let base = default.and_then(|d| {
         [format!("origin/{d}"), d.to_owned()]
             .into_iter()
-            .find_map(|tip| git(top, &["merge-base", "HEAD", &tip]).ok())
+            .find_map(|tip| repo.git(&["merge-base", "HEAD", &tip]).ok())
     });
-    let changed = match &base {
-        Some(base) => git(
-            top,
-            &["diff", "--name-only", "-z", "--no-renames", base.trim()],
-        ),
-        None => git(top, &["diff", "--name-only", "-z", "--no-renames", "HEAD"]),
+    let diff = |base: &str| {
+        repo.git(&[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+        ])
     };
-    let untracked = git(top, &["ls-files", "-z", "--others", "--exclude-standard"]);
+    let changed = diff(base.as_deref().map_or("HEAD", str::trim));
+    let untracked = repo.git(&["ls-files", "-z", "--others", "--exclude-standard"]);
     for out in [changed, untracked].into_iter().flatten() {
         for name in out.split('\0').filter(|n| !n.is_empty()) {
             if readable_kind(name) && !names.iter().any(|n| n == name) {
@@ -212,10 +400,10 @@ pub fn list(top: &Path, default: Option<&str>) -> Vec<Checked> {
             }
         }
     }
-    let mut files: Vec<Checked> = names
-        .iter()
-        .take(MAX_LISTED * 2)
-        .filter_map(|n| check(top, n).ok())
+    names.truncate(MAX_LISTED * 2);
+    let mut files: Vec<Checked> = check_all(repo, &names)
+        .into_iter()
+        .filter_map(Result::ok)
         .collect();
     files.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.rel.cmp(&b.rel)));
     files.truncate(MAX_LISTED);
@@ -224,28 +412,13 @@ pub fn list(top: &Path, default: Option<&str>) -> Vec<Checked> {
 
 /// Of `paths` (mentions in chat or a pane), the ones that pass [`check`], each as
 /// given with its relative path.
-pub fn passing(top: &Path, paths: &[String]) -> Vec<(String, String)> {
+pub fn passing(repo: &Repo, paths: &[String]) -> Vec<(String, String)> {
+    let paths = &paths[..paths.len().min(MAX_LISTED)];
     paths
         .iter()
-        .take(MAX_LISTED)
-        .filter_map(|p| check(top, p).ok().map(|c| (p.clone(), c.rel)))
+        .zip(check_all(repo, paths))
+        .filter_map(|(p, c)| c.ok().map(|c| (p.clone(), c.rel)))
         .collect()
-}
-
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .no_window()
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .context("run git")?;
-    if !out.status.success() {
-        bail!("git {} failed", args.join(" "));
-    }
-    String::from_utf8(out.stdout).context("git's output isn't UTF-8")
 }
 
 #[cfg(test)]
@@ -253,9 +426,10 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    struct Repo {
+    struct Fx {
         _tmp: TempDir,
         top: PathBuf,
+        repo: Repo,
     }
 
     struct TempDir(PathBuf);
@@ -285,7 +459,7 @@ mod tests {
         assert!(ok, "git {args:?}");
     }
 
-    fn repo() -> Repo {
+    fn repo() -> Fx {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "valk-files-{}-{}-{}",
@@ -303,19 +477,23 @@ mod tests {
         std::fs::write(dir.join(".gitignore"), "secret.md\nbuild/\n").unwrap();
         sh(&dir, &["add", "."]);
         sh(&dir, &["commit", "-qm", "first"]);
-        let top = top(&dir).unwrap();
-        Repo { _tmp: tmp, top }
+        let repo = Repo::open(&dir).unwrap();
+        Fx {
+            _tmp: tmp,
+            top: repo.top.clone(),
+            repo,
+        }
     }
 
-    fn refused(r: &Repo, path: &str, why: &str) {
-        let e = check(&r.top, path).expect_err(path).to_string();
+    fn refused(r: &Fx, path: &str, why: &str) {
+        let e = check(&r.repo, path).expect_err(path).to_string();
         assert!(e.contains(why), "{path}: {e}");
     }
 
     #[test]
     fn reads_a_tracked_markdown_file() {
         let r = repo();
-        let (c, text) = read(&r.top, "README.md").unwrap();
+        let (c, text) = read(&r.repo, "README.md").unwrap();
         assert_eq!(c.rel, "README.md");
         assert_eq!(text, "# hi\n");
     }
@@ -325,7 +503,7 @@ mod tests {
         let r = repo();
         std::fs::create_dir(r.top.join("notes")).unwrap();
         std::fs::write(r.top.join("notes/plan.TXT"), "plan").unwrap();
-        assert_eq!(read(&r.top, "notes/plan.TXT").unwrap().1, "plan");
+        assert_eq!(read(&r.repo, "notes/plan.TXT").unwrap().1, "plan");
     }
 
     #[test]
@@ -333,7 +511,7 @@ mod tests {
         let r = repo();
         let abs = r.top.join("README.md");
         assert_eq!(
-            check(&r.top, abs.to_str().unwrap()).unwrap().rel,
+            check(&r.repo, abs.to_str().unwrap()).unwrap().rel,
             "README.md"
         );
     }
@@ -341,12 +519,15 @@ mod tests {
     #[test]
     fn refuses_the_home_folder_and_root_as_top_level() {
         // `/` holds no repository here, and a home folder that is one is too wide.
-        assert!(top(Path::new("/")).is_err());
+        assert!(Repo::open(Path::new("/")).is_err());
         let r = repo();
-        let e = top_in(&r.top, &r.top).unwrap_err().to_string();
+        let e = Repo::open_in(&r.top, &r.top).unwrap_err().to_string();
         assert!(e.contains("too wide"), "{e}");
-        let e = top_in(&r.top.join("README.md"), &r.top);
-        assert!(e.is_err());
+        // Above home is wider still.
+        let e = Repo::open_in(&r.top, &r.top.join("home/me"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("too wide"), "{e}");
     }
 
     #[test]
@@ -425,14 +606,14 @@ mod tests {
         std::fs::write(r.top.join("big.md"), vec![b'a'; MAX_FILE as usize + 1]).unwrap();
         refused(&r, "big.md", "over 200 KB");
         std::fs::write(r.top.join("edge.md"), vec![b'a'; MAX_FILE as usize]).unwrap();
-        assert!(read(&r.top, "edge.md").is_ok());
+        assert!(read(&r.repo, "edge.md").is_ok());
     }
 
     #[test]
     fn refuses_text_that_is_not_utf8() {
         let r = repo();
         std::fs::write(r.top.join("latin1.txt"), b"caf\xe9").unwrap();
-        let e = read(&r.top, "latin1.txt").unwrap_err().to_string();
+        let e = read(&r.repo, "latin1.txt").unwrap_err().to_string();
         assert!(e.contains("not UTF-8"), "{e}");
     }
 
@@ -446,7 +627,7 @@ mod tests {
     fn cleans_the_text_like_a_doc_body() {
         let r = repo();
         std::fs::write(r.top.join("x.md"), "a\u{1b}[31mb\u{202e}c\td\r\n").unwrap();
-        assert_eq!(read(&r.top, "x.md").unwrap().1, "a[31mbc\td\n");
+        assert_eq!(read(&r.repo, "x.md").unwrap().1, "a[31mbc\td\n");
     }
 
     #[test]
@@ -460,7 +641,7 @@ mod tests {
         std::fs::write(r.top.join("README.md"), "# changed\n").unwrap();
         std::fs::write(r.top.join("new.txt"), "n").unwrap();
         std::fs::write(r.top.join("secret.md"), "s").unwrap();
-        let mut got: Vec<String> = list(&r.top, Some("main"))
+        let mut got: Vec<String> = list(&r.repo, Some("main"))
             .into_iter()
             .map(|c| c.rel)
             .collect();
@@ -472,9 +653,88 @@ mod tests {
     fn checks_mentions() {
         let r = repo();
         let got = passing(
-            &r.top,
+            &r.repo,
             &["README.md".into(), "secret.md".into(), "../x.md".into()],
         );
         assert_eq!(got, [("README.md".to_owned(), "README.md".to_owned())]);
+    }
+
+    #[test]
+    fn the_repositorys_config_runs_nothing() {
+        let r = repo();
+        std::fs::write(r.top.join(".gitattributes"), "*.md filter=evil\n").unwrap();
+        sh(&r.top, &["add", "."]);
+        sh(&r.top, &["commit", "-qm", "attrs"]);
+        let ran = r.top.join("RAN");
+        let touch = format!("touch {}; cat", ran.display());
+        sh(&r.top, &["config", "filter.evil.clean", &touch]);
+        sh(
+            &r.top,
+            &[
+                "config",
+                "core.fsmonitor",
+                &format!("touch {}", ran.display()),
+            ],
+        );
+        std::fs::write(r.top.join("README.md"), "# changed\n").unwrap();
+        let repo = Repo::open(&r.top).unwrap();
+        let listed: Vec<String> = list(&repo, Some("main"))
+            .into_iter()
+            .map(|c| c.rel)
+            .collect();
+        assert_eq!(listed, ["README.md"]);
+        assert!(read(&repo, "README.md").is_ok());
+        assert!(!ran.exists(), "a repository setting ran a command");
+    }
+
+    #[test]
+    fn refuses_a_worktree_set_elsewhere() {
+        let r = repo();
+        let elsewhere = r.top.join("sub");
+        std::fs::create_dir(&elsewhere).unwrap();
+        sh(
+            &r.top,
+            &["config", "core.worktree", elsewhere.to_str().unwrap()],
+        );
+        let e = Repo::open(&r.top).unwrap_err().to_string();
+        assert!(e.contains("isn't the checkout"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_hard_link() {
+        let r = repo();
+        let outside = r.top.with_extension("private.md");
+        std::fs::write(&outside, "secret").unwrap();
+        let _gone = TempDir(outside.clone());
+        std::fs::hard_link(&outside, r.top.join("plan.md")).unwrap();
+        refused(&r, "plan.md", "hard linked");
+    }
+
+    #[test]
+    fn refuses_a_name_that_could_read_as_another() {
+        let r = repo();
+        refused(&r, "R\u{202e}dm.txt", "not a plain path");
+        refused(&r, "a\u{7}.md", "not a plain path");
+    }
+
+    #[test]
+    fn checks_many_paths_with_one_git_call() {
+        let r = repo();
+        std::fs::write(r.top.join("secret.md"), "s").unwrap();
+        std::fs::write(r.top.join("new.md"), "n").unwrap();
+        let got: Vec<bool> = check_all(
+            &r.repo,
+            &[
+                "README.md".into(),
+                "secret.md".into(),
+                "new.md".into(),
+                "x.rs".into(),
+            ],
+        )
+        .iter()
+        .map(Result::is_ok)
+        .collect();
+        assert_eq!(got, [true, false, true, false]);
     }
 }

@@ -128,19 +128,23 @@ export function SessionView({ id }: { id: number }) {
       if (!first) return;
       const forId = id;
       setTimeout(() => {
-        const check = waiting.current.splice(0);
-        sessionFiles(forId, check).then(
-          (got) =>
-            setPassing((old) => {
-              if (forId !== idRef.current) return old;
-              const next = new Map(old);
-              check.forEach((p) => next.set(p, null));
-              got.passing.forEach((m) => next.set(m.given, m.path));
-              return next;
-            }),
-          // Asked again next time it's mentioned.
-          () => check.forEach((p) => asked.current.delete(p)),
-        );
+        const all = waiting.current.splice(0);
+        // The daemon checks at most 100 a request.
+        for (let at = 0; at < all.length; at += 100) {
+          const check = all.slice(at, at + 100);
+          sessionFiles(forId, check).then(
+            (got) =>
+              setPassing((old) => {
+                if (forId !== idRef.current) return old;
+                const next = new Map(old);
+                check.forEach((p) => next.set(p, null));
+                got.passing.forEach((m) => next.set(m.given, m.path));
+                return next;
+              }),
+            // Asked again next time it's mentioned.
+            () => check.forEach((p) => asked.current.delete(p)),
+          );
+        }
       }, 50);
     },
     [id],

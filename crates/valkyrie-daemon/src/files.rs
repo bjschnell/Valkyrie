@@ -40,8 +40,8 @@ impl Registry {
         let cwd = self.files_cwd(id, peer)?;
         tokio::task::spawn_blocking(move || {
             // Not in a repository, or a top level too wide: nothing to list.
-            let top = match files::top(&cwd) {
-                Ok(top) => top,
+            let repo = match files::Repo::open(&cwd) {
+                Ok(repo) => repo,
                 Err(e) => {
                     tracing::debug!(id, "session files: {e:#}");
                     return Ok(Reply::SessionFiles {
@@ -50,15 +50,22 @@ impl Registry {
                     });
                 }
             };
-            let default = crate::worktree::default_branch(&top);
-            let listed = files::list(&top, default.as_deref());
-            let passing = files::passing(&top, &check)
-                .into_iter()
-                .map(|(given, path)| FileMention { given, path })
-                .collect();
+            // Mentions are checked alone: the list is its own request.
+            if !check.is_empty() {
+                let passing = files::passing(&repo, &check)
+                    .into_iter()
+                    .map(|(given, path)| FileMention { given, path })
+                    .collect();
+                return Ok(Reply::SessionFiles {
+                    files: Vec::new(),
+                    passing,
+                });
+            }
+            let default = crate::worktree::default_branch(&repo.top);
+            let listed = files::list(&repo, default.as_deref());
             Ok(Reply::SessionFiles {
                 files: listed.into_iter().map(wire).collect(),
-                passing,
+                passing: Vec::new(),
             })
         })
         .await?
@@ -72,8 +79,8 @@ impl Registry {
     ) -> Result<Reply> {
         let cwd = self.files_cwd(id, peer)?;
         tokio::task::spawn_blocking(move || {
-            let top = files::top(&cwd)?;
-            let (checked, text) = files::read(&top, &path)?;
+            let repo = files::Repo::open(&cwd)?;
+            let (checked, text) = files::read(&repo, &path)?;
             Ok(Reply::SessionFileText {
                 file: wire(checked),
                 text,
@@ -156,10 +163,8 @@ mod tests {
         let id = mine.info().id;
 
         as_caller(None, None);
-        let Reply::SessionFiles { files, passing } = registry
-            .session_files(id, vec!["README.md".into(), "../x.md".into()], None)
-            .await
-            .unwrap()
+        let Reply::SessionFiles { files, .. } =
+            registry.session_files(id, Vec::new(), None).await.unwrap()
         else {
             panic!("no files");
         };
@@ -167,6 +172,13 @@ mod tests {
             files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             ["NOTES.md"]
         );
+        let Reply::SessionFiles { passing, .. } = registry
+            .session_files(id, vec!["README.md".into(), "../x.md".into()], None)
+            .await
+            .unwrap()
+        else {
+            panic!("no files");
+        };
         assert_eq!(passing.len(), 1);
         assert_eq!(passing[0].path, "README.md");
 
