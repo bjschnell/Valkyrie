@@ -169,8 +169,8 @@ pub fn read(top: &Path, path: &str) -> Result<(Checked, String)> {
     if bytes.len() as u64 > MAX_FILE {
         bail!("{}: over {} KB", checked.rel, MAX_FILE / 1024);
     }
-    let text = String::from_utf8(bytes)
-        .map_err(|_| anyhow::anyhow!("{}: not UTF-8 text", checked.rel))?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{}: not UTF-8 text", checked.rel))?;
     Ok((checked, crate::shown(&text, true)))
 }
 
@@ -198,7 +198,10 @@ pub fn list(top: &Path, default: Option<&str>) -> Vec<Checked> {
             .find_map(|tip| git(top, &["merge-base", "HEAD", &tip]).ok())
     });
     let changed = match &base {
-        Some(base) => git(top, &["diff", "--name-only", "-z", "--no-renames", base.trim()]),
+        Some(base) => git(
+            top,
+            &["diff", "--name-only", "-z", "--no-renames", base.trim()],
+        ),
         None => git(top, &["diff", "--name-only", "-z", "--no-renames", "HEAD"]),
     };
     let untracked = git(top, &["ls-files", "-z", "--others", "--exclude-standard"]);
@@ -264,7 +267,14 @@ mod tests {
 
     fn sh(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .args(args)
             .current_dir(dir)
             .stdout(std::process::Stdio::null())
@@ -322,7 +332,10 @@ mod tests {
     fn takes_an_absolute_path_under_the_top_level() {
         let r = repo();
         let abs = r.top.join("README.md");
-        assert_eq!(check(&r.top, abs.to_str().unwrap()).unwrap().rel, "README.md");
+        assert_eq!(
+            check(&r.top, abs.to_str().unwrap()).unwrap().rel,
+            "README.md"
+        );
     }
 
     #[test]
@@ -447,7 +460,10 @@ mod tests {
         std::fs::write(r.top.join("README.md"), "# changed\n").unwrap();
         std::fs::write(r.top.join("new.txt"), "n").unwrap();
         std::fs::write(r.top.join("secret.md"), "s").unwrap();
-        let mut got: Vec<String> = list(&r.top, Some("main")).into_iter().map(|c| c.rel).collect();
+        let mut got: Vec<String> = list(&r.top, Some("main"))
+            .into_iter()
+            .map(|c| c.rel)
+            .collect();
         got.sort();
         assert_eq!(got, ["DESIGN.md", "README.md", "new.txt"]);
     }

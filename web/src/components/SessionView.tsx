@@ -1,10 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { STATE_LABEL, program, type Doc } from "../proto";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { STATE_LABEL, program, type Doc, type SessionFile } from "../proto";
 import { isNegative } from "../lib/choices";
 import { answeringLabel } from "../lib/answering";
 import type { Key } from "../lib/keys";
 import { age } from "../lib/time";
-import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, sessionDocs, toast, useApp } from "../store";
+import { answer, kill, openChoices, rename, sendFile, sendKey, sendMessage, sessionDocs, sessionFiles, toast, useApp } from "../store";
 import { Back, Clip, Dots, Grid, Page, Send, Wrap } from "./icons";
 import { ConnectionPill, StateIcon } from "./bits";
 import { ChatView } from "./Chat";
@@ -12,8 +12,8 @@ import { MicButton } from "./Mic";
 import { ScreenView, useDesktop, useWide } from "./Terminal";
 import { usePageKeys } from "../lib/pageKeys";
 import { sessionDock } from "../lib/sessionDock";
-import { DocOpener } from "./docRefs";
-import { SessionDocs } from "./SessionDocs";
+import { DocOpener, FileOpener, type FileLinks } from "./docRefs";
+import { SessionDocs, type Reading } from "./SessionDocs";
 
 const VIEW_KEY = "valk.view";
 const MODE_KEY = "valk.mode";
@@ -76,13 +76,25 @@ export function SessionView({ id }: { id: number }) {
   // null when it's shut, else the doc on show by key, or null for the list.
   const [docs, setDocs] = useState<Doc[] | null>(null);
   const [docsFailed, setDocsFailed] = useState<string | null>(null);
-  const [pane, setPane] = useState<{ reading: string | null } | null>(null);
+  const [pane, setPane] = useState<{ reading: Reading | null } | null>(null);
+  // Its markdown and text files (ADR-0021 item 9), and what the daemon said of
+  // each path mentioned in its chat: the file it names, or null when refused.
+  const [files, setFiles] = useState<SessionFile[] | null>(null);
+  const [passing, setPassing] = useState<ReadonlyMap<string, string | null>>(new Map());
+  // Mentions are asked about in a batch, each path once per session.
+  const asked = useRef(new Set<string>());
+  const waiting = useRef<string[]>([]);
+  const idRef = useRef(id);
+  idRef.current = id;
   const status = useApp((s) => s.status);
   const turn = info?.status.state;
   useEffect(() => setPane(null), [id]);
   useEffect(() => {
     setDocs(null);
     setDocsFailed(null);
+    setFiles(null);
+    setPassing(new Map());
+    asked.current = new Set();
   }, [id]);
   // Asked again as its turns go by, and when the pane opens: a doc it just wrote shows.
   const paneOpen = pane !== null;
@@ -98,11 +110,55 @@ export function SessionView({ id }: { id: number }) {
       // A list it had stays; with none, the pane says why.
       (e: Error) => fresh && setDocsFailed(e.message),
     );
+    sessionFiles(id).then(
+      (got) => fresh && setFiles(got.files),
+      (e: Error) => fresh && setDocsFailed(e.message),
+    );
     return () => {
       fresh = false;
     };
   }, [id, status, turn, paneOpen]);
-  const toggleDocs = () => setPane((p) => (p ? null : { reading: docs?.length === 1 ? docs[0].key || null : null }));
+  const askFiles = useCallback(
+    (paths: string[]) => {
+      const fresh = paths.filter((p) => !asked.current.has(p));
+      if (!fresh.length) return;
+      fresh.forEach((p) => asked.current.add(p));
+      const first = waiting.current.length === 0;
+      waiting.current.push(...fresh);
+      if (!first) return;
+      const forId = id;
+      setTimeout(() => {
+        const check = waiting.current.splice(0);
+        sessionFiles(forId, check).then(
+          (got) =>
+            setPassing((old) => {
+              if (forId !== idRef.current) return old;
+              const next = new Map(old);
+              check.forEach((p) => next.set(p, null));
+              got.passing.forEach((m) => next.set(m.given, m.path));
+              return next;
+            }),
+          // Asked again next time it's mentioned.
+          () => check.forEach((p) => asked.current.delete(p)),
+        );
+      }, 50);
+    },
+    [id],
+  );
+  const fileLinks: FileLinks = useMemo(
+    () => ({ passing, ask: askFiles, open: (path) => setPane({ reading: { file: path } }) }),
+    [passing, askFiles],
+  );
+  const nFiles = files?.length ?? 0;
+  const nDocs = docs?.length ?? 0;
+  const toggleDocs = () =>
+    setPane((p) => {
+      if (p) return null;
+      // Just one thing to show: straight to it.
+      if (nDocs === 1 && nFiles === 0 && docs?.[0].key) return { reading: { doc: docs[0].key } };
+      if (nDocs === 0 && nFiles === 1 && files) return { reading: { file: files[0].path } };
+      return { reading: null };
+    });
   const keyboard = typing && mode === "terminal" && live && desktop;
   const dock = sessionDock(mode, desktop);
   // The chat, a window gone narrow or a program gone: it starts again with a
@@ -209,16 +265,16 @@ export function SessionView({ id }: { id: number }) {
           </div>
         </div>
         <ConnectionPill />
-        {(paneOpen || (docs?.length ?? 0) > 0) && (
+        {(paneOpen || nDocs + nFiles > 0) && (
           <button
             className={`icon-btn docs-btn ${paneOpen ? "lit" : ""}`}
-            aria-label={`Docs from this session (${docs?.length ?? 0})`}
+            aria-label={`Docs and files from this session (${nDocs + nFiles})`}
             aria-pressed={paneOpen}
-            title="Docs from this session (D)"
+            title="Docs and files from this session (D)"
             onClick={toggleDocs}
           >
             <Page />
-            <span className="docs-btn-n">{docs?.length ?? 0}</span>
+            <span className="docs-btn-n">{nDocs + nFiles}</span>
           </button>
         )}
         {mode === "terminal" && (
@@ -249,7 +305,8 @@ export function SessionView({ id }: { id: number }) {
         </div>
       )}
 
-      <DocOpener.Provider value={(key) => setPane({ reading: key })}>
+      <DocOpener.Provider value={(key) => setPane({ reading: { doc: key } })}>
+      <FileOpener.Provider value={fileLinks}>
         <div className={`session-main ${paneOpen ? "with-docs" : ""}`}>
           {mode === "chat" ? (
             <ChatView info={info} scroller={scroller} onTerminal={() => choose("terminal")} />
@@ -258,14 +315,17 @@ export function SessionView({ id }: { id: number }) {
           )}
           {pane && (
             <SessionDocs
+              session={id}
               docs={docs}
+              files={files}
               failed={docsFailed}
               reading={pane.reading}
-              onRead={(key) => setPane({ reading: key })}
+              onRead={(what) => setPane({ reading: what })}
               onClose={() => setPane(null)}
             />
           )}
         </div>
+      </FileOpener.Provider>
       </DocOpener.Provider>
 
       {exited && (

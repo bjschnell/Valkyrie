@@ -4,6 +4,10 @@ import { parseInline, parseMarkdown } from "../lib/chat";
 import { quoteOf } from "../lib/docs";
 import { DocRefs } from "./docRefs";
 
+/** Where a link that isn't to the web goes, as a path in the session's
+ * repository, or null to leave it text (ADR-0021 item 9). */
+export type RelResolver = (href: string) => string | null;
+
 /** Where a `[[wikilink]]` goes: a doc's key, or null when no doc goes by that name. */
 export type WikiResolver = (target: string) => string | null;
 
@@ -48,20 +52,23 @@ function commentable(c: BlockComments | undefined, text: string, base?: string):
  * Markdown as agents write it: chat replies, decision and skill bodies, docs.
  * Everything is React text, so HTML in it shows as text; only http(s) links
  * open, and a `[[wikilink]]` only to a doc `wiki` knows (in docs; text elsewhere).
+ * A relative link opens only where `rel` places it, as `a.md-rel` with its path.
  */
 export function Markdown({
   text,
   className,
   wiki,
+  rel,
   comments,
 }: {
   text: string;
   className?: string;
   wiki?: WikiResolver;
+  rel?: RelResolver;
   comments?: BlockComments;
 }) {
   const parsed = useMemo(() => parseMarkdown(text), [text]);
-  const inline = (s: string) => inlines(s, wiki);
+  const inline = (s: string) => inlines(s, wiki, rel);
   return (
     <div className={className ? `md ${className}` : "md"}>
       {parsed.map((b, i) => {
@@ -145,7 +152,7 @@ export function Markdown({
   );
 }
 
-function inlines(text: string, wiki?: WikiResolver): ReactNode[] {
+function inlines(text: string, wiki?: WikiResolver, rel?: RelResolver): ReactNode[] {
   return parseInline(text).map((part, i) => {
     switch (part.t) {
       case "wiki": {
@@ -169,6 +176,15 @@ function inlines(text: string, wiki?: WikiResolver): ReactNode[] {
         return <strong key={i}>{part.v}</strong>;
       case "i":
         return <em key={i}>{part.v}</em>;
+      case "rel": {
+        const path = rel?.(part.href) ?? null;
+        if (path === null) return part.v;
+        return (
+          <a key={i} className="md-rel" href="#" data-path={path} title={path}>
+            {part.v}
+          </a>
+        );
+      }
       case "a":
         return (
           <a key={i} href={part.href} target="_blank" rel="noreferrer noopener">

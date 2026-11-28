@@ -91,7 +91,7 @@ export const PAGE_KEYS = {
     i: "Write to the agent",
     t: "Switch between chat and terminal",
     r: "Review its changes",
-    D: "Docs this session wrote, beside it: j and k pick one (in a doc, scroll), Enter reads it, Esc goes back, then closes",
+    D: "Docs this session wrote and files its branch changed, beside it: j and k pick one (in one, scroll), Enter reads it, Esc goes back, then closes",
     q: "Back to the inbox",
   },
   review: {

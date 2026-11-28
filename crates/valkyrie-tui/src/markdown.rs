@@ -56,8 +56,22 @@ pub fn render(src: &str, width: u16, t: &Theme) -> Rendered {
 /// `src` drawn in `width` columns, with `[[wikilinks]]` going where `wiki` says:
 /// a doc's key makes a link, and a name no doc goes by shows dimmed.
 pub fn render_with(src: &str, width: u16, t: &Theme, wiki: Option<Wiki>) -> Rendered {
+    render_linked(src, width, t, wiki, None)
+}
+
+/// As [`render_with`], and a link that isn't to the web goes where `rel` says:
+/// a key makes it a link (a session's file, ADR-0021 item 9), else it opens
+/// nowhere.
+pub fn render_linked(
+    src: &str,
+    width: u16,
+    t: &Theme,
+    wiki: Option<Wiki>,
+    rel: Option<Wiki>,
+) -> Rendered {
     let mut w = Writer::new(width.max(1), t);
     w.wiki = wiki;
+    w.rel = rel;
     let mut options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     if wiki.is_some() {
@@ -143,6 +157,8 @@ struct Table {
 struct Writer<'t> {
     t: &'t Theme,
     wiki: Option<Wiki<'t>>,
+    /// Where a relative link goes, if anywhere.
+    rel: Option<Wiki<'t>>,
     width: u16,
     out: Vec<Line<'static>>,
     links: Vec<Link>,
@@ -168,6 +184,7 @@ impl<'t> Writer<'t> {
         Writer {
             t,
             wiki: None,
+            rel: None,
             width,
             out: Vec::new(),
             links: Vec::new(),
@@ -322,7 +339,13 @@ impl<'t> Writer<'t> {
                 self.link.push(self.urls.len() - 1);
             }
             Tag::Link { dest_url, .. } => {
-                self.urls.push(Dest::Url(dest_url.into_string()));
+                let url = dest_url.into_string();
+                let web = url.starts_with("https://") || url.starts_with("http://");
+                let dest = match self.rel.filter(|_| !web).and_then(|rel| rel(&url)) {
+                    Some(key) => Dest::Doc(key),
+                    None => Dest::Url(url),
+                };
+                self.urls.push(dest);
                 self.link.push(self.urls.len() - 1);
             }
             Tag::Image { dest_url, .. } => {

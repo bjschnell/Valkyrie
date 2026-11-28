@@ -163,7 +163,10 @@ mod tests {
         else {
             panic!("no files");
         };
-        assert_eq!(files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["NOTES.md"]);
+        assert_eq!(
+            files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            ["NOTES.md"]
+        );
         assert_eq!(passing.len(), 1);
         assert_eq!(passing[0].path, "README.md");
 
@@ -187,7 +190,12 @@ mod tests {
         assert!(registry.session_files(id, Vec::new(), None).await.is_err());
 
         as_caller(Some("claude"), None);
-        assert!(registry.read_session_file(id, "README.md".into(), None).await.is_err());
+        assert!(
+            registry
+                .read_session_file(id, "README.md".into(), None)
+                .await
+                .is_err()
+        );
 
         AS_CALLER.with(|c| *c.borrow_mut() = None);
         mine.kill();

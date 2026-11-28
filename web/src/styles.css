@@ -6594,3 +6594,19 @@ html.with-tabs .composer-phone {
     border-left: 1px solid var(--line);
   }
 }
+
+/* A session's files beside it (ADR-0021 item 9). */
+.session-docs-section {
+  margin: var(--space-4) var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.session-file-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
