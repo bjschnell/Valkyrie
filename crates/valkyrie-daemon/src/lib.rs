@@ -12,6 +12,7 @@ mod dispatch;
 mod docs;
 mod extract;
 mod facts;
+mod files;
 mod foreground;
 mod guard;
 mod habit;
@@ -1665,6 +1666,14 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
                 count_only,
                 session,
             } => (req, registry.docs(count_only, session)),
+            ClientMsg::SessionFiles {
+                req,
+                session,
+                check,
+            } => (req, registry.session_files(session, check, peer).await),
+            ClientMsg::ReadSessionFile { req, session, path } => {
+                (req, registry.read_session_file(session, path, peer).await)
+            }
             ClientMsg::Digest { req, since_ms, by } => (req, registry.digest(since_ms, by).await),
             ClientMsg::SupervisorLog { req } => (req, registry.supervisor_log()),
             ClientMsg::SupervisorWatch { req } => (req, registry.supervisor_watch()),

@@ -92,6 +92,29 @@ pub struct Doc {
     pub text: Option<String>,
 }
 
+/// A markdown or text file in a session's repository, as its side pane lists it
+/// (ADR-0021 item 9, protocol 57).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SessionFile {
+    /// Relative to the repository's top level, with `/` between folders.
+    pub path: String,
+    /// In bytes.
+    pub size: u64,
+    /// When it last changed, in seconds; `None` if the system didn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<u64>,
+}
+
+/// A path mentioned in chat or a pane that passed the checks: what was written,
+/// and the file it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileMention {
+    pub given: String,
+    pub path: String,
+}
+
 /// The Docs list as the daemon gave it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DocsListing {

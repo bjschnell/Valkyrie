@@ -796,6 +796,9 @@ fn same_origin(headers: &HeaderMap) -> bool {
 /// takes from a human only. `WriteDoc` and `EditDoc` are the agents' path, and
 /// moving the folder is the CLI's.
 ///
+/// A session's markdown and text files (ADR-0021 item 9) are read by session and
+/// path, with every check in the daemon.
+///
 /// Agent notes (ADR-0017): the web app's Memory page lists, corrects (a note
 /// with `replaces`) and deletes them, as the user. Writing past a tombstone
 /// (`force`) stays the user's own terminal's; the daemon refuses it from the
@@ -1390,6 +1393,17 @@ mod tests {
             session: None,
         }));
         assert!(allowed(&ClientMsg::DocsSeen { req: 1, at: 0 }));
+        // A session's files (ADR-0021 item 9): a device already sees the Review page.
+        assert!(allowed(&ClientMsg::SessionFiles {
+            req: 1,
+            session: 1,
+            check: Vec::new(),
+        }));
+        assert!(allowed(&ClientMsg::ReadSessionFile {
+            req: 1,
+            session: 1,
+            path: "README.md".into(),
+        }));
         assert!(allowed(&ClientMsg::OpenDoc {
             req: 1,
             key: "3".into(),

@@ -2854,6 +2854,19 @@ impl App {
                     } else if let Some(doc) = links::doc_at(view.shown(), at.0, at.1) {
                         // A doc it mentions, read beside it (backlog #311).
                         self.open_beside(Some(doc.to_string())).await;
+                    } else if let Some(path) = links::file_at(view.shown(), at.0, at.1) {
+                        // A file of its own it mentions, once the daemon passes it.
+                        let passed = self.client.session_files(id, vec![path]).await;
+                        match passed.map(|(_, p)| p.into_iter().next()) {
+                            Ok(Some(m)) => {
+                                self.open_beside(Some(format!("{}{}", docs::FILE, m.path)))
+                                    .await
+                            }
+                            Ok(None) => {
+                                self.say("that file isn't one this session's pane shows".into())
+                            }
+                            Err(e) => self.say(format!("couldn't check that file: {e}")),
+                        }
                     }
                     return;
                 };
@@ -3146,7 +3159,7 @@ impl App {
             ("r", "rename"),
             ("b", "backlog"),
             ("d", "decisions"),
-            ("D", "its docs, beside it"),
+            ("D", "its docs and files, beside it"),
             ("m", "minimal tabs"),
             (",", "settings"),
             ("?", "every key"),
@@ -4728,7 +4741,16 @@ impl App {
         {
             b.page.named(all);
         }
-        let got = self.client.session_docs(session).await;
+        let mut got = self.client.session_docs(session).await;
+        // Its markdown and text files after its docs (ADR-0021 item 9).
+        if let Ok(listing) = &mut got {
+            match self.client.session_files(session, Vec::new()).await {
+                Ok((files, _)) => listing
+                    .docs
+                    .extend(files.iter().map(|f| docs::file_doc(f, None))),
+                Err(e) => self.say(format!("couldn't list its files: {e}")),
+            }
+        }
         // A live reload that failed keeps the list it had.
         if let Some(b) = &mut self.beside
             && (got.is_ok() || !b.page.listed())
@@ -4807,11 +4829,21 @@ impl App {
             },
             docs::Do::Url(url) => self.open_url(&url),
             docs::Do::Open(key) => {
-                let got = self
-                    .client
-                    .open_doc(key.clone())
-                    .await
-                    .map_err(|e| e.to_string());
+                let got = match (docs::file_path(&key), &self.beside) {
+                    // A session's file, read through the daemon's checks.
+                    (Some(path), Some(b)) => self
+                        .client
+                        .read_session_file(b.session, path)
+                        .await
+                        .map(|(file, text)| docs::file_doc(&file, Some(text)))
+                        .map_err(|e| e.to_string()),
+                    (Some(_), None) => Err("its session is gone".to_string()),
+                    (None, _) => self
+                        .client
+                        .open_doc(key.clone())
+                        .await
+                        .map_err(|e| e.to_string()),
+                };
                 let next = self.docs_page().and_then(|page| page.opened(&key, got));
                 if let Some(next) = next {
                     Box::pin(self.docs_do(next)).await;

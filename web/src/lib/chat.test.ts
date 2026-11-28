@@ -132,7 +132,7 @@ describe("markdown", () => {
     ]);
   });
 
-  it("reads inline code, emphasis and links, and never links a file path", () => {
+  it("reads inline code, emphasis and links, and keeps a file link apart from a web one", () => {
     expect(parseInline("Run `cargo test` **now**, see [docs](https://x.dev/a) or [lib.rs](src/lib.rs).")).toEqual([
       { t: "text", v: "Run " },
       { t: "code", v: "cargo test" },
@@ -141,7 +141,7 @@ describe("markdown", () => {
       { t: "text", v: ", see " },
       { t: "a", v: "docs", href: "https://x.dev/a" },
       { t: "text", v: " or " },
-      { t: "text", v: "lib.rs" },
+      { t: "rel", v: "lib.rs", href: "src/lib.rs" },
       { t: "text", v: "." },
     ]);
     expect(parseInline("at https://example.com/x.")).toEqual([

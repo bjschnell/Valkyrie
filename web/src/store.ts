@@ -23,6 +23,8 @@ import type {
   SearchResults,
   Doc,
   DeletedDoc,
+  FileMention,
+  SessionFile,
   DocComment,
   DocVersion,
   Item,
@@ -968,6 +970,26 @@ export async function sessionDocs(id: SessionId): Promise<Doc[]> {
   const reply = await conn.request({ t: "docs", session: id });
   if (reply.t !== "docs") throw new Error("unexpected reply");
   return reply.docs;
+}
+
+/** Session `id`'s markdown and text files, and which of `check` (paths it
+ * mentioned) pass the daemon's checks (ADR-0021 item 9). Throws with its reason. */
+export async function sessionFiles(
+  id: SessionId,
+  check: string[] = [],
+): Promise<{ files: SessionFile[]; passing: FileMention[] }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "session_files", session: id, check });
+  if (reply.t !== "session_files") throw new Error("unexpected reply");
+  return { files: reply.files, passing: reply.passing };
+}
+
+/** One of session `id`'s files, checked and cleaned by the daemon. Throws with its reason. */
+export async function readSessionFile(id: SessionId, path: string): Promise<{ file: SessionFile; text: string }> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "read_session_file", session: id, path });
+  if (reply.t !== "session_file_text") throw new Error("unexpected reply");
+  return { file: reply.file, text: reply.text };
 }
 
 /** What every agent did since `sinceMs`, or since you were last gone (backlog

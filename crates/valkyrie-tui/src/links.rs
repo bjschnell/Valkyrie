@@ -71,6 +71,48 @@ pub fn doc_at(rows: &[Row], x: u16, y: u16) -> Option<u32> {
     doc_in(&line, x as usize)
 }
 
+/// The markdown or text file named at cell (`x`, `y`) of `rows` (ADR-0021 item
+/// 9): a path ending in `.md`, `.markdown` or `.txt`, as written. The daemon
+/// decides whether it opens.
+pub fn file_at(rows: &[Row], x: u16, y: u16) -> Option<String> {
+    let row = rows.iter().find(|r| r.y == y);
+    let line: String = crate::mouse::row_cells(row)
+        .iter()
+        .map(|c| match c.as_bytes() {
+            [b] if b.is_ascii_graphic() => *b as char,
+            _ => ' ',
+        })
+        .collect();
+    file_in(&line, x as usize)
+}
+
+/// The path in `line` over byte `at`, if it names a markdown or text file.
+fn file_in(line: &str, at: usize) -> Option<String> {
+    let b = line.as_bytes();
+    let part = |c: u8| c.is_ascii_alphanumeric() || b"._-/~".contains(&c);
+    if !b.get(at).copied().is_some_and(part) {
+        return None;
+    }
+    let start = (0..at)
+        .rev()
+        .take_while(|&i| part(b[i]))
+        .last()
+        .unwrap_or(at);
+    let end = (at..b.len()).take_while(|&i| part(b[i])).last()? + 1;
+    // Punctuation after it isn't part of it, nor is a click there.
+    let word = line[start..end].trim_end_matches(['.', '-', '/']);
+    if at >= start + word.len() {
+        return None;
+    }
+    let word = word.strip_prefix("./").unwrap_or(word);
+    let lower = word.to_ascii_lowercase();
+    let named = [".md", ".markdown", ".txt"]
+        .iter()
+        .any(|e| lower.len() > e.len() && lower.ends_with(e));
+    // `~` is the shell's, not a path in the repository.
+    (named && !word.starts_with('~')).then(|| word.to_string())
+}
+
 /// The doc mentioned in `line` over byte `at`.
 fn doc_in(line: &str, at: usize) -> Option<u32> {
     let lower = line.to_ascii_lowercase();
@@ -256,6 +298,22 @@ mod tests {
 
     fn at(text: &str, x: usize) -> Option<String> {
         url_at(&[row(0, text, false)], 80, x as u16, 0)
+    }
+
+    #[test]
+    fn finds_the_file_under_the_click() {
+        let line = "Wrote docs/plan.md, NOTES.txt and src/main.rs.";
+        assert_eq!(file_in(line, 8).as_deref(), Some("docs/plan.md"));
+        assert_eq!(file_in(line, 22).as_deref(), Some("NOTES.txt"));
+        assert_eq!(file_in(line, 36), None);
+        assert_eq!(file_in(line, 2), None);
+        assert_eq!(file_in("see ./README.md.", 8).as_deref(), Some("README.md"));
+        assert_eq!(file_in("see ./README.md.", 15), None);
+        assert_eq!(file_in("cat ~/x.md", 6), None);
+        assert_eq!(
+            file_in("/abs/DESIGN.md", 3).as_deref(),
+            Some("/abs/DESIGN.md")
+        );
     }
 
     #[test]

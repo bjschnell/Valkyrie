@@ -300,6 +300,9 @@ export type Inline =
   | { t: "b"; v: string }
   | { t: "i"; v: string }
   | { t: "a"; v: string; href: string }
+  /** A link that isn't to the web, `[label](docs/x.md)`: text, except beside a
+   * session where one to a markdown file in its repository opens there. */
+  | { t: "rel"; v: string; href: string }
   /** `[[target]]` or `[[target|label]]`: a link to another doc, if one goes by that name. */
   | { t: "wiki"; v: string; target: string };
 
@@ -317,9 +320,11 @@ export function parseInline(src: string): Inline[] {
     else if (m[4] !== undefined) out.push({ t: "b", v: m[4] });
     else if (m[5] !== undefined) out.push({ t: "i", v: m[5] });
     else if (m[6] !== undefined) {
-      // Only web links open; a file path stays text.
+      // Only web links open; a file path is the reader's to open or not.
       if (/^https?:\/\//i.test(m[7])) out.push({ t: "a", v: m[6], href: m[7] });
-      else out.push({ t: "text", v: m[6] });
+      // Any other scheme, or a host (`//x`), is never a link.
+      else if (/^[a-z][a-z0-9+.-]*:|^\/\//i.test(m[7])) out.push({ t: "text", v: m[6] });
+      else out.push({ t: "rel", v: m[6], href: m[7] });
     } else out.push({ t: "a", v: m[8], href: m[8] });
     last = m.index + m[0].length;
   }

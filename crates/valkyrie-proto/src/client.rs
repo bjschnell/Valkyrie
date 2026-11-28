@@ -591,6 +591,45 @@ impl Client {
         }
     }
 
+    /// Session `id`'s markdown and text files, and which of `check` (paths it
+    /// mentioned) pass the same checks (ADR-0021 item 9).
+    pub async fn session_files(
+        &self,
+        id: crate::SessionId,
+        check: Vec<String>,
+    ) -> Result<(Vec<crate::SessionFile>, Vec<crate::FileMention>)> {
+        match self
+            .request(|req| ClientMsg::SessionFiles {
+                req,
+                session: id,
+                check: check.clone(),
+            })
+            .await?
+        {
+            Reply::SessionFiles { files, passing } => Ok((files, passing)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// One of session `id`'s files, checked and cleaned (ADR-0021 item 9).
+    pub async fn read_session_file(
+        &self,
+        id: crate::SessionId,
+        path: &str,
+    ) -> Result<(crate::SessionFile, String)> {
+        match self
+            .request(|req| ClientMsg::ReadSessionFile {
+                req,
+                session: id,
+                path: path.to_owned(),
+            })
+            .await?
+        {
+            Reply::SessionFileText { file, text } => Ok((file, text)),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// The docs session `id` wrote, newest first (backlog #311). Listing them
     /// marks nothing read.
     pub async fn session_docs(&self, id: crate::SessionId) -> Result<crate::DocsListing> {

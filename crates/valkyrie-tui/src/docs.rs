@@ -24,7 +24,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{self, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
-use valkyrie_proto::{DeletedDoc, Doc, DocVersion, DocsListing};
+use valkyrie_proto::{DeletedDoc, Doc, DocVersion, DocsListing, SessionFile};
 
 /// What a key on the page asks the app to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +181,123 @@ impl Page {
     }
 }
 
+/// A session's file listed beside it (ADR-0021 item 9) goes by `file:` and its
+/// path in the repository; the daemon checks it every time it's read.
+pub(crate) const FILE: &str = "file:";
+
+/// What the group of a session's files is called in the list.
+const FILES_GROUP: &str = "files on its branch";
+
+/// The path of a session's file, from its key.
+pub(crate) fn file_path(key: &str) -> Option<&str> {
+    key.strip_prefix(FILE)
+}
+
+/// A session's file as a row of the list: no `valk-id` and no hash, so it takes
+/// no comments, edits or deletes, and `text` once read.
+pub(crate) fn file_doc(f: &SessionFile, text: Option<String>) -> Doc {
+    Doc {
+        id: 0,
+        kind: Default::default(),
+        title: f.path.clone(),
+        path: f.path.clone(),
+        key: format!("{FILE}{}", f.path),
+        unread: false,
+        by: String::new(),
+        created: f
+            .modified
+            .and_then(|s| jiff::Timestamp::from_second(s as i64).ok())
+            .map(|ts| ts.to_string())
+            .unwrap_or_default(),
+        session: None,
+        commit: None,
+        item: None,
+        repo: None,
+        edited: Vec::new(),
+        hash: None,
+        text,
+    }
+}
+
+/// Whether `path` is plain text, shown as it is rather than as markdown.
+fn is_text(path: &str) -> bool {
+    path.len() > 4 && path[path.len() - 4..].eq_ignore_ascii_case(".txt")
+}
+
+/// What a link `href` in the markdown file `from` names, as a path in its
+/// repository: relative to `from`'s folder, or to the top level with a leading
+/// `/`, as the web app's `linked` has it. None for a web link or another scheme,
+/// one that climbs out, or one that isn't to a markdown file. The daemon checks
+/// it again.
+pub(crate) fn linked(from: &str, href: &str) -> Option<String> {
+    let scheme = href.split_once(':').is_some_and(|(s, _)| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+    });
+    if scheme || href.starts_with("//") {
+        return None;
+    }
+    let path = href.split('#').next()?.split('?').next()?;
+    let path = percent_decode(path)?;
+    if path.is_empty() || path.contains('\\') {
+        return None;
+    }
+    // From `from`'s folder, or the top level.
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    if path.starts_with('/') {
+        parts.clear();
+    }
+    for p in path.split('/') {
+        match p {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            p => parts.push(p),
+        }
+    }
+    let out = parts.join("/");
+    let md = [".md", ".markdown"]
+        .iter()
+        .any(|e| out.len() > e.len() && out[out.len() - e.len()..].eq_ignore_ascii_case(e));
+    md.then_some(out)
+}
+
+/// `%20` and its like decoded; None when that isn't UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(h) = s.get(i + 1..i + 3)
+            && let Ok(v) = u8::from_str_radix(h, 16)
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Plain text as a fenced block, so the markdown renderer keeps every line as it
+/// is: the fence is longer than any run of backticks in it.
+fn preformatted(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}\n{}\n{fence}\n", text.trim_end_matches('\n'))
+}
+
 /// The group a doc is listed under, as the web app has it: "" for agent-level
 /// (the top of the folder), the repository's folder for `repos/<name>/…`, else
 /// its first folder.
@@ -311,7 +428,10 @@ impl Page {
                 }
                 let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
                 for (i, d) in listing.docs.iter().enumerate() {
-                    let g = group_of(&d.path);
+                    let g = match file_path(&d.key) {
+                        Some(_) => FILES_GROUP,
+                        None => group_of(&d.path),
+                    };
                     match groups.iter_mut().find(|(name, _)| *name == g) {
                         Some((_, list)) => list.push(i),
                         None => groups.push((g, vec![i])),
@@ -319,8 +439,11 @@ impl Page {
                 }
                 // Agent-level first, then each repository's by name.
                 // Case aside, as the web app's localeCompare has it.
+                // A session's files come after its docs.
                 groups.sort_by(|(a, _), (b, _)| {
-                    (!a.is_empty(), a.to_lowercase(), *a).cmp(&(
+                    let files = |g: &str| g == FILES_GROUP;
+                    (files(a), !a.is_empty(), a.to_lowercase(), *a).cmp(&(
+                        files(b),
                         !b.is_empty(),
                         b.to_lowercase(),
                         *b,
@@ -800,6 +923,12 @@ impl Page {
             return;
         };
         let page = i32::from(reader.rows.get().saturating_sub(1).max(1));
+        // A session's file is read-only here: editing it is the agent's job, or
+        // yours in your editor (ADR-0021 item 9).
+        if file_path(&reader.key).is_some() && matches!(key, b"h" | b"x" | b"c" | b"e") {
+            out.push(Do::Say("a session's file is read-only here".into()));
+            return;
+        }
         match key {
             b"k" | b"\x1b[A" | b"\x1bOA" => reader.scroll(-1),
             b"j" | b"\x1b[B" | b"\x1bOB" => reader.scroll(1),
@@ -981,7 +1110,17 @@ impl Page {
                     0 => String::new(),
                     n => format!(" · {n} new since you last looked"),
                 };
+                let files = l
+                    .docs
+                    .iter()
+                    .filter(|d| file_path(&d.key).is_some())
+                    .count();
                 let about = match self.beside {
+                    true if files > 0 => format!(
+                        "{} and {} from this session",
+                        plural(l.docs.len() - files, "doc"),
+                        plural(files, "file")
+                    ),
                     true => format!("{} from this session", plural(l.docs.len(), "doc")),
                     false => format!(
                         "{} in {}{unread}",
@@ -996,7 +1135,9 @@ impl Page {
                 }
                 if l.docs.is_empty() {
                     let none = match self.beside {
-                        true => " This session hasn't written a doc yet.",
+                        true => {
+                            " This session hasn't written a doc or changed a markdown file yet."
+                        }
                         false => " No docs yet. Agents write them with `valk doc write`.",
                     };
                     top.push(Line::default());
@@ -1027,7 +1168,11 @@ impl Page {
                 Row::Doc(at) => {
                     let Some(d) = docs.get(*at) else { continue };
                     let here = i == self.cursor;
-                    let kind = d.kind.as_str();
+                    let kind = match file_path(&d.key) {
+                        Some(p) if is_text(p) => "text",
+                        Some(_) => "md",
+                        None => d.kind.as_str(),
+                    };
                     let mut first = vec![
                         if here { "▌".fg(t.accent) } else { " ".into() },
                         if d.unread {
@@ -1120,7 +1265,15 @@ impl Page {
                 .unwrap_or_default(),
         });
         let wiki = |target: &str| names.key(target);
-        *drawn = Some((width, markdown::render_with(text, width, t, Some(&wiki))));
+        // A session's markdown file: a relative link opens another one here.
+        let from = file_path(&r.key);
+        let rel = |href: &str| linked(from?, href).map(|p| format!("{FILE}{p}"));
+        let rendered = match from {
+            Some(p) if is_text(p) => markdown::render(&preformatted(text), width, t),
+            Some(_) => markdown::render_linked(text, width, t, None, Some(&rel)),
+            None => markdown::render_with(text, width, t, Some(&wiki)),
+        };
+        *drawn = Some((width, rendered));
         // The links moved: tab starts over.
         r.focus.set(None);
     }
@@ -1139,11 +1292,16 @@ impl Page {
         let doc = r.doc.as_ref().or(listed);
         let title = doc.map_or_else(|| "Doc".to_string(), |d| d.title.clone());
         let takes = doc.is_some_and(|d| d.id > 0);
+        let file = file_path(&r.key).is_some();
         let open = r.comments.open_count();
         // Five at most (spec: One key grammar): what you'd do to the doc;
         // scrolling and going back are on the right.
         let hints = [
-            hint(" e ", "edit ", t),
+            if file {
+                Vec::new()
+            } else {
+                hint(" e ", "edit ", t)
+            },
             if takes {
                 hint(
                     " c ",
@@ -1162,7 +1320,11 @@ impl Page {
             } else {
                 Vec::new()
             },
-            hint(" x ", "delete ", t),
+            if file {
+                Vec::new()
+            } else {
+                hint(" x ", "delete ", t)
+            },
             hint(" y ", "copy ", t),
         ]
         .concat();
@@ -2084,5 +2246,123 @@ mod tests {
         assert_eq!(body("---\na: 1\n---\n\n\nhi"), "\nhi");
         assert_eq!(body("no front matter\n"), "no front matter\n");
         assert_eq!(body("---\nunclosed\n"), "---\nunclosed\n");
+    }
+
+    #[test]
+    fn a_link_in_a_session_file_names_another_markdown_file_in_its_repository() {
+        assert_eq!(
+            linked("docs/adr/0021.md", "0020.md").as_deref(),
+            Some("docs/adr/0020.md")
+        );
+        assert_eq!(
+            linked("docs/adr/0021.md", "../usage.md#keys").as_deref(),
+            Some("docs/usage.md")
+        );
+        assert_eq!(
+            linked("docs/a.md", "./b%20c.md").as_deref(),
+            Some("docs/b c.md")
+        );
+        assert_eq!(
+            linked("docs/a.md", "/README.md").as_deref(),
+            Some("README.md")
+        );
+        for href in [
+            "https://x.io/b.md",
+            "mailto:x@y",
+            "//x.io/b.md",
+            "src/main.rs",
+            "../../x.md",
+            "a\\b.md",
+            "#top",
+            "file:///etc/x.md",
+        ] {
+            assert_eq!(linked("docs/a.md", href), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn plain_text_keeps_its_lines_and_backticks() {
+        assert_eq!(preformatted("a\n```\nb\n"), "````\na\n```\nb\n````\n");
+    }
+
+    #[test]
+    fn a_sessions_files_list_after_its_docs_and_are_read_only() {
+        let mut page = Page {
+            beside: true,
+            ..Default::default()
+        };
+        let file = SessionFile {
+            path: "README.md".into(),
+            size: 3,
+            modified: None,
+        };
+        let mut doc = file_doc(&file, None);
+        doc.key = "7".into();
+        doc.id = 7;
+        doc.path = "zeta/plan.md".into();
+        page.loaded(Ok(DocsListing {
+            docs: vec![file_doc(&file, None), doc],
+            ..Default::default()
+        }));
+        let heads: Vec<_> = page
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Head(h, _) => Some(h.as_str()),
+                Row::Doc(_) => None,
+            })
+            .collect();
+        assert_eq!(heads, ["zeta", FILES_GROUP]);
+        let shown = screen(&page, 60, 14);
+        assert!(
+            shown.contains("1 doc and 1 file from this session"),
+            "{shown}"
+        );
+        assert!(shown.contains("files on its branch"), "{shown}");
+        assert!(shown.contains("md       README.md"), "{shown}");
+        page.read("file:README.md");
+        page.opened("file:README.md", Ok(file_doc(&file, Some("# hi".into()))));
+        let shown = screen(&page, 60, 12);
+        assert!(shown.contains("hi"), "{shown}");
+        assert!(shown.contains("y copy"), "{shown}");
+        assert!(
+            !shown.contains("edit") && !shown.contains("delete"),
+            "{shown}"
+        );
+        assert!(matches!(page.keys(b"e").as_slice(), [Do::Say(s)] if s.contains("read-only")));
+        assert!(matches!(page.keys(b"x").as_slice(), [Do::Say(s)] if s.contains("read-only")));
+    }
+
+    #[test]
+    fn a_text_file_keeps_its_spacing_and_a_relative_link_opens_the_file_it_names() {
+        let mut page = Page {
+            beside: true,
+            ..Default::default()
+        };
+        let notes = SessionFile {
+            path: "NOTES.txt".into(),
+            size: 9,
+            modified: None,
+        };
+        page.read("file:NOTES.txt");
+        page.opened(
+            "file:NOTES.txt",
+            Ok(file_doc(&notes, Some("a   b\n  c".into()))),
+        );
+        let shown = screen(&page, 60, 12);
+        assert!(shown.contains("a   b") && shown.contains("  c"), "{shown}");
+
+        let design = SessionFile {
+            path: "docs/DESIGN.md".into(),
+            size: 9,
+            modified: None,
+        };
+        page.read("file:docs/DESIGN.md");
+        page.opened(
+            "file:docs/DESIGN.md",
+            Ok(file_doc(&design, Some("See [usage](usage.md).".into()))),
+        );
+        let _ = screen(&page, 60, 12);
+        assert_eq!(page.keys(b"\t\r"), [Do::Open("file:docs/usage.md".into())]);
     }
 }

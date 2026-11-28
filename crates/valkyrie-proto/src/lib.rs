@@ -42,7 +42,8 @@ pub use context::{
 pub use digest::{Digest, DigestEntry, DigestGroup, Outcome, PastSession};
 pub use disk::LowDisk;
 pub use docs::{
-    CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, NewDoc,
+    CommentState, DeletedDoc, Doc, DocComment, DocKind, DocVersion, DocsListing, FileMention,
+    NewDoc, SessionFile,
 };
 pub use layout::{Axis, Pane, Side};
 pub use notes::{NewNote, Note, NoteStatus, NotesListing, Tombstone};
@@ -54,7 +55,7 @@ pub use supervisor::{PrState, SupervisorEntry, WatchedPr};
 pub use wiki::{WikiListing, WikiPage};
 
 /// Bumped on incompatible protocol changes; clients check it with `Hello`.
-pub const PROTOCOL: u32 = 56;
+pub const PROTOCOL: u32 = 57;
 
 /// What the desktop app asks the daemon to vouch for (`Vouch`), word for word:
 /// the one thing the daemon vouches for a process with no terminal for, once
@@ -708,6 +709,24 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<SessionId>,
     },
+    /// A session's markdown and text files (ADR-0021 item 9, protocol 57): those
+    /// its branch and working tree changed, each checked. With `check`, paths
+    /// mentioned in its chat or pane; the reply's `passing` names the ones that
+    /// pass the same checks. Only the user or that session's own process asks.
+    /// Replies `SessionFiles`.
+    SessionFiles {
+        req: ReqId,
+        session: SessionId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        check: Vec<String>,
+    },
+    /// One of a session's files by its path in the repository, checked, cleaned
+    /// like a doc's body (ADR-0021 item 9, protocol 57). Replies `SessionFileText`.
+    ReadSessionFile {
+        req: ReqId,
+        session: SessionId,
+        path: String,
+    },
     /// The web app's read (ADR-0021 §5, protocol 33): a doc by the `key` a list
     /// gave it, never by path, and never writing to the file (a doc with no id
     /// stays without one). Replies `Doc`.
@@ -1073,6 +1092,15 @@ pub enum Reply {
         /// When it was listed, in seconds, for `DocsSeen`.
         #[serde(default)]
         at: u64,
+    },
+    SessionFiles {
+        files: Vec<SessionFile>,
+        #[serde(default)]
+        passing: Vec<FileMention>,
+    },
+    SessionFileText {
+        file: SessionFile,
+        text: String,
     },
     Item {
         item: Box<Item>,
