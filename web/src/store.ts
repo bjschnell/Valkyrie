@@ -987,6 +987,15 @@ export async function supervisorLog(): Promise<{ entries: SupervisorEntry[]; on:
   return { entries: reply.entries, on: reply.on };
 }
 
+/** Whether the daemon keeps the web app running on localhost (backlog #316);
+ * `on` sets it first. Throws with the daemon's reason. */
+export async function webServer(on: boolean | null = null): Promise<boolean> {
+  if (!conn) throw new Error("not connected");
+  const reply = await conn.request({ t: "web_server", on });
+  if (reply.t !== "text") throw new Error("unexpected reply");
+  return reply.text === "on";
+}
+
 /** The pull requests the supervisor watches, as its poll last read them, and
  * when it reads them next (backlog #181). Throws with the daemon's reason. */
 export async function supervisorWatch(): Promise<{ prs: WatchedPr[]; polled_at?: number; next_at?: number; on: boolean }> {

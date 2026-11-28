@@ -75,6 +75,14 @@ pub fn default_exe() -> Result<PathBuf> {
     Ok(on_path.unwrap_or(me))
 }
 
+/// Whether `valk setup web` (or the desktop app) has set up the service here: it
+/// owns the web server then, and the daemon leaves it to it (`autoweb`).
+pub fn installed() -> bool {
+    Platform::here()
+        .and_then(|p| p.file(DEFAULT_NAME))
+        .is_ok_and(|file| file.exists())
+}
+
 pub fn run(setup: Setup) -> Result<()> {
     let platform = Platform::here()?;
     let file = platform.file(&setup.name)?;

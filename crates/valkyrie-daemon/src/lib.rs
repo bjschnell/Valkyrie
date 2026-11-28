@@ -1638,6 +1638,7 @@ async fn serve(stream: Stream, registry: Arc<Registry>) -> Result<()> {
             ClientMsg::Siblings { req, session } => (req, registry.siblings(session)),
             ClientMsg::Auto { req, mode } => (req, registry.auto(mode, peer)),
             ClientMsg::Supervise { req, on } => (req, registry.supervise(on, peer)),
+            ClientMsg::WebServer { req, on } => (req, registry.web_server(on, peer)),
             ClientMsg::SupervisorSession {
                 req,
                 cwd,

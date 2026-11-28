@@ -955,6 +955,15 @@ impl Client {
         }
     }
 
+    /// Whether the daemon keeps `valk web` running here; `Some` sets it (see
+    /// `ClientMsg::WebServer`). `on` or `off`.
+    pub async fn web_server(&self, on: Option<bool>) -> Result<String> {
+        match self.request(|req| ClientMsg::WebServer { req, on }).await? {
+            Reply::Text { text } => Ok(text),
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+
     /// Starts the supervisor session, or finds the one already running (see
     /// `ClientMsg::SupervisorSession`).
     pub async fn supervisor_session(
