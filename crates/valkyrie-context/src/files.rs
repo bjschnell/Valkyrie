@@ -32,6 +32,7 @@ pub struct Checked {
     pub modified: Option<u64>,
     /// Its device and inode as checked, for the read to compare with what it
     /// opened (unix).
+    #[cfg_attr(not(unix), allow(dead_code))]
     inode: Option<(u64, u64)>,
 }
 
@@ -71,7 +72,10 @@ impl Repo {
                 top.display()
             );
         }
-        if top != crate::project::checkout(&cwd) {
+        // Both canonical the same way: `project::checkout` keeps Windows's `\\?\`
+        // prefix, which `valkyrie_proto::canonical` drops (decision #69).
+        let nearest = crate::project::checkout(&cwd);
+        if valkyrie_proto::canonical(&nearest).unwrap_or(nearest) != top {
             bail!(
                 "{} isn't the checkout {} is in",
                 top.display(),
@@ -545,7 +549,13 @@ mod tests {
         let r = repo();
         refused(&r, "../outside.md", "not a plain path");
         refused(&r, "./README.md", "not a plain path");
-        refused(&r, "/etc/motd.txt", "outside the repository");
+        // Without a drive, Windows doesn't take it as absolute.
+        let why = if cfg!(windows) {
+            "not a plain path"
+        } else {
+            "outside the repository"
+        };
+        refused(&r, "/etc/motd.txt", why);
         refused(&r, "a\\..\\b.md", "not a plain path");
         refused(&r, "", "no file named");
     }
