@@ -967,16 +967,24 @@ async fn run(cmd: Option<Cmd>, socket: PathBuf) -> Result<()> {
             Some(WebCmd::Server { state }) => {
                 let client = connect(&socket).await?.0;
                 let on = client.web_server(state.map(|s| s == "on")).await?;
-                let addr = autoweb::listen();
+                let place = autoweb::Place::now();
+                let addr = place.listen;
                 let how = if on != "on" {
                     "the daemon doesn't start the web app; `valk web` or `valk setup web` still do"
                         .into()
                 } else if service::installed() {
                     format!("the `{}` service runs the web app", service::DEFAULT_NAME)
                 } else {
-                    format!(
-                        "the daemon keeps the web app running on http://{addr}, this machine only"
-                    )
+                    let reach = if addr.ip().is_loopback() {
+                        "this machine only".to_string()
+                    } else {
+                        format!("reachable beyond this machine (web_listen = {addr})")
+                    };
+                    let url = place
+                        .url
+                        .map(|u| format!(", opened as {u}"))
+                        .unwrap_or_default();
+                    format!("the daemon keeps the web app running on http://{addr}, {reach}{url}")
                 };
                 println!("{on}: {how}");
                 Ok(())

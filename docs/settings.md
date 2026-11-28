@@ -20,9 +20,14 @@ Press `,` to open the settings panel. You can change:
 - analytics (`on`/`off`, off by default): count which features get used, for
   `valk stats` ([usage](usage.md#is-it-helping)). It stays on this machine
 - web server (`on`/`off`, on by default): the daemon keeps the web app running
-  on this machine, on localhost only (port 8790; `web_listen = "127.0.0.1:PORT"`
-  moves it). A service from `valk setup web` runs it instead when there is one.
-  `valk web server on|off` and the web app's Settings change it too
+  on this machine, on localhost (127.0.0.1:8790) unless `web_listen` names
+  another address: `"127.0.0.1:9000"` for another port, a tailnet IP such as
+  `"100.101.102.103:8790"` or `"0.0.0.0:8790"` to take it beyond this machine,
+  where anyone who reaches it can try to pair. `web_url` is the address phones
+  open (your proxy, tunnel or tailnet name); by default the tailnet name when
+  Tailscale runs here. Changing either restarts it. A service from `valk setup
+  web` runs it instead when there is one. `valk web server on|off` and the web
+  app's Settings change it too
 
 With `theme` colors, a session's background, default text and 16 ANSI colors come
 from the theme. Colors a program picks exactly (256-color or RGB) stay as it drew

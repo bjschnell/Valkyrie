@@ -231,7 +231,8 @@ does the handoff. Downloads use `curl` and `tar`, which Linux, macOS and Windows
 `valk web` serves the web app on localhost (port 8790). The daemon starts it for
 you and keeps it running, on this machine only; `valk web open` opens it paired,
 and `valk web server off` (or the *Web server* setting in valk or the web app)
-turns that off. How your phone reaches it is up to you. The app installs and
+turns that off. `web_listen` and `web_url` in [settings](settings.md) move it to
+another port or onto your tailnet's IP. How your phone reaches it is up to you. The app installs and
 sends notifications only over HTTPS.
 
 ```sh

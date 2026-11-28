@@ -1666,7 +1666,8 @@ fn an_agent_drives_the_panes_of_its_tab() {
 }
 
 /// Backlog #316: the daemon serving this machine starts the web app by itself,
-/// on localhost only, and the `web_server` setting turns it off and on again.
+/// on localhost unless `web_listen` says otherwise, and the `web_server` setting
+/// turns it off and on again.
 /// The daemon runs on its default socket here (no `VALK_SOCKET`), as yours does;
 /// `web_listen` moves it off the real one's port.
 #[test]
@@ -1757,6 +1758,28 @@ fn the_daemon_starts_the_web_app_on_localhost_until_it_is_turned_off() {
     )
     .unwrap();
     within(15, "the web app is back once turned on", &|| listening());
+
+    // `web_listen` and `web_url` move a running one: the daemon restarts it there.
+    let port2 = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr2 = format!("127.0.0.1:{port2}");
+    std::fs::write(
+        &settings,
+        format!("web_listen = \"{addr2}\"\nweb_url = \"https://valk.example.com\"\n"),
+    )
+    .unwrap();
+    within(15, "the web app moves to the new address", &|| {
+        std::net::TcpStream::connect(&addr2).is_ok() && !listening()
+    });
+    let out = server();
+    assert!(
+        out.contains(&addr2) && out.contains("https://valk.example.com"),
+        "{out}"
+    );
+    let listening = || std::net::TcpStream::connect(&addr2).is_ok();
 
     // It goes with its daemon, rather than holding the port.
     daemon.kill().unwrap();
