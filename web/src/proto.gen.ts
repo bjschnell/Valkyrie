@@ -122,6 +122,11 @@ take?: boolean, branch?: string | null, pr?: string | null, }
   | { "t": "supervisor_watch", req: number, }
   | { "t": "supervise", req: number, on: boolean | null, }
   | { "t": "web_server", req: number, on: boolean | null, }
+  | { "t": "web_server_config", req: number, on?: boolean | null, 
+/**
+ * An address like `127.0.0.1:8790` or `0.0.0.0:8790`.
+ */
+listen?: string | null, url?: string | null, }
   | { "t": "supervisor_session", req: number, cwd: string, size: Size, env: Array<[string, string | null]>, }
   | { "t": "take_step", req: number, session: number, seq: number, action: StepAction, }
   | { "t": "take_item", req: number, id: number, branch?: string | null, pr?: string | null, steal?: boolean, }
@@ -1126,6 +1131,7 @@ note?: string | null, }
  */
 launches?: Array<LaunchOffer>, }
   | { "t": "supervisor_log", entries: Array<SupervisorEntry>, on: boolean, }
+  | { "t": "web_server_state", state: WebServerState, }
   | { "t": "supervisor_watch", prs: Array<WatchedPr>, 
 /**
  * When the poll last finished, seconds since the epoch; `None` before
@@ -1544,6 +1550,33 @@ order?: number | null,
  * #236: both change src/foo.rs"; `None` when it collides with none.
  */
 merge_note?: string | null, };
+
+/**
+ * What the daemon's web server is doing.
+ */
+export type WebRun = "off" | "starting" | "running" | "service" | "taken" | "unmanaged";
+
+/**
+ * The daemon's web server (backlog #321): its settings, and what it's doing.
+ */
+export type WebServerState = { 
+/**
+ * `web_server`: the daemon keeps one running.
+ */
+on: boolean, 
+/**
+ * `web_listen`, or the default `127.0.0.1:8790`.
+ */
+listen: string, 
+/**
+ * `web_url`, when one is set.
+ */
+url?: string | null, 
+/**
+ * What phones open without `web_url`: the tailnet name when Tailscale runs
+ * here, else the listen address.
+ */
+default_url: string, run: WebRun, };
 
 /**
  * A repository's pages, as `Wiki` replies.
